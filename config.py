@@ -21,17 +21,19 @@ EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json"
 # 2. TRADING RULES & SIZING
 # ==========================================
 INITIAL_CAPITAL        = 96000
-MIN_BALANCE_THRESHOLD  = 70000
+MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
-MAX_TRADES_PER_DAY     = 10
+MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
-MIN_TRADE_IDR          = 26000  # Min IDR for Indodax Pro
+MAX_TRACKED_PAIRS      = 150
+MIN_VOLUME_FILTER      = 100000000  # 5T IDR per 24h
+MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================
 # 3. EXECUTION SETTINGS (TP/SL)
 # ==========================================
-TP_PCT = 0.008   # +0.8% Target Profit
-SL_PCT = -0.0045 # -0.45% Stop Loss
+TP_PCT = 0.015   # +1.5% Target Profit
+SL_PCT = -0.008  # -0.8% Stop Loss
 
 # ==========================================
 # 4. TAX & FEE STRUCTURE (Indodax 2026 / PMK 68/2022)

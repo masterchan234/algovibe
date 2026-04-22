@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Set timezone to Asia/Jakarta (or your preferred timezone)
 ENV TZ=Asia/Jakarta

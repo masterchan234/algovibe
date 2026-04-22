@@ -54,7 +54,10 @@ class ExitManager:
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0):
         try:
-            exit_price = price * 1.0005  # Maker Sell offset +0.05%
+            if reason == "STOP_LOSS":
+                exit_price = price * 0.9500  # SL: Limit order set 5% BELOW market to instantly act as a Taker/Market order
+            else:
+                exit_price = price * 1.0005  # TP: Maker Sell offset +0.05%
 
             if self.dry_run:
                 # ── Simulasi Exit ─────────────────────────────────────────────
@@ -73,8 +76,9 @@ class ExitManager:
                 )
             else:
                 # ── Real Exit ────────────────────────────────────────────────
+                params = {'post_only': True} if reason == "TAKE_PROFIT" else {}
                 order = self.exchange.create_limit_sell_order(
-                    pair, amount, exit_price, {'post_only': True}
+                    pair, amount, exit_price, params
                 )
 
             # Log transaksi (berlaku untuk dry run maupun live)

@@ -1,5 +1,3 @@
-import pandas as pd
-
 def get_prediction(price_history: list) -> float:
     """
     Menghitung probabilitas eksekusi menggunakan indikator teknikal lanjutan.
@@ -9,52 +7,76 @@ def get_prediction(price_history: list) -> float:
         return 0.0
 
     try:
-        df = pd.DataFrame(price_history, columns=['close'])
         prob = 0.40  # Base Score
-        current_price = df['close'].iloc[-1]
+        current_price = price_history[-1]
 
         # 1. RSI (Relative Strength Index) - 14
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).ewm(span=14, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(span=14, adjust=False).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        gains = []
+        losses = []
+        for i in range(1, 15):
+            delta = price_history[i] - price_history[i-1]
+            if delta > 0:
+                gains.append(delta)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(-delta)
         
-        rsi_val = df['RSI'].iloc[-1]
-        if pd.notna(rsi_val):
-            if rsi_val > 70:
-                prob -= 0.10
-            elif rsi_val > 55:
-                prob += 0.20
+        avg_gain = sum(gains) / 14.0
+        avg_loss = sum(losses) / 14.0
+        
+        for i in range(15, len(price_history)):
+            delta = price_history[i] - price_history[i-1]
+            gain = delta if delta > 0 else 0
+            loss = -delta if delta < 0 else 0
+            
+            avg_gain = (avg_gain * 13 + gain) / 14.0
+            avg_loss = (avg_loss * 13 + loss) / 14.0
+            
+        if avg_loss == 0:
+            rsi_val = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi_val = 100.0 - (100.0 / (1.0 + rs))
+
+        if rsi_val > 70:
+            prob -= 0.10
+        elif rsi_val > 55:
+            prob += 0.20
 
         # 2. MACD (12, 26, 9)
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        macd_line = exp1 - exp2
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        def ema(data, span):
+            alpha = 2 / (span + 1)
+            ema_vals = [data[0]]
+            for price in data[1:]:
+                ema_vals.append(price * alpha + ema_vals[-1] * (1 - alpha))
+            return ema_vals
+
+        ema12 = ema(price_history, 12)
+        ema26 = ema(price_history, 26)
+        macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
+        signal_line = ema(macd_line, 9)
         
-        macd_val = macd_line.iloc[-1]
-        sig_val = signal_line.iloc[-1]
+        macd_val = macd_line[-1]
+        sig_val = signal_line[-1]
         
-        if pd.notna(macd_val) and pd.notna(sig_val):
-            if macd_val > sig_val:
-                prob += 0.20
+        if macd_val > sig_val:
+            prob += 0.20
 
         # 3. Bollinger Bands (20, 2)
-        ma = df['close'].rolling(window=20).mean()
-        std = df['close'].rolling(window=20).std()
-        upper_band = ma + (std * 2)
+        window = price_history[-20:]
+        ma = sum(window) / 20.0
+        variance = sum((x - ma) ** 2 for x in window) / 20.0
+        std = variance ** 0.5
+        
         lower_band = ma - (std * 2)
+        upper_band = ma + (std * 2)
         
-        bbl_val = lower_band.iloc[-1]
-        bbu_val = upper_band.iloc[-1]
-        
-        if pd.notna(bbl_val) and pd.notna(bbu_val):
-            if current_price <= bbl_val * 1.002 or current_price >= bbu_val * 0.998:
-                prob += 0.20
+        if current_price <= lower_band * 1.002 or current_price >= upper_band * 0.998:
+            prob += 0.20
 
         prob = max(0.0, min(prob, 0.99))
         return prob
 
-    except Exception as e:
+    except Exception:
         return 0.0
