@@ -1,6 +1,8 @@
-# Indodax Autonomous Scalper Bot 🚀
+# Algovibe 🌊🤖
 
-Bot trading kripto otomatis (Scalping) yang dirancang khusus untuk platform **Indodax**. Dibangun menggunakan Python dengan memanfaatkan arsitektur *multiprocessing* untuk memastikan kecepatan dan efisiensi saat memproses ratusan *trading pair* secara bersamaan.
+**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang diciptakan sepenuhnya melalui proses **"Vibe Coding"**—sebuah metode pengembangan di mana developer berkolaborasi secara *end-to-end* dengan AI Agent untuk merancang, merangkai, dan men-*deploy* kode secara natural melalui instruksi bahasa manusia.
+
+Bot ini dibangun menggunakan arsitektur *multiprocessing* Python untuk memastikan kecepatan dan efisiensi saat memproses ratusan *trading pair* secara bersamaan untuk mencari momentum ("vibe") market yang paling tepat.
 
 ## 🎯 Fitur Utama
 
