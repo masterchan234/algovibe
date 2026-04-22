@@ -37,20 +37,31 @@ def calculate_score(item):
         h    = float(d['high'])
         l    = float(d['low'])
         vol  = float(d['vol_idr'])
+        
+        # Kedalaman Order Book
+        bid_depth = float(d.get('bid_depth', 0))
+        ask_depth = float(d.get('ask_depth', 0))
 
         spread     = (sell - buy) / sell * 100 if sell else 0
         volatility = (h - l) / l * 100 if l else 0
+        
+        # Kalkulasi Imbalance Ratio
+        imbalance = (bid_depth / ask_depth) if ask_depth > 0 else 0
 
+        # Filter dasar + Fake Pump/Bandar Filter
         if spread < 0.5 and 0.3 <= volatility <= 6.0 and vol > MIN_VOLUME_FILTER:
-            # score = (volume × 0.5) + (volatility × 0.3) - (spread × 0.2)
-            score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2)
-            return {
-                "pair": pair,
-                "last": last,
-                "spread": spread,
-                "volatility": volatility,
-                "score": score,
-            }
+            if bid_depth > 100_000_000 and imbalance > 1.5:
+                # Tambahkan imbalance sebagai penambah bobot score
+                score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2) + (imbalance * 100_000_000)
+                return {
+                    "pair": pair,
+                    "last": last,
+                    "spread": spread,
+                    "volatility": volatility,
+                    "score": score,
+                    "imbalance": imbalance,
+                    "bid_depth": bid_depth
+                }
     except Exception:
         pass
     return None
@@ -270,10 +281,11 @@ class ScalperBot:
                 tq_prob = get_prediction(history) if trend == "UP" else 0.0
 
                 # Diagnostic Log
+                imbalance_ratio = p.get('imbalance', 0)
                 log_message(
                     f"Track: {p['pair']:10} | Trend: {trend:9} | "
                     f"BO: {str(breakout):5} | Sprd: {p['spread']:.3f}% | "
-                    f"TQ_Prob: {tq_prob*100:.0f}%"
+                    f"Imb: {imbalance_ratio:.1f}x | TQ_Prob: {tq_prob*100:.0f}%"
                 )
 
                 # Signal Trigger (Predictive Filter > 75%)

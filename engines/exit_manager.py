@@ -33,7 +33,19 @@ class ExitManager:
             entry_price = data['entry_price']
             amount = data['amount']
             
-            tp_price = entry_price * (1 + TP_PCT)
+            # Import the required variables dynamically
+            from config import FEE_PER_SIDE, MIN_NET_PROFIT_IDR
+            
+            # Base TP calculation from percentage
+            base_tp_price = entry_price * (1 + TP_PCT)
+            
+            # Dynamic TP calculation for exact Net Profit (300 IDR)
+            # Rumus: (Target_IDR + Entry_Value * (1 + Fee)) / (Amount * (1 - Fee))
+            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_PER_SIDE))) / (amount * (1 - FEE_PER_SIDE))
+            
+            # Gunakan harga TP tertinggi antara persentase baseline (1.5%) atau target minimum 300 IDR
+            tp_price = max(base_tp_price, exact_tp_price)
+            
             sl_price = entry_price * (1 + SL_PCT)
 
             # 1. Cek Take Profit

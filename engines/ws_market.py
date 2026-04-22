@@ -280,16 +280,29 @@ class MarketDataWS:
             return
 
         try:
+            bid_depth = 0.0
+            ask_depth = 0.0
+            
             # Parse best bid and ask depending on whether it's a dict or a list
             if isinstance(bids[0], dict):
                 best_bid = float(bids[0].get("price", 0))
+                for b in bids[:10]:
+                    vol = b.get("idr_volume")
+                    if vol: bid_depth += float(vol)
+                    elif b.get("btc_volume"): bid_depth += float(b.get("price", 0)) * float(b.get("btc_volume", 0))
             else:
                 best_bid = float(bids[0][0])
+                bid_depth = sum(float(b[0]) * float(b[1]) for b in bids[:10] if len(b) > 1)
                 
             if isinstance(asks[0], dict):
                 best_ask = float(asks[0].get("price", 0))
+                for a in asks[:10]:
+                    vol = a.get("idr_volume")
+                    if vol: ask_depth += float(vol)
+                    elif a.get("btc_volume"): ask_depth += float(a.get("price", 0)) * float(a.get("btc_volume", 0))
             else:
                 best_ask = float(asks[0][0])
+                ask_depth = sum(float(a[0]) * float(a[1]) for a in asks[:10] if len(a) > 1)
                 
             if best_bid == 0 or best_ask == 0:
                 return
@@ -300,6 +313,8 @@ class MarketDataWS:
             if pair in self._tickers:
                 self._tickers[pair]["buy"]  = best_bid
                 self._tickers[pair]["sell"] = best_ask
+                self._tickers[pair]["bid_depth"] = bid_depth
+                self._tickers[pair]["ask_depth"] = ask_depth
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")

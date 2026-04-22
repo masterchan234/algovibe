@@ -32,8 +32,9 @@ MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 # ==========================================
 # 3. EXECUTION SETTINGS (TP/SL)
 # ==========================================
-TP_PCT = 0.015   # +1.5% Target Profit
+TP_PCT = 0.015   # +1.5% Target Profit (Baseline Minimum)
 SL_PCT = -0.008  # -0.8% Stop Loss
+MIN_NET_PROFIT_IDR = 300 # Minimum target keuntungan bersih (Rupiah) per trade
 
 # ==========================================
 # 4. TAX & FEE STRUCTURE (Indodax 2026 / PMK 68/2022)
