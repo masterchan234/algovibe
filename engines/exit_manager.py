@@ -19,12 +19,16 @@ class ExitManager:
         with open(POSITION_FILE, 'w') as f:
             json.dump(positions, f)
 
-    def monitor_and_execute(self, current_tickers):
+    def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
         if not positions:
             return
 
         for pair, data in list(positions.items()):
+            # Jangan eksekusi jika sedang dalam proses jual (menunggu konfirmasi WS)
+            if data.get('status') == "EXITING":
+                continue
+
             # Ambil harga terakhir dari ticker terbaru
             if pair not in current_tickers:
                 continue
@@ -51,22 +55,51 @@ class ExitManager:
             # 1. Cek Take Profit
             if current_price >= tp_price:
                 print(f"!!! TARGET REACHED: {pair} | Price: {current_price} | Action: SELL (TP)")
-                self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
+                order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
-                del positions[pair]
+                if order_id:
+                    positions[pair]["status"] = "EXITING"
+                    positions[pair]["exit_order_id"] = order_id
 
             # 2. Cek Stop Loss
             elif current_price <= sl_price:
+                hard_sl_price = entry_price * (1 + (SL_PCT * 2))  # Hard SL: 2x SL_PCT
+                
+                # Jaring Pengaman Akhir (Hard Stop Loss)
+                if current_price <= hard_sl_price:
+                    print(f"!!! HARD STOP LOSS REACHED: {pair} | Price: {current_price} | Action: FORCED SELL")
+                    order_id = self.execute_exit(pair, amount, current_price, "HARD_STOP_LOSS",
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        positions[pair]["exit_order_id"] = order_id
+                    continue
+                
+                # Predictive SL Override (Coba deteksi pantulan/fake dump)
+                override_sl = False
+                if get_prediction_fn and price_history and pair in price_history:
+                    history = price_history[pair]
+                    if len(history) >= 15: # Pastikan sampel cukup untuk AI
+                        tq_prob = get_prediction_fn(history)
+                        if tq_prob > 0.70:
+                            override_sl = True
+                            print(f"[{pair}] SL OVERRIDE: Holding position. Bounce probability: {tq_prob*100:.0f}%")
+                
+                if override_sl:
+                    continue # Lewati eksekusi SL, tahan posisi
+                    
                 print(f"!!! STOP LOSS REACHED: {pair} | Price: {current_price} | Action: SELL (SL)")
-                self.execute_exit(pair, amount, current_price, "STOP_LOSS",
+                order_id = self.execute_exit(pair, amount, current_price, "STOP_LOSS",
                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
-                del positions[pair]
+                if order_id:
+                    positions[pair]["status"] = "EXITING"
+                    positions[pair]["exit_order_id"] = order_id
 
         self.save_positions(positions)
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0):
         try:
-            if reason == "STOP_LOSS":
+            if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
                 exit_price = price * 0.9500  # SL: Limit order set 5% BELOW market to instantly act as a Taker/Market order
             else:
                 exit_price = price * 1.0005  # TP: Maker Sell offset +0.05%
@@ -106,6 +139,9 @@ class ExitManager:
             }
             with open(EXIT_LOG, "a") as f:
                 f.write(json.dumps(log_entry) + "\n")
+                
+            return order.get("id", f"DRY-{int(time.time())}")
 
         except Exception as e:
             print(f"Exit Error ({reason}): {e}")
+            return None

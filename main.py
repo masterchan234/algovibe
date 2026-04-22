@@ -119,38 +119,44 @@ class ScalperBot:
 
         # Tentukan apakah kita perlu menghapus posisi dari tracker
         should_delete = False
+        revert_to_open = False
         
         # Jika order SELL berhasil (keluar market), hapus posisi
         if side == "sell" and status in ("DONE", "FILL"):
             should_delete = True
             
-        # Jika order (baik BUY maupun SELL) dibatalkan/ditolak, bersihkan dari tracker
+        # Jika order dibatalkan/ditolak
         if status in ("CANCELLED", "REJECTED"):
-            should_delete = True
+            if side == "buy":
+                should_delete = True
+            elif side == "sell":
+                revert_to_open = True
 
-        if should_delete:
+        if should_delete or revert_to_open:
             pos_file = f"{RAM_PATH}/open_positions.json"
             if os.path.exists(pos_file):
                 try:
                     with open(pos_file, "r") as f:
                         positions = json.load(f)
 
-                    # Cocokkan berdasarkan symbol (pair format: btcidr → BTC/IDR)
-                    pair_normalized = symbol  # indodax pakai lowercase pair
-                    removed = False
+                    # Cocokkan berdasarkan symbol
+                    pair_normalized = symbol
+                    modified = False
                     for key in list(positions.keys()):
                         if key.replace("/", "").lower() == pair_normalized.lower():
-                            del positions[key]
-                            removed = True
+                            if should_delete:
+                                del positions[key]
+                                log_message(f"[PWS] Position cleared: {symbol} (status={status})")
+                            elif revert_to_open:
+                                positions[key]["status"] = "OPEN"
+                                positions[key]["exit_order_id"] = None
+                                log_message(f"[PWS] Position Reverted to OPEN: {symbol} (sell {status})")
+                            modified = True
                             break
 
-                    if removed:
+                    if modified:
                         with open(pos_file, "w") as f:
                             json.dump(positions, f, indent=4)
-                        log_message(
-                            f"[PWS] Position cleared: {symbol} "
-                            f"(status={status}, orderId={order_id})"
-                        )
                 except Exception as e:
                     log_message(f"[PWS] Error updating positions: {e}")
 
@@ -228,6 +234,8 @@ class ScalperBot:
                 "amount_idr":  amount_idr,
                 "timestamp":   datetime.now().isoformat(),
                 "dry_run":     DRY_RUN,
+                "status":      "OPEN",
+                "exit_order_id": None
             }
 
             with open(pos_file, "w") as f:
@@ -272,8 +280,12 @@ class ScalperBot:
                 time.sleep(5)
                 continue
 
-            # Monitor & Execute Exits (pakai harga terbaru dari WS)
-            self.exit_manager.monitor_and_execute(tickers)
+            # Monitor & Execute Exits (pakai harga terbaru dari WS, beserta Predictive SL Override)
+            self.exit_manager.monitor_and_execute(
+                current_tickers=tickers,
+                price_history=self.price_history,
+                get_prediction_fn=get_prediction
+            )
 
             # Parallel Ranking (using persistent pool)
             ranked = [r for r in self.pool.map(calculate_score, tickers.items()) if r]
