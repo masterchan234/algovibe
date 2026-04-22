@@ -81,9 +81,40 @@ Menjalankan Algovibe dengan Docker Compose adalah cara paling mudah dan bersih. 
 
 ## 🛠 Menjalankan Bot (Khusus Native OS)
 
-Proyek ini telah disetup untuk berjalan sebagai layanan *Systemd*:
+Untuk memastikan bot berjalan secara stabil 24/7 di *background*, sangat disarankan menggunakan *Systemd Service*.
+
+### 1. Membuat File Service
+Buat file service baru di `/etc/systemd/system/indodax-scalper.service` menggunakan editor teks (misal: `nano` atau `vim`):
 ```bash
-# Mengaktifkan service
+sudo nano /etc/systemd/system/indodax-scalper.service
+```
+
+Isi file tersebut dengan konfigurasi berikut (sesuaikan `WorkingDirectory` dan `ExecStart` dengan path instalasi Anda):
+```ini
+[Unit]
+Description=Indodax Scalper Autonomous Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/crypto/algotrade
+ExecStart=/usr/bin/python3 /root/projects/crypto/algotrade/main.py
+Restart=always
+RestartSec=10
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 2. Mengaktifkan dan Menjalankan Service
+Setelah file service dibuat, jalankan perintah berikut untuk mengaktifkannya agar otomatis berjalan setiap kali server menyala (reboot):
+```bash
+# Memuat ulang konfigurasi systemd
+sudo systemctl daemon-reload
+
+# Mengaktifkan dan langsung menjalankan service
 sudo systemctl enable --now indodax-scalper.service
 
 # Melihat status
