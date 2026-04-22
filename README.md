@@ -95,7 +95,14 @@ tail -f scalper.log
 
 ## 📊 Laporan Performa
 
-Bot akan secara otomatis mencetak laporan PnL setiap pergantian hari. Untuk mencetak laporan 24 jam secara manual, jalankan:
+Bot akan secara otomatis mencetak laporan PnL setiap pergantian hari. Untuk mencetak laporan 24 jam secara manual, Anda bisa menggunakan perintah berikut:
+
+**Jika menggunakan Docker:**
+```bash
+docker compose exec algovibe_bot python3 -c "from engines.performance_tracker import run_performance_report; run_performance_report()"
+```
+
+**Jika menggunakan Native OS:**
 ```bash
 python3 -c "from engines.performance_tracker import run_performance_report; run_performance_report()"
 ```
