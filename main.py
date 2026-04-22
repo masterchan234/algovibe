@@ -24,8 +24,6 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted_msg = f"[{timestamp}] {message}"
     print(formatted_msg)
-    with open(LOG_FILE, "a") as f:
-        f.write(formatted_msg + "\n")
 
 # ==========================================
 # ENGINES
