@@ -117,8 +117,18 @@ class ScalperBot:
             f"Status: {status} | OrderID: {order_id} | Price: {price}"
         )
 
-        # Jika order DONE / FILLED — hapus posisi terbuka dari file
-        if status in ("DONE", "FILL", "CANCELLED", "REJECTED"):
+        # Tentukan apakah kita perlu menghapus posisi dari tracker
+        should_delete = False
+        
+        # Jika order SELL berhasil (keluar market), hapus posisi
+        if side == "sell" and status in ("DONE", "FILL"):
+            should_delete = True
+            
+        # Jika order (baik BUY maupun SELL) dibatalkan/ditolak, bersihkan dari tracker
+        if status in ("CANCELLED", "REJECTED"):
+            should_delete = True
+
+        if should_delete:
             pos_file = f"{RAM_PATH}/open_positions.json"
             if os.path.exists(pos_file):
                 try:
