@@ -16,6 +16,7 @@ from engines.performance_tracker import run_performance_report
 from engines.predictor import get_prediction
 from engines.ws_market import MarketDataWS
 from engines.ws_private import PrivateWS
+from engines.telegram_bot import send_telegram_message
 
 # ==========================================
 # UTILITY FUNCTIONS
@@ -203,15 +204,25 @@ class ScalperBot:
 
             if DRY_RUN:
                 # ── Virtual Order ─────────────────────────────────────────────
-                log_message(
-                    f"DRY RUN: Virtual Order Placed | {pair} | "
-                    f"Amt: {amount_idr:,.0f} IDR | "
-                    f"Price: {buy_price:,.2f} | "
-                    f"Crypto: {amount_crypto:.6f}"
+                msg = (
+                    f"🟢 *DRY RUN BUY* 🟢\n"
+                    f"Pair: `{pair}`\n"
+                    f"Modal: Rp {amount_idr:,.0f}\n"
+                    f"Harga: Rp {buy_price:,.2f}"
                 )
+                log_message(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
             else:
                 # ── Real Order ────────────────────────────────────────────────
-                log_message(f"EXEC BUY: {pair} | Amt: {amount_idr:,.0f} IDR | Price: {buy_price:,.2f}")
+                msg = (
+                    f"🟢 *LIVE BUY* 🟢\n"
+                    f"Pair: `{pair}`\n"
+                    f"Modal: Rp {amount_idr:,.0f}\n"
+                    f"Harga: Rp {buy_price:,.2f}"
+                )
+                log_message(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
                 order = self.exchange.create_limit_buy_order(
                     pair, amount_crypto, buy_price, {'post_only': True}
                 )
@@ -251,7 +262,9 @@ class ScalperBot:
 
     def run(self):
         mode_label = "DRY RUN (Simulasi)" if DRY_RUN else "LIVE TRADING"
-        log_message(f"Scalper Bot Initialized on 6 vCPUs. Mode: {mode_label}.")
+        init_msg = f"🚀 *Algovibe Scalper Bot Online*\nMode: `{mode_label}`\nCores: `6 vCPUs`"
+        log_message(init_msg.replace('*', '').replace('\n', ' | '))
+        send_telegram_message(init_msg)
 
         # ── Mulai WebSocket Clients ─────────────────────────────────────────
         log_message("Starting Market Data WebSocket…")

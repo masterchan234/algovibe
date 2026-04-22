@@ -24,6 +24,7 @@ from config import (
     MAKER_FEE, PPH_RATE, PPN_RATE, FEE_PER_SIDE, FEE_ROUNDTRIP,
     EXIT_LOG, DAILY_REPORT
 )
+from engines.telegram_bot import send_telegram_message
 
 
 def _load_exit_log() -> list[dict]:
@@ -244,6 +245,10 @@ def print_daily_summary(report: dict) -> None:
 
     for line in lines:
         print(line)
+        
+    # Kirim ke Telegram (hilangkan karakter '=' dan '-' berlebih agar rapi)
+    tg_lines = [line for line in lines if not line.startswith("===") and not line.startswith("---")]
+    send_telegram_message("\n".join(tg_lines))
 
 
 def run_performance_report(log_fn=None) -> dict:

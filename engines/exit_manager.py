@@ -3,6 +3,7 @@ import os
 import time
 
 from config import POSITION_FILE, EXIT_LOG, TP_PCT, SL_PCT
+from engines.telegram_bot import send_telegram_message
 
 class ExitManager:
     def __init__(self, exchange_client, dry_run: bool = False):
@@ -54,7 +55,10 @@ class ExitManager:
 
             # 1. Cek Take Profit
             if current_price >= tp_price:
-                print(f"!!! TARGET REACHED: {pair} | Price: {current_price} | Action: SELL (TP)")
+                msg = f"🎯 *TAKE PROFIT* 🎯\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}"
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
                 order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
                 if order_id:
@@ -67,7 +71,10 @@ class ExitManager:
                 
                 # Jaring Pengaman Akhir (Hard Stop Loss)
                 if current_price <= hard_sl_price:
-                    print(f"!!! HARD STOP LOSS REACHED: {pair} | Price: {current_price} | Action: FORCED SELL")
+                    msg = f"🚨 *HARD STOP LOSS* 🚨\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}\nAction: FORCED SELL"
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    
                     order_id = self.execute_exit(pair, amount, current_price, "HARD_STOP_LOSS",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
                     if order_id:
@@ -83,12 +90,17 @@ class ExitManager:
                         tq_prob = get_prediction_fn(history)
                         if tq_prob > 0.70:
                             override_sl = True
-                            print(f"[{pair}] SL OVERRIDE: Holding position. Bounce probability: {tq_prob*100:.0f}%")
+                            msg = f"🛡 *SL OVERRIDE* 🛡\nPair: `{pair}`\nProbabilitas Bounce: {tq_prob*100:.0f}%\nAction: HOLDING POSITION"
+                            print(msg.replace('*', '').replace('\n', ' | '))
+                            send_telegram_message(msg)
                 
                 if override_sl:
                     continue # Lewati eksekusi SL, tahan posisi
                     
-                print(f"!!! STOP LOSS REACHED: {pair} | Price: {current_price} | Action: SELL (SL)")
+                msg = f"⚠️ *STOP LOSS* ⚠️\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}"
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
                 order_id = self.execute_exit(pair, amount, current_price, "STOP_LOSS",
                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
                 if order_id:
