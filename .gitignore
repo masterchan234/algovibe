@@ -9,7 +9,7 @@ venv.bak/
 
 # Logs
 *.log
-scalper.log
+scalper.log*
 
 # Python
 __pycache__/
