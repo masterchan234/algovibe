@@ -203,30 +203,6 @@ class ScalperBot:
                     f"Price: {buy_price:,.2f} | "
                     f"Crypto: {amount_crypto:.6f}"
                 )
-
-                # Simpan ke open_positions.json agar ExitManager bisa memantau
-                pos_file = f"{RAM_PATH}/open_positions.json"
-                positions = {}
-                if os.path.exists(pos_file):
-                    with open(pos_file, "r") as f:
-                        try:
-                            positions = json.load(f)
-                        except json.JSONDecodeError:
-                            positions = {}
-
-                positions[pair] = {
-                    "entry_price": buy_price,
-                    "amount":      amount_crypto,
-                    "amount_idr":  amount_idr,
-                    "timestamp":   datetime.now().isoformat(),
-                    "dry_run":     True,
-                }
-
-                with open(pos_file, "w") as f:
-                    json.dump(positions, f, indent=4)
-
-                log_message(f"DRY RUN: Position saved → {pos_file}")
-
             else:
                 # ── Real Order ────────────────────────────────────────────────
                 log_message(f"EXEC BUY: {pair} | Amt: {amount_idr:,.0f} IDR | Price: {buy_price:,.2f}")
@@ -236,6 +212,29 @@ class ScalperBot:
                 with open(EXECUTION_LOG, "a") as f:
                     f.write(json.dumps(order) + "\n")
 
+            # ── Simpan Posisi ke Tracker (Berlaku untuk DRY RUN maupun LIVE) ──
+            pos_file = f"{RAM_PATH}/open_positions.json"
+            positions = {}
+            if os.path.exists(pos_file):
+                with open(pos_file, "r") as f:
+                    try:
+                        positions = json.load(f)
+                    except json.JSONDecodeError:
+                        positions = {}
+
+            positions[pair] = {
+                "entry_price": buy_price,
+                "amount":      amount_crypto,
+                "amount_idr":  amount_idr,
+                "timestamp":   datetime.now().isoformat(),
+                "dry_run":     DRY_RUN,
+            }
+
+            with open(pos_file, "w") as f:
+                json.dump(positions, f, indent=4)
+
+            log_message(f"Position tracking saved → {pos_file}")
+            
             return True
 
         except Exception as e:

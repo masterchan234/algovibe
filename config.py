@@ -20,7 +20,7 @@ EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json"
 # ==========================================
 # 2. TRADING RULES & SIZING
 # ==========================================
-INITIAL_CAPITAL        = 96000
+INITIAL_CAPITAL        = 10000000
 MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
