@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  algovibe:
+    build: .
+    container_name: algovibe_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./scalper.log:/app/scalper.log
+    tmpfs:
+      - /mnt/ramdisk/algotrade:size=512m,uid=1000,gid=1000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -34,6 +34,30 @@ Proyek ini menggunakan pola arsitektur *modular engines*:
 
 ## 🚀 Instalasi & Konfigurasi
 
+### Opsi 1: Menggunakan Docker (Direkomendasikan)
+Menjalankan Algovibe dengan Docker Compose adalah cara paling mudah dan bersih. Konfigurasi `docker-compose.yml` sudah mencakup pengaturan *tmpfs* untuk RAM Disk.
+
+1. **Siapkan Environment:**
+   Buat file `.env` dan isi API Key Indodax Anda:
+   ```bash
+   echo 'INDODAX_API_KEY="your_api_key_here"' > .env
+   echo 'INDODAX_API_SECRET="your_secret_key_here"' >> .env
+   ```
+
+2. **Jalankan Bot:**
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Melihat Log:**
+   ```bash
+   docker compose logs -f
+   ```
+
+---
+
+### Opsi 2: Manual / Native OS
+
 1. **Install Dependencies:**
    ```bash
    pip install -r requirements.txt
@@ -55,7 +79,7 @@ Proyek ini menggunakan pola arsitektur *modular engines*:
    mount -t tmpfs -o size=512m tmpfs /mnt/ramdisk/algotrade
    ```
 
-## 🛠 Menjalankan Bot
+## 🛠 Menjalankan Bot (Khusus Native OS)
 
 Proyek ini telah disetup untuk berjalan sebagai layanan *Systemd*:
 ```bash
