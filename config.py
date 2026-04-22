@@ -1,0 +1,50 @@
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# ==========================================
+# 1. CORE PATHS & FILES
+# ==========================================
+BASE_PATH    = "/root/projects/crypto/algotrade"
+DATA_PATH    = f"{BASE_PATH}/data"
+RAM_PATH     = "/mnt/ramdisk/algotrade"
+
+LOG_FILE        = f"{BASE_PATH}/scalper.log"
+POSITION_FILE   = f"{RAM_PATH}/open_positions.json"
+EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json"
+DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json"
+EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json"
+
+# ==========================================
+# 2. TRADING RULES & SIZING
+# ==========================================
+INITIAL_CAPITAL        = 96000
+MIN_BALANCE_THRESHOLD  = 70000
+DAILY_LOSS_LIMIT_PCT   = 0.03
+MAX_TRADES_PER_DAY     = 10
+MAX_CONSECUTIVE_LOSSES = 3
+MIN_TRADE_IDR          = 26000  # Min IDR for Indodax Pro
+
+# ==========================================
+# 3. EXECUTION SETTINGS (TP/SL)
+# ==========================================
+TP_PCT = 0.008   # +0.8% Target Profit
+SL_PCT = -0.0045 # -0.45% Stop Loss
+
+# ==========================================
+# 4. TAX & FEE STRUCTURE (Indodax 2026 / PMK 68/2022)
+# ==========================================
+MAKER_FEE     = 0.0010   # 0.10% Maker fee Indodax Pro
+PPH_RATE      = 0.0010   # 0.10% PPh Pasal 22 (tiap sisi)
+PPN_RATE      = 0.0011   # 0.11% PPN (tiap sisi)
+FEE_PER_SIDE  = MAKER_FEE + PPH_RATE + PPN_RATE  # 0.31%
+FEE_ROUNDTRIP = FEE_PER_SIDE * 2                  # 0.62%
+
+# ==========================================
+# 5. DRY RUN MODE
+# ==========================================
+# Set ke False untuk eksekusi order nyata ke Indodax.
+# Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
+DRY_RUN = True
