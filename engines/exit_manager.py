@@ -14,6 +14,7 @@ class ExitManager:
         self.dry_run  = dry_run
         self.oracle = oracle
         self.jaring_orders = {} # {pair: {id, price, amount}}
+        self.last_jaring_update = {} # {pair: timestamp}
         self._sync_jaring_from_db()
 
     def get_open_positions(self):
@@ -356,12 +357,18 @@ class ExitManager:
             for pair, o in list(self.jaring_orders.items()):
                 if pair in current_tickers:
                     curr_price = current_tickers[pair]['last']
-                    # Jika harga pasar sudah naik > 10% dari jaring kita, batalkan dan pasang baru lebih tinggi
+                    
+                    # [Fix] Tambah Cooldown 5 Menit agar tidak spam cancel/replace
+                    last_update = self.last_jaring_update.get(pair, 0)
+                    if time.time() - last_update < 300: continue 
+
+                    # Jika harga pasar sudah naik > 10% dari jaring kita
                     if curr_price > o['price'] * 1.10:
                         log_message(f"Jaring: Price moved up for {pair}. Trailing jaring...")
                         if not self.dry_run: self.exchange.cancel_order(o['id'])
                         db.delete_shadow_order(pair)
                         del self.jaring_orders[pair]
+                        self.last_jaring_update[pair] = time.time()
 
             # 2. Placement: Fill empty slots (Max 3 jaring)
             if len(self.jaring_orders) < 3:

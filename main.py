@@ -172,8 +172,8 @@ class ScalperBot:
                 "ai_prob": tq_prob,
                 "whale_boost": whale_boost,
                 "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
-                "imbalance": p.get('imbalance', 1.0) if p else 1.0,
-                "volatility": p.get('volatility', 0.0) if p else 0.0
+                "imbalance": p_data.get('imbalance', 1.0),
+                "volatility": p_data.get('volatility', 0.0)
             }
             db.save_trade_dna(pair, dna_data)
 
@@ -245,7 +245,8 @@ class ScalperBot:
                 db.save_state("daily_trades", 0)
                 db.save_state("consecutive_losses", 0)
                 db.save_state("start_day", self.start_day)
-                log_message("New day detected. Counters reset.")
+                db.purge_old_data() # [Fix] Hapus data lama harian
+                log_message("New day detected. Counters reset & Database cleaned.")
 
             # ── Ambil tickers ──────────────────────────────────────────────
             tickers = self.get_tickers()
@@ -325,7 +326,7 @@ class ScalperBot:
 
                 if breakout and ai_ready and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
-                        if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
+                        if self.execute_trade(pair, p['last'], p_data=p, trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)

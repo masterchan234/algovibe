@@ -302,9 +302,8 @@ class Oracle:
         multiplier = 1.0
         for feat, val in features.items():
             weight = self.weights.get(feat, 1.0)
-            # Jika weight > 1.0, fitur ini dianggap "pembawa hoki"
-            # Jika weight < 1.0, fitur ini dianggap "pembawa sial"
-            if val > 0: # Hanya jika fitur tersebut ada/aktif
+            # [Fix] Gunakan != 0 agar fitur negatif (seperti Sektor Merah) juga diproses
+            if val != 0: 
                 multiplier *= weight
                 
         return base_score * multiplier

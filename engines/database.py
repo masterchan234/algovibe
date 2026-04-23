@@ -416,13 +416,25 @@ class Database:
                 (value, feature)
             )
 
-    def get_all_weights(self):
+    def purge_old_data(self, days=7):
+        """
+        [Maintenance] Hapus data lama agar database tidak membengkak.
+        """
         try:
             with self.get_connection() as conn:
-                cursor = conn.execute("SELECT feature_name, weight_value FROM dynamic_weights")
-                return {row['feature_name']: row['weight_value'] for row in cursor.fetchall()}
-        except Exception:
-            return {}
+                # Hapus ticker history > 3 hari (karena kita hanya butuh 40 candle terbaru)
+                conn.execute("DELETE FROM ticker_history WHERE updated_at < datetime('now', '-3 days')")
+                # Hapus analytics > 7 hari
+                conn.execute("DELETE FROM trade_analytics WHERE entry_timestamp < datetime('now', '-7 days')")
+                # Hapus sector history > 7 hari
+                conn.execute("DELETE FROM sector_history WHERE timestamp < datetime('now', '-7 days')")
+                # Hapus order logs > 7 hari
+                conn.execute("DELETE FROM order_logs WHERE created_at < datetime('now', '-7 days')")
+                
+                conn.execute("VACUUM") # Kompres file database
+                print(f"Database Cleanup: Old data purged (>{days} days).")
+        except Exception as e:
+            print(f"Cleanup Error: {e}")
 
 # Instantiate a global db object for ease of use
 db = Database()
