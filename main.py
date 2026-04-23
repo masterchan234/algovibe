@@ -207,18 +207,20 @@ class ScalperBot:
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
-    def execute_trade(self, pair, price):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0):
         try:
+            from config import TP_PCT, SL_PCT
+            
             # ── Sizing ───────────────────────────────────────────────────────
             if DRY_RUN:
                 # Dry run: gunakan modal virtual dari INITIAL_CAPITAL
-                amount_idr = INITIAL_CAPITAL * 0.60 * 0.25
+                amount_idr = INITIAL_CAPITAL * 0.15 # Gunakan 15% modal per trade agar bisa multiple trades
             else:
                 balance = self.exchange.fetch_balance()['free']['IDR']
                 if balance < MIN_BALANCE_THRESHOLD:
                     log_message(f"STOP: Balance below {MIN_BALANCE_THRESHOLD}")
                     return False
-                amount_idr = balance * 0.60 * 0.25
+                amount_idr = balance * 0.15
 
             if amount_idr < MIN_TRADE_IDR:
                 log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
@@ -226,6 +228,10 @@ class ScalperBot:
 
             buy_price     = price * 0.9995   # Maker offset 0.05%
             amount_crypto = amount_idr / buy_price
+            
+            # Estimate Targets
+            tp_target = buy_price * (1 + TP_PCT)
+            sl_target = buy_price * (1 + SL_PCT)
 
             if DRY_RUN:
                 order = {
@@ -238,8 +244,11 @@ class ScalperBot:
                 msg = (
                     f"🟢 *DRY RUN BUY* 🟢\n"
                     f"Pair: `{pair}`\n"
-                    f"Modal: Rp {amount_idr:,.0f}\n"
-                    f"Harga: Rp {buy_price:,.2f}"
+                    f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
+                    f"Price: Rp {buy_price:,.2f}\n"
+                    f"Qty: {amount_crypto:.8f}\n"
+                    f"Target TP: Rp {tp_target:,.2f}\n"
+                    f"Target SL: Rp {sl_target:,.2f}"
                 )
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
@@ -247,8 +256,11 @@ class ScalperBot:
                 msg = (
                     f"🟢 *LIVE BUY* 🟢\n"
                     f"Pair: `{pair}`\n"
-                    f"Modal: Rp {amount_idr:,.0f}\n"
-                    f"Harga: Rp {buy_price:,.2f}"
+                    f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
+                    f"Price: Rp {buy_price:,.2f}\n"
+                    f"Qty: {amount_crypto:.8f}\n"
+                    f"Target TP: Rp {tp_target:,.2f}\n"
+                    f"Target SL: Rp {sl_target:,.2f}"
                 )
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
@@ -368,7 +380,7 @@ class ScalperBot:
 
                 if breakout and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
-                        success = self.execute_trade(p['pair'], p['last'])
+                        success = self.execute_trade(p['pair'], p['last'], trend=trend, tq_prob=tq_prob)
                         if success:
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)

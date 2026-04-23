@@ -91,7 +91,20 @@ class ExitManager:
 
             # 1. Cek Take Profit
             if current_price >= tp_price:
-                msg = f"🎯 *TAKE PROFIT* 🎯\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}"
+                # Calculate metrics for logging
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                duration = datetime.now() - entry_time
+                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+
+                msg = (
+                    f"🎯 *TAKE PROFIT* 🎯\n"
+                    f"Pair: `{pair}`\n"
+                    f"Entry: Rp {entry_price:,.2f}\n"
+                    f"Exit: Rp {current_price:,.2f}\n"
+                    f"PnL: {pnl_pct:+.2f}%\n"
+                    f"Hold: {duration_str}"
+                )
                 print(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
@@ -105,14 +118,28 @@ class ExitManager:
             elif current_price <= sl_price:
                 hard_sl_price = entry_price * (1 + (SL_PCT * 2))  # Hard SL: 2x SL_PCT
                 
+                # Calculate metrics for logging
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                duration = datetime.now() - entry_time
+                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+
                 # Jaring Pengaman Akhir (Hard Stop Loss)
                 if current_price <= hard_sl_price:
-                    msg = f"🚨 *HARD STOP LOSS* 🚨\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}\nAction: FORCED SELL"
+                    msg = (
+                        f"🚨 *HARD STOP LOSS* 🚨\n"
+                        f"Pair: `{pair}`\n"
+                        f"Entry: Rp {entry_price:,.2f}\n"
+                        f"Exit: Rp {current_price:,.2f}\n"
+                        f"PnL: {pnl_pct:+.2f}%\n"
+                        f"Hold: {duration_str}\n"
+                        f"Action: FORCED SELL"
+                    )
                     print(msg.replace('*', '').replace('\n', ' | '))
                     send_telegram_message(msg)
                     
                     order_id = self.execute_exit(pair, amount, current_price, "HARD_STOP_LOSS",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         positions[pair]["status"] = "EXITING"
                         positions[pair]["exit_order_id"] = order_id
@@ -133,7 +160,14 @@ class ExitManager:
                 if override_sl:
                     continue # Lewati eksekusi SL, tahan posisi
                     
-                msg = f"⚠️ *STOP LOSS* ⚠️\nPair: `{pair}`\nHarga Jual: Rp {current_price:,.2f}"
+                msg = (
+                    f"⚠️ *STOP LOSS* ⚠️\n"
+                    f"Pair: `{pair}`\n"
+                    f"Entry: Rp {entry_price:,.2f}\n"
+                    f"Exit: Rp {current_price:,.2f}\n"
+                    f"PnL: {pnl_pct:+.2f}%\n"
+                    f"Hold: {duration_str}"
+                )
                 print(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
