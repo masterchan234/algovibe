@@ -66,6 +66,7 @@ class Oracle:
         up_count = 0
         down_count = 0
         total_change = 0
+        panic_count = 0 # Short-term memory (velocity proxy)
         
         for t in top_50:
             change = t.get('change_24h', 0)
@@ -73,14 +74,23 @@ class Oracle:
             if change > 1.0: up_count += 1
             if change < -1.0: down_count += 1
             
+            # Deteksi jika harga saat ini sedang nyungsep (berada di dasar kisaran 24 jam)
+            last = float(t.get('last', 0))
+            high = float(t.get('high', 1))
+            low = float(t.get('low', 0))
+            if high > low:
+                pos_in_range = (last - low) / (high - low)
+                if pos_in_range < 0.05: # Berada di 5% titik terendah
+                    panic_count += 1
+            
         avg_change = total_change / len(top_50) if top_50 else 0
         
-        # Decide Regime
-        if avg_change < -5.0 or down_count > 35:
+        # Decide Regime (Amygdala Reflex)
+        if avg_change < -5.0 or down_count > 35 or panic_count > 15:
             regime = MarketRegime.CRASH
-        elif avg_change < -1.5:
+        elif avg_change < -1.5 or panic_count > 10:
             regime = MarketRegime.BEARISH
-        elif avg_change > 1.5 and up_count > 25:
+        elif avg_change > 1.5 and up_count > 25 and panic_count < 5:
             regime = MarketRegime.BULLISH
         else:
             regime = MarketRegime.CHOPPY
@@ -303,10 +313,17 @@ class Oracle:
             for feature in ["ai_prob", "whale_boost", "sector_sentiment", "imbalance"]:
                 current_w = self.weights.get(feature, 1.0)
                 
-                # Check presence/strength of feature in DNA
+                # Check presence/strength of feature in DNA (Zero-Centering)
                 strength = dna.get(feature, 0)
-                if feature == "ai_prob": strength -= 0.5 # Center AI prob at 0.5
-                if feature == "sector_sentiment": strength /= 5.0 # Normalize sentiment
+                if feature == "ai_prob": 
+                    strength -= 0.5 # 0 is neutral, >0 is confident
+                elif feature == "sector_sentiment": 
+                    strength /= 5.0 # Normalize sentiment
+                elif feature == "whale_boost":
+                    strength -= 1.0 # 0 if no whale, 0.5 if whale present
+                elif feature == "imbalance":
+                    strength -= 1.0 # 0 if balanced, >0 if highly imbalanced
+                    
                 
                 if is_profit:
                     new_w = current_w + (LR * abs(strength))
