@@ -1,5 +1,5 @@
 // --- Configuration ---
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = window.location.origin + '/api';
 
 // --- Radar Engine ---
 const canvas = document.getElementById('radarCanvas');

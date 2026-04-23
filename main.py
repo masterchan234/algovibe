@@ -209,7 +209,7 @@ class ScalperBot:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            log_message("Dashboard available at http://localhost:5000")
+            log_message("Dashboard available at http://localhost:5005")
         except Exception as e:
             log_message(f"Failed to launch dashboard: {e}")
 
