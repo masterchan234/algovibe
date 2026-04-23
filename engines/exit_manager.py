@@ -79,7 +79,10 @@ class ExitManager:
             # --- END AUTO-CANCEL ---
 
             # Import the required variables dynamically
-            from config import FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR
+            from config import (
+                FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR, 
+                AI_MIN_HISTORY_POINTS, AI_SL_OVERRIDE_THRESHOLD
+            )
             
             # Base TP calculation from percentage
             base_tp_price = entry_price * (1 + TP_PCT)
@@ -185,14 +188,14 @@ class ExitManager:
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
-            from config import TOTAL_MAKER_FEE, TOTAL_TAKER_FEE, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            from config import FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
             
             if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
                 exit_price = price * (1 - SELL_TAKER_OFFSET)
-                fee_sell_rate = TOTAL_TAKER_FEE
+                fee_sell_rate = FEE_SELL_TAKER
             else:
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
-                fee_sell_rate = TOTAL_MAKER_FEE
+                fee_sell_rate = FEE_SELL_MAKER
 
             if self.dry_run:
                 order = {
@@ -210,7 +213,10 @@ class ExitManager:
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
 
             order_status = order.get('status', 'closed')
-            from config import FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            from config import (
+                FEE_BUY_MAKER, FEE_BUY_TAKER, FEE_SELL_MAKER, FEE_SELL_TAKER,
+                MIN_NET_PROFIT_IDR, AI_MIN_HISTORY_POINTS, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            )
             
             # Tentukan fee jual berdasarkan strategi exit
             is_taker = reason in ("STOP_LOSS", "HARD_STOP_LOSS")

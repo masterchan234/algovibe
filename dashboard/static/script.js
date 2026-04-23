@@ -81,6 +81,11 @@ function drawRadar() {
         const x = centerX + Math.cos(angle) * radius;
         const y = centerY + Math.sin(angle) * radius;
 
+        // Draw Lock-on for high scores (>75)
+        if (p.score > 75) {
+            drawLockOn(x, y);
+        }
+
         // Glow
         const color = p.score > 80 ? '#ff00ff' : '#00f2ff';
         ctx.shadowBlur = 15;
@@ -151,16 +156,56 @@ function addTerminalLine(text) {
     if (terminal.childElementCount > 50) terminal.removeChild(terminal.firstChild);
 }
 
+// --- Voice & Targeting Logic ---
+let isMuted = true;
+const muteBtn = document.getElementById('mute-btn');
+
+muteBtn.addEventListener('click', () => {
+    isMuted = !isMuted;
+    muteBtn.innerText = isMuted ? 'VOICE: OFF' : 'VOICE: ON';
+    muteBtn.classList.toggle('active', !isMuted);
+    if (!isMuted) speak("Predator Voice System Activated.");
+});
+
+function speak(text) {
+    if (isMuted) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1;
+    utterance.pitch = 0.8; // Deep tactical voice
+    window.speechSynthesis.speak(utterance);
+}
+
+function drawLockOn(x, y) {
+    ctx.strokeStyle = '#ff00ff';
+    ctx.lineWidth = 2;
+    const size = 15 + Math.sin(Date.now() / 100) * 5;
+    
+    ctx.beginPath();
+    ctx.moveTo(x - size, y - size); ctx.lineTo(x - size + 10, y - size);
+    ctx.moveTo(x - size, y - size); ctx.lineTo(x - size, y - size + 10);
+    
+    ctx.moveTo(x + size, y + size); ctx.lineTo(x + size - 10, y + size);
+    ctx.moveTo(x + size, y + size); ctx.lineTo(x + size, y + size - 10);
+    
+    ctx.stroke();
+}
+
 // --- Alerts & Drama ---
 const alertOverlay = document.getElementById('alert-overlay');
 let lastSeenLogId = null;
 
 function triggerAlert(type, pair, pnl) {
     const isTP = type === 'TP';
-    alertOverlay.innerText = isTP ? 
+    const text = isTP ? 
         `[ TARGET NEUTRALIZED ]\n${pair.toUpperCase()} PROFIT: ${pnl}` : 
         `[ SYSTEM BREACH ]\n${pair.toUpperCase()} LIQUIDATED`;
     
+    alertOverlay.innerText = text;
+    
+    // Speak event
+    if (isTP) speak(`Target neutralized on ${pair}. Profit secured.`);
+    else speak(`Position liquidated on ${pair}. System breach detected.`);
+
     alertOverlay.className = isTP ? 'tp-alert' : 'sl-alert';
     alertOverlay.style.display = 'flex';
     document.body.classList.add('shake');
@@ -181,6 +226,7 @@ function triggerSpecialEvent(type, text = "") {
         whale.innerText = '🐳';
         specialContainer.appendChild(whale);
         addTerminalLine(`[!] WHALE SIGHTING DETECTED // MASSIVE ORDER DETECTED`);
+        speak("Warning. Massive liquidity detected. Whale shadowing initiated.");
         setTimeout(() => whale.remove(), 8000);
     }
     
@@ -218,6 +264,7 @@ async function fetchData() {
         
         if (stats.regime !== lastRegime) {
             addTerminalLine(`MARKET REGIME SHIFT: ${stats.regime}`);
+            speak(`Market regime shift detected. Global sentiment is now ${stats.regime}.`);
             lastRegime = stats.regime;
             
             // Update Background Watermark
@@ -228,7 +275,7 @@ async function fetchData() {
         regimeEl.style.color = stats.regime === 'BULL' ? '#00ff41' : (stats.regime === 'BEAR' ? '#ff003c' : '#00f2ff');
 
         document.getElementById('daily-trades').innerText = stats.daily_trades;
-        document.getElementById('total-pnl').innerText = `Rp ${stats.total_pnl.toLocaleString()}`;
+        document.getElementById('total-pnl').innerText = `Rp ${(stats.total_pnl || 0).toLocaleString()}`;
 
         const weightsRes = await fetch(`${API_BASE}/weights`);
         const weights = await weightsRes.json();

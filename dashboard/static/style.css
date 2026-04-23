@@ -272,6 +272,53 @@ h2 {
     transition: all 1s ease;
 }
 
+/* --- Voice & Targeting --- */
+.mute-btn {
+    background: transparent;
+    border: 1px solid var(--neon-blue);
+    color: var(--neon-blue);
+    font-family: 'Orbitron', sans-serif;
+    font-size: 10px;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: all 0.3s;
+    margin-left: 15px;
+}
+
+.mute-btn.active {
+    background: var(--neon-blue);
+    color: black;
+    box-shadow: 0 0 10px var(--neon-blue);
+}
+
+.lock-on {
+    position: absolute;
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--neon-pink);
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    animation: lock-rotate 2s linear infinite;
+    z-index: 10;
+}
+
+.lock-on::before, .lock-on::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--neon-pink);
+}
+
+.lock-on::before { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+.lock-on::after { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+
+@keyframes lock-rotate {
+    0% { transform: translate(-50%, -50%) rotate(0deg) scale(1.5); opacity: 0; }
+    20% { opacity: 1; transform: translate(-50%, -50%) rotate(45deg) scale(1); }
+    100% { transform: translate(-50%, -50%) rotate(45deg) scale(1); opacity: 1; }
+}
+
 /* --- Scrollbar --- */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
