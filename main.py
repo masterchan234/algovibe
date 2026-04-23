@@ -97,7 +97,7 @@ class ScalperBot:
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
-    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0):
         try:
             # ── Oracle Sizing Multiplier ─────────────────────────────────────
             multiplier = self.oracle.get_sizing_multiplier()
@@ -173,8 +173,8 @@ class ScalperBot:
                 "ai_prob": tq_prob,
                 "whale_boost": whale_boost,
                 "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
-                "imbalance": p_data.get('imbalance', 1.0),
-                "volatility": p_data.get('volatility', 0.0)
+                "imbalance": imbalance,
+                "volatility": volatility
             }
             db.save_trade_dna(pair, dna_data)
 
@@ -352,8 +352,9 @@ class ScalperBot:
 
                 if breakout and ai_ready and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
-                        if self.execute_trade(pair, p['last'], p_data=p, trend=trend, tq_prob=tq_prob, 
-                                             whale_boost=whale_boost, sector_boost=sector_boost):
+                        if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
+                                             whale_boost=whale_boost, sector_boost=sector_boost,
+                                             imbalance=imbalance_ratio, volatility=p['volatility']):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)
 
