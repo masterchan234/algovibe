@@ -39,7 +39,8 @@ def get_stats():
         "daily_trades": stats_dict.get('daily_trades', 0),
         "total_pnl": perf['pnl'] or 0,
         "active_positions": len(positions),
-        "regime": stats_dict.get('market_regime', 'CHOPPY')
+        "regime": stats_dict.get('market_regime', 'CHOPPY'),
+        "latest_whale": stats_dict.get('latest_whale', '')
     })
 
 @app.route('/api/radar')

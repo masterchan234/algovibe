@@ -173,6 +173,105 @@ h2 {
 
 .term-line { margin: 2px 0; border-left: 2px solid var(--matrix-green); padding-left: 10px; }
 
+/* --- Alerts & Glitch --- */
+#alert-overlay {
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+    pointer-events: none;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 48px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.tp-alert {
+    background: rgba(0, 255, 65, 0.2);
+    color: var(--matrix-green);
+    border: 5px solid var(--matrix-green);
+    text-shadow: 0 0 20px var(--matrix-green);
+    animation: glitch-text 0.2s infinite;
+}
+
+.sl-alert {
+    background: rgba(255, 0, 60, 0.2);
+    color: var(--alert-red);
+    border: 5px solid var(--alert-red);
+    text-shadow: 0 0 20px var(--alert-red);
+    animation: glitch-text 0.2s infinite;
+}
+
+@keyframes glitch-text {
+    0% { transform: translate(0); }
+    20% { transform: translate(-5px, 5px); }
+    40% { transform: translate(-5px, -5px); }
+    60% { transform: translate(5px, 5px); }
+    80% { transform: translate(5px, -5px); }
+    100% { transform: translate(0); }
+}
+
+.shake {
+    animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
+}
+
+@keyframes shake {
+    10%, 90% { transform: translate3d(-1px, 0, 0); }
+    20%, 80% { transform: translate3d(2px, 0, 0); }
+    30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
+    40%, 60% { transform: translate3d(4px, 0, 0); }
+}
+
+/* --- Special Events --- */
+.whale-swim {
+    position: absolute;
+    font-size: 80px;
+    opacity: 0;
+    pointer-events: none;
+    animation: whale-move 8s linear;
+    z-index: 5;
+    color: var(--neon-blue);
+    filter: blur(2px);
+}
+
+@keyframes whale-move {
+    0% { left: -150px; top: 20%; opacity: 0; transform: scale(0.5); }
+    20% { opacity: 0.3; }
+    80% { opacity: 0.3; }
+    100% { left: 110%; top: 60%; opacity: 0; transform: scale(1.5); }
+}
+
+.fake-pump-alert {
+    position: absolute;
+    border: 10px double var(--alert-red);
+    color: var(--alert-red);
+    padding: 20px;
+    font-size: 60px;
+    font-weight: 900;
+    transform: rotate(-20deg);
+    opacity: 0;
+    animation: stamp-in 0.5s cubic-bezier(.36,.07,.19,.97) forwards;
+    z-index: 100;
+    text-shadow: 0 0 10px var(--alert-red);
+    background: rgba(255, 0, 0, 0.1);
+}
+
+@keyframes stamp-in {
+    0% { transform: scale(5) rotate(-20deg); opacity: 0; }
+    100% { transform: scale(1) rotate(-20deg); opacity: 0.8; }
+}
+
+.regime-bg {
+    position: absolute;
+    font-size: 300px;
+    opacity: 0.03;
+    z-index: -1;
+    pointer-events: none;
+    transition: all 1s ease;
+}
+
 /* --- Scrollbar --- */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }

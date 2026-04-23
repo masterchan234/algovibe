@@ -187,6 +187,7 @@ class Oracle:
             for bid in ob['bids'][:10]:
                 val_idr = float(bid[0]) * float(bid[1])
                 if val_idr >= WHALE_THRESHOLD_IDR:
+                    db.save_state("latest_whale", f"{pair}|{int(val_idr)}")
                     return 1.5 # Boost skor 50%
                     
             return 1.0

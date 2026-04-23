@@ -151,21 +151,81 @@ function addTerminalLine(text) {
     if (terminal.childElementCount > 50) terminal.removeChild(terminal.firstChild);
 }
 
-// --- Data Fetching ---
+// --- Alerts & Drama ---
+const alertOverlay = document.getElementById('alert-overlay');
+let lastSeenLogId = null;
+
+function triggerAlert(type, pair, pnl) {
+    const isTP = type === 'TP';
+    alertOverlay.innerText = isTP ? 
+        `[ TARGET NEUTRALIZED ]\n${pair.toUpperCase()} PROFIT: ${pnl}` : 
+        `[ SYSTEM BREACH ]\n${pair.toUpperCase()} LIQUIDATED`;
+    
+    alertOverlay.className = isTP ? 'tp-alert' : 'sl-alert';
+    alertOverlay.style.display = 'flex';
+    document.body.classList.add('shake');
+
+    setTimeout(() => {
+        alertOverlay.style.display = 'none';
+        document.body.classList.remove('shake');
+    }, 3000);
+}
+
+const specialContainer = document.getElementById('special-alerts-container');
+const regimeBg = document.getElementById('regime-bg');
+
+function triggerSpecialEvent(type, text = "") {
+    if (type === 'WHALE') {
+        const whale = document.createElement('div');
+        whale.className = 'whale-swim';
+        whale.innerText = '🐳';
+        specialContainer.appendChild(whale);
+        addTerminalLine(`[!] WHALE SIGHTING DETECTED // MASSIVE ORDER DETECTED`);
+        setTimeout(() => whale.remove(), 8000);
+    }
+    
+    if (type === 'FAKE_PUMP') {
+        const stamp = document.createElement('div');
+        stamp.className = 'fake-pump-alert';
+        stamp.innerText = 'FAKE PUMP';
+        specialContainer.appendChild(stamp);
+        addTerminalLine(`[!] WARNING: ARTIFICIAL VOLUME DETECTED (FAKE PUMP)`);
+        document.body.classList.add('shake');
+        setTimeout(() => {
+            stamp.remove();
+            document.body.classList.remove('shake');
+        }, 3000);
+    }
+}
+
+// Data Fetching
 let lastRegime = '';
+let lastWhaleStr = '';
 async function fetchData() {
     try {
         const statsRes = await fetch(`${API_BASE}/stats`);
         const stats = await statsRes.json();
         
+        // Auto-Trigger Whale Alert
+        if (stats.latest_whale && stats.latest_whale !== lastWhaleStr) {
+            const [pair, val] = stats.latest_whale.split('|');
+            triggerSpecialEvent('WHALE', `${pair.toUpperCase()} - Rp ${parseInt(val).toLocaleString()}`);
+            lastWhaleStr = stats.latest_whale;
+        }
+
         const regimeEl = document.getElementById('market-regime');
         regimeEl.innerText = stats.regime;
-        regimeEl.style.color = stats.regime === 'BULL' ? '#00ff41' : (stats.regime === 'BEAR' ? '#ff003c' : '#00f2ff');
         
         if (stats.regime !== lastRegime) {
-            addTerminalLine(`MARKET REGIME SHIFT DETECTED: ${stats.regime}`);
+            addTerminalLine(`MARKET REGIME SHIFT: ${stats.regime}`);
             lastRegime = stats.regime;
+            
+            // Update Background Watermark
+            regimeBg.innerText = stats.regime === 'BULL' ? '📈' : (stats.regime === 'BEAR' ? '📉' : '⚡');
+            regimeBg.style.color = stats.regime === 'BULL' ? '#00ff41' : (stats.regime === 'BEAR' ? '#ff003c' : '#00f2ff');
         }
+        
+        regimeEl.style.color = stats.regime === 'BULL' ? '#00ff41' : (stats.regime === 'BEAR' ? '#ff003c' : '#00f2ff');
 
         document.getElementById('daily-trades').innerText = stats.daily_trades;
         document.getElementById('total-pnl').innerText = `Rp ${stats.total_pnl.toLocaleString()}`;
@@ -183,6 +243,17 @@ async function fetchData() {
 
         const logsRes = await fetch(`${API_BASE}/logs`);
         const logs = await logsRes.json();
+        
+        // Detect NEW SELL events for alerts
+        if (logs.length > 0) {
+            const latest = logs[0];
+            if (lastSeenLogId && latest.id > lastSeenLogId && latest.side === 'SELL') {
+                const type = (latest.price > 0) ? 'TP' : 'SL'; // Simple heuristic
+                triggerAlert(type, latest.pair, latest.price);
+            }
+            lastSeenLogId = latest.id;
+        }
+
         const feed = document.getElementById('log-feed');
         feed.innerHTML = logs.map(l => `
             <div style="border-bottom: 1px solid rgba(255,255,255,0.05); padding: 5px 0; color: ${l.side === 'BUY' ? '#00ff41' : '#ff003c'}">
@@ -214,3 +285,19 @@ const thoughts = [
 setInterval(() => {
     addTerminalLine(thoughts[Math.floor(Math.random() * thoughts.length)]);
 }, 8000);
+
+// Test Trigger (Press T for TP, S for SL, W for Whale, F for Fake Pump)
+window.addEventListener('keydown', (e) => {
+    const key = e.key.toLowerCase();
+    if (key === 't') triggerAlert('TP', 'BTCIDR', '+Rp 50,000');
+    if (key === 's') triggerAlert('SL', 'ETHIDR', '-Rp 20,000');
+    if (key === 'w') triggerSpecialEvent('WHALE');
+    if (key === 'f') triggerSpecialEvent('FAKE_PUMP');
+    if (key === 'b') {
+        // Test Regime Change
+        lastRegime = (lastRegime === 'BULL' ? 'BEAR' : 'BULL');
+        document.getElementById('market-regime').innerText = lastRegime;
+        regimeBg.innerText = lastRegime === 'BULL' ? '📈' : '📉';
+        regimeBg.style.color = lastRegime === 'BULL' ? '#00ff41' : '#ff003c';
+    }
+});
