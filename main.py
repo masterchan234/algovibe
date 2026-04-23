@@ -204,10 +204,13 @@ class ScalperBot:
         """Start the Predator HUD Dashboard in the background."""
         try:
             log_message("Launching Predator HUD Dashboard...")
+            log_path = "data/logs/dashboard.log"
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            log_f = open(log_path, "a")
             subprocess.Popen(
                 ["python3", "dashboard/server.py"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=log_f,
+                stderr=subprocess.STDOUT
             )
             log_message("Dashboard available at http://localhost:5005")
         except Exception as e:

@@ -79,12 +79,11 @@ class ExitManager:
             # --- END AUTO-CANCEL ---
 
             # Import the required variables dynamically
-            from config import FEE_PER_SIDE, MIN_NET_PROFIT_IDR
+            from config import FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR
             
             # Base TP calculation from percentage
             base_tp_price = entry_price * (1 + TP_PCT)
             
-            from config import FEE_BUY_MAKER, FEE_SELL_MAKER
             # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
             exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
             
