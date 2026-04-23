@@ -148,7 +148,7 @@ class Database:
             cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
             cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
             
-            self.conn.commit()
+            # Committing is handled by the context manager automatically
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -258,6 +258,12 @@ class Database:
             stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
             
             return stats
+
+    def get_recent_trades(self, limit=10):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trade_history ORDER BY created_at DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cursor.fetchall()]
 
     # ── METODE UNTUK TICKER HISTORY ──
 
@@ -435,6 +441,14 @@ class Database:
                 print(f"Database Cleanup: Old data purged (>{days} days).")
         except Exception as e:
             print(f"Cleanup Error: {e}")
+
+    def get_all_weights(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute("SELECT feature_name, weight_value FROM dynamic_weights")
+                return {row['feature_name']: row['weight_value'] for row in cursor.fetchall()}
+        except Exception:
+            return {}
 
 # Instantiate a global db object for ease of use
 db = Database()

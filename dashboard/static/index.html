@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PREDATOR HUD - Crypto Scalper</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="hud-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">PREDATOR HUD <span>v2.0</span></div>
+            <div class="status-bar">
+                <div class="stat-item">STATUS: <span id="bot-status" class="online">ACTIVE</span></div>
+                <div class="stat-item">REGIME: <span id="market-regime">CHOPPY</span></div>
+                <div class="stat-item">TRADES: <span id="daily-trades">0</span></div>
+                <div class="stat-item">PNL: <span id="total-pnl">Rp 0</span></div>
+            </div>
+        </header>
+
+        <main>
+            <!-- Left Panel: Weights & Neural -->
+            <section class="panel side-panel">
+                <div class="panel-header">NEURAL WEIGHTS</div>
+                <div class="chart-container">
+                    <canvas id="weightsChart"></canvas>
+                </div>
+                <div class="panel-header">ASSET ALLOCATION</div>
+                <div class="chart-container">
+                    <canvas id="allocationChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Center Panel: Radar -->
+            <section class="panel center-panel">
+                <div class="radar-container">
+                    <canvas id="radarCanvas"></canvas>
+                    <div class="radar-overlay">
+                        <div class="crosshair"></div>
+                    </div>
+                </div>
+                <div class="panel-header">SIGNAL FEED</div>
+                <div class="log-container" id="log-feed">
+                    <!-- Logs will appear here -->
+                </div>
+            </section>
+
+            <!-- Right Panel: Positions & Depth -->
+            <section class="panel side-panel">
+                <div class="panel-header">ACTIVE POSITIONS</div>
+                <div class="list-container" id="positions-list">
+                    <!-- Positions will appear here -->
+                </div>
+                <div class="panel-header">WHALE ALERTS</div>
+                <div class="list-container" id="whale-alerts">
+                    <!-- Whale alerts -->
+                    <div class="alert-item">🐳 BTCIDR: Buy Wall detected @ 950M</div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

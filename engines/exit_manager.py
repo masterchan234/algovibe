@@ -4,7 +4,6 @@ import time
 from datetime import datetime
 
 from config import TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
-from engines.telegram_bot import send_telegram_message
 from engines.database import db
 from utils.logger import log_message, send_telegram_message
 
@@ -268,6 +267,11 @@ class ExitManager:
 
             except Exception as db_err:
                 print(f"Failed to save trade history/state for {pair}: {db_err}")
+            
+            return order.get('id')
+        except Exception as e:
+            print(f"Critical error in execute_exit for {pair}: {e}")
+            return None
                 
     def handle_order_update(self, order):
         """

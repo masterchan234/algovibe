@@ -1,5 +1,6 @@
 import os
 import time
+import subprocess
 import collections
 from datetime import datetime
 from collections import defaultdict, deque
@@ -199,7 +200,23 @@ class ScalperBot:
             log_message(f"Trade Error: {e}")
             return False
 
+    def _start_dashboard(self):
+        """Start the Predator HUD Dashboard in the background."""
+        try:
+            log_message("Launching Predator HUD Dashboard...")
+            subprocess.Popen(
+                ["python3", "dashboard/server.py"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            log_message("Dashboard available at http://localhost:5000")
+        except Exception as e:
+            log_message(f"Failed to launch dashboard: {e}")
+
     def run(self):
+        # ── Start Dashboard ──
+        self._start_dashboard()
+        
         # ── Mulai WebSocket Clients ─────────────────────────────────────────
         log_message("Starting Market Data WebSocket…")
         self.market_ws.start()
@@ -255,6 +272,10 @@ class ScalperBot:
                 time.sleep(5)
                 continue
 
+            # Parallel Ranking (using adaptive filters)
+            ranked = [r for r in self.pool.map(calculate_score, [(item, adaptive_cfg) for item in tickers.items()]) if r]
+            ranked.sort(key=lambda x: x['score'], reverse=True)
+
             # Monitor Exits
             self.exit_manager.monitor_and_execute(
                 current_tickers=tickers,
@@ -265,9 +286,6 @@ class ScalperBot:
             # Manage Shadow Jaring (Liquidity Grab)
             self.exit_manager.manage_shadow_jaring(ranked, tickers)
 
-            # Parallel Ranking (using adaptive filters)
-            ranked = [r for r in self.pool.map(calculate_score, [(item, adaptive_cfg) for item in tickers.items()]) if r]
-            ranked.sort(key=lambda x: x['score'], reverse=True)
             log_message(
                 f"Oracle Loop | Regime: {regime:8} | "
                 f"AI_Thresh: {adaptive_cfg['ai_threshold']*100:.0f}% | "
@@ -284,6 +302,7 @@ class ScalperBot:
                     continue
                 
                 trend, breakout, history = self.update_history_and_trend(pair, p['last'])
+                imbalance_ratio = p.get('imbalance', 1.0)
                 # Get Prediction Probability
                 tq_prob = get_prediction(history) if trend == "UP" else 0.0
                 
