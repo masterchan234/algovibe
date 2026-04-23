@@ -1,96 +1,75 @@
 def get_prediction(price_history: list) -> float:
     """
-    Menghitung probabilitas eksekusi menggunakan indikator teknikal lanjutan.
-    Menerima array history harga, mengembalikan float 0.0 - 1.0.
+    Menghitung probabilitas eksekusi menggunakan Microstructure & Statistical Arbitrage.
+    Menerima array history harga (raw ticks, max 100), mengembalikan float 0.0 - 1.0.
     """
     from config import AI_MIN_HISTORY_POINTS
-    if not price_history or len(price_history) < AI_MIN_HISTORY_POINTS:
+    
+    n = len(price_history)
+    if n < AI_MIN_HISTORY_POINTS:
         return -1.0  # -1 indicates 'Warming Up' status
 
     try:
         prob = 0.40  # Base Score
         current_price = price_history[-1]
 
-        # 1. RSI (Relative Strength Index) - 14
-        gains = []
-        losses = []
-        for i in range(1, 15):
-            delta = price_history[i] - price_history[i-1]
-            if delta > 0:
-                gains.append(delta)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(-delta)
+        # 1. Linear Regression Slope (Momentum Sejati)
+        # Menghitung tren arah harga secara matematis, mengabaikan noise tick.
+        # x = range(n), y = price_history
+        sum_x = n * (n - 1) / 2
+        sum_y = sum(price_history)
+        sum_xy = sum(i * price_history[i] for i in range(n))
+        sum_x2 = sum(i * i for i in range(n))
         
-        avg_gain = sum(gains) / 14.0
-        avg_loss = sum(losses) / 14.0
-        
-        for i in range(15, len(price_history)):
-            delta = price_history[i] - price_history[i-1]
-            gain = delta if delta > 0 else 0
-            loss = -delta if delta < 0 else 0
-            
-            avg_gain = (avg_gain * 13 + gain) / 14.0
-            avg_loss = (avg_loss * 13 + loss) / 14.0
-            
-        if avg_loss == 0:
-            rsi_val = 100.0
+        denominator = (n * sum_x2 - sum_x * sum_x)
+        if denominator == 0:
+            slope = 0
         else:
-            rs = avg_gain / avg_loss
-            rsi_val = 100.0 - (100.0 / (1.0 + rs))
-
-        if rsi_val > 70:
-            prob -= 0.10
-        elif rsi_val > 55:
-            prob += 0.20
-
-        # 2. MACD (12, 26, 9)
-        def ema(data, span):
-            alpha = 2 / (span + 1)
-            ema_vals = [data[0]]
-            for price in data[1:]:
-                ema_vals.append(price * alpha + ema_vals[-1] * (1 - alpha))
-            return ema_vals
-
-        ema12 = ema(price_history, 12)
-        ema26 = ema(price_history, 26)
-        macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
-        signal_line = ema(macd_line, 9)
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            
+        # Normalisasi slope ke percentage
+        slope_pct = (slope / current_price) * 100
         
-        macd_val = macd_line[-1]
-        sig_val = signal_line[-1]
-        
-        if macd_val > sig_val:
-            prob += 0.20
+        # Jika slope sangat positif (Momentum naik kuat)
+        if slope_pct > 0.005:
+            prob += 0.25
+        elif slope_pct > 0.001:
+            prob += 0.10
+        elif slope_pct < -0.005:
+            prob -= 0.30 # Trend turun tajam
 
-        # 3. Bollinger Bands (20, 2)
-        window = price_history[-20:]
-        ma = sum(window) / 20.0
-        variance = sum((x - ma) ** 2 for x in window) / 20.0
-        std = variance ** 0.5
+        # 2. Tick Volatility Z-Score (Deteksi Anomali / Breakout)
+        # Seberapa jauh harga saat ini dari rata-rata (dalam satuan standar deviasi)
+        mean_price = sum_y / n
+        variance = sum((p - mean_price) ** 2 for p in price_history) / n
+        std_dev = variance ** 0.5
         
-        lower_band = ma - (std * 2)
-        upper_band = ma + (std * 2)
+        if std_dev > 0:
+            z_score = (current_price - mean_price) / std_dev
+            
+            # Jika harga melonjak jauh di atas rata-rata (Breakout asli)
+            if z_score > 2.0:
+                prob += 0.15
+            elif z_score < -2.0:
+                prob -= 0.20 # Dump
         
-        if current_price <= lower_band * 1.002 or current_price >= upper_band * 0.998:
-            prob += 0.15 # Mengurangi sedikit bobot BB klasik
-
-        # 4. ANTI-FALLING-KNIFE (Velocity Check)
-        # Jika harga turun > 1.2% dalam 5 tick terakhir, ini Panic Dump.
-        if len(price_history) >= 6:
-            prev_5_price = price_history[-6]
-            velocity_5 = (current_price - prev_5_price) / prev_5_price
-            if velocity_5 < -0.012:
-                prob -= 0.40 # Penalti berat, jangan coba lawan gravitasi
-            elif velocity_5 < -0.006:
-                prob -= 0.15
-
-        # 5. REBOUND DETECTION (Bounce from Local Support)
-        # Cek apakah harga saat ini sudah naik dari titik terendah 10 tick terakhir
-        local_min = min(price_history[-10:])
-        if current_price > local_min * 1.0015: # Naik 0.15% dari dasar
-            prob += 0.20 # Bonus probabilitas untuk potensi pantulan (Hammer effect)
+        # 3. Micro Mean-Reversion (Anti-Falling-Knife)
+        # Deteksi penurunan tiba-tiba dalam 10 tick terakhir
+        if n >= 10:
+            recent_10 = price_history[-10:]
+            recent_max = max(recent_10)
+            drop_from_recent_max = (recent_max - current_price) / recent_max
+            
+            if drop_from_recent_max > 0.01: # Turun > 1% dalam 10 tick
+                prob -= 0.40 # Hindari menangkap pisau jatuh
+                
+        # 4. Micro-Bounce / Floor Detection
+        # Jika harga stabil di support lokal lalu sedikit naik
+        if n >= 20:
+            recent_20 = price_history[-20:]
+            local_min = min(recent_20)
+            if current_price > local_min * 1.002: # Naik 0.2% dari titik terendah 20 tick terakhir
+                prob += 0.15
 
         prob = max(0.0, min(prob, 0.99))
         return prob

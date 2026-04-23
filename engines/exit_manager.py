@@ -80,8 +80,8 @@ class ExitManager:
 
             # Import the required variables dynamically
             from config import (
-                FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR, 
-                AI_MIN_HISTORY_POINTS, AI_SL_OVERRIDE_THRESHOLD
+                FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR,
+                TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT
             )
             
             # Base TP calculation from percentage
@@ -90,14 +90,38 @@ class ExitManager:
             # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
             exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
             
-            # Gunakan harga TP tertinggi antara persentase baseline (1.5%) atau target minimum 300 IDR
+            # Target TP minimal agar tidak rugi fee
             tp_price = max(base_tp_price, exact_tp_price)
             
-            sl_price = entry_price * (1 + SL_PCT)
+            # Default Initial Stop Loss
+            initial_sl_price = entry_price * (1 + SL_PCT)
+            
+            # --- Trailing Stop Logic ---
+            # Retrieve or initialize highest price seen and current trailing stop price
+            highest_price = data.get('highest_price', entry_price)
+            trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
+            
+            if current_price > highest_price:
+                highest_price = current_price
+                positions[pair]['highest_price'] = highest_price
+                
+                # Check if we should activate or update trailing stop
+                profit_pct = (highest_price - entry_price) / entry_price
+                if profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                    # Calculate new trailing SL
+                    new_trailing_sl = highest_price * (1 - TRAILING_STOP_DISTANCE_PCT)
+                    # Never lower the trailing stop once raised
+                    if new_trailing_sl > trailing_sl_price:
+                        trailing_sl_price = new_trailing_sl
+                        positions[pair]['trailing_sl_price'] = trailing_sl_price
+            
+            # Active SL is whichever is higher: initial or trailing
+            active_sl_price = max(initial_sl_price, trailing_sl_price)
 
-            # 1. Cek Take Profit
+            # --- Execution Checks ---
+            
+            # 1. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
             if current_price >= tp_price:
-                # Calculate metrics for logging
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 entry_time = datetime.fromisoformat(data['timestamp'])
                 duration = datetime.now() - entry_time
@@ -120,55 +144,19 @@ class ExitManager:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
 
-            # 2. Cek Stop Loss
-            elif current_price <= sl_price:
-                hard_sl_price = entry_price * (1 + (SL_PCT * 2))  # Hard SL: 2x SL_PCT
-                
-                # Calculate metrics for logging
+            # 2. Stop Loss (Initial or Trailing)
+            elif current_price <= active_sl_price:
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 entry_time = datetime.fromisoformat(data['timestamp'])
                 duration = datetime.now() - entry_time
                 duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
 
-                # Jaring Pengaman Akhir (Hard Stop Loss)
-                if current_price <= hard_sl_price:
-                    msg = (
-                        f"🚨 *HARD STOP LOSS* 🚨\n"
-                        f"Pair: `{pair}`\n"
-                        f"Entry: Rp {entry_price:,.2f}\n"
-                        f"Exit: Rp {current_price:,.2f}\n"
-                        f"PnL: {pnl_pct:+.2f}%\n"
-                        f"Hold: {duration_str}\n"
-                        f"Action: FORCED SELL"
-                    )
-                    print(msg.replace('*', '').replace('\n', ' | '))
-                    send_telegram_message(msg)
-                    
-                    order_id = self.execute_exit(pair, amount, current_price, "HARD_STOP_LOSS",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                    if order_id:
-                        positions[pair]["status"] = "EXITING"
-                        positions[pair]["exit_order_id"] = order_id
-                    continue
+                is_trailing_hit = active_sl_price > initial_sl_price
+                reason_str = "TRAILING STOP" if is_trailing_hit else "STOP LOSS"
+                log_reason = "TAKE_PROFIT" if (is_trailing_hit and pnl_pct > 0) else "STOP_LOSS" # Categorize positive trail as TP for DB
                 
-                # Predictive SL Override (Coba deteksi pantulan/fake dump)
-                override_sl = False
-                if get_prediction_fn and price_history and pair in price_history:
-                    history = price_history[pair]
-                    if len(history) >= AI_MIN_HISTORY_POINTS: # Pastikan sampel cukup untuk AI
-                        tq_prob = get_prediction_fn(history)
-                        if tq_prob >= AI_SL_OVERRIDE_THRESHOLD:
-                            override_sl = True
-                            rationale = self.oracle.get_rationale(pair, 'ADAPTIVE_SL') if self.oracle else "Bounce potential detected."
-                            msg = f"🛡 *SL OVERRIDE* 🛡\nPair: `{pair}`\nProb: {tq_prob*100:.0f}%\nRationale: _{rationale}_"
-                            print(msg.replace('*', '').replace('\n', ' | '))
-                            send_telegram_message(msg)
-                
-                if override_sl:
-                    continue # Lewati eksekusi SL, tahan posisi
-                    
                 msg = (
-                    f"⚠️ *STOP LOSS* ⚠️\n"
+                    f"⚠️ *{reason_str}* ⚠️\n"
                     f"Pair: `{pair}`\n"
                     f"Entry: Rp {entry_price:,.2f}\n"
                     f"Exit: Rp {current_price:,.2f}\n"
@@ -178,7 +166,7 @@ class ExitManager:
                 print(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
-                order_id = self.execute_exit(pair, amount, current_price, "STOP_LOSS",
+                order_id = self.execute_exit(pair, amount, current_price, log_reason,
                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
                     positions[pair]["status"] = "EXITING"

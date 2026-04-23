@@ -45,7 +45,7 @@ class ScalperBot:
         self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
         
         # Memory-based history tracking with DB Recovery
-        self.price_history = defaultdict(lambda: deque(maxlen=40))
+        self.price_history = defaultdict(lambda: deque(maxlen=100))
         self.blacklist = set(db.get_blacklist())
         self.pool = ThreadPool(processes=8)
         

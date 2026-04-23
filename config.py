@@ -33,8 +33,13 @@ MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 # ==========================================
 # 3. STRATEGY PARAMETERS
 # ==========================================
-TP_PCT = 0.015   # +1.5% Target Profit (Baseline Minimum)
-SL_PCT = -0.008  # -0.8% Stop Loss
+TP_PCT = 0.02   # +2.0% Target Profit (Baseline Minimum)
+SL_PCT = -0.015  # -1.5% Stop Loss (Wider to avoid whipsaw noise)
+
+# --- Trailing Stop Loss ---
+TRAILING_STOP_ACTIVATION_PCT = 0.01  # Activate trailing stop when profit hits 1.0%
+TRAILING_STOP_DISTANCE_PCT = 0.005   # Trail price by 0.5% once activated
+
 MIN_NET_PROFIT_IDR = 300 # Minimum target keuntungan bersih (Rupiah) per trade
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
@@ -55,7 +60,7 @@ SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
 SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
 
 # --- Sizing ---
-CAPITAL_PER_TRADE_PCT = 0.15 # Gunakan 15% modal per trade (0.15)
+CAPITAL_PER_TRADE_PCT = 0.05 # Gunakan 5% modal per trade (Prop-firm standard for scalping)
 
 # --- Indodax Pro Fee Structure (Image Reference) ---
 FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
