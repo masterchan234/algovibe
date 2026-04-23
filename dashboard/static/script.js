@@ -223,19 +223,20 @@ function triggerSpecialEvent(type, text = "") {
     if (type === 'WHALE') {
         const whale = document.createElement('div');
         whale.className = 'whale-swim';
-        whale.innerText = '🐳';
+        whale.innerHTML = `🐳<br><span style="font-size: 14px; font-family: 'Orbitron';">${text}</span>`;
         specialContainer.appendChild(whale);
-        addTerminalLine(`[!] WHALE SIGHTING DETECTED // MASSIVE ORDER DETECTED`);
-        speak("Warning. Massive liquidity detected. Whale shadowing initiated.");
+        addTerminalLine(`[!] WHALE SIGHTING: ${text}`);
+        speak(`Warning. Massive liquidity detected on ${text.split(' ')[0]}. Whale shadowing initiated.`);
         setTimeout(() => whale.remove(), 8000);
     }
     
     if (type === 'FAKE_PUMP') {
         const stamp = document.createElement('div');
         stamp.className = 'fake-pump-alert';
-        stamp.innerText = 'FAKE PUMP';
+        stamp.innerHTML = `FAKE PUMP<br><span style="font-size: 20px;">${text}</span>`;
         specialContainer.appendChild(stamp);
-        addTerminalLine(`[!] WARNING: ARTIFICIAL VOLUME DETECTED (FAKE PUMP)`);
+        addTerminalLine(`[!] WARNING: FAKE PUMP DETECTED ON ${text}`);
+        speak(`Caution. Fake pump detected on ${text}. Volume is artificial.`);
         document.body.classList.add('shake');
         setTimeout(() => {
             stamp.remove();
@@ -247,6 +248,7 @@ function triggerSpecialEvent(type, text = "") {
 // Data Fetching
 let lastRegime = '';
 let lastWhaleStr = '';
+let lastFakeStr = '';
 async function fetchData() {
     try {
         const statsRes = await fetch(`${API_BASE}/stats`);
@@ -259,12 +261,19 @@ async function fetchData() {
             lastWhaleStr = stats.latest_whale;
         }
 
+        // Auto-Trigger Fake Pump Alert
+        if (stats.latest_fake_pump && stats.latest_fake_pump !== lastFakeStr) {
+            const [pair, chg] = stats.latest_fake_pump.split('|');
+            triggerSpecialEvent('FAKE_PUMP', `${pair.toUpperCase()} (+${chg}%)`);
+            lastFakeStr = stats.latest_fake_pump;
+        }
+
         const regimeEl = document.getElementById('market-regime');
         regimeEl.innerText = stats.regime;
         
         if (stats.regime !== lastRegime) {
-            addTerminalLine(`MARKET REGIME SHIFT: ${stats.regime}`);
-            speak(`Market regime shift detected. Global sentiment is now ${stats.regime}.`);
+            addTerminalLine(`MARKET REGIME SHIFT: ${stats.regime} (Leader: ${stats.regime_leader})`);
+            speak(`Market regime shift detected. Global sentiment is now ${stats.regime}. Leading pair: ${stats.regime_leader.split(' ')[0]}.`);
             lastRegime = stats.regime;
             
             // Update Background Watermark

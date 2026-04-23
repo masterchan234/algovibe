@@ -86,7 +86,13 @@ class Oracle:
             regime = MarketRegime.CHOPPY
             
         if regime != self.last_regime:
-            logger.info(f"[Oracle] Market Regime Shift: {self.last_regime} -> {regime}")
+            # Find the "Leader" of the movement (highest change in top 50)
+            leader = max(top_50, key=lambda x: x.get('change_24h', 0)) if top_50 else None
+            leader_str = f"{leader['pair'].upper()} (+{leader['change_24h']:.1f}%)" if leader else "UNKNOWN"
+            
+            logger.info(f"[Oracle] Market Regime Shift: {self.last_regime} -> {regime} | Leader: {leader_str}")
+            db.save_state("market_regime", regime)
+            db.save_state("regime_leader", leader_str)
             
         self.last_regime = regime
         self.last_regime_update = datetime.now()
@@ -193,6 +199,28 @@ class Oracle:
             return 1.0
         except Exception:
             return 1.0
+
+    def detect_fake_pump(self, pair: str, price_change_pct: float) -> bool:
+        """
+        Detect if a price surge is artificial (low liquidity support).
+        """
+        try:
+            if price_change_pct < 3.0: return False
+            
+            ob = self.market_ws.get_order_book(pair)
+            if not ob or not ob.get('bids'): return True # No bids = definitely fake
+            
+            # Check Buy Wall support
+            buy_wall_idr = sum(float(b[0]) * float(b[1]) for b in ob['bids'][:5])
+            from config import WHALE_THRESHOLD_IDR
+            
+            if buy_wall_idr < (WHALE_THRESHOLD_IDR / 5): # Very thin buy support
+                db.save_state("latest_fake_pump", f"{pair}|{price_change_pct:.1f}")
+                return True
+                
+            return False
+        except Exception:
+            return False
 
     def get_sector_boost(self, pair: str) -> float:
         """

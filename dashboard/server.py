@@ -40,7 +40,9 @@ def get_stats():
         "total_pnl": perf['pnl'] or 0,
         "active_positions": len(positions),
         "regime": stats_dict.get('market_regime', 'CHOPPY'),
-        "latest_whale": stats_dict.get('latest_whale', '')
+        "regime_leader": stats_dict.get('regime_leader', ''),
+        "latest_whale": stats_dict.get('latest_whale', ''),
+        "latest_fake_pump": stats_dict.get('latest_fake_pump', '')
     })
 
 @app.route('/api/radar')

@@ -285,6 +285,10 @@ class ScalperBot:
                 price_history=self.price_history,
                 get_prediction_fn=get_prediction
             )
+
+            # [Project Predator] Real-time Fake Pump Detection for Top 5
+            for r in ranked[:5]:
+                self.oracle.detect_fake_pump(r['pair'], r['change'])
             
             # Manage Shadow Jaring (Liquidity Grab)
             self.exit_manager.manage_shadow_jaring(ranked, tickers)
@@ -385,7 +389,8 @@ def calculate_score(args):
             score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2) + imb_bonus
             return {
                     "pair": pair, "last": last, "spread": spread, 
-                    "volatility": volatility, "score": score, "imbalance": imbalance
+                    "volatility": volatility, "score": score, "imbalance": imbalance,
+                    "change": d.get('change_24h', 0)
             }
     except: pass
     return None
