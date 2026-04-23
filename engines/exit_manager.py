@@ -35,6 +35,7 @@ class ExitManager:
                 
             current_price = float(current_tickers[pair]['last'])
             entry_price = data['entry_price']
+            amount = data['amount_crypto']
             
             # --- AUTO-CANCEL LOGIC UNTUK PENDING_BUY ---
             if data.get('status') == "PENDING_BUY":
@@ -73,8 +74,6 @@ class ExitManager:
                 continue
             # --- END AUTO-CANCEL ---
 
-            amount = data['amount']
-            
             # Import the required variables dynamically
             from config import FEE_PER_SIDE, MIN_NET_PROFIT_IDR
             
@@ -178,6 +177,9 @@ class ExitManager:
             else:
                 db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
             
+            # Log to Database Audit
+            db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
+            
             gross_pnl = (current_price - entry_price) * amount
             fee_buy = amount_idr * FEE_PER_SIDE
             sell_value = amount * current_price
@@ -203,8 +205,16 @@ class ExitManager:
                     duration_seconds=int(duration_sec),
                     dry_run=self.dry_run
                 )
+                
+                # Update Consecutive Losses state
+                current_cl = int(db.get_state("consecutive_losses", 0))
+                if pnl_idr > 0:
+                    db.save_state("consecutive_losses", 0)
+                else:
+                    db.save_state("consecutive_losses", current_cl + 1)
+
             except Exception as db_err:
-                print(f"Failed to save trade history for {pair}: {db_err}")
+                print(f"Failed to save trade history/state for {pair}: {db_err}")
                 
             return order.get("id", f"DRY-{int(time.time())}")
 

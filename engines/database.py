@@ -62,6 +62,48 @@ class Database:
                 )
             ''')
 
+            # Tabel untuk persistensi price history (Warm-up prevention)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ticker_history (
+                    pair TEXT PRIMARY KEY,
+                    history_json TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Tabel untuk status bot (daily counters, last day reset, dll)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Tabel untuk audit log semua order (Buy/Sell/Cancel)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS order_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT,
+                    side TEXT,
+                    price REAL,
+                    amount REAL,
+                    status TEXT,
+                    response_json TEXT,
+                    error_msg TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Tabel untuk daftar koin yang diblokir
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    pair TEXT PRIMARY KEY,
+                    reason TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -171,6 +213,84 @@ class Database:
             stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
             
             return stats
+
+    # ── METODE UNTUK TICKER HISTORY ──
+
+    def save_ticker_history(self, pair, history_list):
+        import json
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO ticker_history (pair, history_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(pair) DO UPDATE SET
+                    history_json=excluded.history_json,
+                    updated_at=excluded.updated_at
+            ''', (pair, json.dumps(history_list)))
+
+    def get_all_ticker_history(self):
+        import json
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT pair, history_json FROM ticker_history")
+            rows = cursor.fetchall()
+            result = {}
+            for row in rows:
+                try:
+                    result[row['pair']] = json.loads(row['history_json'])
+                except:
+                    continue
+            return result
+
+    # ── METODE UNTUK BOT STATE ──
+
+    def save_state(self, key, value):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO bot_state (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+            ''', (key, str(value)))
+
+    def get_state(self, key, default=None):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row['value'] if row else default
+
+    # ── METODE UNTUK AUDIT LOG & BLACKLIST ──
+
+    def log_order(self, pair, side, price, amount, status, response=None, error=None):
+        import json
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            resp_str = json.dumps(response) if response else None
+            err_str = str(error) if error else None
+            cursor.execute('''
+                INSERT INTO order_logs (pair, side, price, amount, status, response_json, error_msg)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (pair, side, price, amount, status, resp_str, err_str))
+
+    def add_to_blacklist(self, pair, reason="Manual"):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO blacklist (pair, reason) VALUES (?, ?)", (pair, reason))
+
+    def get_blacklist(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT pair FROM blacklist")
+            return [row['pair'] for row in cursor.fetchall()]
+
+    def is_blacklisted(self, pair):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM blacklist WHERE pair = ?", (pair,))
+            return cursor.fetchone() is not None
 
 # Instantiate a global db object for ease of use
 db = Database()

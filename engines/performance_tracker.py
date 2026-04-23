@@ -119,3 +119,7 @@ def run_performance_report(log_fn=None) -> dict:
             f"Trades: {report['total_trades']} | Win: {report['win_rate_pct']:.0f}%"
         )
     return report
+
+
+if __name__ == "__main__":
+    run_performance_report()

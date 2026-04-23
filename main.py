@@ -78,12 +78,26 @@ class ScalperBot:
             'enableRateLimit': True,
         })
         self.exit_manager = ExitManager(self.exchange, dry_run=DRY_RUN)
-        self.consecutive_losses = 0
-        self.daily_trades = 0
         self.start_day = datetime.now().day
         
-        # Memory-based history tracking
+        # Load persistent bot state from DB
+        self.daily_trades = int(db.get_state("daily_trades", 0))
+        self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
+        log_message(f"Loaded bot state: Daily Trades={self.daily_trades}, Consecutive Losses={self.consecutive_losses}")
+        
+        # Load Blacklist
+        self.blacklist = set(db.get_blacklist())
+        log_message(f"Loaded blacklist: {len(self.blacklist)} pairs.")
+        
+        # Memory-based history tracking with DB Recovery
         self.price_history = collections.defaultdict(lambda: collections.deque(maxlen=40))
+        
+        # Load history from DB (Warm-up prevention)
+        log_message("Loading price history from database...")
+        db_history = db.get_all_ticker_history()
+        for pair, history in db_history.items():
+            self.price_history[pair] = collections.deque(history, maxlen=40)
+        log_message(f"Loaded history for {len(db_history)} pairs.")
 
         # Directory Safety
         os.makedirs(RAM_PATH, exist_ok=True)
@@ -186,6 +200,9 @@ class ScalperBot:
         # Logic Flat Breakout: Current price > Avg of prev 10 + 0.3%  (tangkap awal pergerakan)
         is_flat_breakout = len(history) >= 10 and history[-1] > (sum(history[-10:])/10) * 1.003
         
+        # Save to DB for persistence (limit writes to tracked pairs)
+        db.save_ticker_history(pair, history)
+        
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
     def execute_trade(self, pair, price):
@@ -209,7 +226,13 @@ class ScalperBot:
             amount_crypto = amount_idr / buy_price
 
             if DRY_RUN:
-                # ── Virtual Order ─────────────────────────────────────────────
+                order = {
+                    'id': f"DRY-{int(time.time())}",
+                    'status': 'closed',
+                    'price': buy_price,
+                    'amount': amount_crypto,
+                    'timestamp': datetime.now().isoformat()
+                }
                 msg = (
                     f"🟢 *DRY RUN BUY* 🟢\n"
                     f"Pair: `{pair}`\n"
@@ -219,7 +242,6 @@ class ScalperBot:
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
             else:
-                # ── Real Order ────────────────────────────────────────────────
                 msg = (
                     f"🟢 *LIVE BUY* 🟢\n"
                     f"Pair: `{pair}`\n"
@@ -229,12 +251,11 @@ class ScalperBot:
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
-                order = self.exchange.create_limit_buy_order(
-                    pair, amount_crypto, buy_price, {'post_only': True}
-                )
-                order_id = order.get('id')
-                with open(EXECUTION_LOG, "a") as f:
-                    f.write(json.dumps(order) + "\n")
+                params = {'post_only': True}
+                order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
+
+            # Log to Database Audit
+            db.log_order(pair, "BUY", buy_price, amount_crypto, order.get('status'), order)
 
             # ── Simpan Posisi ke Tracker Database ──
             data = {
@@ -278,10 +299,16 @@ class ScalperBot:
 
         while True:
             # Daily Reset — cetak laporan performa 24 jam sebelum reset
-            if datetime.now().day != self.start_day:
+            current_day = datetime.now().day
+            if current_day != self.start_day:
                 run_performance_report(log_fn=log_message)
                 self.daily_trades = 0
-                self.start_day = datetime.now().day
+                self.consecutive_losses = 0
+                self.start_day = current_day
+                db.save_state("daily_trades", 0)
+                db.save_state("consecutive_losses", 0)
+                db.save_state("start_day", self.start_day)
+                log_message("New day detected. Counters reset.")
 
             # ── Ambil tickers dari WS buffer (bukan REST) ──────────────────
             tickers = self.get_tickers()
@@ -309,10 +336,11 @@ class ScalperBot:
             open_positions = self.exit_manager.get_open_positions()
 
             for p in high_speed:
-                if p['pair'] in open_positions:
-                    continue  # Lewati pair yang sedang dipegang
+                pair = p['pair']
+                if pair in open_positions or pair in self.blacklist:
+                    continue  # Lewati pair yang sedang dipegang atau di-blacklist
                 
-                trend, breakout, history = self.update_history_and_trend(p['pair'], p['last'])
+                trend, breakout, history = self.update_history_and_trend(pair, p['last'])
 
                 # Get Prediction Probability
                 tq_prob = get_prediction(history) if trend == "UP" else 0.0
@@ -327,11 +355,21 @@ class ScalperBot:
 
                 # Signal Trigger: Trend UP + Breakout OR Sideways + Breakout dengan Imbalance tinggi
                 has_strong_imb = p.get('imbalance', 0) > 2.0
+                
+                # RE-CHECK PERSISTENT STATE BEFORE TRADE
+                self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
+                
+                if self.consecutive_losses >= 3: # MAX_CONSECUTIVE_LOSSES
+                    log_message("PAUSE: Hit max consecutive losses (3). Waiting for manual review or next day.")
+                    time.sleep(60)
+                    break
+
                 if breakout and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         success = self.execute_trade(p['pair'], p['last'])
                         if success:
                             self.daily_trades += 1
+                            db.save_state("daily_trades", self.daily_trades)
 
             # ── Loop interval ──────────────────────────────────────────────
             # WS sudah push data real-time; sleep pendek hanya untuk
