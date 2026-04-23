@@ -268,6 +268,46 @@ class ExitManager:
             except Exception as db_err:
                 print(f"Failed to save trade history/state for {pair}: {db_err}")
                 
+    def handle_order_update(self, order):
+        """
+        Callback dari PrivateWS. Memproses order yang terisi (Filled).
+        """
+        try:
+            order_id = str(order.get('id', ''))
+            pair = order.get('pair', '')
+            status = order.get('status', '').lower()
+            
+            if status not in ['filled', 'closed', 'fill']: return
+            
+            # 1. Cek apakah ini Jaring yang terisi
+            for p, jaring in list(self.jaring_orders.items()):
+                if str(jaring['id']) == order_id:
+                    log_message(f"🎯 JARING FILLED! {p} bought at Rp {jaring['price']:,.2f} via Liquidity Grab.")
+                    
+                    # Pindahkan dari Shadow ke Positions
+                    data = {
+                        "entry_price": jaring['price'],
+                        "amount":      jaring['amount'],
+                        "amount_idr":  jaring['price'] * jaring['amount'],
+                        "timestamp":   datetime.now().isoformat(),
+                        "dry_run":     self.dry_run,
+                        "status":      "OPEN",
+                        "entry_order_id": order_id,
+                        "exit_order_id": None
+                    }
+                    db.upsert_position(p, data)
+                    db.delete_shadow_order(p)
+                    if p in self.jaring_orders: del self.jaring_orders[p]
+                    
+                    send_telegram_message(f"🎯 *JARING FILLED* 🎯\nPair: `{p}`\nPrice: Rp {jaring['price']:,.2f}")
+                    return
+
+            # 2. Cek apakah ini Buy Order reguler yang baru terisi
+            # (Sudah di-handle oleh main.py saat create_order, tapi bisa di-sync di sini jika perlu)
+            
+        except Exception as e:
+            print(f"Error handling order update: {e}")
+
     def reconcile_with_exchange(self):
         """
         [Anti-Hallucination] 

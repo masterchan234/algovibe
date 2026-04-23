@@ -58,7 +58,7 @@ class ScalperBot:
         self.private_ws = PrivateWS(
             api_key    = os.getenv('INDODAX_API_KEY', ''),
             api_secret = os.getenv('INDODAX_API_SECRET', ''),
-            exit_manager = self.exit_manager
+            on_order_update = self.exit_manager.handle_order_update
         )
         
         log_message("Oracle Engine initialized. Consciousness level: FULL.")
