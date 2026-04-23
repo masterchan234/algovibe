@@ -17,6 +17,7 @@ from engines.predictor import get_prediction
 from engines.ws_market import MarketDataWS
 from engines.ws_private import PrivateWS
 from engines.telegram_bot import send_telegram_message
+from engines.database import db
 
 # ==========================================
 # UTILITY FUNCTIONS
@@ -140,35 +141,29 @@ class ScalperBot:
                 revert_to_open = True
 
         if should_delete or revert_to_open or mark_buy_open:
-            pos_file = f"{RAM_PATH}/open_positions.json"
-            if os.path.exists(pos_file):
-                try:
-                    with open(pos_file, "r") as f:
-                        positions = json.load(f)
-
-                    # Cocokkan berdasarkan symbol
-                    pair_normalized = symbol
-                    modified = False
-                    for key in list(positions.keys()):
-                        if key.replace("/", "").lower() == pair_normalized.lower():
-                            if should_delete:
-                                del positions[key]
-                                log_message(f"[PWS] Position cleared: {symbol} (status={status})")
-                            elif revert_to_open:
-                                positions[key]["status"] = "OPEN"
-                                positions[key]["exit_order_id"] = None
-                                log_message(f"[PWS] Position Reverted to OPEN: {symbol} (sell {status})")
-                            elif mark_buy_open:
-                                positions[key]["status"] = "OPEN"
-                                log_message(f"[PWS] Order Filled. Position OPEN: {symbol}")
-                            modified = True
-                            break
-
-                    if modified:
-                        with open(pos_file, "w") as f:
-                            json.dump(positions, f, indent=4)
-                except Exception as e:
-                    log_message(f"[PWS] Error updating positions: {e}")
+            try:
+                positions = db.get_open_positions()
+                pair_normalized = symbol
+                
+                # Cari key asli yang cocok (case-insensitive & tanpa slash)
+                target_pair = None
+                for key in positions.keys():
+                    if key.replace("/", "").lower() == pair_normalized.lower():
+                        target_pair = key
+                        break
+                        
+                if target_pair:
+                    if should_delete:
+                        db.delete_position(target_pair)
+                        log_message(f"[PWS] Position cleared: {symbol} (status={status})")
+                    elif revert_to_open:
+                        db.update_position_status(target_pair, "OPEN", exit_order_id=None)
+                        log_message(f"[PWS] Position Reverted to OPEN: {symbol} (sell {status})")
+                    elif mark_buy_open:
+                        db.update_position_status(target_pair, "OPEN")
+                        log_message(f"[PWS] Order Filled. Position OPEN: {symbol}")
+            except Exception as e:
+                log_message(f"[PWS] Error updating positions: {e}")
 
     # ── Ticker Source (WS-based) ────────────────────────────────────────────
     def get_tickers(self) -> dict | None:
@@ -241,17 +236,8 @@ class ScalperBot:
                 with open(EXECUTION_LOG, "a") as f:
                     f.write(json.dumps(order) + "\n")
 
-            # ── Simpan Posisi ke Tracker (Berlaku untuk DRY RUN maupun LIVE) ──
-            pos_file = f"{RAM_PATH}/open_positions.json"
-            positions = {}
-            if os.path.exists(pos_file):
-                with open(pos_file, "r") as f:
-                    try:
-                        positions = json.load(f)
-                    except json.JSONDecodeError:
-                        positions = {}
-
-            positions[pair] = {
+            # ── Simpan Posisi ke Tracker Database ──
+            data = {
                 "entry_price": buy_price,
                 "amount":      amount_crypto,
                 "amount_idr":  amount_idr,
@@ -262,10 +248,8 @@ class ScalperBot:
                 "exit_order_id": None
             }
 
-            with open(pos_file, "w") as f:
-                json.dump(positions, f, indent=4)
-
-            log_message(f"Position tracking saved → {pos_file}")
+            db.upsert_position(pair, data)
+            log_message(f"Position tracking saved to DB: {pair}")
             
             return True
 

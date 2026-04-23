@@ -3,8 +3,9 @@ import os
 import time
 from datetime import datetime
 
-from config import POSITION_FILE, EXIT_LOG, TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
+from config import TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
 from engines.telegram_bot import send_telegram_message
+from engines.database import db
 
 class ExitManager:
     def __init__(self, exchange_client, dry_run: bool = False):
@@ -12,14 +13,11 @@ class ExitManager:
         self.dry_run  = dry_run
 
     def get_open_positions(self):
-        if os.path.exists(POSITION_FILE):
-            with open(POSITION_FILE, 'r') as f:
-                return json.load(f)
-        return {}
+        return db.get_open_positions()
 
     def save_positions(self, positions):
-        with open(POSITION_FILE, 'w') as f:
-            json.dump(positions, f)
+        # Fallback method if needed, but we should use db.upsert_position instead
+        pass
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
@@ -63,9 +61,7 @@ class ExitManager:
                     try:
                         self.exchange.cancel_order(order_id, pair)
                         # Hapus lokal sebagai fallback jika PrivateWS miss event
-                        if pair in positions:
-                            del positions[pair]
-                            self.save_positions(positions)
+                        db.delete_position(pair)
                         
                         msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
                         print(msg.replace('*', '').replace('\n', ' | '))
@@ -173,25 +169,42 @@ class ExitManager:
                     f"Price: {exit_price:,.2f} | Crypto: {amount:.6f}"
                 )
             else:
-                # ── Real Exit ────────────────────────────────────────────────
                 params = {'post_only': True} if reason == "TAKE_PROFIT" else {}
-                order = self.exchange.create_limit_sell_order(
-                    pair, amount, exit_price, params
-                )
+                order = self.exchange.create_limit_sell_order(pair, amount, exit_price, params)
 
-            # Log transaksi (berlaku untuk dry run maupun live)
-            log_entry = {
-                "timestamp":   time.time(),
-                "pair":        pair,
-                "reason":      reason,
-                "entry_price": entry_price,
-                "exit_price":  exit_price,
-                "amount_idr":  amount_idr,
-                "order":       order,
-                "dry_run":     self.dry_run,
-            }
-            with open(EXIT_LOG, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
+            order_status = order.get('status', 'closed')
+            if order_status in ['closed', 'canceled', 'done', 'fill']:
+                db.delete_position(pair)
+            else:
+                db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
+            
+            gross_pnl = (current_price - entry_price) * amount
+            fee_buy = amount_idr * FEE_PER_SIDE
+            sell_value = amount * current_price
+            fee_sell = sell_value * FEE_PER_SIDE
+            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+            
+            pnl_idr = net_pnl_idr
+            pnl_pct = (net_pnl_idr / amount_idr) * 100
+            
+            entry_time = datetime.fromisoformat(data['timestamp'])
+            duration_sec = (datetime.now() - entry_time).total_seconds()
+            
+            try:
+                db.insert_trade_history(
+                    pair=pair,
+                    entry_price=entry_price,
+                    exit_price=current_price,
+                    amount_crypto=amount,
+                    amount_idr=amount_idr,
+                    pnl_idr=pnl_idr,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                    duration_seconds=int(duration_sec),
+                    dry_run=self.dry_run
+                )
+            except Exception as db_err:
+                print(f"Failed to save trade history for {pair}: {db_err}")
                 
             return order.get("id", f"DRY-{int(time.time())}")
 

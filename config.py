@@ -11,11 +11,12 @@ BASE_PATH    = os.getenv("APP_BASE_PATH", os.path.dirname(os.path.abspath(__file
 DATA_PATH    = os.getenv("APP_DATA_PATH", os.path.join(BASE_PATH, "data"))
 RAM_PATH     = os.getenv("APP_RAM_PATH", "/mnt/ramdisk/algotrade")
 
-LOG_FILE        = f"{BASE_PATH}/scalper.log"
-POSITION_FILE   = f"{RAM_PATH}/open_positions.json"
-EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json"
-DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json"
-EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json"
+LOG_FILE        = f"{DATA_PATH}/logs/scalper.log"
+POSITION_FILE   = f"{RAM_PATH}/open_positions.json" # DEPRECATED
+EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
+DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
+EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED
+DB_PATH         = f"{DATA_PATH}/algotrade.db"
 
 # ==========================================
 # 2. TRADING RULES & SIZING
