@@ -92,9 +92,6 @@ class ScalperBot:
         # Logic Flat Breakout: Current price > Avg of prev 10 + 0.2%  (tangkap awal pergerakan)
         is_flat_breakout = len(history) >= 10 and price > avg_10 * 1.002
         
-        # Save to DB for persistence
-        db.save_ticker_history(pair, history)
-        
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
     def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0):
@@ -312,6 +309,9 @@ class ScalperBot:
                 imbalance_ratio = p.get('imbalance', 1.0)
                 # Get Prediction Probability
                 tq_prob = get_prediction(history) if trend == "UP" else 0.0
+                
+                # [Project Predator] Sync prediction to DB for Dashboard
+                db.save_ticker_history(pair, history, prediction_prob=tq_prob, trend=trend)
                 
                 # Predator Boosts (Whale & Sector)
                 whale_boost = self.oracle.get_whale_boost(pair)

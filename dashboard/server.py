@@ -1,8 +1,11 @@
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
+from engines.database import db
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
@@ -36,6 +39,9 @@ def get_stats():
         # Daily Performance
         perf = conn.execute("SELECT COUNT(*) as trades, SUM(pnl_idr) as pnl FROM trade_history WHERE date(created_at) = date('now')").fetchone()
         
+        # Sector Sentiment
+        sectors = db.get_all_latest_sector_sentiment()
+        
         return jsonify({
             "daily_trades": int(stats_dict.get('daily_trades', 0)),
             "total_pnl": float(perf['pnl'] or 0),
@@ -43,7 +49,8 @@ def get_stats():
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
             "latest_whale": stats_dict.get('latest_whale', ''),
-            "latest_fake_pump": stats_dict.get('latest_fake_pump', '')
+            "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
+            "sectors": sectors
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -75,6 +82,8 @@ def get_radar_data():
                     "price": last_price,
                     "score": score,
                     "change": round(change, 2),
+                    "prediction": float(t['prediction_prob'] or 0.0),
+                    "trend": t['trend'] or 'N/A',
                     "sector": "ALT" 
                 })
             except: continue

@@ -1,21 +1,23 @@
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Roboto+Mono:wght@400;700&display=swap');
 
 :root {
-    --bg-color: #050a0f;
+    --bg-color: #000000;
     --neon-blue: #00f2ff;
     --neon-pink: #ff00ff;
     --matrix-green: #00ff41;
-    --alert-red: #ff003c;
-    --glass-bg: rgba(10, 20, 30, 0.7);
+    --alert-red: #ff0055;
+    --glass-bg: rgba(0, 15, 20, 0.85);
+    --panel-bg: rgba(0, 242, 255, 0.08);
 }
 
 body {
     background-color: var(--bg-color);
-    color: white;
+    color: #ffffff;
     font-family: 'Roboto Mono', monospace;
     margin: 0;
     overflow: hidden;
     height: 100vh;
+    text-shadow: 0 0 5px rgba(255,255,255,0.2);
 }
 
 /* --- CRT & Scanline Effect --- */
@@ -53,25 +55,26 @@ body {
 }
 
 .hunting-item {
-    background: rgba(0, 242, 255, 0.05);
+    background: var(--panel-bg);
     padding: 12px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     font-family: 'Orbitron', sans-serif;
-    font-size: 11px;
+    font-size: 12px;
     clip-path: polygon(0 0, 100% 0, 100% 70%, 90% 100%, 0 100%);
-    border: 1px solid rgba(0, 242, 255, 0.1);
+    border: 1px solid var(--neon-blue);
     transition: all 0.3s;
 }
 
 .hunting-item:hover {
-    background: rgba(0, 242, 255, 0.15);
+    background: rgba(0, 242, 255, 0.2);
     transform: translateX(5px);
+    box-shadow: 0 0 10px var(--neon-blue);
 }
 
 .hunting-item .pair { color: var(--neon-blue); font-weight: bold; }
-.hunting-item .score { color: var(--neon-green); opacity: 0.8; }
+.hunting-item .score { color: var(--matrix-green); opacity: 0.9; }
 
 /* --- Scrollbar --- */
 
@@ -95,16 +98,16 @@ header {
     justify-content: space-between;
     align-items: center;
     padding: 0 20px;
-    box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+    box-shadow: 0 0 20px rgba(0, 242, 255, 0.4);
 }
 
 .logo {
     font-family: 'Orbitron', sans-serif;
-    font-size: 24px;
-    font-weight: bold;
+    font-size: 32px;
+    font-weight: 900;
     color: var(--neon-blue);
-    text-shadow: 0 0 10px var(--neon-blue);
-    letter-spacing: 4px;
+    text-shadow: 0 0 15px var(--neon-blue), 0 0 30px var(--neon-blue);
+    letter-spacing: 2px;
 }
 
 /* --- Whale Alert Ticker --- */

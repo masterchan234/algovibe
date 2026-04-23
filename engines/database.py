@@ -62,11 +62,13 @@ class Database:
                 )
             ''')
 
-            # Tabel untuk persistensi price history (Warm-up prevention)
+            # Tabel untuk menyimpan history harga koin
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ticker_history (
                     pair TEXT PRIMARY KEY,
                     history_json TEXT,
+                    prediction_prob REAL DEFAULT 0.0,
+                    trend TEXT DEFAULT 'N/A',
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -267,17 +269,19 @@ class Database:
 
     # ── METODE UNTUK TICKER HISTORY ──
 
-    def save_ticker_history(self, pair, history_list):
+    def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A'):
         import json
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO ticker_history (pair, history_json, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
+                    prediction_prob=excluded.prediction_prob,
+                    trend=excluded.trend,
                     updated_at=excluded.updated_at
-            ''', (pair, json.dumps(history_list)))
+            ''', (pair, json.dumps(history_list), prediction_prob, trend))
 
     def get_all_ticker_history(self):
         import json
@@ -360,6 +364,17 @@ class Database:
             )
             row = cursor.fetchone()
             return row['sentiment_score'] if row else 0.0
+
+    def get_all_latest_sector_sentiment(self):
+        with self.get_connection() as conn:
+            # Menggunakan subquery untuk mengambil entri terbaru per sektor
+            cursor = conn.execute("""
+                SELECT sector, sentiment_score 
+                FROM sector_history s1
+                WHERE timestamp = (SELECT MAX(timestamp) FROM sector_history s2 WHERE s1.sector = s2.sector)
+            """)
+            rows = cursor.fetchall()
+            return {row['sector']: row['sentiment_score'] for row in rows}
 
     def upsert_shadow_order(self, pair, order_id, price, amount):
         with self.get_connection() as conn:
