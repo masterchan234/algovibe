@@ -1,23 +1,27 @@
 import json
 import os
 import time
+from datetime import datetime
 
-from config import POSITION_FILE, EXIT_LOG, TP_PCT, SL_PCT
+from config import TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
+from engines.database import db
+from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
-    def __init__(self, exchange_client, dry_run: bool = False):
+    def __init__(self, exchange_client, dry_run: bool = False, oracle=None):
         self.exchange = exchange_client
         self.dry_run  = dry_run
+        self.oracle = oracle
+        self.jaring_orders = {} # {pair: {id, price, amount}}
+        self.last_jaring_update = {} # {pair: timestamp}
+        self._sync_jaring_from_db()
 
     def get_open_positions(self):
-        if os.path.exists(POSITION_FILE):
-            with open(POSITION_FILE, 'r') as f:
-                return json.load(f)
-        return {}
+        return db.get_open_positions()
 
     def save_positions(self, positions):
-        with open(POSITION_FILE, 'w') as f:
-            json.dump(positions, f)
+        # Fallback method if needed, but we should use db.upsert_position instead
+        pass
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
@@ -35,17 +39,56 @@ class ExitManager:
                 
             current_price = float(current_tickers[pair]['last'])
             entry_price = data['entry_price']
-            amount = data['amount']
+            amount = data['amount_crypto']
             
+            # --- AUTO-CANCEL LOGIC UNTUK PENDING_BUY ---
+            if data.get('status') == "PENDING_BUY":
+                if self.dry_run:
+                    # Di mode simulasi, anggap selalu filled seketika (sudah dihandle OPEN di main.py, 
+                    # fallback hapus aja kalau somehow nyangkut)
+                    continue
+
+                order_id = data.get('entry_order_id')
+                if not order_id:
+                    continue
+                    
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
+                
+                # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
+                spread_pct = (current_price - entry_price) / entry_price
+                
+                is_timeout = time_elapsed > PENDING_BUY_TIMEOUT_MINUTES
+                is_too_far = spread_pct > PENDING_BUY_MAX_SPREAD_PCT
+                
+                if is_timeout or is_too_far:
+                    reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
+                    try:
+                        self.exchange.cancel_order(order_id, pair)
+                        # Hapus lokal sebagai fallback jika PrivateWS miss event
+                        db.delete_position(pair)
+                        
+                        msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
+                        print(msg.replace('*', '').replace('\n', ' | '))
+                        send_telegram_message(msg)
+                    except Exception as e:
+                        print(f"Failed to auto-cancel {pair}: {e}")
+                    
+                    # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
+                continue
+            # --- END AUTO-CANCEL ---
+
             # Import the required variables dynamically
-            from config import FEE_PER_SIDE, MIN_NET_PROFIT_IDR
+            from config import (
+                FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR, 
+                AI_MIN_HISTORY_POINTS, AI_SL_OVERRIDE_THRESHOLD
+            )
             
             # Base TP calculation from percentage
             base_tp_price = entry_price * (1 + TP_PCT)
             
-            # Dynamic TP calculation for exact Net Profit (300 IDR)
-            # Rumus: (Target_IDR + Entry_Value * (1 + Fee)) / (Amount * (1 - Fee))
-            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_PER_SIDE))) / (amount * (1 - FEE_PER_SIDE))
+            # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
+            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
             
             # Gunakan harga TP tertinggi antara persentase baseline (1.5%) atau target minimum 300 IDR
             tp_price = max(base_tp_price, exact_tp_price)
@@ -54,9 +97,25 @@ class ExitManager:
 
             # 1. Cek Take Profit
             if current_price >= tp_price:
-                print(f"!!! TARGET REACHED: {pair} | Price: {current_price} | Action: SELL (TP)")
+                # Calculate metrics for logging
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                duration = datetime.now() - entry_time
+                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+
+                msg = (
+                    f"🎯 *TAKE PROFIT* 🎯\n"
+                    f"Pair: `{pair}`\n"
+                    f"Entry: Rp {entry_price:,.2f}\n"
+                    f"Exit: Rp {current_price:,.2f}\n"
+                    f"PnL: {pnl_pct:+.2f}%\n"
+                    f"Hold: {duration_str}"
+                )
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
                 order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
@@ -65,11 +124,28 @@ class ExitManager:
             elif current_price <= sl_price:
                 hard_sl_price = entry_price * (1 + (SL_PCT * 2))  # Hard SL: 2x SL_PCT
                 
+                # Calculate metrics for logging
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                duration = datetime.now() - entry_time
+                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+
                 # Jaring Pengaman Akhir (Hard Stop Loss)
                 if current_price <= hard_sl_price:
-                    print(f"!!! HARD STOP LOSS REACHED: {pair} | Price: {current_price} | Action: FORCED SELL")
+                    msg = (
+                        f"🚨 *HARD STOP LOSS* 🚨\n"
+                        f"Pair: `{pair}`\n"
+                        f"Entry: Rp {entry_price:,.2f}\n"
+                        f"Exit: Rp {current_price:,.2f}\n"
+                        f"PnL: {pnl_pct:+.2f}%\n"
+                        f"Hold: {duration_str}\n"
+                        f"Action: FORCED SELL"
+                    )
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    
                     order_id = self.execute_exit(pair, amount, current_price, "HARD_STOP_LOSS",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         positions[pair]["status"] = "EXITING"
                         positions[pair]["exit_order_id"] = order_id
@@ -79,69 +155,256 @@ class ExitManager:
                 override_sl = False
                 if get_prediction_fn and price_history and pair in price_history:
                     history = price_history[pair]
-                    if len(history) >= 15: # Pastikan sampel cukup untuk AI
+                    if len(history) >= AI_MIN_HISTORY_POINTS: # Pastikan sampel cukup untuk AI
                         tq_prob = get_prediction_fn(history)
-                        if tq_prob > 0.70:
+                        if tq_prob >= AI_SL_OVERRIDE_THRESHOLD:
                             override_sl = True
-                            print(f"[{pair}] SL OVERRIDE: Holding position. Bounce probability: {tq_prob*100:.0f}%")
+                            rationale = self.oracle.get_rationale(pair, 'ADAPTIVE_SL') if self.oracle else "Bounce potential detected."
+                            msg = f"🛡 *SL OVERRIDE* 🛡\nPair: `{pair}`\nProb: {tq_prob*100:.0f}%\nRationale: _{rationale}_"
+                            print(msg.replace('*', '').replace('\n', ' | '))
+                            send_telegram_message(msg)
                 
                 if override_sl:
                     continue # Lewati eksekusi SL, tahan posisi
                     
-                print(f"!!! STOP LOSS REACHED: {pair} | Price: {current_price} | Action: SELL (SL)")
+                msg = (
+                    f"⚠️ *STOP LOSS* ⚠️\n"
+                    f"Pair: `{pair}`\n"
+                    f"Entry: Rp {entry_price:,.2f}\n"
+                    f"Exit: Rp {current_price:,.2f}\n"
+                    f"PnL: {pnl_pct:+.2f}%\n"
+                    f"Hold: {duration_str}"
+                )
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
                 order_id = self.execute_exit(pair, amount, current_price, "STOP_LOSS",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
 
         self.save_positions(positions)
 
-    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0):
+    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
+            from config import FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            
             if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
-                exit_price = price * 0.9500  # SL: Limit order set 5% BELOW market to instantly act as a Taker/Market order
+                exit_price = price * (1 - SELL_TAKER_OFFSET)
+                fee_sell_rate = FEE_SELL_TAKER
             else:
-                exit_price = price * 1.0005  # TP: Maker Sell offset +0.05%
+                exit_price = price * (1 + SELL_MAKER_OFFSET)
+                fee_sell_rate = FEE_SELL_MAKER
 
             if self.dry_run:
-                # ── Simulasi Exit ─────────────────────────────────────────────
                 order = {
-                    "id":     f"DRY-{int(time.time())}",
-                    "symbol": pair,
-                    "side":   "sell",
-                    "price":  exit_price,
-                    "amount": amount,
+                    "id": f"DRY-{int(time.time())}",
                     "status": "closed",
-                    "dry_run": True,
+                    "price": exit_price,
+                    "amount": amount
                 }
-                print(
-                    f"DRY RUN: Virtual Exit ({reason}) | {pair} | "
-                    f"Price: {exit_price:,.2f} | Crypto: {amount:.6f}"
-                )
+                print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
-                # ── Real Exit ────────────────────────────────────────────────
                 params = {'post_only': True} if reason == "TAKE_PROFIT" else {}
-                order = self.exchange.create_limit_sell_order(
-                    pair, amount, exit_price, params
-                )
+                order = self.exchange.create_limit_sell_order(pair, amount, exit_price, params)
 
-            # Log transaksi (berlaku untuk dry run maupun live)
-            log_entry = {
-                "timestamp":   time.time(),
-                "pair":        pair,
-                "reason":      reason,
-                "entry_price": entry_price,
-                "exit_price":  exit_price,
-                "amount_idr":  amount_idr,
-                "order":       order,
-                "dry_run":     self.dry_run,
-            }
-            with open(EXIT_LOG, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
+            # Audit log
+            db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
+
+            order_status = order.get('status', 'closed')
+            from config import (
+                FEE_BUY_MAKER, FEE_BUY_TAKER, FEE_SELL_MAKER, FEE_SELL_TAKER,
+                MIN_NET_PROFIT_IDR, AI_MIN_HISTORY_POINTS, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            )
+            
+            # Tentukan fee jual berdasarkan strategi exit
+            is_taker = reason in ("STOP_LOSS", "HARD_STOP_LOSS")
+            fee_sell_rate = FEE_SELL_TAKER if is_taker else FEE_SELL_MAKER
+            
+            # Entry fee selalu Maker (karena bot antri beli)
+            fee_buy = amount_idr * FEE_BUY_MAKER
+            
+            sell_value = amount * price
+            fee_sell = sell_value * fee_sell_rate
+            
+            gross_pnl = (price - entry_price) * amount
+            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+            
+            if order_status in ['closed', 'canceled', 'done', 'fill']:
+                db.delete_position(pair)
+            else:
+                db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
+            
+            pnl_idr = net_pnl_idr
+            pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+            
+            # Use provided position_data for timestamp, fallback to now
+            timestamp_str = position_data.get('timestamp') if position_data else datetime.now().isoformat()
+            entry_time = datetime.fromisoformat(timestamp_str)
+            duration_sec = (datetime.now() - entry_time).total_seconds()
+            
+            try:
+                db.insert_trade_history(
+                    pair=pair,
+                    entry_price=entry_price,
+                    exit_price=price,
+                    amount_crypto=amount,
+                    amount_idr=amount_idr,
+                    pnl_idr=pnl_idr,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                    duration_seconds=int(duration_sec),
+                    dry_run=self.dry_run
+                )
+                
+                # Update Consecutive Losses state
+                current_cl = int(db.get_state("consecutive_losses", 0))
+                if pnl_idr > 0:
+                    db.save_state("consecutive_losses", 0)
+                else:
+                    db.save_state("consecutive_losses", current_cl + 1)
+
+                # ── Project Evolution: Learning Loop ─────────────────────────────
+                db.update_trade_outcome(pair, pnl_idr)
+                if self.oracle:
+                    self.oracle.learn_from_trade(pair, pnl_idr)
+
+            except Exception as db_err:
+                print(f"Failed to save trade history/state for {pair}: {db_err}")
+            
+            return order.get('id')
+        except Exception as e:
+            print(f"Critical error in execute_exit for {pair}: {e}")
+            return None
+                
+    def handle_order_update(self, order):
+        """
+        Callback dari PrivateWS. Memproses order yang terisi (Filled).
+        """
+        try:
+            order_id = str(order.get('id', ''))
+            pair = order.get('pair', '')
+            status = order.get('status', '').lower()
+            
+            if status not in ['filled', 'closed', 'fill']: return
+            
+            # 1. Cek apakah ini Jaring yang terisi
+            for p, jaring in list(self.jaring_orders.items()):
+                if str(jaring['id']) == order_id:
+                    log_message(f"🎯 JARING FILLED! {p} bought at Rp {jaring['price']:,.2f} via Liquidity Grab.")
+                    
+                    # Pindahkan dari Shadow ke Positions
+                    data = {
+                        "entry_price": jaring['price'],
+                        "amount":      jaring['amount'],
+                        "amount_idr":  jaring['price'] * jaring['amount'],
+                        "timestamp":   datetime.now().isoformat(),
+                        "dry_run":     self.dry_run,
+                        "status":      "OPEN",
+                        "entry_order_id": order_id,
+                        "exit_order_id": None
+                    }
+                    db.upsert_position(p, data)
+                    db.delete_shadow_order(p)
+                    if p in self.jaring_orders: del self.jaring_orders[p]
+                    
+                    send_telegram_message(f"🎯 *JARING FILLED* 🎯\nPair: `{p}`\nPrice: Rp {jaring['price']:,.2f}")
+                    return
+
+            # 2. Cek apakah ini Buy Order reguler yang baru terisi
+            # (Sudah di-handle oleh main.py saat create_order, tapi bisa di-sync di sini jika perlu)
+            
+        except Exception as e:
+            print(f"Error handling order update: {e}")
+
+    def reconcile_with_exchange(self):
+        """
+        [Anti-Hallucination] 
+        Sinkronisasi posisi di Database dengan saldo asli di bursa.
+        """
+        try:
+            log_message("Reality Check: Reconciling positions with Indodax balance...")
+            if self.dry_run: return # Dry run tidak punya saldo asli untuk di-cek
+            
+            balance = self.exchange.fetch_balance()
+            open_positions = db.get_open_positions()
+            
+            for pair, pos in open_positions.items():
+                coin = pair.replace('idr', '').upper()
+                amount_on_exchange = float(balance['total'].get(coin, 0))
+                
+                # Jika di DB ada posisi tapi di bursa koinnya tidak ada (sudah terjual manual/error)
+                if amount_on_exchange < (pos['amount'] * 0.9): # Toleransi 10% untuk pembulatan
+                    log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Marking as GHOST.")
+                    db.delete_position(pair)
+                    if pair in self.jaring_orders:
+                        del self.jaring_orders[pair]
+                        db.delete_shadow_order(pair)
+            
+            log_message("Reality Check: Sync complete. No hallucinations found.")
+        except Exception as e:
+            log_message(f"Reality Check Failed: {e}")
                 
             return order.get("id", f"DRY-{int(time.time())}")
 
+    # ── Shadow Jaring (Liquidity Grab) ───────────────────────────────────
+
+    def _sync_jaring_from_db(self):
+        """Recover active jaring orders from SQLite on startup."""
+        saved = db.get_all_shadow_orders()
+        for o in saved:
+            self.jaring_orders[o['pair']] = o
+    def manage_shadow_jaring(self, ranked_pairs, current_tickers):
+        """
+        Main entry for jaring logic. Called from the main loop.
+        """
+        try:
+            from config import JARING_ALLOCATION_PCT, JARING_DEPTH_PCT, INITIAL_CAPITAL
+            
+            # 1. Trailing: Move existing jaring up if price is too far (protect from missing pumps)
+            for pair, o in list(self.jaring_orders.items()):
+                if pair in current_tickers:
+                    curr_price = current_tickers[pair]['last']
+                    
+                    # [Fix] Tambah Cooldown 5 Menit agar tidak spam cancel/replace
+                    last_update = self.last_jaring_update.get(pair, 0)
+                    if time.time() - last_update < 300: continue 
+
+                    # Jika harga pasar sudah naik > 10% dari jaring kita
+                    if curr_price > o['price'] * 1.10:
+                        log_message(f"Jaring: Price moved up for {pair}. Trailing jaring...")
+                        if not self.dry_run: self.exchange.cancel_order(o['id'])
+                        db.delete_shadow_order(pair)
+                        del self.jaring_orders[pair]
+                        self.last_jaring_update[pair] = time.time()
+
+            # 2. Placement: Fill empty slots (Max 3 jaring)
+            if len(self.jaring_orders) < 3:
+                candidates = [p for p in ranked_pairs if p['pair'] not in self.jaring_orders][:3]
+                for c in candidates:
+                    pair = c['pair']
+                    jaring_price = c['last'] * (1 + JARING_DEPTH_PCT)
+                    amount_idr = INITIAL_CAPITAL * JARING_ALLOCATION_PCT
+                    amount_crypto = amount_idr / jaring_price
+                    self.place_jaring(pair, amount_crypto, jaring_price)
+                    
         except Exception as e:
-            print(f"Exit Error ({reason}): {e}")
-            return None
+            print(f"Jaring Manager Error: {e}")
+
+    def place_jaring(self, pair, amount, price):
+        """Place a deep-limit buy order."""
+        try:
+            log_message(f"Jaring: Placing Liquidity Grab on {pair} at Rp {price:,.2f}")
+            if self.dry_run:
+                order_id = f"JARING-{int(time.time())}"
+                order = {"id": order_id, "status": "open", "price": price, "amount": amount}
+            else:
+                order = self.exchange.create_limit_buy_order(pair, amount, price)
+                order_id = order['id']
+            
+            self.jaring_orders[pair] = {"id": order_id, "price": price, "amount": amount}
+            db.upsert_shadow_order(pair, order_id, price, amount)
+            
+        except Exception as e:
+            print(f"Failed to place jaring for {pair}: {e}")

@@ -35,7 +35,10 @@ share/python-wheels/
 *.egg
 
 # Data & Output
-data/*.json
+data/
+*.db
+*.db-wal
+*.db-shm
 /mnt/ramdisk/algotrade/
 
 # IDE / OS

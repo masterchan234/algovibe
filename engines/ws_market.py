@@ -32,9 +32,9 @@ CHANNEL_SUMMARY = "market:summary-24h"
 CHANNEL_OB_PFX  = "market:order-book-"   # + pair, e.g. market:order-book-btc_idr
 
 # Berapa banyak pair teratas (by volume) yang akan di-subscribe order book-nya
-OB_TOP_PAIRS     = 20
+OB_TOP_PAIRS     = 50
 # Filter volume minimum sebelum subscribe order book (hindari pair mati)
-OB_MIN_VOL_IDR   = 500_000_000  # 500 Juta IDR
+OB_MIN_VOL_IDR   = 50_000_000  # 50 Juta IDR (diturunkan agar lebih banyak pair tercover)
 
 # Indeks kolom pada payload market:summary-24h
 # [pair, epoch, last, low, high, open, vol_idr, vol_coin]
@@ -67,6 +67,7 @@ class MarketDataWS:
         self._thread  = None
         self._running = False
         self._req_id  = 0
+        self._last_msg_time = 0
         self._connected = threading.Event()  # set saat autentikasi berhasil
         self._ob_subscribed: set = set()     # pair yang sudah di-subscribe order book
         self._ws_ref = None                  # ref ke ws instance untuk subscribe dinamis
@@ -101,6 +102,14 @@ class MarketDataWS:
         """
         with self._lock:
             return dict(self._tickers)
+
+    def is_connected(self):
+        return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
+
+    def get_latency(self):
+        """Estimate latency based on message frequency or specific ping/pong."""
+        if self._last_msg_time == 0: return 0
+        return time.time() - self._last_msg_time
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
@@ -140,95 +149,113 @@ class MarketDataWS:
         }
         ws.send(json.dumps(auth_msg))
 
-    def _on_message(self, ws, raw: str):
+    def _safe_float(self, val, default=0.0):
         try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            return
+            if val is None: return default
+            return float(val)
+        except (ValueError, TypeError):
+            return default
 
-        # ── Auth response ──────────────────────────────────────────────────
-        if "result" in msg and "client" in msg.get("result", {}):
-            logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
-            # Step 2: Subscribe ke channel summary 24h
-            req_id = self._next_id()
-            sub_msg = {
-                "method": 1,
-                "params": {"channel": CHANNEL_SUMMARY},
-                "id": req_id,
-            }
-            self._pending_subs[req_id] = CHANNEL_SUMMARY
-            ws.send(json.dumps(sub_msg))
-            return
+    def _on_message(self, ws, raw: str):
+        self._last_msg_time = time.time()
+        import traceback
+        try:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                return
 
-        # ── Subscribe ACK ──────────────────────────────────────────────────
-        if "id" in msg and "result" in msg and "recoverable" in msg.get("result", {}):
-            req_id = msg["id"]
-            channel_name = self._pending_subs.pop(req_id, f"unknown (id={req_id})")
-            logger.info(f"[MarketWS] Subscribed to {channel_name} | "
-                        f"offset={msg['result'].get('offset')}")
-            return
+            # ── Auth response ──────────────────────────────────────────────────
+            if "result" in msg and "client" in msg.get("result", {}):
+                logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
+                # Step 2: Subscribe ke channel summary 24h
+                req_id = self._next_id()
+                sub_msg = {
+                    "method": 1,
+                    "params": {"channel": CHANNEL_SUMMARY},
+                    "id": req_id,
+                }
+                self._pending_subs[req_id] = CHANNEL_SUMMARY
+                ws.send(json.dumps(sub_msg))
+                return
 
-        # ── Streaming data ─────────────────────────────────────────────────
-        result = msg.get("result", {})
-        channel = result.get("channel", "")
-        data_wrap = result.get("data", {})
+            # ── Subscribe ACK ──────────────────────────────────────────────────
+            if "id" in msg and "result" in msg and "recoverable" in msg.get("result", {}):
+                req_id = msg["id"]
+                channel_name = self._pending_subs.pop(req_id, f"unknown (id={req_id})")
+                logger.info(f"[MarketWS] Subscribed to {channel_name} | "
+                            f"offset={msg['result'].get('offset')}")
+                return
 
-        if channel == CHANNEL_SUMMARY:
-            rows = data_wrap.get("data", [])
-            self._process_summary(rows)
+            # ── Streaming data ─────────────────────────────────────────────────
+            result = msg.get("result", {})
+            channel = result.get("channel", "")
+            data_wrap = result.get("data", {})
 
-        elif channel.startswith(CHANNEL_OB_PFX):
-            pair = channel[len(CHANNEL_OB_PFX):]
-            ob_data = data_wrap.get("data", {})
-            self._process_orderbook(pair, ob_data)
+            if channel == CHANNEL_SUMMARY:
+                rows = data_wrap.get("data", [])
+                self._process_summary(rows)
+
+            elif channel.startswith(CHANNEL_OB_PFX):
+                pair = channel[len(CHANNEL_OB_PFX):]
+                ob_data = data_wrap.get("data", {})
+                # DEBUG: Log format OB pertama kali per pair (hapus setelah format diketahui)
+                if not hasattr(self, '_ob_format_logged'):
+                    self._ob_format_logged = set()
+                if pair not in self._ob_format_logged:
+                    logger.info(f"[MarketWS] OB FORMAT DEBUG ({pair}): keys={list(ob_data.keys()) if isinstance(ob_data, dict) else type(ob_data).__name__} | sample={str(ob_data)[:300]}")
+                    self._ob_format_logged.add(pair)
+                self._process_orderbook(pair, ob_data)
+        except Exception as e:
+            logger.error(f"[MarketWS] Critical Error in _on_message: {e}\n{traceback.format_exc()}")
 
     def _process_summary(self, rows: list):
         """Parse baris market:summary-24h dan update internal ticker dict."""
+        if not rows: return
         updated = {}
         for row in rows:
             if not isinstance(row, list) or len(row) < 7:
                 continue
             pair     = str(row[IDX_PAIR])
-            last     = float(row[IDX_LAST])
-            low      = float(row[IDX_LOW])
-            high     = float(row[IDX_HIGH])
-            open_p   = float(row[IDX_OPEN])
-            vol_idr  = float(row[IDX_VOL_IDR]) if row[IDX_VOL_IDR] else 0.0
-            vol_coin = str(row[IDX_VOL_COIN])
+            last     = self._safe_float(row[IDX_LAST])
+            low      = self._safe_float(row[IDX_LOW])
+            high     = self._safe_float(row[IDX_HIGH])
+            open_p   = self._safe_float(row[IDX_OPEN])
+            vol_idr  = self._safe_float(row[IDX_VOL_IDR])
+            vol_coin = str(row[IDX_VOL_COIN] or "0")
 
-            # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask)
-            # ExitManager & ScalperBot hanya butuh 'last', 'high', 'low', 'vol_idr'
+            # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask).
+            # Jika data Order Book yang lebih akurat sudah ada, pertahankan nilainya.
+            existing = self._tickers.get(pair, {})
             updated[pair] = {
-                "last":    last,
-                "buy":     last,        # estimasi — gunakan order-book WS jika butuh presisi
-                "sell":    last,
-                "high":    high,
-                "low":     low,
-                "open":    open_p,
-                "vol_idr": vol_idr,
-                "vol_coin": vol_coin,
+                "last":      last,
+                # Gunakan harga real dari OB jika sudah ada, jangan timpa dengan estimasi
+                "buy":       existing.get("buy", last) if existing.get("buy", last) != existing.get("last", last) else last,
+                "sell":      existing.get("sell", last) if existing.get("sell", last) != existing.get("last", last) else last,
+                "high":      high,
+                "low":       low,
+                "open":      open_p,
+                "vol_idr":   vol_idr,
+                "vol_coin":  vol_coin,
+                # Pertahankan kedalaman order book jika sudah ada
+                "bid_depth": existing.get("bid_depth", 0),
+                "ask_depth": existing.get("ask_depth", 0),
             }
 
+        # Trigger OB subscribe dinamis, seiring bertambahnya pair bervolume tinggi
+        # (Karena summary-24h payload-nya parsial, tidak datang 200 pair sekaligus)
         need_ob_subscribe = False
         with self._lock:
             self._tickers.update(updated)
             if not self._connected.is_set():
                 self._connected.set()
                 logger.info(f"[MarketWS] First data received — {len(self._tickers)} pairs loaded.")
-            # Trigger OB subscribe sekali, setelah akumulasi cukup pair bervolume tinggi
-            if not self._ob_done:
-                qualifying = sum(
-                    1 for d in self._tickers.values()
-                    if (d.get("vol_idr") or 0) >= OB_MIN_VOL_IDR
-                )
-                logger.debug(f"[MarketWS] OB qualify check: {qualifying}/{len(self._tickers)} pairs >= {OB_MIN_VOL_IDR:,}")
-                if qualifying >= 5:
-                    need_ob_subscribe = True
-                    self._ob_done = True
-
-        # Subscribe order book di luar lock untuk menghindari deadlock
+            
+            # Jika belum mencapai kuota maksimal langganan OB
+            if len(self._ob_subscribed) < OB_TOP_PAIRS:
+                need_ob_subscribe = True
+                
         if need_ob_subscribe and self._ws_ref:
-            # Ambil snapshot terkini untuk kandidat OB
             with self._lock:
                 snapshot = dict(self._tickers)
             self._subscribe_top_orderbooks(snapshot)
@@ -240,8 +267,10 @@ class MarketDataWS:
             for pair, d in summary_snapshot.items()
             if (d.get("vol_idr") or 0) >= OB_MIN_VOL_IDR
         ]
-        # Urutkan descending by volume, ambil top N
+        # Urutkan descending by volume
         candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        # Ambil sampai batas OB_TOP_PAIRS
         top_pairs = [p for p, _ in candidates[:OB_TOP_PAIRS]]
 
         for pair in top_pairs:
@@ -263,58 +292,66 @@ class MarketDataWS:
                 logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
 
     def _process_orderbook(self, pair: str, data: dict):
-        """Update bid/ask terbaik dari payload order book."""
-        # Log raw format sekali per pair untuk debugging
-        if pair not in getattr(self, '_ob_logged', set()):
-            logger.debug(f"[MarketWS] OB raw ({pair}): keys={list(data.keys())} sample={str(data)[:200]}")
-            if not hasattr(self, '_ob_logged'):
-                self._ob_logged = set()
-            self._ob_logged.add(pair)
+        """
+        Update bid/ask terbaik dari payload order book.
+        Format Indodax yang sudah dikonfirmasi:
+        {
+          'pair': 'usdtidr',
+          'ask': [{'price': '17291', 'idr_volume': '295908835', 'usdt_volume': '...'}, ...],
+          'bid': [{'price': '17290', 'idr_volume': '...', 'usdt_volume': '...'}, ...]
+        }
+        """
+        bids = data.get("bid", [])
+        asks = data.get("ask", [])
 
-        # Indodax Market Data WS order-book format:
-        # data: { "pair": "...", "ask": [{"price": "...", ...}], "bid": [{"price": "...", ...}] }
-        bids = data.get("bid", []) or data.get("bids", []) or data.get("buy", [])
-        asks = data.get("ask", []) or data.get("asks", []) or data.get("sell", [])
-
-        if not bids or not asks:
+        if not bids and not asks:
+            logger.warning(f"[MarketWS] OB ({pair}): both bid and ask are empty — data keys: {list(data.keys())}")
             return
 
         try:
             bid_depth = 0.0
             ask_depth = 0.0
-            
-            # Parse best bid and ask depending on whether it's a dict or a list
-            if isinstance(bids[0], dict):
-                best_bid = float(bids[0].get("price", 0))
-                for b in bids[:10]:
-                    vol = b.get("idr_volume")
-                    if vol: bid_depth += float(vol)
-                    elif b.get("btc_volume"): bid_depth += float(b.get("price", 0)) * float(b.get("btc_volume", 0))
-            else:
-                best_bid = float(bids[0][0])
-                bid_depth = sum(float(b[0]) * float(b[1]) for b in bids[:10] if len(b) > 1)
-                
-            if isinstance(asks[0], dict):
-                best_ask = float(asks[0].get("price", 0))
-                for a in asks[:10]:
-                    vol = a.get("idr_volume")
-                    if vol: ask_depth += float(vol)
-                    elif a.get("btc_volume"): ask_depth += float(a.get("price", 0)) * float(a.get("btc_volume", 0))
-            else:
-                best_ask = float(asks[0][0])
-                ask_depth = sum(float(a[0]) * float(a[1]) for a in asks[:10] if len(a) > 1)
-                
-            if best_bid == 0 or best_ask == 0:
+            best_bid  = 0.0
+            best_ask  = 0.0
+
+            # ── Parse BIDs ────────────────────────────────────────────────
+            for i, b in enumerate(bids[:10]):
+                price = self._safe_float(b.get("price"))
+                vol   = self._safe_float(b.get("idr_volume"))
+                if i == 0:
+                    best_bid = price
+                bid_depth += vol
+
+            # ── Parse ASKs ────────────────────────────────────────────────
+            for i, a in enumerate(asks[:10]):
+                price = self._safe_float(a.get("price"))
+                vol   = self._safe_float(a.get("idr_volume"))
+                if i == 0:
+                    best_ask = price
+                ask_depth += vol
+
+            if best_bid == 0 and best_ask == 0:
+                logger.warning(f"[MarketWS] OB ({pair}): best_bid=0 best_ask=0 — bids={len(bids)} asks={len(asks)}")
                 return
         except (IndexError, ValueError, TypeError):
             return
 
         with self._lock:
             if pair in self._tickers:
-                self._tickers[pair]["buy"]  = best_bid
-                self._tickers[pair]["sell"] = best_ask
-                self._tickers[pair]["bid_depth"] = bid_depth
-                self._tickers[pair]["ask_depth"] = ask_depth
+                if best_bid > 0:
+                    self._tickers[pair]["buy"]       = best_bid
+                if best_ask > 0:
+                    self._tickers[pair]["sell"]      = best_ask
+                self._tickers[pair]["bid_depth"]     = bid_depth
+                self._tickers[pair]["ask_depth"]     = ask_depth
+            else:
+                # Pair belum ada di summary ticker, simpan sementara
+                self._tickers[pair] = {
+                    "last": best_bid, "buy": best_bid, "sell": best_ask,
+                    "high": 0, "low": 0, "open": 0,
+                    "vol_idr": 0, "vol_coin": "0",
+                    "bid_depth": bid_depth, "ask_depth": ask_depth
+                }
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")

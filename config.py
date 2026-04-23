@@ -11,11 +11,12 @@ BASE_PATH    = os.getenv("APP_BASE_PATH", os.path.dirname(os.path.abspath(__file
 DATA_PATH    = os.getenv("APP_DATA_PATH", os.path.join(BASE_PATH, "data"))
 RAM_PATH     = os.getenv("APP_RAM_PATH", "/mnt/ramdisk/algotrade")
 
-LOG_FILE        = f"{BASE_PATH}/scalper.log"
-POSITION_FILE   = f"{RAM_PATH}/open_positions.json"
-EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json"
-DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json"
-EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json"
+LOG_FILE        = f"{DATA_PATH}/logs/scalper.log"
+POSITION_FILE   = f"{RAM_PATH}/open_positions.json" # DEPRECATED
+EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
+DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
+EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED
+DB_PATH         = f"{DATA_PATH}/algotrade.db"
 
 # ==========================================
 # 2. TRADING RULES & SIZING
@@ -26,28 +27,57 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 150
-MIN_VOLUME_FILTER      = 100000000  # IDR per 24h
+MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================
-# 3. EXECUTION SETTINGS (TP/SL)
+# 3. STRATEGY PARAMETERS
 # ==========================================
 TP_PCT = 0.015   # +1.5% Target Profit (Baseline Minimum)
 SL_PCT = -0.008  # -0.8% Stop Loss
 MIN_NET_PROFIT_IDR = 300 # Minimum target keuntungan bersih (Rupiah) per trade
+PENDING_BUY_TIMEOUT_MINUTES = 3
+PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
-# ==========================================
-# 4. TAX & FEE STRUCTURE (Indodax 2026 / PMK 68/2022)
-# ==========================================
-MAKER_FEE     = 0.0010   # 0.10% Maker fee Indodax Pro
-PPH_RATE      = 0.0010   # 0.10% PPh Pasal 22 (tiap sisi)
-PPN_RATE      = 0.0011   # 0.11% PPN (tiap sisi)
-FEE_PER_SIDE  = MAKER_FEE + PPH_RATE + PPN_RATE  # 0.31%
-FEE_ROUNDTRIP = FEE_PER_SIDE * 2                  # 0.62%
+# --- Filter Criteria ---
+MAX_ALLOWED_SPREAD_PCT = 0.005 # Max 0.5% spread untuk masuk ranking
+MIN_TRACKING_VOLATILITY = 0.5  # Volatilitas minimal untuk micro-tracking
+STRONG_IMBALANCE_RATIO  = 2.0  # Ratio Bid/Ask untuk sinyal tambahan
 
-# ==========================================
-# 5. DRY RUN MODE
-# ==========================================
+# --- AI & Probability ---
+AI_CONFIDENCE_THRESHOLD = 0.60 # Beli jika probabilitas >= 60%
+AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
+AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
+
+# --- Execution Offsets ---
+BUY_MAKER_OFFSET = 0.0005 # Antri beli 0.05% di bawah market
+SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
+SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
+
+# --- Sizing ---
+CAPITAL_PER_TRADE_PCT = 0.15 # Gunakan 15% modal per trade (0.15)
+
+# --- Indodax Pro Fee Structure (Image Reference) ---
+FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
+FEE_BUY_TAKER  = 0.002111  # 0.2111% (0.2% Service + 0.0111% CFX)
+FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
+FEE_SELL_TAKER = 0.004211  # 0.4211% (0.2% Service + 0.21% Tax + 0.0111% CFX)
+
+
+
+# --- Predator Strategy Parameters ---
+WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"
+JARING_ALLOCATION_PCT = 0.05      # Sisihkan 5% modal untuk jaring (flash crash)
+JARING_DEPTH_PCT = -0.07          # Pasang jaring 7% di bawah harga pasar
+
+# --- Sector Mapping (Indodax Pro) ---
+SECTOR_MAP = {
+    "dogeidr": "MEME", "pepeidr": "MEME", "shibidr": "MEME", "flokiidr": "MEME",
+    "fetidr": "AI", "agixidr": "AI", "rndridr": "AI", "oceanidr": "AI",
+    "btcidr": "BLUECHIP", "ethidr": "BLUECHIP", "solidr": "BLUECHIP", "bnbidr": "BLUECHIP",
+    "maticidr": "L2", "opidr": "L2", "arbidr": "L2"
+}
+
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
 DRY_RUN = True
