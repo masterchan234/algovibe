@@ -111,7 +111,7 @@ class Database:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
 
-            # Tabel untuk shadow orders / Jaring (Project Predator)
+            # 7. Shadow Orders / Jaring (Project Predator)
             cursor.execute('''CREATE TABLE IF NOT EXISTS shadow_orders (
                 pair TEXT PRIMARY KEY,
                 order_id TEXT,
@@ -122,6 +122,33 @@ class Database:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
 
+            # 8. Trade Analytics / DNA (Project Evolution)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS trade_analytics (
+                pair TEXT,
+                entry_timestamp DATETIME,
+                ai_prob REAL,
+                whale_boost REAL,
+                sector_sentiment REAL,
+                imbalance REAL,
+                volatility REAL,
+                pnl_idr REAL,
+                status TEXT DEFAULT 'OPEN'
+            )''')
+
+            # 9. Dynamic Weights (Project Evolution)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS dynamic_weights (
+                feature_name TEXT PRIMARY KEY,
+                weight_value REAL DEFAULT 1.0,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            # Initialize weights if empty
+            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
+            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
+            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
+            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
+            
+            self.conn.commit()
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -343,6 +370,59 @@ class Database:
     def delete_shadow_order(self, pair):
         with self.get_connection() as conn:
             conn.execute("DELETE FROM shadow_orders WHERE pair = ?", (pair,))
+
+    # ── Learning & Analytics Methods (Evolution) ─────────────────────────
+
+    def save_trade_dna(self, pair, dna_data):
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """INSERT INTO trade_analytics 
+                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
+                     dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'])
+                )
+        except Exception as e:
+            print(f"DB Error (save_trade_dna): {e}")
+
+    def update_trade_outcome(self, pair, pnl_idr):
+        try:
+            with self.get_connection() as conn:
+                # Update PnL untuk entri terbaru yang masih OPEN
+                conn.execute(
+                    "UPDATE trade_analytics SET pnl_idr = ?, status = 'CLOSED' WHERE pair = ? AND status = 'OPEN'",
+                    (pnl_idr, pair)
+                )
+        except Exception as e:
+            print(f"DB Error (update_trade_outcome): {e}")
+
+    def get_latest_trade_dna(self, pair):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT * FROM trade_analytics WHERE pair = ? AND status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1",
+                    (pair,)
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception:
+            return None
+
+    def update_dynamic_weight(self, feature, value):
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE dynamic_weights SET weight_value = ?, last_updated = CURRENT_TIMESTAMP WHERE feature_name = ?",
+                (value, feature)
+            )
+
+    def get_all_weights(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute("SELECT feature_name, weight_value FROM dynamic_weights")
+                return {row['feature_name']: row['weight_value'] for row in cursor.fetchall()}
+        except Exception:
+            return {}
 
 # Instantiate a global db object for ease of use
 db = Database()

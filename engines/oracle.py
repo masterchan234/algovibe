@@ -20,6 +20,10 @@ class Oracle:
         self.market_ws = market_ws
         self.last_regime = MarketRegime.CHOPPY
         self.last_regime_update = datetime.now()
+        self.weights = db.get_all_weights() or {
+            "ai_prob": 1.0, "whale_boost": 1.0, 
+            "sector_sentiment": 1.0, "imbalance": 1.0
+        }
         self.health_status = True
         self.latency_history = []
         
@@ -194,17 +198,25 @@ class Oracle:
         Check if the pair's sector is pumping.
         """
         try:
-            from config import SECTOR_MAP
-            sector = SECTOR_MAP.get(pair.lower())
-            if not sector: return 1.0
-            
-            sentiment = db.get_latest_sector_sentiment(sector)
+            sentiment = self.get_sector_sentiment_val(pair)
             if sentiment > 2.0: # Sektor naik > 2% rata-rata
                 return 1.3 # Boost skor 30%
                 
             return 1.0
         except Exception:
             return 1.0
+
+    def get_sector_sentiment_val(self, pair: str) -> float:
+        """
+        Returns the raw sentiment score for a pair's sector.
+        """
+        try:
+            from config import SECTOR_MAP
+            sector = SECTOR_MAP.get(pair.lower())
+            if not sector: return 0.0
+            return db.get_latest_sector_sentiment(sector)
+        except Exception:
+            return 0.0
 
     def update_sector_sentiment(self):
         """
@@ -231,3 +243,92 @@ class Oracle:
                 
         except Exception as e:
             logger.error(f"[Oracle] Sector Update Error: {e}")
+
+    # ── Self-Learning Engine (Project Evolution) ───────────────────────
+
+    def learn_from_trade(self, pair, pnl_idr):
+        """
+        Analisa DNA transaksi terakhir dan sesuaikan bobot di database.
+        """
+        try:
+            dna = db.get_latest_trade_dna(pair)
+            if not dna: return
+            
+            # [Anti-Hallucination] Outlier Filter
+            # Jika rugi > 15%, kemungkinan besar ada anomali pasar (flash crash/delist)
+            # Bot tidak boleh belajar berlebihan dari kejadian 'Bencana Alam'
+            if pnl_idr < -0.15: 
+                logger.warning(f"[Oracle] Learning SKIP: Trade {pair} was an extreme outlier (Bencana Alam).")
+                return
+            
+            # Learning Rate (Seberapa cepat bot berubah pikiran)
+            LR = 0.05 
+            
+            is_profit = pnl_idr > 0
+            
+            # Update Bobot berdasarkan fitur yang ada saat beli
+            # Jika fitur tersebut hadir saat PROFIT, naikkan bobotnya.
+            # Jika fitur tersebut hadir saat LOSS, turunkan bobotnya.
+            
+            new_weights = {}
+            for feature in ["ai_prob", "whale_boost", "sector_sentiment", "imbalance"]:
+                current_w = self.weights.get(feature, 1.0)
+                
+                # Check presence/strength of feature in DNA
+                strength = dna.get(feature, 0)
+                if feature == "ai_prob": strength -= 0.5 # Center AI prob at 0.5
+                if feature == "sector_sentiment": strength /= 5.0 # Normalize sentiment
+                
+                if is_profit:
+                    new_w = current_w + (LR * abs(strength))
+                else:
+                    new_w = current_w - (LR * abs(strength))
+                
+                # Clamp weights between 0.5 and 2.0 (Jangan biarkan terlalu ekstrim)
+                new_w = max(0.5, min(2.0, new_w))
+                new_weights[feature] = new_w
+                db.update_dynamic_weight(feature, new_w)
+            
+            self.weights = new_weights
+            logger.info(f"[Oracle] Evolution: Adjusted weights after {pair} trade. New Weights: {new_weights}")
+            
+        except Exception as e:
+            logger.error(f"[Oracle] Learning Error: {e}")
+
+    def apply_learning_to_score(self, base_score, features):
+        """
+        Gunakan bobot hasil belajar untuk memodifikasi skor akhir.
+        """
+        multiplier = 1.0
+        for feat, val in features.items():
+            weight = self.weights.get(feat, 1.0)
+            # Jika weight > 1.0, fitur ini dianggap "pembawa hoki"
+            # Jika weight < 1.0, fitur ini dianggap "pembawa sial"
+            if val > 0: # Hanya jika fitur tersebut ada/aktif
+                multiplier *= weight
+                
+        return base_score * multiplier
+
+    def apply_weight_decay(self):
+        """
+        [Anti-Hallucination] 
+        Secara perlahan mengembalikan bobot ke 1.0 agar bot tidak terjebak di masa lalu.
+        """
+        try:
+            DECAY_RATE = 0.01 # 1% setiap jam
+            new_weights = {}
+            for feat, weight in self.weights.items():
+                if weight > 1.0:
+                    new_w = max(1.0, weight - DECAY_RATE)
+                elif weight < 1.0:
+                    new_w = min(1.0, weight + DECAY_RATE)
+                else:
+                    new_w = 1.0
+                
+                new_weights[feat] = new_w
+                db.update_dynamic_weight(feat, new_w)
+            
+            self.weights = new_weights
+            logger.info("[Oracle] Weight Decay: Dynamic weights normalized toward 1.0.")
+        except Exception as e:
+            logger.error(f"[Oracle] Decay Error: {e}")

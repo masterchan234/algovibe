@@ -260,8 +260,41 @@ class ExitManager:
                 else:
                     db.save_state("consecutive_losses", current_cl + 1)
 
+                # ── Project Evolution: Learning Loop ─────────────────────────────
+                db.update_trade_outcome(pair, pnl_idr)
+                if self.oracle:
+                    self.oracle.learn_from_trade(pair, pnl_idr)
+
             except Exception as db_err:
                 print(f"Failed to save trade history/state for {pair}: {db_err}")
+                
+    def reconcile_with_exchange(self):
+        """
+        [Anti-Hallucination] 
+        Sinkronisasi posisi di Database dengan saldo asli di bursa.
+        """
+        try:
+            log_message("Reality Check: Reconciling positions with Indodax balance...")
+            if self.dry_run: return # Dry run tidak punya saldo asli untuk di-cek
+            
+            balance = self.exchange.fetch_balance()
+            open_positions = db.get_open_positions()
+            
+            for pair, pos in open_positions.items():
+                coin = pair.replace('idr', '').upper()
+                amount_on_exchange = float(balance['total'].get(coin, 0))
+                
+                # Jika di DB ada posisi tapi di bursa koinnya tidak ada (sudah terjual manual/error)
+                if amount_on_exchange < (pos['amount'] * 0.9): # Toleransi 10% untuk pembulatan
+                    log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Marking as GHOST.")
+                    db.delete_position(pair)
+                    if pair in self.jaring_orders:
+                        del self.jaring_orders[pair]
+                        db.delete_shadow_order(pair)
+            
+            log_message("Reality Check: Sync complete. No hallucinations found.")
+        except Exception as e:
+            log_message(f"Reality Check Failed: {e}")
                 
             return order.get("id", f"DRY-{int(time.time())}")
 

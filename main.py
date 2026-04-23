@@ -167,7 +167,17 @@ class ScalperBot:
                 params = {'post_only': True}
                 order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
 
-            # Log to Database Audit
+            # ── Project Evolution: Save DNA for Learning ──
+            dna_data = {
+                "ai_prob": tq_prob,
+                "whale_boost": whale_boost,
+                "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
+                "imbalance": p.get('imbalance', 1.0) if p else 1.0,
+                "volatility": p.get('volatility', 0.0) if p else 0.0
+            }
+            db.save_trade_dna(pair, dna_data)
+
+            # Audit log
             db.log_order(pair, "BUY", buy_price, amount_crypto, order.get('status'), order)
 
             # ── Simpan Posisi ke Tracker Database ──
@@ -216,6 +226,14 @@ class ScalperBot:
             # Update Sector Sentiment every 10 minutes
             if int(time.time()) % 600 < 10:
                 self.oracle.update_sector_sentiment()
+                
+            # [Anti-Hallucination] Reality Check every 30 minutes
+            if int(time.time()) % 1800 < 10:
+                self.exit_manager.reconcile_with_exchange()
+                
+            # [Anti-Hallucination] Weight Decay every hour
+            if int(time.time()) % 3600 < 10:
+                self.oracle.apply_weight_decay()
                 
             # Daily Reset
             current_day = datetime.now().day
@@ -272,12 +290,22 @@ class ScalperBot:
                 whale_boost = self.oracle.get_whale_boost(pair)
                 sector_boost = self.oracle.get_sector_boost(pair)
                 
+                # Apply Self-Learning Weights
+                features = {
+                    "ai_prob": tq_prob,
+                    "whale_boost": whale_boost - 1.0, # 0.5 becomes 0.5
+                    "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
+                    "imbalance": imbalance_ratio
+                }
+                final_score = self.oracle.apply_learning_to_score(p['score'], features)
+                
                 # Diagnostic Log
-                imbalance_ratio = p.get('imbalance', 0)
                 prob_display = f"{tq_prob*100:.0f}%" if tq_prob >= 0 else "WARMUP"
                 boost_str = ""
                 if whale_boost > 1.0: boost_str += " 🐳"
                 if sector_boost > 1.0: boost_str += " 🔥"
+                if final_score > p['score']: boost_str += " 📈"
+                if final_score < p['score']: boost_str += " 📉"
                 
                 log_message(
                     f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
