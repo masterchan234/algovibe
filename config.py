@@ -27,7 +27,7 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 150
-MIN_VOLUME_FILTER      = 100000000  # IDR per 24h
+MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================

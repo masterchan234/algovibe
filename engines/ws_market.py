@@ -201,6 +201,7 @@ class MarketDataWS:
 
     def _process_summary(self, rows: list):
         """Parse baris market:summary-24h dan update internal ticker dict."""
+        if not rows: return
         updated = {}
         for row in rows:
             if not isinstance(row, list) or len(row) < 7:

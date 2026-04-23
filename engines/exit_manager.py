@@ -96,7 +96,7 @@ class ExitManager:
                 send_telegram_message(msg)
                 
                 order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
@@ -138,15 +138,16 @@ class ExitManager:
                 send_telegram_message(msg)
                 
                 order_id = self.execute_exit(pair, amount, current_price, "STOP_LOSS",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0))
+                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
 
         self.save_positions(positions)
 
-    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0):
+    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
+            from config import FEE_PER_SIDE
             if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
                 exit_price = price * 0.9500  # SL: Limit order set 5% BELOW market to instantly act as a Taker/Market order
             else:
@@ -180,23 +181,25 @@ class ExitManager:
             # Log to Database Audit
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
             
-            gross_pnl = (current_price - entry_price) * amount
+            gross_pnl = (price - entry_price) * amount
             fee_buy = amount_idr * FEE_PER_SIDE
-            sell_value = amount * current_price
+            sell_value = amount * price
             fee_sell = sell_value * FEE_PER_SIDE
             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
             
             pnl_idr = net_pnl_idr
-            pnl_pct = (net_pnl_idr / amount_idr) * 100
+            pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
             
-            entry_time = datetime.fromisoformat(data['timestamp'])
+            # Use provided position_data for timestamp, fallback to now
+            timestamp_str = position_data.get('timestamp') if position_data else datetime.now().isoformat()
+            entry_time = datetime.fromisoformat(timestamp_str)
             duration_sec = (datetime.now() - entry_time).total_seconds()
             
             try:
                 db.insert_trade_history(
                     pair=pair,
                     entry_price=entry_price,
-                    exit_price=current_price,
+                    exit_price=price,
                     amount_crypto=amount,
                     amount_idr=amount_idr,
                     pnl_idr=pnl_idr,

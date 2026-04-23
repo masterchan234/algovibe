@@ -193,12 +193,14 @@ class ScalperBot:
         history_deque.append(price)
         history = list(history_deque)
 
-        # Logic UP: Last 3 increasing (lebih sensitif)
-        is_up = len(history) >= 3 and all(history[-i] > history[-i-1] for i in range(1, 3))
+        # Logic UP: Harga di atas rata-rata 10 candle terakhir + momentum positif
+        avg_10 = sum(history[-10:]) / 10 if len(history) >= 10 else history[0]
+        is_up = len(history) >= 10 and price > avg_10 and price >= history[-3]
+        
         # Logic Breakout: Current > Max of prev 5
-        is_breakout = len(history) >= 6 and history[-1] > max(history[-6:-1])
-        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.3%  (tangkap awal pergerakan)
-        is_flat_breakout = len(history) >= 10 and history[-1] > (sum(history[-10:])/10) * 1.003
+        is_breakout = len(history) >= 6 and price > max(history[-6:-1])
+        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.2%  (tangkap awal pergerakan)
+        is_flat_breakout = len(history) >= 10 and price > avg_10 * 1.002
         
         # Save to DB for persistence (limit writes to tracked pairs)
         db.save_ticker_history(pair, history)
