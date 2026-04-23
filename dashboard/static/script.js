@@ -42,7 +42,7 @@ function drawRadar() {
     const maxRadius = Math.min(centerX, centerY) * 0.9;
 
     // Fading background for trails
-    ctx.fillStyle = 'rgba(5, 10, 15, 0.15)';
+    ctx.fillStyle = 'rgba(5, 10, 15, 0.2)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Draw Background Grid
@@ -54,12 +54,17 @@ function drawRadar() {
         ctx.stroke();
     }
 
+    // Grid Lines (Sectors)
+    ctx.beginPath();
+    ctx.moveTo(centerX - maxRadius, centerY); ctx.lineTo(centerX + maxRadius, centerY);
+    ctx.moveTo(centerX, centerY - maxRadius); ctx.lineTo(centerX, centerY + maxRadius);
+    ctx.stroke();
+
     // Draw Sweeping Beam
-    const sweepAngle = (Date.now() / 1500) % (Math.PI * 2);
+    const sweepAngle = (Date.now() / 2000) % (Math.PI * 2);
     const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, maxRadius);
     gradient.addColorStop(0, 'rgba(0, 242, 255, 0)');
-    gradient.addColorStop(1, 'rgba(0, 242, 255, 0.1)');
-
+    gradient.addColorStop(1, 'rgba(0, 242, 255, 0.05)');
     ctx.beginPath();
     ctx.moveTo(centerX, centerY);
     ctx.arc(centerX, centerY, maxRadius, sweepAngle - 0.4, sweepAngle);
@@ -67,44 +72,39 @@ function drawRadar() {
     ctx.fillStyle = gradient;
     ctx.fill();
 
-    // Beam Line
-    ctx.strokeStyle = 'rgba(0, 242, 255, 0.5)';
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.lineTo(centerX + Math.cos(sweepAngle) * maxRadius, centerY + Math.sin(sweepAngle) * maxRadius);
-    ctx.stroke();
+    points.forEach((p, index) => {
+        // Deterministic Angle based on pair name hash
+        let hash = 0;
+        for (let i = 0; i < p.pair.length; i++) hash = p.pair.charCodeAt(i) + ((hash << 5) - hash);
+        const angle = (hash % 360) * (Math.PI / 180);
+        
+        // Radius mapping
+        let radius;
+        if (p.score >= 80) radius = (100 - p.score) * (maxRadius / 100) * 1.5;
+        else if (p.score >= 40) radius = (maxRadius * 0.3) + (80 - p.score) * (maxRadius / 100) * 2;
+        else radius = (maxRadius * 0.6) + (40 - p.score) * (maxRadius / 100) * 1.5;
 
-    // Draw Points (Coins)
-    points.forEach((p, i) => {
-        const angle = (i / (points.length || 1)) * Math.PI * 2 + (Date.now() / 10000);
-        const radius = (1 - (p.score / 100)) * maxRadius;
         const x = centerX + Math.cos(angle) * radius;
         const y = centerY + Math.sin(angle) * radius;
 
-        // Draw Lock-on for high scores (>75)
-        if (p.score > 75) {
-            drawLockOn(x, y);
-        }
+        const isElite = p.score >= 80;
+        const isShadow = p.score < 30;
 
-        // Glow
-        const color = p.score > 80 ? '#ff00ff' : '#00f2ff';
-        ctx.shadowBlur = 15;
-        ctx.shadowColor = color;
-        ctx.fillStyle = color;
+        // Draw Point
+        ctx.shadowBlur = isElite ? 15 : 0;
+        ctx.shadowColor = '#00f2ff';
+        ctx.fillStyle = isElite ? '#00f2ff' : (isShadow ? 'rgba(0, 242, 255, 0.2)' : 'rgba(0, 242, 255, 0.6)');
         
         ctx.beginPath();
-        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.arc(x, y, isElite ? 4 : (isShadow ? 1 : 2.5), 0, Math.PI * 2);
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // Label
-        ctx.fillStyle = 'white';
-        ctx.font = 'bold 11px Roboto Mono';
-        ctx.fillText(p.pair.toUpperCase(), x + 10, y + 4);
-
-        // Particle Trigger for high scores
-        if (p.score > 90 && Math.random() > 0.95) {
-            particles.push(new Particle(x, y, color === '#ff00ff' ? 'rgb(255,0,255)' : 'rgb(0,242,255)'));
+        // Label for Elite or if score is decent
+        if (isElite || p.score > 60) {
+            ctx.fillStyle = isElite ? '#00f2ff' : 'rgba(255,255,255,0.7)';
+            ctx.font = isElite ? 'bold 11px Orbitron' : '9px Orbitron';
+            ctx.fillText(p.pair.toUpperCase(), x + 8, y + 4);
         }
     });
 
@@ -196,6 +196,9 @@ let lastSeenLogId = null;
 
 function triggerAlert(type, pair, pnl) {
     const isTP = type === 'TP';
+    
+    if (isTP) triggerGlitch(); // Spectacular transition on TP
+    
     const text = isTP ? 
         `[ TARGET NEUTRALIZED ]\n${pair.toUpperCase()} PROFIT: ${pnl}` : 
         `[ SYSTEM BREACH ]\n${pair.toUpperCase()} LIQUIDATED`;
@@ -221,6 +224,7 @@ const regimeBg = document.getElementById('regime-bg');
 
 function triggerSpecialEvent(type, text = "") {
     if (type === 'WHALE') {
+        triggerGlitch(); // Spectacular entry for whales
         const whale = document.createElement('div');
         whale.className = 'whale-swim';
         whale.innerHTML = `🐳<br><span style="font-size: 14px; font-family: 'Orbitron';">${text}</span>`;
@@ -243,6 +247,56 @@ function triggerSpecialEvent(type, text = "") {
             document.body.classList.remove('shake');
         }, 3000);
     }
+}
+
+// --- Spectacular Logic ---
+const pulseContainer = document.getElementById('volume-pulse');
+const pulseBars = [];
+const BAR_COUNT = 60;
+
+function initPulse() {
+    for (let i = 0; i < BAR_COUNT; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'pulse-bar';
+        const angle = (i / BAR_COUNT) * 360;
+        bar.style.transform = `rotate(${angle}deg) translateY(-210px)`;
+        pulseContainer.appendChild(bar);
+        pulseBars.push(bar);
+    }
+}
+
+function updatePulse(volume) {
+    const intensity = Math.min(100, volume / 10000000); // Scale to 10M volume
+    pulseBars.forEach((bar, i) => {
+        const h = 5 + Math.random() * intensity;
+        bar.style.height = `${h}px`;
+        bar.style.opacity = 0.2 + (intensity / 150);
+    });
+}
+
+function triggerGlitch() {
+    document.body.classList.add('glitch-active');
+    setTimeout(() => document.body.classList.remove('glitch-active'), 600);
+}
+
+function triggerBuyEffect(pair) {
+    const matrix = document.getElementById('matrix-overlay');
+    matrix.classList.add('active');
+    
+    // Voice confirmation
+    speak(`Engaging target ${pair}. Oracle synchronization complete. Execution initiated.`);
+    
+    // Crosshair on radar (simulated at center for now, or random point)
+    const crosshair = document.createElement('div');
+    crosshair.className = 'lock-on-crosshair';
+    crosshair.style.left = '50%';
+    crosshair.style.top = '50%';
+    document.getElementById('center-radar').appendChild(crosshair);
+    
+    setTimeout(() => {
+        matrix.classList.remove('active');
+        crosshair.remove();
+    }, 5000);
 }
 
 // Data Fetching
@@ -272,6 +326,7 @@ async function fetchData() {
         regimeEl.innerText = stats.regime;
         
         if (stats.regime !== lastRegime) {
+            triggerGlitch(); // Spectacular Regime shift
             addTerminalLine(`MARKET REGIME SHIFT: ${stats.regime} (Leader: ${stats.regime_leader})`);
             speak(`Market regime shift detected. Global sentiment is now ${stats.regime}. Leading pair: ${stats.regime_leader.split(' ')[0]}.`);
             lastRegime = stats.regime;
@@ -297,6 +352,25 @@ async function fetchData() {
         const radarRes = await fetch(`${API_BASE}/radar`);
         points = await radarRes.json();
 
+        // Update Pulse Visualizer based on top pair volume
+        if (points.length > 0) {
+            updatePulse(points[0].price * 1000); // Simulated volume signal
+            
+            // Update Active Hunting Grounds (Top 10)
+            const huntingList = document.getElementById('hunting-grounds');
+            huntingList.innerHTML = '';
+            [...points].sort((a,b) => b.score - a.score).slice(0, 10).forEach(p => {
+                const item = document.createElement('div');
+                item.className = 'hunting-item';
+                item.style.borderLeft = `3px solid ${p.score > 80 ? '#00f2ff' : '#00ff41'}`;
+                item.innerHTML = `
+                    <span class="pair">${p.pair.toUpperCase()}</span>
+                    <span class="score">SCORE: ${p.score.toFixed(0)}</span>
+                `;
+                huntingList.appendChild(item);
+            });
+        }
+
         const logsRes = await fetch(`${API_BASE}/logs`);
         const logs = await logsRes.json();
         
@@ -307,7 +381,17 @@ async function fetchData() {
                 const type = (latest.price > 0) ? 'TP' : 'SL'; // Simple heuristic
                 triggerAlert(type, latest.pair, latest.price);
             }
-            lastSeenLogId = latest.id;
+            
+            // Detect BUY events for visuals
+            logs.forEach(log => {
+                if (log.side === 'BUY') {
+                    if (!window.lastBuyHandled || window.lastBuyHandled !== log.id) {
+                        triggerBuyEffect(log.pair);
+                        window.lastBuyHandled = log.id;
+                    }
+                }
+            });
+            lastSeenLogId = logs[0].id;
         }
 
         const feed = document.getElementById('log-feed');
@@ -324,6 +408,7 @@ async function fetchData() {
 
 // Initialize
 initCharts();
+initPulse();
 drawRadar();
 setInterval(fetchData, 3000);
 fetchData();
@@ -349,6 +434,8 @@ window.addEventListener('keydown', (e) => {
     if (key === 's') triggerAlert('SL', 'ETHIDR', '-Rp 20,000');
     if (key === 'w') triggerSpecialEvent('WHALE');
     if (key === 'f') triggerSpecialEvent('FAKE_PUMP');
+    if (key === 'g') triggerGlitch();
+    if (key === 't') triggerBuyEffect('BTCIDR'); // Test BUY effect
     if (key === 'b') {
         // Test Regime Change
         lastRegime = (lastRegime === 'BULL' ? 'BEAR' : 'BULL');
