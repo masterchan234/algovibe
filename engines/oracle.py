@@ -160,5 +160,74 @@ class Oracle:
             return f"Saya tidak mau beli koin apapun sekarang karena pasar global sedang {regime}. Saya menjaga modal kita."
         if decision == "ADAPTIVE_SL":
             return f"Pasar sedang {regime}, saya akan sedikit lebih 'sabar' menahan guncangan harga."
+        if decision == "WHALE_BOOST":
+            return "Ada paus besar sedang menahan harga di bawah kita. Kesempatan emas!"
+        if decision == "SECTOR_BOOST":
+            return "Sektor koin ini sedang 'hot'. Momentum sedang berpihak pada kita."
         
         return "Keputusan berdasarkan analisa teknikal dan probabilitas AI yang kuat."
+
+    def get_whale_boost(self, pair: str) -> float:
+        """
+        Scan Order Book for massive buy walls.
+        Returns a score multiplier boost (e.g., 1.5) if a whale is found.
+        """
+        try:
+            from config import WHALE_THRESHOLD_IDR
+            # Ambil OB data (MarketWS cache)
+            ob = self.market_ws.get_order_book(pair)
+            if not ob or not ob.get('bids'): return 1.0
+            
+            # Cari tembok beli raksasa di 10 level pertama
+            # format bid: [price, amount]
+            for bid in ob['bids'][:10]:
+                val_idr = float(bid[0]) * float(bid[1])
+                if val_idr >= WHALE_THRESHOLD_IDR:
+                    return 1.5 # Boost skor 50%
+                    
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def get_sector_boost(self, pair: str) -> float:
+        """
+        Check if the pair's sector is pumping.
+        """
+        try:
+            from config import SECTOR_MAP
+            sector = SECTOR_MAP.get(pair.lower())
+            if not sector: return 1.0
+            
+            sentiment = db.get_latest_sector_sentiment(sector)
+            if sentiment > 2.0: # Sektor naik > 2% rata-rata
+                return 1.3 # Boost skor 30%
+                
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def update_sector_sentiment(self):
+        """
+        Calculate and persist global sector sentiment.
+        Called periodically (e.g., every 5-10 minutes).
+        """
+        try:
+            from config import SECTOR_MAP
+            tickers = self.market_ws.get_tickers()
+            if not tickers: return
+            
+            # {SECTOR: [change1, change2, ...]}
+            sector_data = {}
+            for pair, data in tickers.items():
+                s = SECTOR_MAP.get(pair.lower())
+                if s:
+                    if s not in sector_data: sector_data[s] = []
+                    sector_data[s].append(data.get('change_24h', 0))
+            
+            # Calculate and save average
+            for sector, changes in sector_data.items():
+                avg_change = sum(changes) / len(changes)
+                db.save_sector_sentiment(sector, avg_change)
+                
+        except Exception as e:
+            logger.error(f"[Oracle] Sector Update Error: {e}")

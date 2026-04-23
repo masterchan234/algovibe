@@ -6,12 +6,15 @@ from datetime import datetime
 from config import TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
 from engines.telegram_bot import send_telegram_message
 from engines.database import db
+from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
     def __init__(self, exchange_client, dry_run: bool = False, oracle=None):
         self.exchange = exchange_client
         self.dry_run  = dry_run
         self.oracle = oracle
+        self.jaring_orders = {} # {pair: {id, price, amount}}
+        self._sync_jaring_from_db()
 
     def get_open_positions(self):
         return db.get_open_positions()
@@ -262,6 +265,57 @@ class ExitManager:
                 
             return order.get("id", f"DRY-{int(time.time())}")
 
+    # ── Shadow Jaring (Liquidity Grab) ───────────────────────────────────
+
+    def _sync_jaring_from_db(self):
+        """Recover active jaring orders from SQLite on startup."""
+        saved = db.get_all_shadow_orders()
+        for o in saved:
+            self.jaring_orders[o['pair']] = o
+    def manage_shadow_jaring(self, ranked_pairs, current_tickers):
+        """
+        Main entry for jaring logic. Called from the main loop.
+        """
+        try:
+            from config import JARING_ALLOCATION_PCT, JARING_DEPTH_PCT, INITIAL_CAPITAL
+            
+            # 1. Trailing: Move existing jaring up if price is too far (protect from missing pumps)
+            for pair, o in list(self.jaring_orders.items()):
+                if pair in current_tickers:
+                    curr_price = current_tickers[pair]['last']
+                    # Jika harga pasar sudah naik > 10% dari jaring kita, batalkan dan pasang baru lebih tinggi
+                    if curr_price > o['price'] * 1.10:
+                        log_message(f"Jaring: Price moved up for {pair}. Trailing jaring...")
+                        if not self.dry_run: self.exchange.cancel_order(o['id'])
+                        db.delete_shadow_order(pair)
+                        del self.jaring_orders[pair]
+
+            # 2. Placement: Fill empty slots (Max 3 jaring)
+            if len(self.jaring_orders) < 3:
+                candidates = [p for p in ranked_pairs if p['pair'] not in self.jaring_orders][:3]
+                for c in candidates:
+                    pair = c['pair']
+                    jaring_price = c['last'] * (1 + JARING_DEPTH_PCT)
+                    amount_idr = INITIAL_CAPITAL * JARING_ALLOCATION_PCT
+                    amount_crypto = amount_idr / jaring_price
+                    self.place_jaring(pair, amount_crypto, jaring_price)
+                    
         except Exception as e:
-            print(f"Exit Error ({reason}): {e}")
-            return None
+            print(f"Jaring Manager Error: {e}")
+
+    def place_jaring(self, pair, amount, price):
+        """Place a deep-limit buy order."""
+        try:
+            log_message(f"Jaring: Placing Liquidity Grab on {pair} at Rp {price:,.2f}")
+            if self.dry_run:
+                order_id = f"JARING-{int(time.time())}"
+                order = {"id": order_id, "status": "open", "price": price, "amount": amount}
+            else:
+                order = self.exchange.create_limit_buy_order(pair, amount, price)
+                order_id = order['id']
+            
+            self.jaring_orders[pair] = {"id": order_id, "price": price, "amount": amount}
+            db.upsert_shadow_order(pair, order_id, price, amount)
+            
+        except Exception as e:
+            print(f"Failed to place jaring for {pair}: {e}")

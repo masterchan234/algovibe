@@ -104,6 +104,24 @@ class Database:
                 )
             ''')
 
+            # Tabel untuk sector history (Project Predator)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS sector_history (
+                sector TEXT,
+                sentiment_score REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+
+            # Tabel untuk shadow orders / Jaring (Project Predator)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS shadow_orders (
+                pair TEXT PRIMARY KEY,
+                order_id TEXT,
+                price REAL,
+                amount REAL,
+                side TEXT DEFAULT 'BUY',
+                status TEXT DEFAULT 'OPEN',
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -291,6 +309,40 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM blacklist WHERE pair = ?", (pair,))
             return cursor.fetchone() is not None
+
+    # ── Sector & Shadow Order Methods (Predator) ─────────────────────────
+
+    def save_sector_sentiment(self, sector, score):
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO sector_history (sector, sentiment_score) VALUES (?, ?)",
+                (sector, score)
+            )
+
+    def get_latest_sector_sentiment(self, sector):
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT sentiment_score FROM sector_history WHERE sector = ? ORDER BY timestamp DESC LIMIT 1",
+                (sector,)
+            )
+            row = cursor.fetchone()
+            return row['sentiment_score'] if row else 0.0
+
+    def upsert_shadow_order(self, pair, order_id, price, amount):
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO shadow_orders (pair, order_id, price, amount, status) VALUES (?, ?, ?, ?, 'OPEN')",
+                (pair, order_id, price, amount)
+            )
+
+    def get_all_shadow_orders(self):
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM shadow_orders WHERE status = 'OPEN'")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def delete_shadow_order(self, pair):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM shadow_orders WHERE pair = ?", (pair,))
 
 # Instantiate a global db object for ease of use
 db = Database()

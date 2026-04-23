@@ -65,9 +65,19 @@ FEE_SELL_TAKER = 0.004211  # 0.4211% (0.2% Service + 0.21% Tax + 0.0111% CFX)
 
 
 
-# ==========================================
-# 5. DRY RUN MODE
-# ==========================================
+# --- Predator Strategy Parameters ---
+WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"
+JARING_ALLOCATION_PCT = 0.05      # Sisihkan 5% modal untuk jaring (flash crash)
+JARING_DEPTH_PCT = -0.07          # Pasang jaring 7% di bawah harga pasar
+
+# --- Sector Mapping (Indodax Pro) ---
+SECTOR_MAP = {
+    "dogeidr": "MEME", "pepeidr": "MEME", "shibidr": "MEME", "flokiidr": "MEME",
+    "fetidr": "AI", "agixidr": "AI", "rndridr": "AI", "oceanidr": "AI",
+    "btcidr": "BLUECHIP", "ethidr": "BLUECHIP", "solidr": "BLUECHIP", "bnbidr": "BLUECHIP",
+    "maticidr": "L2", "opidr": "L2", "arbidr": "L2"
+}
+
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
 DRY_RUN = True

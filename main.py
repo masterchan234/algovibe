@@ -96,7 +96,7 @@ class ScalperBot:
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
-    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0):
         try:
             # ── Oracle Sizing Multiplier ─────────────────────────────────────
             multiplier = self.oracle.get_sizing_multiplier()
@@ -134,11 +134,16 @@ class ScalperBot:
                     'amount': amount_crypto,
                     'timestamp': datetime.now().isoformat()
                 }
+                # Semantic Rationale for Predator Features
+                predator_msg = ""
+                if whale_boost > 1.0: predator_msg += "\n🐳 *Whale Backed*: Tembok raksasa terdeteksi menjaga harga."
+                if sector_boost > 1.0: predator_msg += "\n🔥 *Sector Driven*: Koin ini mengikuti momentum sektor yang sedang 'hot'."
+
                 msg = (
                     f"🟢 *DRY RUN BUY* 🟢\n"
                     f"Pair: `{pair}`\n"
                     f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
-                    f"Rationale: _{self.oracle.get_rationale(pair, 'BUY')}_\n"
+                    f"Rationale: _{self.oracle.get_rationale(pair, 'BUY')}_{predator_msg}\n"
                     f"Price: Rp {buy_price:,.2f}\n"
                     f"Qty: {amount_crypto:.8f}\n"
                     f"Target TP: Rp {tp_target:,.2f}\n"
@@ -208,6 +213,10 @@ class ScalperBot:
             regime = self.oracle.get_market_regime()
             adaptive_cfg = self.oracle.get_adaptive_config()
             
+            # Update Sector Sentiment every 10 minutes
+            if int(time.time()) % 600 < 10:
+                self.oracle.update_sector_sentiment()
+                
             # Daily Reset
             current_day = datetime.now().day
             if current_day != self.start_day:
@@ -233,6 +242,9 @@ class ScalperBot:
                 price_history=self.price_history,
                 get_prediction_fn=get_prediction
             )
+            
+            # Manage Shadow Jaring (Liquidity Grab)
+            self.exit_manager.manage_shadow_jaring(ranked, tickers)
 
             # Parallel Ranking (using adaptive filters)
             ranked = [r for r in self.pool.map(calculate_score, [(item, adaptive_cfg) for item in tickers.items()]) if r]
@@ -253,14 +265,23 @@ class ScalperBot:
                     continue
                 
                 trend, breakout, history = self.update_history_and_trend(pair, p['last'])
+                # Get Prediction Probability
                 tq_prob = get_prediction(history) if trend == "UP" else 0.0
-
+                
+                # Predator Boosts (Whale & Sector)
+                whale_boost = self.oracle.get_whale_boost(pair)
+                sector_boost = self.oracle.get_sector_boost(pair)
+                
                 # Diagnostic Log
                 imbalance_ratio = p.get('imbalance', 0)
                 prob_display = f"{tq_prob*100:.0f}%" if tq_prob >= 0 else "WARMUP"
+                boost_str = ""
+                if whale_boost > 1.0: boost_str += " 🐳"
+                if sector_boost > 1.0: boost_str += " 🔥"
+                
                 log_message(
                     f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
-                    f"BO: {str(breakout):5} | TQ_Prob: {prob_display}"
+                    f"BO: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
                 )
 
                 # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
@@ -276,7 +297,8 @@ class ScalperBot:
 
                 if breakout and ai_ready and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
-                        if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob):
+                        if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
+                                             whale_boost=whale_boost, sector_boost=sector_boost):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)
 
