@@ -32,9 +32,9 @@ CHANNEL_SUMMARY = "market:summary-24h"
 CHANNEL_OB_PFX  = "market:order-book-"   # + pair, e.g. market:order-book-btc_idr
 
 # Berapa banyak pair teratas (by volume) yang akan di-subscribe order book-nya
-OB_TOP_PAIRS     = 20
+OB_TOP_PAIRS     = 50
 # Filter volume minimum sebelum subscribe order book (hindari pair mati)
-OB_MIN_VOL_IDR   = 500_000_000  # 500 Juta IDR
+OB_MIN_VOL_IDR   = 50_000_000  # 50 Juta IDR (diturunkan agar lebih banyak pair tercover)
 
 # Indeks kolom pada payload market:summary-24h
 # [pair, epoch, last, low, high, open, vol_idr, vol_coin]
@@ -180,6 +180,12 @@ class MarketDataWS:
         elif channel.startswith(CHANNEL_OB_PFX):
             pair = channel[len(CHANNEL_OB_PFX):]
             ob_data = data_wrap.get("data", {})
+            # DEBUG: Log format OB pertama kali per pair (hapus setelah format diketahui)
+            if not hasattr(self, '_ob_format_logged'):
+                self._ob_format_logged = set()
+            if pair not in self._ob_format_logged:
+                logger.info(f"[MarketWS] OB FORMAT DEBUG ({pair}): keys={list(ob_data.keys()) if isinstance(ob_data, dict) else type(ob_data).__name__} | sample={str(ob_data)[:300]}")
+                self._ob_format_logged.add(pair)
             self._process_orderbook(pair, ob_data)
 
     def _process_summary(self, rows: list):
@@ -196,39 +202,38 @@ class MarketDataWS:
             vol_idr  = float(row[IDX_VOL_IDR]) if row[IDX_VOL_IDR] else 0.0
             vol_coin = str(row[IDX_VOL_COIN])
 
-            # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask)
-            # ExitManager & ScalperBot hanya butuh 'last', 'high', 'low', 'vol_idr'
+            # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask).
+            # Jika data Order Book yang lebih akurat sudah ada, pertahankan nilainya.
+            existing = self._tickers.get(pair, {})
             updated[pair] = {
-                "last":    last,
-                "buy":     last,        # estimasi — gunakan order-book WS jika butuh presisi
-                "sell":    last,
-                "high":    high,
-                "low":     low,
-                "open":    open_p,
-                "vol_idr": vol_idr,
-                "vol_coin": vol_coin,
+                "last":      last,
+                # Gunakan harga real dari OB jika sudah ada, jangan timpa dengan estimasi
+                "buy":       existing.get("buy", last) if existing.get("buy", last) != existing.get("last", last) else last,
+                "sell":      existing.get("sell", last) if existing.get("sell", last) != existing.get("last", last) else last,
+                "high":      high,
+                "low":       low,
+                "open":      open_p,
+                "vol_idr":   vol_idr,
+                "vol_coin":  vol_coin,
+                # Pertahankan kedalaman order book jika sudah ada
+                "bid_depth": existing.get("bid_depth", 0),
+                "ask_depth": existing.get("ask_depth", 0),
             }
 
+        # Trigger OB subscribe dinamis, seiring bertambahnya pair bervolume tinggi
+        # (Karena summary-24h payload-nya parsial, tidak datang 200 pair sekaligus)
         need_ob_subscribe = False
         with self._lock:
             self._tickers.update(updated)
             if not self._connected.is_set():
                 self._connected.set()
                 logger.info(f"[MarketWS] First data received — {len(self._tickers)} pairs loaded.")
-            # Trigger OB subscribe sekali, setelah akumulasi cukup pair bervolume tinggi
-            if not self._ob_done:
-                qualifying = sum(
-                    1 for d in self._tickers.values()
-                    if (d.get("vol_idr") or 0) >= OB_MIN_VOL_IDR
-                )
-                logger.debug(f"[MarketWS] OB qualify check: {qualifying}/{len(self._tickers)} pairs >= {OB_MIN_VOL_IDR:,}")
-                if qualifying >= 5:
-                    need_ob_subscribe = True
-                    self._ob_done = True
-
-        # Subscribe order book di luar lock untuk menghindari deadlock
+            
+            # Jika belum mencapai kuota maksimal langganan OB
+            if len(self._ob_subscribed) < OB_TOP_PAIRS:
+                need_ob_subscribe = True
+                
         if need_ob_subscribe and self._ws_ref:
-            # Ambil snapshot terkini untuk kandidat OB
             with self._lock:
                 snapshot = dict(self._tickers)
             self._subscribe_top_orderbooks(snapshot)
@@ -240,8 +245,10 @@ class MarketDataWS:
             for pair, d in summary_snapshot.items()
             if (d.get("vol_idr") or 0) >= OB_MIN_VOL_IDR
         ]
-        # Urutkan descending by volume, ambil top N
+        # Urutkan descending by volume
         candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        # Ambil sampai batas OB_TOP_PAIRS
         top_pairs = [p for p, _ in candidates[:OB_TOP_PAIRS]]
 
         for pair in top_pairs:
@@ -263,58 +270,66 @@ class MarketDataWS:
                 logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
 
     def _process_orderbook(self, pair: str, data: dict):
-        """Update bid/ask terbaik dari payload order book."""
-        # Log raw format sekali per pair untuk debugging
-        if pair not in getattr(self, '_ob_logged', set()):
-            logger.debug(f"[MarketWS] OB raw ({pair}): keys={list(data.keys())} sample={str(data)[:200]}")
-            if not hasattr(self, '_ob_logged'):
-                self._ob_logged = set()
-            self._ob_logged.add(pair)
+        """
+        Update bid/ask terbaik dari payload order book.
+        Format Indodax yang sudah dikonfirmasi:
+        {
+          'pair': 'usdtidr',
+          'ask': [{'price': '17291', 'idr_volume': '295908835', 'usdt_volume': '...'}, ...],
+          'bid': [{'price': '17290', 'idr_volume': '...', 'usdt_volume': '...'}, ...]
+        }
+        """
+        bids = data.get("bid", [])
+        asks = data.get("ask", [])
 
-        # Indodax Market Data WS order-book format:
-        # data: { "pair": "...", "ask": [{"price": "...", ...}], "bid": [{"price": "...", ...}] }
-        bids = data.get("bid", []) or data.get("bids", []) or data.get("buy", [])
-        asks = data.get("ask", []) or data.get("asks", []) or data.get("sell", [])
-
-        if not bids or not asks:
+        if not bids and not asks:
+            logger.warning(f"[MarketWS] OB ({pair}): both bid and ask are empty — data keys: {list(data.keys())}")
             return
 
         try:
             bid_depth = 0.0
             ask_depth = 0.0
-            
-            # Parse best bid and ask depending on whether it's a dict or a list
-            if isinstance(bids[0], dict):
-                best_bid = float(bids[0].get("price", 0))
-                for b in bids[:10]:
-                    vol = b.get("idr_volume")
-                    if vol: bid_depth += float(vol)
-                    elif b.get("btc_volume"): bid_depth += float(b.get("price", 0)) * float(b.get("btc_volume", 0))
-            else:
-                best_bid = float(bids[0][0])
-                bid_depth = sum(float(b[0]) * float(b[1]) for b in bids[:10] if len(b) > 1)
-                
-            if isinstance(asks[0], dict):
-                best_ask = float(asks[0].get("price", 0))
-                for a in asks[:10]:
-                    vol = a.get("idr_volume")
-                    if vol: ask_depth += float(vol)
-                    elif a.get("btc_volume"): ask_depth += float(a.get("price", 0)) * float(a.get("btc_volume", 0))
-            else:
-                best_ask = float(asks[0][0])
-                ask_depth = sum(float(a[0]) * float(a[1]) for a in asks[:10] if len(a) > 1)
-                
-            if best_bid == 0 or best_ask == 0:
+            best_bid  = 0.0
+            best_ask  = 0.0
+
+            # ── Parse BIDs ────────────────────────────────────────────────
+            for i, b in enumerate(bids[:10]):
+                price = float(b.get("price", 0))
+                vol   = float(b.get("idr_volume", 0))
+                if i == 0:
+                    best_bid = price
+                bid_depth += vol
+
+            # ── Parse ASKs ────────────────────────────────────────────────
+            for i, a in enumerate(asks[:10]):
+                price = float(a.get("price", 0))
+                vol   = float(a.get("idr_volume", 0))
+                if i == 0:
+                    best_ask = price
+                ask_depth += vol
+
+            if best_bid == 0 and best_ask == 0:
+                logger.warning(f"[MarketWS] OB ({pair}): best_bid=0 best_ask=0 — bids={len(bids)} asks={len(asks)}")
                 return
         except (IndexError, ValueError, TypeError):
             return
 
         with self._lock:
             if pair in self._tickers:
-                self._tickers[pair]["buy"]  = best_bid
-                self._tickers[pair]["sell"] = best_ask
-                self._tickers[pair]["bid_depth"] = bid_depth
-                self._tickers[pair]["ask_depth"] = ask_depth
+                if best_bid > 0:
+                    self._tickers[pair]["buy"]       = best_bid
+                if best_ask > 0:
+                    self._tickers[pair]["sell"]      = best_ask
+                self._tickers[pair]["bid_depth"]     = bid_depth
+                self._tickers[pair]["ask_depth"]     = ask_depth
+            else:
+                # Pair belum ada di summary ticker, simpan sementara
+                self._tickers[pair] = {
+                    "last": best_bid, "buy": best_bid, "sell": best_ask,
+                    "high": 0, "low": 0, "open": 0,
+                    "vol_idr": 0, "vol_coin": "0",
+                    "bid_depth": bid_depth, "ask_depth": ask_depth
+                }
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")

@@ -49,12 +49,13 @@ def calculate_score(item):
         # Kalkulasi Imbalance Ratio
         imbalance = (bid_depth / ask_depth) if ask_depth > 0 else 0
 
-        # Filter dasar + Fake Pump/Bandar Filter
-        if spread < 0.5 and 0.3 <= volatility <= 6.0 and vol > MIN_VOLUME_FILTER:
-            if bid_depth > 100_000_000 and imbalance > 1.5:
-                # Tambahkan imbalance sebagai penambah bobot score
-                score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2) + (imbalance * 100_000_000)
-                return {
+        # Filter dasar: spread, volatility, volume minimum
+        if spread < 0.5 and 0.2 <= volatility <= 8.0 and vol > MIN_VOLUME_FILTER:
+            # Imbalance & bid_depth sebagai bonus score (opsional, tidak wajib ada data OB)
+            imb_bonus = (imbalance * 50_000_000) if imbalance > 1.2 else 0
+            depth_bonus = (bid_depth * 0.1) if bid_depth > 10_000_000 else 0
+            score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2) + imb_bonus + depth_bonus
+            return {
                     "pair": pair,
                     "last": last,
                     "spread": spread,
@@ -175,12 +176,14 @@ class ScalperBot:
         history_deque.append(price)
         history = list(history_deque)
 
-        # Logic UP: Last 4 increasing
-        is_up = len(history) >= 4 and all(history[-i] > history[-i-1] for i in range(1, 4))
+        # Logic UP: Last 3 increasing (lebih sensitif)
+        is_up = len(history) >= 3 and all(history[-i] > history[-i-1] for i in range(1, 3))
         # Logic Breakout: Current > Max of prev 5
         is_breakout = len(history) >= 6 and history[-1] > max(history[-6:-1])
-
-        return "UP" if is_up else "SIDEWAYS", is_breakout, history
+        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.3%  (tangkap awal pergerakan)
+        is_flat_breakout = len(history) >= 10 and history[-1] > (sum(history[-10:])/10) * 1.003
+        
+        return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
     def execute_trade(self, pair, price):
         try:
@@ -322,8 +325,9 @@ class ScalperBot:
                     f"Imb: {imbalance_ratio:.1f}x | TQ_Prob: {tq_prob*100:.0f}%"
                 )
 
-                # Signal Trigger (Predictive Filter > 75%)
-                if trend == "UP" and breakout and p['spread'] < 0.5 and tq_prob > 0.75:
+                # Signal Trigger: Trend UP + Breakout OR Sideways + Breakout dengan Imbalance tinggi
+                has_strong_imb = p.get('imbalance', 0) > 2.0
+                if breakout and (trend == "UP" or has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         success = self.execute_trade(p['pair'], p['last'])
                         if success:
