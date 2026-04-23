@@ -67,6 +67,7 @@ class MarketDataWS:
         self._thread  = None
         self._running = False
         self._req_id  = 0
+        self._last_msg_time = 0
         self._connected = threading.Event()  # set saat autentikasi berhasil
         self._ob_subscribed: set = set()     # pair yang sudah di-subscribe order book
         self._ws_ref = None                  # ref ke ws instance untuk subscribe dinamis
@@ -101,6 +102,14 @@ class MarketDataWS:
         """
         with self._lock:
             return dict(self._tickers)
+
+    def is_connected(self):
+        return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
+
+    def get_latency(self):
+        """Estimate latency based on message frequency or specific ping/pong."""
+        if self._last_msg_time == 0: return 0
+        return time.time() - self._last_msg_time
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
@@ -148,6 +157,7 @@ class MarketDataWS:
             return default
 
     def _on_message(self, ws, raw: str):
+        self._last_msg_time = time.time()
         import traceback
         try:
             try:

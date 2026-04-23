@@ -3,8 +3,9 @@ def get_prediction(price_history: list) -> float:
     Menghitung probabilitas eksekusi menggunakan indikator teknikal lanjutan.
     Menerima array history harga, mengembalikan float 0.0 - 1.0.
     """
-    if not price_history or len(price_history) < 30:
-        return 0.0
+    from config import AI_MIN_HISTORY_POINTS
+    if not price_history or len(price_history) < AI_MIN_HISTORY_POINTS:
+        return -1.0  # -1 indicates 'Warming Up' status
 
     try:
         prob = 0.40  # Base Score
@@ -73,7 +74,23 @@ def get_prediction(price_history: list) -> float:
         upper_band = ma + (std * 2)
         
         if current_price <= lower_band * 1.002 or current_price >= upper_band * 0.998:
-            prob += 0.20
+            prob += 0.15 # Mengurangi sedikit bobot BB klasik
+
+        # 4. ANTI-FALLING-KNIFE (Velocity Check)
+        # Jika harga turun > 1.2% dalam 5 tick terakhir, ini Panic Dump.
+        if len(price_history) >= 6:
+            prev_5_price = price_history[-6]
+            velocity_5 = (current_price - prev_5_price) / prev_5_price
+            if velocity_5 < -0.012:
+                prob -= 0.40 # Penalti berat, jangan coba lawan gravitasi
+            elif velocity_5 < -0.006:
+                prob -= 0.15
+
+        # 5. REBOUND DETECTION (Bounce from Local Support)
+        # Cek apakah harga saat ini sudah naik dari titik terendah 10 tick terakhir
+        local_min = min(price_history[-10:])
+        if current_price > local_min * 1.0015: # Naik 0.15% dari dasar
+            prob += 0.20 # Bonus probabilitas untuk potensi pantulan (Hammer effect)
 
         prob = max(0.0, min(prob, 0.99))
         return prob

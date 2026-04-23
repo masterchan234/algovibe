@@ -8,9 +8,10 @@ from engines.telegram_bot import send_telegram_message
 from engines.database import db
 
 class ExitManager:
-    def __init__(self, exchange_client, dry_run: bool = False):
+    def __init__(self, exchange_client, dry_run: bool = False, oracle=None):
         self.exchange = exchange_client
         self.dry_run  = dry_run
+        self.oracle = oracle
 
     def get_open_positions(self):
         return db.get_open_positions()
@@ -80,9 +81,9 @@ class ExitManager:
             # Base TP calculation from percentage
             base_tp_price = entry_price * (1 + TP_PCT)
             
-            # Dynamic TP calculation for exact Net Profit (300 IDR)
-            # Rumus: (Target_IDR + Entry_Value * (1 + Fee)) / (Amount * (1 - Fee))
-            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_PER_SIDE))) / (amount * (1 - FEE_PER_SIDE))
+            from config import FEE_BUY_MAKER, FEE_SELL_MAKER
+            # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
+            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
             
             # Gunakan harga TP tertinggi antara persentase baseline (1.5%) atau target minimum 300 IDR
             tp_price = max(base_tp_price, exact_tp_price)
@@ -149,11 +150,12 @@ class ExitManager:
                 override_sl = False
                 if get_prediction_fn and price_history and pair in price_history:
                     history = price_history[pair]
-                    if len(history) >= 15: # Pastikan sampel cukup untuk AI
+                    if len(history) >= AI_MIN_HISTORY_POINTS: # Pastikan sampel cukup untuk AI
                         tq_prob = get_prediction_fn(history)
-                        if tq_prob > 0.70:
+                        if tq_prob >= AI_SL_OVERRIDE_THRESHOLD:
                             override_sl = True
-                            msg = f"🛡 *SL OVERRIDE* 🛡\nPair: `{pair}`\nProbabilitas Bounce: {tq_prob*100:.0f}%\nAction: HOLDING POSITION"
+                            rationale = self.oracle.get_rationale(pair, 'ADAPTIVE_SL') if self.oracle else "Bounce potential detected."
+                            msg = f"🛡 *SL OVERRIDE* 🛡\nPair: `{pair}`\nProb: {tq_prob*100:.0f}%\nRationale: _{rationale}_"
                             print(msg.replace('*', '').replace('\n', ' | '))
                             send_telegram_message(msg)
                 
@@ -181,45 +183,50 @@ class ExitManager:
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
-            from config import FEE_PER_SIDE
+            from config import TOTAL_MAKER_FEE, TOTAL_TAKER_FEE, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            
             if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
-                exit_price = price * 0.9500  # SL: Limit order set 5% BELOW market to instantly act as a Taker/Market order
+                exit_price = price * (1 - SELL_TAKER_OFFSET)
+                fee_sell_rate = TOTAL_TAKER_FEE
             else:
-                exit_price = price * 1.0005  # TP: Maker Sell offset +0.05%
+                exit_price = price * (1 + SELL_MAKER_OFFSET)
+                fee_sell_rate = TOTAL_MAKER_FEE
 
             if self.dry_run:
-                # ── Simulasi Exit ─────────────────────────────────────────────
                 order = {
-                    "id":     f"DRY-{int(time.time())}",
-                    "symbol": pair,
-                    "side":   "sell",
-                    "price":  exit_price,
-                    "amount": amount,
+                    "id": f"DRY-{int(time.time())}",
                     "status": "closed",
-                    "dry_run": True,
+                    "price": exit_price,
+                    "amount": amount
                 }
-                print(
-                    f"DRY RUN: Virtual Exit ({reason}) | {pair} | "
-                    f"Price: {exit_price:,.2f} | Crypto: {amount:.6f}"
-                )
+                print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
                 params = {'post_only': True} if reason == "TAKE_PROFIT" else {}
                 order = self.exchange.create_limit_sell_order(pair, amount, exit_price, params)
 
+            # Audit log
+            db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
+
             order_status = order.get('status', 'closed')
+            from config import FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
+            
+            # Tentukan fee jual berdasarkan strategi exit
+            is_taker = reason in ("STOP_LOSS", "HARD_STOP_LOSS")
+            fee_sell_rate = FEE_SELL_TAKER if is_taker else FEE_SELL_MAKER
+            
+            # Entry fee selalu Maker (karena bot antri beli)
+            fee_buy = amount_idr * FEE_BUY_MAKER
+            
+            sell_value = amount * price
+            fee_sell = sell_value * fee_sell_rate
+            
+            gross_pnl = (price - entry_price) * amount
+            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+            
             if order_status in ['closed', 'canceled', 'done', 'fill']:
                 db.delete_position(pair)
             else:
                 db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
-            
-            # Log to Database Audit
-            db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
-            
-            gross_pnl = (price - entry_price) * amount
-            fee_buy = amount_idr * FEE_PER_SIDE
-            sell_value = amount * price
-            fee_sell = sell_value * FEE_PER_SIDE
-            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
             
             pnl_idr = net_pnl_idr
             pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
