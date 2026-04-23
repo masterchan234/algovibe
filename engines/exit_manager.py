@@ -1,8 +1,9 @@
 import json
 import os
 import time
+from datetime import datetime
 
-from config import POSITION_FILE, EXIT_LOG, TP_PCT, SL_PCT
+from config import POSITION_FILE, EXIT_LOG, TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
 from engines.telegram_bot import send_telegram_message
 
 class ExitManager:
@@ -36,6 +37,46 @@ class ExitManager:
                 
             current_price = float(current_tickers[pair]['last'])
             entry_price = data['entry_price']
+            
+            # --- AUTO-CANCEL LOGIC UNTUK PENDING_BUY ---
+            if data.get('status') == "PENDING_BUY":
+                if self.dry_run:
+                    # Di mode simulasi, anggap selalu filled seketika (sudah dihandle OPEN di main.py, 
+                    # fallback hapus aja kalau somehow nyangkut)
+                    continue
+
+                order_id = data.get('entry_order_id')
+                if not order_id:
+                    continue
+                    
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
+                
+                # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
+                spread_pct = (current_price - entry_price) / entry_price
+                
+                is_timeout = time_elapsed > PENDING_BUY_TIMEOUT_MINUTES
+                is_too_far = spread_pct > PENDING_BUY_MAX_SPREAD_PCT
+                
+                if is_timeout or is_too_far:
+                    reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
+                    try:
+                        self.exchange.cancel_order(order_id, pair)
+                        # Hapus lokal sebagai fallback jika PrivateWS miss event
+                        if pair in positions:
+                            del positions[pair]
+                            self.save_positions(positions)
+                        
+                        msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
+                        print(msg.replace('*', '').replace('\n', ' | '))
+                        send_telegram_message(msg)
+                    except Exception as e:
+                        print(f"Failed to auto-cancel {pair}: {e}")
+                    
+                    # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
+                continue
+            # --- END AUTO-CANCEL ---
+
             amount = data['amount']
             
             # Import the required variables dynamically

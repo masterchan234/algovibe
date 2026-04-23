@@ -30,11 +30,13 @@ MIN_VOLUME_FILTER      = 100000000  # IDR per 24h
 MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================
-# 3. EXECUTION SETTINGS (TP/SL)
+# 3. EXECUTION SETTINGS (TP/SL/AUTO-CANCEL)
 # ==========================================
 TP_PCT = 0.015   # +1.5% Target Profit (Baseline Minimum)
 SL_PCT = -0.008  # -0.8% Stop Loss
 MIN_NET_PROFIT_IDR = 300 # Minimum target keuntungan bersih (Rupiah) per trade
+PENDING_BUY_TIMEOUT_MINUTES = 3
+PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
 # ==========================================
 # 4. TAX & FEE STRUCTURE (Indodax 2026 / PMK 68/2022)

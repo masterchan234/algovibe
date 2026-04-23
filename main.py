@@ -127,6 +127,11 @@ class ScalperBot:
         if side == "sell" and status in ("DONE", "FILL"):
             should_delete = True
             
+        # Jika order BUY berhasil masuk market, ubah PENDING_BUY jadi OPEN
+        mark_buy_open = False
+        if side == "buy" and status in ("DONE", "FILL"):
+            mark_buy_open = True
+            
         # Jika order dibatalkan/ditolak
         if status in ("CANCELLED", "REJECTED"):
             if side == "buy":
@@ -134,7 +139,7 @@ class ScalperBot:
             elif side == "sell":
                 revert_to_open = True
 
-        if should_delete or revert_to_open:
+        if should_delete or revert_to_open or mark_buy_open:
             pos_file = f"{RAM_PATH}/open_positions.json"
             if os.path.exists(pos_file):
                 try:
@@ -153,6 +158,9 @@ class ScalperBot:
                                 positions[key]["status"] = "OPEN"
                                 positions[key]["exit_order_id"] = None
                                 log_message(f"[PWS] Position Reverted to OPEN: {symbol} (sell {status})")
+                            elif mark_buy_open:
+                                positions[key]["status"] = "OPEN"
+                                log_message(f"[PWS] Order Filled. Position OPEN: {symbol}")
                             modified = True
                             break
 
@@ -229,6 +237,7 @@ class ScalperBot:
                 order = self.exchange.create_limit_buy_order(
                     pair, amount_crypto, buy_price, {'post_only': True}
                 )
+                order_id = order.get('id')
                 with open(EXECUTION_LOG, "a") as f:
                     f.write(json.dumps(order) + "\n")
 
@@ -248,7 +257,8 @@ class ScalperBot:
                 "amount_idr":  amount_idr,
                 "timestamp":   datetime.now().isoformat(),
                 "dry_run":     DRY_RUN,
-                "status":      "OPEN",
+                "status":      "OPEN" if DRY_RUN else "PENDING_BUY",
+                "entry_order_id": order_id if not DRY_RUN else None,
                 "exit_order_id": None
             }
 
@@ -311,7 +321,13 @@ class ScalperBot:
             # Take Top N for Micro-tracking
             high_speed = [p for p in ranked if p['volatility'] > 0.5][:MAX_TRACKED_PAIRS]
 
+            # Ambil open positions agar tidak melakukan double-buy (Orphaned Entry fix)
+            open_positions = self.exit_manager.get_open_positions()
+
             for p in high_speed:
+                if p['pair'] in open_positions:
+                    continue  # Lewati pair yang sedang dipegang
+                
                 trend, breakout, history = self.update_history_and_trend(p['pair'], p['last'])
 
                 # Get Prediction Probability
