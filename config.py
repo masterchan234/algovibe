@@ -34,7 +34,7 @@ MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 # 3. STRATEGY PARAMETERS
 # ==========================================
 TP_PCT = 0.02   # +2.0% Target Profit (Baseline Minimum)
-SL_PCT = -0.015  # -1.5% Stop Loss (Wider to avoid whipsaw noise)
+SL_PCT = -0.012  # -1.2% Stop Loss (Lebih ketat untuk memotong kerugian lebih cepat)
 
 # --- Trailing Stop Loss ---
 TRAILING_STOP_ACTIVATION_PCT = 0.01  # Activate trailing stop when profit hits 1.0%
@@ -55,7 +55,7 @@ AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
-BUY_MAKER_OFFSET = 0.0005 # Antri beli 0.05% di bawah market
+BUY_MAKER_OFFSET = 0.002 # Antri beli 0.2% di bawah pucuk harga (Pullback Entry Strategy)
 SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
 SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
 

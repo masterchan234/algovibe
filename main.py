@@ -87,10 +87,12 @@ class ScalperBot:
         avg_10 = sum(history[-10:]) / 10 if len(history) >= 10 else history[0]
         is_up = len(history) >= 10 and price > avg_10 and price >= history[-3]
         
-        # Logic Breakout: Current > Max of prev 5
-        is_breakout = len(history) >= 6 and price > max(history[-6:-1])
-        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.2%  (tangkap awal pergerakan)
-        is_flat_breakout = len(history) >= 10 and price > avg_10 * 1.002
+        # Logic Breakout: Current > Max of prev 5, tapi harus di atas rata-rata 20 tick untuk memfilter spike sesaat
+        avg_20 = sum(history[-20:]) / 20 if len(history) >= 20 else avg_10
+        is_breakout = len(history) >= 20 and price > max(history[-6:-1]) and price > avg_20 * 1.001
+        
+        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.3% (syarat lebih ketat)
+        is_flat_breakout = len(history) >= 10 and price > avg_10 * 1.003
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
@@ -350,7 +352,7 @@ class ScalperBot:
                     time.sleep(60)
                     break
 
-                if breakout and ai_ready and (trend == "UP" or has_strong_imb):
+                if breakout and ai_ready and (trend == "UP" and has_strong_imb):
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
