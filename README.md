@@ -83,13 +83,13 @@ Menjalankan Algovibe dengan Docker Compose adalah cara paling mudah dan bersih. 
 
 Untuk memastikan bot berjalan secara stabil 24/7 di *background*, sangat disarankan menggunakan *Systemd Service*.
 
-### 1. Membuat File Service
-Buat file service baru di `/etc/systemd/system/indodax-scalper.service` menggunakan editor teks (misal: `nano` atau `vim`):
+### 1. Membuat File Service (Bot & Dashboard)
+Buat file service untuk bot utama di `/etc/systemd/system/indodax-scalper.service`:
 ```bash
 sudo nano /etc/systemd/system/indodax-scalper.service
 ```
 
-Isi file tersebut dengan konfigurasi berikut (sesuaikan `WorkingDirectory` dan `ExecStart` dengan path instalasi Anda):
+Isi file tersebut dengan konfigurasi berikut:
 ```ini
 [Unit]
 Description=Indodax Scalper Autonomous Agent
@@ -103,25 +103,55 @@ ExecStart=/usr/bin/python3 /root/projects/crypto/algotrade/main.py
 Restart=always
 RestartSec=10
 Environment="PYTHONUNBUFFERED=1"
+StandardOutput=append:/root/projects/crypto/algotrade/data/logs/scalper.log
+StandardError=append:/root/projects/crypto/algotrade/data/logs/scalper.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Lalu, buat service kedua khusus untuk **Dashboard** di `/etc/systemd/system/indodax-dashboard.service`:
+```bash
+sudo nano /etc/systemd/system/indodax-dashboard.service
+```
+
+Isi dengan konfigurasi:
+```ini
+[Unit]
+Description=AlgoVibe Dashboard Server
+After=network.target indodax-scalper.service
+BindsTo=indodax-scalper.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/crypto/algotrade
+ExecStart=/usr/bin/python3 /root/projects/crypto/algotrade/dashboard/server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/root/projects/crypto/algotrade/data/logs/dashboard.log
+StandardError=append:/root/projects/crypto/algotrade/data/logs/dashboard.log
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ### 2. Mengaktifkan dan Menjalankan Service
-Setelah file service dibuat, jalankan perintah berikut untuk mengaktifkannya agar otomatis berjalan setiap kali server menyala (reboot):
+Jalankan perintah berikut untuk mengaktifkan keduanya agar berjalan otomatis saat boot:
 ```bash
 # Memuat ulang konfigurasi systemd
 sudo systemctl daemon-reload
 
-# Mengaktifkan dan langsung menjalankan service
+# Mengaktifkan dan langsung menjalankan service bot dan dashboard
 sudo systemctl enable --now indodax-scalper.service
+sudo systemctl enable --now indodax-dashboard.service
 
 # Melihat status
-systemctl status indodax-scalper.service
+sudo systemctl status indodax-scalper.service indodax-dashboard.service
 
 # Memantau log secara real-time
-tail -f scalper.log
+tail -f data/logs/scalper.log
+tail -f data/logs/dashboard.log
 ```
 
 ## 📊 Laporan Performa

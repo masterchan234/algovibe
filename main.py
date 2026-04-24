@@ -1,6 +1,6 @@
 import os
 import time
-import subprocess
+
 import collections
 from datetime import datetime
 from collections import defaultdict, deque
@@ -199,29 +199,9 @@ class ScalperBot:
             log_message(f"Trade Error: {e}")
             return False
 
-    def _start_dashboard(self):
-        """Start the Predator HUD Dashboard in the background."""
-        try:
-            log_message("Launching Predator HUD Dashboard...")
-            log_path = "data/logs/dashboard.log"
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            log_f = open(log_path, "a")
-            env = os.environ.copy()
-            env["PYTHONPATH"] = "/home/chandev/.local/lib/python3.13/site-packages:" + env.get("PYTHONPATH", "")
-            import sys
-            subprocess.Popen(
-                [sys.executable, "dashboard/server.py"],
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
-                env=env
-            )
-            log_message("Dashboard available at http://localhost:5005")
-        except Exception as e:
-            log_message(f"Failed to launch dashboard: {e}")
+    # Dashboard dijalankan oleh indodax-dashboard.service (systemd terpisah)
 
     def run(self):
-        # ── Start Dashboard ──
-        self._start_dashboard()
         
         # ── Mulai WebSocket Clients ─────────────────────────────────────────
         log_message("Starting Market Data WebSocket…")

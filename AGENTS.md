@@ -12,8 +12,11 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
   - `INDODAX_API_KEY`
   - `INDODAX_API_SECRET`
 - Development runtime (preferred): `python3 main.py`
-- Service runtime (production-like/native): `systemctl start indodax-scalper.service`
-- Service stop after changes: `systemctl stop indodax-scalper.service`
+- Service runtime (production-like/native):
+  - Bot Engine: `systemctl start indodax-scalper.service`
+  - Dashboard: `systemctl start indodax-dashboard.service`
+- Service stop after changes: 
+  - `systemctl stop indodax-scalper.service indodax-dashboard.service`
 - Do not use Docker during development.
 - Docker run (`docker compose up -d`) is only for container deployment scenarios.
 - Logs:
@@ -35,7 +38,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - `engines/exit_manager.py`: open-position monitoring and exits.
 - `engines/oracle.py`, `engines/predictor.py`: adaptive regime/AI scoring logic.
 - `engines/database.py`: SQLite schema + state/history persistence.
-- `dashboard/server.py`: Flask API/static dashboard.
+- `dashboard/server.py`: Flask API/static dashboard (runs as standalone `indodax-dashboard.service`).
 
 ## 5) Code Conventions in This Repo
 - Keep edits modular; prefer changing one engine at a time.
