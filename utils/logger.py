@@ -4,7 +4,7 @@ from datetime import datetime
 from engines.telegram_bot import send_telegram_message
 
 # Setup logging ke file dan konsol
-LOG_FILE = "/root/projects/crypto/algotrade/data/logs/scalper.log"
+from config import LOG_FILE
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 logging.basicConfig(
