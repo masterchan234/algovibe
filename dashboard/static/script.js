@@ -284,21 +284,61 @@ async function updateTradeHistory() {
 
         data.forEach(t => {
             const tr = document.createElement('tr');
+            const isOpen = t.status === 'OPEN';
             const isWin = t.pnl_idr > 0;
-            const pnlColorClass = isWin ? 'up' : 'down';
+            
+            let pnlColorClass = '';
+            let formattedPnl = '-';
+            
+            if (!isOpen) {
+                pnlColorClass = isWin ? 'up' : 'down';
+                formattedPnl = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(t.pnl_idr);
+                formattedPnl = (isWin ? '+' : '') + formattedPnl;
+            }
+
             const time = new Date(t.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
-            const formattedPnl = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(t.pnl_idr);
             
             tr.innerHTML = `
                 <td style="color: var(--text-muted)">${time}</td>
                 <td class="col-pair">${t.pair.toUpperCase()}</td>
                 <td>${t.reason}</td>
-                <td class="${pnlColorClass}">
-                    ${isWin ? '+' : ''}${formattedPnl}
+                <td class="${pnlColorClass}" style="${isOpen ? 'color: var(--text-muted)' : ''}">
+                    ${formattedPnl}
                 </td>
-                <td style="color: var(--text-muted)">${t.reason.includes('TP') ? 'COMPLETED' : 'CLOSED'}</td>
+                <td style="color: ${isOpen ? 'var(--accent-blue)' : 'var(--text-muted)'}">${isOpen ? 'OPEN' : (t.reason.includes('TP') ? 'COMPLETED' : 'CLOSED')}</td>
             `;
             tbody.appendChild(tr);
+        });
+    } catch (e) {}
+}
+
+// Fetch System Logs
+async function updateLogs() {
+    try {
+        const res = await fetch('/api/logs');
+        const data = await res.json();
+        const container = document.getElementById('ai-logs');
+        
+        // Only update if there's new data to avoid flickering or just clear and render
+        container.innerHTML = '';
+        data.forEach(log => {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            
+            let actionColor = 'var(--text-primary)';
+            if (log.side === 'BUY') actionColor = 'var(--accent-green)';
+            if (log.side === 'SELL') actionColor = 'var(--accent-red)';
+            
+            const time = new Date(log.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+            
+            div.innerHTML = `
+                <span class="log-time">${time}</span>
+                <span class="log-msg">
+                    <strong style="color: ${actionColor}">${log.side}</strong> ${log.pair.toUpperCase()} 
+                    @ ${log.price} (${log.status.toUpperCase()})
+                </span>
+            `;
+            container.appendChild(div);
         });
     } catch (e) {}
 }
@@ -336,10 +376,12 @@ initSystem();
 updateStats();
 updateWatchlist();
 updateTradeHistory();
+updateLogs();
 
 setInterval(updateStats, 5000);
 setInterval(updateWatchlist, 3000);
 setInterval(updateTradeHistory, 10000);
+setInterval(updateLogs, 5000);
 setInterval(updateStream, 300);
 
 // Default Selection

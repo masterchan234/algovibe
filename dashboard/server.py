@@ -78,11 +78,40 @@ def get_pair_history(pair):
 
 @app.route('/api/trades/recent')
 def get_recent_trades_api():
+    conn = get_db_connection()
     try:
+        # Fetch open positions
+        positions = conn.execute("SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp as created_at FROM positions").fetchall()
+        
+        # Fetch recent trades
         trades = db.get_recent_trades(limit=20)
-        return jsonify(trades)
-    except:
+        
+        results = []
+        for p in positions:
+            results.append({
+                "pair": p['pair'],
+                "reason": "OPEN POSITION",
+                "pnl_idr": 0, # Still open, PnL is floating (could be calculated if we wanted, but 0 is safe for now)
+                "created_at": p['created_at'],
+                "status": "OPEN"
+            })
+            
+        for t in trades:
+            results.append({
+                "pair": t['pair'],
+                "reason": t['reason'],
+                "pnl_idr": t['pnl_idr'],
+                "created_at": t['created_at'],
+                "status": "CLOSED"
+            })
+            
+        # Sort combined results by created_at descending
+        results.sort(key=lambda x: str(x['created_at']), reverse=True)
+        return jsonify(results[:20])
+    except Exception as e:
         return jsonify([])
+    finally:
+        conn.close()
 
 @app.route('/api/radar')
 def get_radar_data():
