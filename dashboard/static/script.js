@@ -326,9 +326,11 @@ async function updateLogs() {
             div.className = 'log-entry';
             
             let actionColor = 'var(--text-primary)';
-            if (log.side === 'BUY') actionColor = 'var(--accent-green)';
-            if (log.side === 'SELL') actionColor = 'var(--accent-red)';
-            if (log.side === 'AI SIGNAL') actionColor = 'var(--accent-blue)';
+            if (log.side === 'PREDICTION') actionColor = 'var(--accent-blue)';
+            if (log.side.includes('REGIME')) actionColor = '#fbbf24'; // Yellow
+            if (log.side.includes('WHALE')) actionColor = '#f472b6'; // Pink
+            if (log.side.includes('FAKE PUMP')) actionColor = '#ef4444'; // Red
+            if (log.side === 'ANALYSIS') actionColor = '#a855f7'; // Purple
             
             const time = new Date(log.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
             

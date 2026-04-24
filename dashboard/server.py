@@ -162,30 +162,68 @@ def get_weights():
 def get_logs():
     conn = get_db_connection()
     try:
-        orders = conn.execute("SELECT * FROM order_logs ORDER BY created_at DESC LIMIT 10").fetchall()
-        ai_scans = conn.execute("SELECT pair, prediction_prob, trend, updated_at as created_at FROM ticker_history WHERE prediction_prob > 0.5 ORDER BY updated_at DESC LIMIT 10").fetchall()
+        # 1. Fetch AI Signals from ticker_history
+        ai_scans = conn.execute("""
+            SELECT pair, prediction_prob, trend, updated_at as created_at 
+            FROM ticker_history 
+            WHERE prediction_prob > 0.4
+            ORDER BY updated_at DESC LIMIT 10
+        """).fetchall()
+        
+        # 2. Fetch Oracle Intelligence from bot_state
+        oracle_data = conn.execute("""
+            SELECT key, value, updated_at as created_at 
+            FROM bot_state 
+            WHERE key IN ('market_regime', 'regime_leader', 'latest_whale', 'latest_fake_pump')
+            ORDER BY updated_at DESC
+        """).fetchall()
+        
+        # 3. Fetch Trade Analytics
+        analytics = conn.execute("""
+            SELECT pair, entry_timestamp as created_at, ai_prob, whale_boost, sector_sentiment 
+            FROM trade_analytics 
+            ORDER BY entry_timestamp DESC LIMIT 5
+        """).fetchall()
         
         results = []
-        for o in orders:
-            results.append({
-                "created_at": o['created_at'],
-                "pair": o['pair'],
-                "side": o['side'],
-                "price": o['price'],
-                "status": o['status']
-            })
-            
+        
+        # Process AI Signals
         for a in ai_scans:
             results.append({
                 "created_at": a['created_at'],
-                "pair": a['pair'],
-                "side": "AI SIGNAL",
+                "pair": a['pair'].upper(),
+                "side": "PREDICTION",
                 "price": f"Prob {round(a['prediction_prob']*100)}%",
-                "status": a['trend']
+                "status": f"Trend: {a['trend']}"
+            })
+            
+        # Process Oracle Data
+        for o in oracle_data:
+            icon = "🔮 ORACLE"
+            if o['key'] == 'market_regime': icon = "📡 REGIME"
+            if o['key'] == 'latest_whale': icon = "🐋 WHALE"
+            if o['key'] == 'latest_fake_pump': icon = "⚠️ FAKE PUMP"
+            
+            results.append({
+                "created_at": o['created_at'],
+                "pair": o['value'].split('|')[0].upper() if '|' in o['value'] else 'GLOBAL',
+                "side": icon,
+                "price": o['value'].split('|')[1] if '|' in o['value'] else o['value'],
+                "status": "DETECTED"
+            })
+            
+        # Process Analytics
+        for d in analytics:
+            results.append({
+                "created_at": d['created_at'],
+                "pair": d['pair'].upper(),
+                "side": "ANALYSIS",
+                "price": f"Whale: {d['whale_boost']}x",
+                "status": f"Sector: {round(d['sector_sentiment'],1)}%"
             })
             
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return jsonify(results[:15])
+        return jsonify(results[:20])
     except Exception as e:
         import traceback
         print("LOG ERROR:", traceback.format_exc())
