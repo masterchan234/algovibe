@@ -10,7 +10,7 @@ from engines.database import db
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
-DB_PATH = '/root/projects/crypto/algotrade/data/algotrade.db'
+from config import DB_PATH
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
