@@ -1,8 +1,161 @@
 let chart;
-let areaSeries;
 let activePair = 'BTCCIDR';
 let lastStats = {};
 let lastPrices = {};
+
+// Custom Canvas Area Chart Implementation
+class CustomAreaChart {
+    constructor(canvasId, tooltipId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.tooltip = document.getElementById(tooltipId);
+        this.data = [];
+        this.hoverIndex = -1;
+        
+        // Handle resizing
+        this.resizeObserver = new ResizeObserver(() => this.resize());
+        this.resizeObserver.observe(this.canvas.parentElement);
+        
+        // Interactivity
+        this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+        this.canvas.addEventListener('mouseleave', () => {
+            this.hoverIndex = -1;
+            this.tooltip.style.display = 'none';
+            this.draw();
+        });
+    }
+
+    resize() {
+        const rect = this.canvas.parentElement.getBoundingClientRect();
+        // High DPI support
+        const dpr = window.devicePixelRatio || 1;
+        this.canvas.width = rect.width * dpr;
+        this.canvas.height = rect.height * dpr;
+        this.ctx.scale(dpr, dpr);
+        this.canvas.style.width = `${rect.width}px`;
+        this.canvas.style.height = `${rect.height}px`;
+        this.draw();
+    }
+
+    setData(data) {
+        this.data = data;
+        this.draw();
+    }
+
+    handleMouseMove(e) {
+        if (!this.data.length) return;
+        
+        const rect = this.canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        
+        const width = rect.width;
+        const step = width / Math.max(1, this.data.length - 1);
+        
+        // Find nearest data point
+        let index = Math.round(x / step);
+        index = Math.max(0, Math.min(index, this.data.length - 1));
+        
+        if (this.hoverIndex !== index) {
+            this.hoverIndex = index;
+            this.draw(); // Redraw crosshair
+            
+            // Update Tooltip
+            const point = this.data[index];
+            const px = index * step;
+            this.tooltip.innerText = `$${point.value.toLocaleString()}`;
+            this.tooltip.style.display = 'block';
+            
+            // Position tooltip
+            const tooltipRect = this.tooltip.getBoundingClientRect();
+            let tooltipX = px + 10;
+            if (tooltipX + tooltipRect.width > width) {
+                tooltipX = px - tooltipRect.width - 10;
+            }
+            this.tooltip.style.left = `${tooltipX}px`;
+            this.tooltip.style.top = '10px';
+        }
+    }
+
+    draw() {
+        const rect = this.canvas.parentElement.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+        
+        this.ctx.clearRect(0, 0, width, height);
+        
+        if (!this.data.length) return;
+
+        const values = this.data.map(d => d.value);
+        const minVal = Math.min(...values);
+        const maxVal = Math.max(...values);
+        const range = maxVal - minVal || 1;
+        
+        const padding = height * 0.1; // 10% padding top/bottom
+        const drawHeight = height - (padding * 2);
+        const stepX = width / Math.max(1, this.data.length - 1);
+
+        // Path generation
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, height);
+        
+        let points = [];
+        this.data.forEach((d, i) => {
+            const x = i * stepX;
+            const normalizedY = (d.value - minVal) / range;
+            const y = height - padding - (normalizedY * drawHeight);
+            points.push({x, y});
+            
+            if (i === 0) this.ctx.lineTo(x, y);
+            else this.ctx.lineTo(x, y);
+        });
+
+        this.ctx.lineTo(width, height);
+        this.ctx.closePath();
+
+        // Gradient Fill
+        const gradient = this.ctx.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, 'rgba(59, 130, 246, 0.25)'); // #3b82f6 with opacity
+        gradient.addColorStop(1, 'rgba(59, 130, 246, 0.0)');
+        this.ctx.fillStyle = gradient;
+        this.ctx.fill();
+
+        // Draw Line
+        this.ctx.beginPath();
+        points.forEach((p, i) => {
+            if (i === 0) this.ctx.moveTo(p.x, p.y);
+            else this.ctx.lineTo(p.x, p.y);
+        });
+        this.ctx.strokeStyle = '#3b82f6';
+        this.ctx.lineWidth = 2;
+        this.ctx.lineJoin = 'round';
+        this.ctx.stroke();
+
+        // Draw Crosshair if hovering
+        if (this.hoverIndex >= 0 && this.hoverIndex < points.length) {
+            const p = points[this.hoverIndex];
+            
+            // Vertical line
+            this.ctx.beginPath();
+            this.ctx.setLineDash([4, 4]);
+            this.ctx.moveTo(p.x, 0);
+            this.ctx.lineTo(p.x, height);
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            this.ctx.lineWidth = 1;
+            this.ctx.stroke();
+            this.ctx.setLineDash([]);
+            
+            // Dot
+            this.ctx.beginPath();
+            this.ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            this.ctx.fillStyle = '#09090b';
+            this.ctx.fill();
+            this.ctx.lineWidth = 2;
+            this.ctx.strokeStyle = '#3b82f6';
+            this.ctx.stroke();
+        }
+    }
+}
+
 
 // Helper for flashing numbers via text color
 function flashText(el, direction) {
@@ -10,58 +163,13 @@ function flashText(el, direction) {
     const originalColor = el.style.color;
     el.style.color = direction === 'up' ? '#10b981' : '#ef4444';
     setTimeout(() => {
-        el.style.color = originalColor;
+        el.style.color = originalColor || '';
     }, 600);
 }
 
-// Initialize Chart
-function initChart() {
-    const chartContainer = document.getElementById('chart-canvas');
-    chart = LightweightCharts.createChart(chartContainer, {
-        layout: {
-            backgroundColor: 'transparent',
-            textColor: '#71717a',
-            fontSize: 11,
-            fontFamily: "'Inter', sans-serif"
-        },
-        grid: {
-            vertLines: { color: 'rgba(255, 255, 255, 0.03)' },
-            horzLines: { color: 'rgba(255, 255, 255, 0.03)' },
-        },
-        crosshair: {
-            mode: LightweightCharts.CrosshairMode.Normal,
-            vertLine: {
-                color: '#3b82f6',
-                width: 1,
-                style: 3,
-                labelBackgroundColor: '#3b82f6',
-            },
-            horzLine: {
-                color: '#3b82f6',
-                width: 1,
-                style: 3,
-                labelBackgroundColor: '#3b82f6',
-            },
-        },
-        rightPriceScale: {
-            borderColor: '#27272a',
-        },
-        timeScale: {
-            borderColor: '#27272a',
-            timeVisible: true,
-        },
-    });
-
-    areaSeries = chart.addAreaSeries({
-        lineColor: '#3b82f6',
-        topColor: 'rgba(59, 130, 246, 0.2)',
-        bottomColor: 'rgba(59, 130, 246, 0.0)',
-        lineWidth: 2,
-    });
-
-    window.addEventListener('resize', () => {
-        chart.resize(chartContainer.clientWidth, chartContainer.clientHeight);
-    });
+// Initialize System
+function initSystem() {
+    chart = new CustomAreaChart('custom-chart', 'chart-tooltip');
 }
 
 // Fetch Stats
@@ -71,8 +179,6 @@ async function updateStats() {
         const data = await res.json();
         
         const pnlEl = document.getElementById('daily-pnl');
-        const newPnl = `$${(data.daily_pnl / 15000).toFixed(2)}`; // Converting IDR to rough USD for a "professional" look if desired, or keep IDR. Let's keep original data structure but format nicely.
-        
         const formattedPnl = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(data.daily_pnl);
         
         if (pnlEl.innerText !== formattedPnl) {
@@ -127,7 +233,7 @@ async function updateWatchlist() {
             item.innerHTML = `
                 <div class="ticker-info">
                     <span class="ticker-pair">${t.pair.toUpperCase()}</span>
-                    <span class="ticker-price class="flash-text">${priceStr}</span>
+                    <span class="ticker-price flash-text">${priceStr}</span>
                 </div>
                 <span class="ticker-change ${changeClass}">${t.change > 0 ? '+' : ''}${t.change.toFixed(2)}%</span>
             `;
@@ -162,8 +268,7 @@ async function selectPair(pair, trend, prob) {
             value: parseFloat(price)
         }));
         
-        areaSeries.setData(chartData);
-        chart.timeScale().fitContent();
+        chart.setData(chartData);
     } catch (e) {}
     
     updateWatchlist();
@@ -227,7 +332,7 @@ function addLog(msg) {
 }
 
 // Main Loop
-initChart();
+initSystem();
 updateStats();
 updateWatchlist();
 updateTradeHistory();

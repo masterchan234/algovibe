@@ -6,7 +6,6 @@
     <title>Quantitative Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -71,7 +70,10 @@
                                 <div class="chart-subtitle" id="pair-details">Awaiting selection</div>
                             </div>
                         </div>
-                        <div id="chart-canvas"></div>
+                        <div id="chart-canvas">
+                            <canvas id="custom-chart"></canvas>
+                            <div id="chart-tooltip" class="chart-tooltip"></div>
+                        </div>
                     </div>
                 </div>
 
