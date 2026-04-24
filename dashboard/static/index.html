@@ -3,91 +3,99 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PREDATOR // PROFESSIONAL HUD</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <title>Quantitative Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <!-- TradingView Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div class="app-container">
-        <!-- TOP NAV: Global Stats -->
+        <!-- TOP NAV: Metrics -->
         <header class="top-nav">
-            <div class="logo">
-                <span class="glitch" data-text="PREDATOR">PREDATOR</span>
-                <span class="sub-logo">QUANT ENGINE v4.0</span>
+            <div class="logo-section">
+                <span class="logo-title">QUANTITATIVE DASHBOARD</span>
             </div>
             <div class="global-metrics">
                 <div class="metric-card">
-                    <span class="label">DAILY PNL</span>
-                    <span class="value" id="daily-pnl">Rp 0</span>
+                    <span class="label">Daily PnL</span>
+                    <span class="value" id="daily-pnl">$0.00</span>
                 </div>
                 <div class="metric-card">
-                    <span class="label">WIN RATE</span>
-                    <span class="value accent" id="win-rate">0%</span>
+                    <span class="label">Win Rate</span>
+                    <span class="value" id="win-rate">0.0%</span>
                 </div>
                 <div class="metric-card">
-                    <span class="label">EXECUTIONS</span>
+                    <span class="label">Executions</span>
                     <span class="value" id="total-trades">0</span>
                 </div>
                 <div class="metric-card">
-                    <span class="label">REGIME</span>
-                    <span class="value" id="market-regime">CHOPPY</span>
+                    <span class="label">Market Regime</span>
+                    <span class="value" id="market-regime">ANALYZING</span>
                 </div>
             </div>
         </header>
 
         <main class="main-layout">
-            <!-- SIDEBAR: Watchlist -->
-            <aside class="watchlist">
-                <div class="panel-header">WATCHLIST</div>
-                <div class="ticker-list" id="ticker-list">
-                    <!-- Tickers populated by JS -->
+            <!-- LEFT SIDEBAR: Logs & Stream -->
+            <aside class="left-sidebar">
+                <div class="panel log-panel">
+                    <div class="panel-header">System Events</div>
+                    <div class="log-container" id="ai-logs">
+                        <!-- Logs populated by JS -->
+                    </div>
+                </div>
+                <div class="panel stream-panel">
+                    <div class="panel-header">
+                        <span><span class="live-dot"></span>Live Stream</span>
+                    </div>
+                    <div class="stream-container" id="ws-stream">
+                        <!-- Raw data populated by JS -->
+                    </div>
                 </div>
             </aside>
 
-            <!-- CENTER: Chart & History -->
-            <section class="center-panel">
-                <div class="chart-container" id="chart-area">
-                    <div class="chart-header">
-                        <h2 id="active-pair">SELECT A PAIR</h2>
-                        <div class="chart-controls">
-                            <span class="badge" id="pair-trend">N/A</span>
-                            <span class="badge" id="pair-prob">0% PROB</span>
+            <!-- CENTER AREA -->
+            <section class="center-area">
+                <!-- Top Center: Watchlist + Chart -->
+                <div class="top-center">
+                    <div class="panel watchlist-panel">
+                        <div class="panel-header">Watchlist</div>
+                        <div class="ticker-list" id="ticker-list">
+                            <!-- Tickers populated by JS -->
                         </div>
                     </div>
-                    <div id="chart-canvas"></div>
+                    <div class="panel chart-panel">
+                        <div class="chart-header">
+                            <div class="chart-title-area">
+                                <h2 id="active-pair">SELECT PAIR</h2>
+                                <div class="chart-subtitle" id="pair-details">Awaiting selection</div>
+                            </div>
+                        </div>
+                        <div id="chart-canvas"></div>
+                    </div>
                 </div>
-                <div class="trade-history-panel">
-                    <div class="panel-header">RECENT TRANSACTIONS</div>
-                    <table class="trade-table">
-                        <thead>
-                            <tr>
-                                <th>TIME</th>
-                                <th>PAIR</th>
-                                <th>TYPE</th>
-                                <th>PROFIT</th>
-                                <th>REASON</th>
-                            </tr>
-                        </thead>
-                        <tbody id="trade-history-body">
-                            <!-- Trades populated by JS -->
-                        </tbody>
-                    </table>
+
+                <!-- Bottom Center: Trade History -->
+                <div class="panel history-panel">
+                    <div class="panel-header">Execution Ledger</div>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Timestamp</th>
+                                    <th>Ticker</th>
+                                    <th>Logic</th>
+                                    <th>Profit/Loss</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trade-history-body">
+                                <!-- Trades populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
-
-            <!-- RIGHT: AI Logs & Stream -->
-            <aside class="intel-panel">
-                <div class="panel-header">AI INTEL & WHALE ALERTS</div>
-                <div class="log-container" id="ai-logs">
-                    <!-- Logs populated by JS -->
-                </div>
-                <div class="panel-header mt-20">LIVE WEBSOCKET STREAM</div>
-                <div class="stream-container" id="ws-stream">
-                    <!-- Raw data populated by JS -->
-                </div>
-            </aside>
         </main>
     </div>
     <script src="script.js"></script>
