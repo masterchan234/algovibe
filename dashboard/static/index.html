@@ -2,72 +2,94 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>PREDATOR HUD // AI WAR-ROOM</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PREDATOR // PROFESSIONAL HUD</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-    <div class="crt-overlay"></div>
-    <div class="crt-flicker"></div>
-    <div id="alert-overlay"></div>
-
-    <div class="whale-ticker">
-        <div class="ticker-wrap" id="whale-ticker-content">
-            >> SYSTEM ONLINE // SCANNING FOR WHALE ACTIVITY // STANDBY FOR TARGET ACQUISITION...
-        </div>
-    </div>
-
-    <div class="dashboard">
-        <header>
-            <div class="logo">PROJECT PREDATOR</div>
-            <div class="regime-status">
-                MARKET REGIME: <span id="market-regime" style="color: #00f2ff;">SCANNING...</span>
-                <button id="mute-btn" class="mute-btn">VOICE: OFF</button>
+    <div class="app-container">
+        <!-- TOP NAV: Global Stats -->
+        <header class="top-nav">
+            <div class="logo">
+                <span class="glitch" data-text="PREDATOR">PREDATOR</span>
+                <span class="sub-logo">QUANT ENGINE v4.0</span>
+            </div>
+            <div class="global-metrics">
+                <div class="metric-card">
+                    <span class="label">DAILY PNL</span>
+                    <span class="value" id="daily-pnl">Rp 0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">WIN RATE</span>
+                    <span class="value accent" id="win-rate">0%</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">EXECUTIONS</span>
+                    <span class="value" id="total-trades">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">REGIME</span>
+                    <span class="value" id="market-regime">CHOPPY</span>
+                </div>
             </div>
         </header>
 
-        <!-- Sidebar Left -->
-        <aside class="panel left-panel">
-            <div class="stat-card">
-                <div class="stat-label">TOTAL PROFIT/LOSS</div>
-                <div class="stat-value" id="total-pnl">Rp 0</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">DAILY EXECUTIONS</div>
-                <div class="stat-value" id="daily-trades" style="color: #00f2ff;">0</div>
-            </div>
-            
-            <div style="flex-grow: 1; margin-top: 20px;">
-                <h2>Neural Weights</h2>
-                <canvas id="weightsChart"></canvas>
-            </div>
-        </aside>
+        <main class="main-layout">
+            <!-- SIDEBAR: Watchlist -->
+            <aside class="watchlist">
+                <div class="panel-header">WATCHLIST</div>
+                <div class="ticker-list" id="ticker-list">
+                    <!-- Tickers populated by JS -->
+                </div>
+            </aside>
 
-        <!-- Center Radar -->
-        <main class="center-radar" id="center-radar">
-            <div id="regime-bg" class="regime-bg"></div>
-            <div id="volume-pulse" class="volume-pulse-container"></div>
-            <div id="special-alerts-container" style="position: absolute; width: 100%; height: 100%; pointer-events: none; overflow: hidden;"></div>
-            <canvas id="radarCanvas"></canvas>
-            <div id="radar-target-info" style="position: absolute; bottom: 20px; left: 20px; color: #00f2ff; font-size: 12px;"></div>
+            <!-- CENTER: Chart & History -->
+            <section class="center-panel">
+                <div class="chart-container" id="chart-area">
+                    <div class="chart-header">
+                        <h2 id="active-pair">SELECT A PAIR</h2>
+                        <div class="chart-controls">
+                            <span class="badge" id="pair-trend">N/A</span>
+                            <span class="badge" id="pair-prob">0% PROB</span>
+                        </div>
+                    </div>
+                    <div id="chart-canvas"></div>
+                </div>
+                <div class="trade-history-panel">
+                    <div class="panel-header">RECENT TRANSACTIONS</div>
+                    <table class="trade-table">
+                        <thead>
+                            <tr>
+                                <th>TIME</th>
+                                <th>PAIR</th>
+                                <th>TYPE</th>
+                                <th>PROFIT</th>
+                                <th>REASON</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trade-history-body">
+                            <!-- Trades populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- RIGHT: AI Logs & Stream -->
+            <aside class="intel-panel">
+                <div class="panel-header">AI INTEL & WHALE ALERTS</div>
+                <div class="log-container" id="ai-logs">
+                    <!-- Logs populated by JS -->
+                </div>
+                <div class="panel-header mt-20">LIVE WEBSOCKET STREAM</div>
+                <div class="stream-container" id="ws-stream">
+                    <!-- Raw data populated by JS -->
+                </div>
+            </aside>
         </main>
-
-        <!-- Sidebar Right -->
-        <aside class="panel right-panel">
-            <h2>Active Hunting Grounds</h2>
-            <div id="hunting-grounds" class="hunting-grounds-list">
-                <!-- Filled by script -->
-            </div>
-        </aside>
-
-        <!-- Neural Terminal -->
-        <footer class="neural-terminal" id="neural-terminal">
-            <div class="term-line">> Initializing AI Awareness...</div>
-            <div class="term-line">> Connecting to Indodax Private WebSocket...</div>
-            <div class="term-line">> Predator Engine V2.0.0-PRO Standby.</div>
-        </footer>
     </div>
-
     <script src="script.js"></script>
 </body>
 </html>

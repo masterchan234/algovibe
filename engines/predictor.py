@@ -1,96 +1,82 @@
 def get_prediction(price_history: list) -> float:
     """
-    Menghitung probabilitas eksekusi menggunakan indikator teknikal lanjutan.
-    Menerima array history harga, mengembalikan float 0.0 - 1.0.
+    Menghitung probabilitas eksekusi menggunakan Microstructure & Statistical Arbitrage.
+    Menerima array history harga (raw ticks, max 100), mengembalikan float 0.0 - 1.0.
     """
     from config import AI_MIN_HISTORY_POINTS
-    if not price_history or len(price_history) < AI_MIN_HISTORY_POINTS:
+    
+    n = len(price_history)
+    if n < AI_MIN_HISTORY_POINTS:
         return -1.0  # -1 indicates 'Warming Up' status
 
     try:
         prob = 0.40  # Base Score
         current_price = price_history[-1]
 
-        # 1. RSI (Relative Strength Index) - 14
-        gains = []
-        losses = []
-        for i in range(1, 15):
-            delta = price_history[i] - price_history[i-1]
-            if delta > 0:
-                gains.append(delta)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(-delta)
+        # --- Noise Filtering (EMA Smoothing) ---
+        # Ticks di kripto sangat berisik. Kita haluskan dulu historinya.
+        alpha = 0.2  # Smoothing factor
+        smoothed_history = [price_history[0]]
+        for i in range(1, n):
+            ema = (price_history[i] * alpha) + (smoothed_history[-1] * (1 - alpha))
+            smoothed_history.append(ema)
+
+        # Gunakan harga yang sudah dihaluskan untuk analisa tren
+        smoothed_current = smoothed_history[-1]
+
+        # 1. Linear Regression Slope (Momentum Sejati) dari Smoothed History
+        sum_x = n * (n - 1) / 2
+        sum_y = sum(smoothed_history)
+        sum_xy = sum(i * smoothed_history[i] for i in range(n))
+        sum_x2 = sum(i * i for i in range(n))
         
-        avg_gain = sum(gains) / 14.0
-        avg_loss = sum(losses) / 14.0
-        
-        for i in range(15, len(price_history)):
-            delta = price_history[i] - price_history[i-1]
-            gain = delta if delta > 0 else 0
-            loss = -delta if delta < 0 else 0
-            
-            avg_gain = (avg_gain * 13 + gain) / 14.0
-            avg_loss = (avg_loss * 13 + loss) / 14.0
-            
-        if avg_loss == 0:
-            rsi_val = 100.0
+        denominator = (n * sum_x2 - sum_x * sum_x)
+        if denominator == 0:
+            slope = 0
         else:
-            rs = avg_gain / avg_loss
-            rsi_val = 100.0 - (100.0 / (1.0 + rs))
-
-        if rsi_val > 70:
-            prob -= 0.10
-        elif rsi_val > 55:
-            prob += 0.20
-
-        # 2. MACD (12, 26, 9)
-        def ema(data, span):
-            alpha = 2 / (span + 1)
-            ema_vals = [data[0]]
-            for price in data[1:]:
-                ema_vals.append(price * alpha + ema_vals[-1] * (1 - alpha))
-            return ema_vals
-
-        ema12 = ema(price_history, 12)
-        ema26 = ema(price_history, 26)
-        macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
-        signal_line = ema(macd_line, 9)
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            
+        slope_pct = (slope / smoothed_current) * 100
         
-        macd_val = macd_line[-1]
-        sig_val = signal_line[-1]
-        
-        if macd_val > sig_val:
-            prob += 0.20
+        # Momentum harus lebih solid karena sudah di-smooth
+        if slope_pct > 0.003:
+            prob += 0.25
+        elif slope_pct > 0.001:
+            prob += 0.10
+        elif slope_pct < -0.003:
+            prob -= 0.35 # Trend turun jelas
 
-        # 3. Bollinger Bands (20, 2)
-        window = price_history[-20:]
-        ma = sum(window) / 20.0
-        variance = sum((x - ma) ** 2 for x in window) / 20.0
-        std = variance ** 0.5
+        # 2. Tick Volatility Z-Score (Mendeteksi Anomali / Breakout pada Smoothed Data)
+        mean_price = sum_y / n
+        variance = sum((p - mean_price) ** 2 for p in smoothed_history) / n
+        std_dev = variance ** 0.5
         
-        lower_band = ma - (std * 2)
-        upper_band = ma + (std * 2)
+        if std_dev > 0:
+            z_score = (smoothed_current - mean_price) / std_dev
+            
+            # Membutuhkan Z-Score lebih stabil (karena data sudah dihaluskan)
+            if z_score > 1.8:
+                prob += 0.15
+            elif z_score < -1.5:
+                prob -= 0.20
         
-        if current_price <= lower_band * 1.002 or current_price >= upper_band * 0.998:
-            prob += 0.15 # Mengurangi sedikit bobot BB klasik
-
-        # 4. ANTI-FALLING-KNIFE (Velocity Check)
-        # Jika harga turun > 1.2% dalam 5 tick terakhir, ini Panic Dump.
-        if len(price_history) >= 6:
-            prev_5_price = price_history[-6]
-            velocity_5 = (current_price - prev_5_price) / prev_5_price
-            if velocity_5 < -0.012:
-                prob -= 0.40 # Penalti berat, jangan coba lawan gravitasi
-            elif velocity_5 < -0.006:
-                prob -= 0.15
-
-        # 5. REBOUND DETECTION (Bounce from Local Support)
-        # Cek apakah harga saat ini sudah naik dari titik terendah 10 tick terakhir
-        local_min = min(price_history[-10:])
-        if current_price > local_min * 1.0015: # Naik 0.15% dari dasar
-            prob += 0.20 # Bonus probabilitas untuk potensi pantulan (Hammer effect)
+        # 3. Micro Mean-Reversion (Anti-Falling-Knife Murni)
+        # Deteksi penurunan tiba-tiba menggunakan data raw
+        if n >= 10:
+            recent_10 = price_history[-10:]
+            recent_max = max(recent_10)
+            drop_from_recent_max = (recent_max - current_price) / recent_max
+            
+            # Penurunan lebih tajam = risiko lebih tinggi
+            if drop_from_recent_max > 0.005: # Turun > 0.5% dalam 10 tick terakhir
+                prob -= 0.40 # Hindari pisau jatuh
+                
+        # 4. Micro-Bounce / Floor Detection (Support)
+        if n >= 20:
+            recent_20 = smoothed_history[-20:]
+            local_min = min(recent_20)
+            if smoothed_current > local_min * 1.0015: # Naik pelan dari support (0.15%)
+                prob += 0.15
 
         prob = max(0.0, min(prob, 0.99))
         return prob

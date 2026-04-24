@@ -36,15 +36,21 @@ def get_stats():
         # Open Positions
         positions = conn.execute("SELECT * FROM positions").fetchall()
         
-        # Daily Performance
-        perf = conn.execute("SELECT COUNT(*) as trades, SUM(pnl_idr) as pnl FROM trade_history WHERE date(created_at) = date('now')").fetchone()
+        # Performance Rekap
+        perf = db.get_daily_stats() # Gunakan fungsi yang sudah ada di db engine
+        
+        # All time performance for winrate
+        all_time = conn.execute("SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history").fetchone()
+        win_rate = (all_time['wins'] / all_time['trades'] * 100) if all_time['trades'] > 0 else 0
         
         # Sector Sentiment
         sectors = db.get_all_latest_sector_sentiment()
         
         return jsonify({
-            "daily_trades": int(stats_dict.get('daily_trades', 0)),
-            "total_pnl": float(perf['pnl'] or 0),
+            "daily_trades": perf['total_trades'],
+            "daily_pnl": float(perf['total_pnl_idr']),
+            "win_rate": round(win_rate, 2),
+            "total_trades_all_time": all_time['trades'],
             "active_positions": len(positions),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
@@ -56,6 +62,27 @@ def get_stats():
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
+
+@app.route('/api/history/<pair>')
+def get_pair_history(pair):
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+        if row and row['history_json']:
+            return jsonify(json.loads(row['history_json']))
+        return jsonify([])
+    except:
+        return jsonify([])
+    finally:
+        conn.close()
+
+@app.route('/api/trades/recent')
+def get_recent_trades_api():
+    try:
+        trades = db.get_recent_trades(limit=20)
+        return jsonify(trades)
+    except:
+        return jsonify([])
 
 @app.route('/api/radar')
 def get_radar_data():
@@ -71,20 +98,15 @@ def get_radar_data():
                 last_price = float(history[-1])
                 first_price = float(history[0])
                 
-                # Hitung perubahan harga dari history (Proxy untuk momentum)
+                # Hitung perubahan harga dari history
                 change = ((last_price - first_price) / first_price * 100) if first_price > 0 else 0
-                
-                # Score 0-100 (Sederhana: makin besar kenaikan, makin ke tengah)
-                score = min(100, max(0, 50 + (change * 10)))
                 
                 results.append({
                     "pair": t['pair'],
                     "price": last_price,
-                    "score": score,
                     "change": round(change, 2),
                     "prediction": float(t['prediction_prob'] or 0.0),
-                    "trend": t['trend'] or 'N/A',
-                    "sector": "ALT" 
+                    "trend": t['trend'] or 'N/A'
                 })
             except: continue
         return jsonify(results)
