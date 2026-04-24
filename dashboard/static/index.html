@@ -3,103 +3,211 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quantitative Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <title>AlgoVibe — Quantitative Trading Terminal</title>
+    <meta name="description" content="Real-time crypto scalping dashboard for Indodax with AI-driven market regime detection, whale alerts, and live position tracking.">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="app-container">
-        <!-- TOP NAV: Metrics -->
-        <header class="top-nav">
+
+        <!-- ═══════════════════════════════════════════ TOP HEADER ═══ -->
+        <header class="top-nav" id="top-nav">
             <div class="logo-section">
-                <span class="logo-title">QUANTITATIVE DASHBOARD</span>
+                <div class="logo-icon">AV</div>
+                <div class="logo-text">
+                    <span class="logo-title">ALGOVIBE</span>
+                    <span class="logo-sub">Indodax Scalper</span>
+                </div>
+                <div id="bot-status-badge" class="bot-status-badge status-loading">
+                    <span class="status-dot"></span>
+                    <span id="bot-status-text">CONNECTING</span>
+                </div>
+                <div id="dry-run-badge" class="dry-run-badge" style="display:none">
+                    ⚡ DRY RUN
+                </div>
+                <button id="notif-btn" class="notif-btn" onclick="requestNotificationPermission()" title="Aktifkan notifikasi">🔕</button>
             </div>
+
             <div class="global-metrics">
                 <div class="metric-card">
                     <span class="label">Daily PnL</span>
-                    <span class="value" id="daily-pnl">$0.00</span>
+                    <span class="value" id="daily-pnl">Rp 0</span>
                 </div>
                 <div class="metric-card">
                     <span class="label">Win Rate</span>
                     <span class="value" id="win-rate">0.0%</span>
                 </div>
                 <div class="metric-card">
-                    <span class="label">Executions</span>
-                    <span class="value" id="total-trades">0</span>
+                    <span class="label">W / L Hari Ini</span>
+                    <span class="value" id="daily-wl"><span class="up">0</span>/<span class="down">0</span></span>
                 </div>
                 <div class="metric-card">
+                    <span class="label">Unrealized PnL</span>
+                    <span class="value" id="unrealized-pnl">Rp 0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Total Trades</span>
+                    <span class="value" id="total-trades">0</span>
+                </div>
+                <div class="metric-card regime-metric">
                     <span class="label">Market Regime</span>
-                    <span class="value" id="market-regime">ANALYZING</span>
+                    <span id="market-regime-badge" class="regime-badge regime-choppy">ANALYZING</span>
                 </div>
             </div>
         </header>
 
+        <!-- ═══════════════════════════════════════════ MAIN GRID ════ -->
         <main class="main-layout">
-            <!-- LEFT SIDEBAR: Logs & Stream -->
+
+            <!-- ══ LEFT SIDEBAR ══ -->
             <aside class="left-sidebar">
-                <div class="panel log-panel">
-                    <div class="panel-header">System Events</div>
-                    <div class="log-container" id="ai-logs">
-                        <!-- Logs populated by JS -->
-                    </div>
-                </div>
-                <div class="panel stream-panel">
+
+                <!-- Watchlist Panel -->
+                <div class="panel watchlist-panel">
                     <div class="panel-header">
-                        <span><span class="live-dot"></span>Live Stream</span>
+                        <span>Watchlist</span>
+                        <span id="watchlist-count" class="count-badge">0</span>
                     </div>
-                    <div class="stream-container" id="ws-stream">
-                        <!-- Raw data populated by JS -->
+                    <div class="ticker-list" id="ticker-list">
+                        <div class="empty-state">Menunggu data pasar...</div>
                     </div>
                 </div>
+
+                <!-- System Events Log -->
+                <div class="panel log-panel">
+                    <div class="panel-header">
+                        <span>System Events</span>
+                        <span class="live-dot"></span>
+                    </div>
+                    <div class="log-container" id="ai-logs">
+                        <div class="log-placeholder">Memuat event...</div>
+                    </div>
+                </div>
+
             </aside>
 
-            <!-- CENTER AREA -->
+            <!-- ══ CENTER AREA ══ -->
             <section class="center-area">
-                <!-- Top Center: Watchlist + Chart -->
-                <div class="top-center">
-                    <div class="panel watchlist-panel">
-                        <div class="panel-header">Watchlist</div>
-                        <div class="ticker-list" id="ticker-list">
-                            <!-- Tickers populated by JS -->
-                        </div>
-                    </div>
-                    <div class="panel chart-panel">
-                        <div class="chart-header">
-                            <div class="chart-title-area">
-                                <h2 id="active-pair">SELECT PAIR</h2>
-                                <div class="chart-subtitle" id="pair-details">Awaiting selection</div>
+
+                <!-- Chart Panel -->
+                <div class="panel chart-panel">
+                    <div class="chart-header">
+                        <div class="chart-title-area">
+                            <h1 id="active-pair">SELECT PAIR</h1>
+                            <div class="chart-meta">
+                                <span class="chart-subtitle" id="pair-trend">—</span>
+                                <div class="ai-prob-bar-wrap" id="ai-prob-wrap" style="display:none">
+                                    <span class="ai-prob-label">AI</span>
+                                    <div class="ai-prob-track">
+                                        <div class="ai-prob-fill" id="ai-prob-fill"></div>
+                                    </div>
+                                    <span class="ai-prob-val" id="ai-prob-val">0%</span>
+                                </div>
                             </div>
                         </div>
-                        <div id="chart-canvas">
-                            <canvas id="custom-chart"></canvas>
-                            <div id="chart-tooltip" class="chart-tooltip"></div>
+                        <div class="chart-right-controls">
+                            <div class="chart-legend">
+                                <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Price</span>
+                                <span class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>SMA-10</span>
+                            </div>
+                            <div class="chart-controls">
+                                <button id="chart-area-btn" class="chart-toggle active" onclick="setChartMode('area')">AREA</button>
+                                <button id="chart-candle-btn" class="chart-toggle" onclick="setChartMode('candle')">CANDLE</button>
+                            </div>
                         </div>
+                    </div>
+                    <div id="chart-canvas">
+                        <canvas id="custom-chart"></canvas>
+                        <div id="chart-tooltip" class="chart-tooltip"></div>
+                        <div id="chart-empty" class="chart-empty">Pilih pair dari watchlist untuk melihat chart</div>
                     </div>
                 </div>
 
-                <!-- Bottom Center: Trade History -->
+                <!-- Execution Ledger -->
                 <div class="panel history-panel">
-                    <div class="panel-header">Execution Ledger</div>
+                    <div class="panel-header">
+                        <span>Execution Ledger</span>
+                        <span id="ledger-count" class="count-badge">0</span>
+                    </div>
                     <div class="table-wrapper">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Timestamp</th>
-                                    <th>Ticker</th>
+                                    <th>Waktu</th>
+                                    <th>Pair</th>
                                     <th>Logic</th>
-                                    <th>Profit/Loss</th>
+                                    <th>PnL</th>
                                     <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody id="trade-history-body">
-                                <!-- Trades populated by JS -->
                             </tbody>
                         </table>
                     </div>
                 </div>
+
             </section>
+
+            <!-- ══ RIGHT SIDEBAR ══ -->
+            <aside class="right-sidebar">
+
+                <!-- Open Positions Panel -->
+                <div class="panel positions-panel">
+                    <div class="panel-header">
+                        <span>Open Positions</span>
+                        <span id="positions-count" class="count-badge">0</span>
+                    </div>
+                    <div class="positions-list" id="positions-list">
+                        <div class="empty-state">Tidak ada posisi aktif</div>
+                    </div>
+                </div>
+
+                <!-- Sector Sentiment Panel -->
+                <div class="panel sector-panel">
+                    <div class="panel-header">
+                        <span>Sector Sentiment</span>
+                    </div>
+                    <div class="sector-list" id="sector-list">
+                        <div class="empty-state">Memuat data sektor...</div>
+                    </div>
+                </div>
+
+                <!-- AI Weights Panel -->
+                <div class="panel weights-panel">
+                    <div class="panel-header">
+                        <span>AI Signal Weights</span>
+                    </div>
+                    <div class="weights-list" id="weights-list">
+                        <div class="weight-item">
+                            <span class="weight-label">AI Prob</span>
+                            <div class="weight-track"><div class="weight-fill" id="w-ai-prob" style="width:50%"></div></div>
+                            <span class="weight-val" id="wv-ai-prob">1.0</span>
+                        </div>
+                        <div class="weight-item">
+                            <span class="weight-label">Whale Boost</span>
+                            <div class="weight-track"><div class="weight-fill" id="w-whale-boost" style="width:50%"></div></div>
+                            <span class="weight-val" id="wv-whale-boost">1.0</span>
+                        </div>
+                        <div class="weight-item">
+                            <span class="weight-label">Sector</span>
+                            <div class="weight-track"><div class="weight-fill" id="w-sector" style="width:50%"></div></div>
+                            <span class="weight-val" id="wv-sector">1.0</span>
+                        </div>
+                        <div class="weight-item">
+                            <span class="weight-label">Imbalance</span>
+                            <div class="weight-track"><div class="weight-fill" id="w-imbalance" style="width:50%"></div></div>
+                            <span class="weight-val" id="wv-imbalance">1.0</span>
+                        </div>
+                    </div>
+                </div>
+
+            </aside>
+
         </main>
     </div>
+
     <script src="script.js"></script>
 </body>
 </html>
