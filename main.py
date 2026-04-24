@@ -206,10 +206,14 @@ class ScalperBot:
             log_path = "data/logs/dashboard.log"
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             log_f = open(log_path, "a")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "/home/chandev/.local/lib/python3.13/site-packages:" + env.get("PYTHONPATH", "")
+            import sys
             subprocess.Popen(
-                ["python3", "dashboard/server.py"],
+                [sys.executable, "dashboard/server.py"],
                 stdout=log_f,
-                stderr=subprocess.STDOUT
+                stderr=subprocess.STDOUT,
+                env=env
             )
             log_message("Dashboard available at http://localhost:5005")
         except Exception as e:

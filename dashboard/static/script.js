@@ -328,6 +328,7 @@ async function updateLogs() {
             let actionColor = 'var(--text-primary)';
             if (log.side === 'BUY') actionColor = 'var(--accent-green)';
             if (log.side === 'SELL') actionColor = 'var(--accent-red)';
+            if (log.side === 'AI SIGNAL') actionColor = 'var(--accent-blue)';
             
             const time = new Date(log.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
             

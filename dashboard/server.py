@@ -1,6 +1,7 @@
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, '/home/chandev/.local/lib/python3.13/site-packages')
 import sqlite3
 import json
 from flask import Flask, jsonify, send_from_directory
@@ -89,19 +90,19 @@ def get_recent_trades_api():
         results = []
         for p in positions:
             results.append({
-                "pair": p['pair'],
+                "pair": p['pair'] or "UNKNOWN",
                 "reason": "OPEN POSITION",
-                "pnl_idr": 0, # Still open, PnL is floating (could be calculated if we wanted, but 0 is safe for now)
-                "created_at": p['created_at'],
+                "pnl_idr": 0, 
+                "created_at": p['created_at'] or "1970-01-01T00:00:00",
                 "status": "OPEN"
             })
             
         for t in trades:
             results.append({
-                "pair": t['pair'],
-                "reason": t['reason'],
-                "pnl_idr": t['pnl_idr'],
-                "created_at": t['created_at'],
+                "pair": t['pair'] or "UNKNOWN",
+                "reason": t['reason'] or "UNKNOWN",
+                "pnl_idr": t['pnl_idr'] or 0,
+                "created_at": t['created_at'] or "1970-01-01T00:00:00",
                 "status": "CLOSED"
             })
             
@@ -109,6 +110,8 @@ def get_recent_trades_api():
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
         return jsonify(results[:20])
     except Exception as e:
+        import traceback
+        print("API ERROR:", traceback.format_exc())
         return jsonify([])
     finally:
         conn.close()
@@ -159,9 +162,33 @@ def get_weights():
 def get_logs():
     conn = get_db_connection()
     try:
-        logs = conn.execute("SELECT * FROM order_logs ORDER BY created_at DESC LIMIT 10").fetchall()
-        return jsonify([dict(row) for row in logs])
-    except:
+        orders = conn.execute("SELECT * FROM order_logs ORDER BY created_at DESC LIMIT 10").fetchall()
+        ai_scans = conn.execute("SELECT pair, prediction_prob, trend, updated_at as created_at FROM ticker_history WHERE prediction_prob > 0.5 ORDER BY updated_at DESC LIMIT 10").fetchall()
+        
+        results = []
+        for o in orders:
+            results.append({
+                "created_at": o['created_at'],
+                "pair": o['pair'],
+                "side": o['side'],
+                "price": o['price'],
+                "status": o['status']
+            })
+            
+        for a in ai_scans:
+            results.append({
+                "created_at": a['created_at'],
+                "pair": a['pair'],
+                "side": "AI SIGNAL",
+                "price": f"Prob {round(a['prediction_prob']*100)}%",
+                "status": a['trend']
+            })
+            
+        results.sort(key=lambda x: str(x['created_at']), reverse=True)
+        return jsonify(results[:15])
+    except Exception as e:
+        import traceback
+        print("LOG ERROR:", traceback.format_exc())
         return jsonify([])
     finally:
         conn.close()
