@@ -704,59 +704,19 @@ class Oracle:
 
     def learn_from_trade(self, pair, pnl_idr):
         """
-        Analisa DNA transaksi terakhir dan sesuaikan bobot di database.
+        [Revisi] Experience Replay: Tidak ada lagi if-else trauma/weights.
+        Semua transaksi hanya di-log ke otak LLM untuk Post-Mortem. Otak matematis
+        (k-NN) langsung mengambil data dari database di putaran berikutnya.
         """
         try:
             dna = db.get_latest_trade_dna(pair)
             if not dna: return
             
-            # [Anti-Hallucination] Outlier Filter
-            # Jika rugi > 15%, kemungkinan besar ada anomali pasar (flash crash/delist)
-            # Bot tidak boleh belajar berlebihan dari kejadian 'Bencana Alam'
-            if pnl_idr < -0.15: 
-                logger.warning(f"[Oracle] Learning SKIP: Trade {pair} was an extreme outlier (Bencana Alam).")
-                return
-            
-            # Learning Rate (Seberapa cepat bot berubah pikiran)
-            LR = 0.05 
-            
             is_profit = pnl_idr > 0
-            
-            # Update Bobot berdasarkan fitur yang ada saat beli
-            # Jika fitur tersebut hadir saat PROFIT, naikkan bobotnya.
-            # Jika fitur tersebut hadir saat LOSS, turunkan bobotnya.
-            
-            new_weights = {}
-            for feature in ["ai_prob", "whale_boost", "sector_sentiment", "imbalance"]:
-                current_w = self.weights.get(feature, 1.0)
-                
-                # Check presence/strength of feature in DNA (Zero-Centering)
-                strength = dna.get(feature, 0)
-                if feature == "ai_prob": 
-                    strength -= 0.5 # 0 is neutral, >0 is confident
-                elif feature == "sector_sentiment": 
-                    strength /= 5.0 # Normalize sentiment
-                elif feature == "whale_boost":
-                    strength -= 1.0 # 0 if no whale, 0.5 if whale present
-                elif feature == "imbalance":
-                    strength -= 1.0 # 0 if balanced, >0 if highly imbalanced
-                    
-                
-                if is_profit:
-                    new_w = current_w + (LR * abs(strength))
-                else:
-                    new_w = current_w - (LR * abs(strength))
-                
-                # Clamp weights between 0.5 and 2.0 (Jangan biarkan terlalu ekstrim)
-                new_w = max(0.5, min(2.0, new_w))
-                new_weights[feature] = new_w
-                db.update_dynamic_weight(feature, new_w)
-            
-            self.weights = new_weights
-            logger.info(f"[Oracle] Evolution: Adjusted weights after {pair} trade. New Weights: {new_weights}")
-            
-            # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
             status = "PROFIT" if is_profit else "LOSS"
+            logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_idr}).")
+
+            # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
             prompt = (
                 f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
                 f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
@@ -769,6 +729,63 @@ class Oracle:
             
         except Exception as e:
             logger.error(f"[Oracle] Learning Error: {e}")
+
+    def find_winning_pattern(self, pair: str, current_dna: dict) -> dict:
+        """
+        K-Nearest Neighbors Pattern Matcher & LLM Strategy Generator.
+        Mencari 5 transaksi masa lalu terdekat (Euclidean), lalu LLM menentukan target.
+        Returns: { 'verdict': 'BUY'/'AVOID', 'target_tp': 0.02, 'target_sl': -0.012, 'confidence': float }
+        """
+        import math
+        history = db.get_all_closed_dnas(limit=1000)
+        default_resp = {"verdict": "BUY", "target_tp": 0.02, "target_sl": -0.012, "confidence": 50.0}
+        
+        if not history or len(history) < 3:
+            return default_resp
+            
+        distances = []
+        for h in history:
+            try:
+                # Normalisasi jarak k-NN
+                d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 10.0
+                d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 5.0
+                d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 100.0
+                
+                dist = math.sqrt(d_vol**2 + d_imb**2 + d_ai**2)
+                distances.append((dist, h))
+            except:
+                continue
+                
+        distances.sort(key=lambda x: x[0])
+        top_matches = [item[1] for item in distances[:5]]
+        
+        # Susun laporan historis untuk LiteRT-LM
+        win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
+        history_text = ", ".join([f"{'WIN' if t.get('pnl_idr',0)>0 else 'LOSS'} ({t.get('pnl_pct',0):.2f}%)" for t in top_matches])
+        
+        prompt = (
+            f"URGENT TRADE DECISION FOR {pair.upper()}.\n"
+            f"Current Market DNA: Volatility={current_dna.get('volatility',0):.2f}%, "
+            f"Imbalance={current_dna.get('imbalance',1):.2f}, AI_Prob={current_dna.get('ai_prob',0)}%.\n"
+            f"Past 5 closest historical trades resulted in: {history_text}. ({win_count}/5 Wins).\n"
+            "If past trades show winning patterns, be AGGRESSIVE. Set dynamic TP matching the past win percentages. "
+            "If they show losing patterns (falling knife), return AVOID.\n"
+            "Return JSON format: verdict (BUY/AVOID), confidence (0-100), TP (float e.g., 0.03 for 3%), SL (float < 0, e.g., -0.015)."
+        )
+        
+        # Panggil LLM secara sinkronus agar bisa menunggangi momentum
+        llm_resp = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
+        
+        if not llm_resp:
+            return default_resp
+            
+        return {
+            "verdict": llm_resp.get("verdict", "BUY"),
+            "target_tp": float(llm_resp.get("TP", 0.02)),
+            "target_sl": float(llm_resp.get("SL", -0.012)),
+            "confidence": float(llm_resp.get("confidence", 50.0)),
+            "reason": llm_resp.get("reason", "")
+        }
 
     def apply_learning_to_score(self, base_score, features):
         """

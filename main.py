@@ -155,7 +155,7 @@ class ScalperBot:
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
-    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None):
         try:
             # ── Oracle Sizing Multiplier ─────────────────────────────────────
             multiplier = self.oracle.get_sizing_multiplier()
@@ -178,12 +178,15 @@ class ScalperBot:
                 return False
 
             from config import BUY_MAKER_OFFSET, TP_PCT, SL_PCT
+            
+            final_tp = dynamic_tp if dynamic_tp is not None else TP_PCT
+            final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
             buy_price     = price * (1 - BUY_MAKER_OFFSET)
             amount_crypto = amount_idr / buy_price
             
             # Estimate Targets
-            tp_target = buy_price * (1 + TP_PCT)
-            sl_target = buy_price * (1 + SL_PCT)
+            tp_target = buy_price * (1 + final_tp)
+            sl_target = buy_price * (1 + final_sl)
 
             if DRY_RUN:
                 order = {
@@ -248,7 +251,9 @@ class ScalperBot:
                 "dry_run":     DRY_RUN,
                 "status":      "OPEN" if DRY_RUN else "PENDING_BUY",
                 "entry_order_id": order.get('id') if not DRY_RUN else None,
-                "exit_order_id": None
+                "exit_order_id": None,
+                "target_tp_pct": final_tp,
+                "target_sl_pct": final_sl
             }
 
             db.upsert_position(pair, data)
@@ -470,19 +475,32 @@ class ScalperBot:
                     time.sleep(60)
                     break
 
-                if breakout and ai_ready and (trend == "UP" and has_strong_imb):
-                    # ── LLM Veto Gate (bersifat FINAL) ──────────────────────────
-                    vetoed, veto_reason = self.oracle.check_llm_veto(pair)
-                    if vetoed:
-                        log_message(f"🚫 LLM VETO [{pair}]: {veto_reason}")
-                        continue
-
+                # ── Custom AI Pattern Matcher (k-NN + LLM) ────────────────
+                current_dna = {
+                    "ai_prob": tq_prob,
+                    "whale_boost": whale_boost,
+                    "sector_sentiment": sector_boost,
+                    "imbalance": imbalance_ratio,
+                    "volatility": p['volatility']
+                }
+                
+                # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
+                knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
+                
+                if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= 60.0:
+                    log_message(f"🧠 [K-NN Match] {pair} dominasi profit histori. Target TP: {knn_decision['target_tp']*100:.1f}%.")
+                    
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
-                                             imbalance=imbalance_ratio, volatility=p['volatility']):
+                                             imbalance=imbalance_ratio, volatility=p['volatility'],
+                                             dynamic_tp=knn_decision['target_tp'], dynamic_sl=knn_decision['target_sl']):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)
+                else:
+                    # Pola kalah dominan, jangan masuk
+                    if knn_decision['verdict'] == "AVOID":
+                        log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
 
             time.sleep(5)
 

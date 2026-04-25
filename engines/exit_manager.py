@@ -85,7 +85,8 @@ class ExitManager:
             )
             
             # Base TP calculation from percentage
-            base_tp_price = entry_price * (1 + TP_PCT)
+            dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
+            base_tp_price = entry_price * (1 + dynamic_tp_pct)
             
             # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
             exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
@@ -94,7 +95,8 @@ class ExitManager:
             tp_price = max(base_tp_price, exact_tp_price)
             
             # Default Initial Stop Loss
-            initial_sl_price = entry_price * (1 + SL_PCT)
+            dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
+            initial_sl_price = entry_price * (1 + dynamic_sl_pct)
             
             # --- Trailing Stop Logic ---
             # Retrieve or initialize highest price seen and current trailing stop price

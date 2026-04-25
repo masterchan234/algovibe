@@ -193,8 +193,8 @@ class Database:
             cursor.execute('''
                 INSERT INTO positions (
                     pair, entry_price, amount_crypto, amount_idr, status, 
-                    entry_order_id, exit_order_id, timestamp, dry_run
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -203,7 +203,9 @@ class Database:
                     entry_order_id=excluded.entry_order_id,
                     exit_order_id=excluded.exit_order_id,
                     timestamp=excluded.timestamp,
-                    dry_run=excluded.dry_run
+                    dry_run=excluded.dry_run,
+                    target_tp_pct=excluded.target_tp_pct,
+                    target_sl_pct=excluded.target_sl_pct
             ''', (
                 pair,
                 data.get('entry_price'),
@@ -213,7 +215,9 @@ class Database:
                 data.get('entry_order_id'),
                 data.get('exit_order_id'),
                 data.get('timestamp'),
-                dry_run
+                dry_run,
+                data.get('target_tp_pct'),
+                data.get('target_sl_pct')
             ))
 
     def delete_position(self, pair):
@@ -455,6 +459,23 @@ class Database:
                 return dict(row) if row else None
         except Exception:
             return None
+
+    def get_all_closed_dnas(self, limit=1000):
+        """Menarik data DNA historis untuk Pattern Matching (k-NN)."""
+        try:
+            with self.get_connection() as conn:
+                query = """
+                    SELECT a.*, h.pnl_pct, h.duration_seconds 
+                    FROM trade_analytics a 
+                    JOIN trade_history h ON a.pair = h.pair AND abs(a.pnl_idr - h.pnl_idr) < 10 
+                    WHERE a.status = 'CLOSED' 
+                    ORDER BY a.entry_timestamp DESC LIMIT ?
+                """
+                cursor = conn.execute(query, (limit,))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            print(f"DB Error (get_all_closed_dnas): {e}")
+            return []
 
     def update_dynamic_weight(self, feature, value):
         with self.get_connection() as conn:
