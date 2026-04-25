@@ -13,10 +13,10 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
   - `INDODAX_API_SECRET`
 - Development runtime (preferred): `python3 main.py`
 - Service runtime (production-like/native):
-  - Bot Engine: `systemctl start indodax-scalper.service`
-  - Dashboard: `systemctl start indodax-dashboard.service`
+  - Bot Engine: `systemctl --user start indodax-scalper.service`
+  - Dashboard: `systemctl --user start indodax-dashboard.service`
 - Service stop after changes: 
-  - `systemctl stop indodax-scalper.service indodax-dashboard.service`
+  - `systemctl --user stop indodax-scalper.service indodax-dashboard.service`
 - Do not use Docker during development.
 - Docker run (`docker compose up -d`) is only for container deployment scenarios.
 - Logs:
@@ -36,7 +36,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - `engines/ws_market.py`: market WebSocket ingestion and ticker/orderbook state.
 - `engines/ws_private.py`: private/order updates feed.
 - `engines/exit_manager.py`: open-position monitoring and exits.
-- `engines/oracle.py`, `engines/predictor.py`: adaptive regime/AI scoring logic.
+- engines/oracle.py, engines/predictor.py, engines/llm_worker.py: AI & Reasoning layer.
 - `engines/database.py`: SQLite schema + state/history persistence.
 - `dashboard/server.py`: Flask API/static dashboard (runs as standalone `indodax-dashboard.service`).
 

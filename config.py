@@ -8,11 +8,9 @@ load_dotenv()
 # 1. CORE PATHS & FILES
 # ==========================================
 BASE_PATH    = os.getenv("APP_BASE_PATH", os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH    = os.getenv("APP_DATA_PATH", os.path.join(BASE_PATH, "data"))
-RAM_PATH     = os.getenv("APP_RAM_PATH", "/mnt/ramdisk/algotrade")
-
-LOG_FILE        = f"{DATA_PATH}/logs/scalper.log"
-POSITION_FILE   = f"{RAM_PATH}/open_positions.json" # DEPRECATED
+DATA_PATH    = "data"
+LOG_FILE     = f"{DATA_PATH}/logs/scalper.log"
+MODEL_PATH   = "models/gemma-4-E2B-it.litertlm"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
 DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
 EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED

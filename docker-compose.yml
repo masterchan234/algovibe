@@ -8,8 +8,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./scalper.log:/app/scalper.log
-    tmpfs:
-      - /mnt/ramdisk/algotrade:size=512m,uid=1000,gid=1000
     logging:
       driver: "json-file"
       options:
