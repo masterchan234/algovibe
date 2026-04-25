@@ -878,13 +878,23 @@ html, body {
     position: relative;
     overflow: hidden;
     min-height: 0;
+    display: flex;
 }
 
 #custom-chart {
-    width: 100%;
+    flex: 1;
     height: 100%;
     display: block;
     cursor: crosshair;
+    min-width: 0;
+}
+
+#price-axis-canvas {
+    width: 72px;
+    height: 100%;
+    display: block;
+    flex-shrink: 0;
+    cursor: default;
 }
 
 .chart-tooltip {
@@ -1864,3 +1874,62 @@ tr:hover td { background: var(--bg-hover); }
 .trade-price { font-weight: 700; font-family: var(--font-mono); }
 .trade-amount { text-align: right; color: var(--text-secondary); font-family: var(--font-mono); }
 
+
+/* ── Indicator Dropdown ─────────────────────────────────── */
+.ind-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-highlight);
+    border-radius: var(--radius);
+    padding: 6px 0;
+    min-width: 180px;
+    z-index: 500;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+    backdrop-filter: blur(12px);
+    animation: fadeInDown 0.15s ease-out;
+}
+@keyframes fadeInDown {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.ind-menu-title {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 4px 12px 8px;
+    border-bottom: 1px solid var(--border-soft);
+    margin-bottom: 4px;
+}
+.ind-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: background 0.1s ease, opacity 0.15s;
+    user-select: none;
+}
+.ind-menu-item:hover { background: var(--bg-hover); }
+.ind-menu-item.inactive { opacity: 0.42; }
+.ind-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.ind-chk {
+    margin-left: auto;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--green);
+    width: 16px;
+    text-align: center;
+    transition: opacity 0.15s;
+}
+.ind-chk.hidden { opacity: 0; }

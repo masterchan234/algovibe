@@ -126,17 +126,6 @@
 
 
 
-                <!-- ── Radar Watchlist (Full Market) ── -->
-                <div class="sidebar-section watchlist-section"
-                    style="flex: 1; display: flex; flex-direction: column; overflow: hidden; border-left: 3px solid var(--text-muted); margin-bottom: 10px;">
-                    <div class="section-header" onclick="toggleSection(this.parentElement)">
-                        <span class="section-title">Radar Watchlist</span>
-                        <span id="watchlist-count" class="badge badge-dim">0</span>
-                    </div>
-                    <div id="ticker-list" class="sidebar-list" style="flex: 1; overflow-y: auto; max-height: 400px;">
-                        <div class="empty-state">Menunggu data pasar...</div>
-                    </div>
-                </div>
 
                 <!-- ── System Events Log ── -->
                 <div class="panel log-panel" style="max-height: 150px;">
@@ -178,6 +167,28 @@
                                 <button class="chart-tf-btn" onclick="setChartTimeframe('1h')">1H</button>
                                 <button class="chart-tf-btn" onclick="setChartTimeframe('24h')">24H</button>
                             </div>
+                            <!-- Indicator Dropdown -->
+                            <div class="ind-dropdown-wrap" style="position:relative; margin-right: 12px;">
+                                <button id="ind-menu-btn" class="chart-toggle" onclick="toggleIndMenu()" title="Toggle Indicators">IND ▾</button>
+                                <div id="ind-menu" class="ind-menu" style="display:none;">
+                                    <div class="ind-menu-title">Overlay Indikator</div>
+                                    <label class="ind-menu-item" onclick="toggleIndicator('ma7')">
+                                        <span class="ind-dot" style="background:#f59e0b"></span>
+                                        <span>MA 7</span>
+                                        <span id="ind-chk-ma7" class="ind-chk active">✓</span>
+                                    </label>
+                                    <label class="ind-menu-item" onclick="toggleIndicator('ma25')">
+                                        <span class="ind-dot" style="background:#a855f7"></span>
+                                        <span>MA 25</span>
+                                        <span id="ind-chk-ma25" class="ind-chk active">✓</span>
+                                    </label>
+                                    <label class="ind-menu-item" onclick="toggleIndicator('bb')">
+                                        <span class="ind-dot" style="background:#06b6d4"></span>
+                                        <span>Bollinger Bands</span>
+                                        <span id="ind-chk-bb" class="ind-chk active">✓</span>
+                                    </label>
+                                </div>
+                            </div>
                             <div class="chart-controls">
                                 <button id="chart-area-btn" class="chart-toggle active"
                                     onclick="setChartMode('area')">LINE</button>
@@ -188,6 +199,7 @@
                     </div>
                     <div id="chart-canvas">
                         <canvas id="custom-chart"></canvas>
+                        <canvas id="price-axis-canvas"></canvas>
                         <div id="chart-tooltip" class="chart-tooltip"></div>
                         <div id="chart-empty" class="chart-empty">Pilih pair dari watchlist untuk melihat chart</div>
                     </div>

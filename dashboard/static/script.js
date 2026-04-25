@@ -5,6 +5,40 @@ let chart, activePair = null, activeTimeframe = 'LIVE', lastStats = {}, lastPric
 let _logCache = new Set();
 const socket = typeof io !== 'undefined' ? io() : null;
 
+// ── Indicator Visibility State ─────────────────────────────
+const indState = { ma7: true, ma25: true, bb: true };
+
+function toggleIndicator(key) {
+    indState[key] = !indState[key];
+    // Update checkmark UI
+    const chk = document.getElementById('ind-chk-' + key);
+    if (chk) chk.classList.toggle('hidden', !indState[key]);
+    // Dim row
+    if (chk) chk.closest('.ind-menu-item').classList.toggle('inactive', !indState[key]);
+    // Redraw chart
+    if (chart) chart.draw();
+}
+
+function toggleIndMenu() {
+    const menu = document.getElementById('ind-menu');
+    if (!menu) return;
+    const isOpen = menu.style.display !== 'none';
+    menu.style.display = isOpen ? 'none' : 'block';
+    const btn = document.getElementById('ind-menu-btn');
+    if (btn) btn.classList.toggle('active', !isOpen);
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', e => {
+    const wrap = e.target.closest('.ind-dropdown-wrap');
+    if (!wrap) {
+        const menu = document.getElementById('ind-menu');
+        const btn  = document.getElementById('ind-menu-btn');
+        if (menu) menu.style.display = 'none';
+        if (btn)  btn.classList.remove('active');
+    }
+});
+
 // ── Theme Management ─────────────────────────────────────────
 function toggleTheme() {
     const isLight = document.documentElement.getAttribute('data-theme') === 'light';
@@ -32,19 +66,31 @@ class AlgoChart {
     constructor(cId, tId) {
         this.canvas = document.getElementById(cId);
         this.ctx = this.canvas.getContext('2d');
+        this.axisCanvas = document.getElementById('price-axis-canvas');
+        this.axisCtx = this.axisCanvas ? this.axisCanvas.getContext('2d') : null;
         this.tip = document.getElementById(tId);
         this.data = []; this._ohlc = [];
         this.mode = 'area';
         this.hI = -1; this.hC = -1;
+        this._lastMin = 0; this._lastMax = 0;
         new ResizeObserver(() => this.resize()).observe(this.canvas.parentElement);
         this.canvas.addEventListener('mousemove', e => this._move(e));
         this.canvas.addEventListener('mouseleave', () => { this.hI = this.hC = -1; this.tip.style.display = 'none'; this.draw(); });
     }
     resize() {
-        const r = this.canvas.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+        const dpr = devicePixelRatio || 1;
+        // Main chart canvas
+        const r = this.canvas.getBoundingClientRect();
         this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
         this.ctx.scale(dpr, dpr);
         this.canvas.style.width = r.width + 'px'; this.canvas.style.height = r.height + 'px';
+        // Axis canvas
+        if (this.axisCanvas) {
+            const ra = this.axisCanvas.getBoundingClientRect();
+            this.axisCanvas.width = ra.width * dpr; this.axisCanvas.height = ra.height * dpr;
+            this.axisCtx.scale(dpr, dpr);
+            this.axisCanvas.style.width = ra.width + 'px'; this.axisCanvas.style.height = ra.height + 'px';
+        }
         this.draw();
     }
     setData(d) {
@@ -129,42 +175,238 @@ class AlgoChart {
         return out;
     }
     _sma(arr, n) { return arr.map((_, i) => { if (i < n - 1) return null; const s = arr.slice(i - n + 1, i + 1); return s.reduce((a, b) => a + b, 0) / n; }); }
+    _stddev(arr, sma, n) {
+        return arr.map((_, i) => {
+            if (i < n - 1) return null;
+            const s = arr.slice(i - n + 1, i + 1);
+            const m = sma[i];
+            return Math.sqrt(s.reduce((a, v) => a + (v - m) ** 2, 0) / n);
+        });
+    }
+    // Gambar MA + Bollinger Bands overlay
+    _drawOverlays(vals, toY, padX, stepX, W, H, pad, isLight) {
+        const ctx = this.ctx;
+        const n = vals.length;
+        if (n < 7) return;
+
+        // Clip semua drawing ke dalam area chart — BB tidak meluber ke luar
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, pad, W, H - pad * 2);
+        ctx.clip();
+
+        const drawLine = (smaArr, color, lw = 1.2) => {
+            ctx.beginPath();
+            ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round';
+            let started = false;
+            smaArr.forEach((v, i) => {
+                if (v === null) return;
+                const x = padX + i * stepX, y = toY(v);
+                if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        };
+
+        // ─ MA7 ─
+        if (indState.ma7 && n >= 7) {
+            drawLine(this._sma(vals, 7), 'rgba(245,158,11,0.85)', 1.2);
+        }
+
+        // ─ MA25 ─
+        if (indState.ma25 && n >= 25) {
+            drawLine(this._sma(vals, 25), 'rgba(168,85,247,0.85)', 1.2);
+        }
+
+        // ─ Bollinger Bands (MA20 ± 2σ) ─
+        if (indState.bb && n >= 20) {
+            const ma20  = this._sma(vals, 20);
+            const sigma = this._stddev(vals, ma20, 20);
+            const upper = ma20.map((v, i) => v !== null ? v + 2 * sigma[i] : null);
+            const lower = ma20.map((v, i) => v !== null ? v - 2 * sigma[i] : null);
+            const ptUp = [], ptLo = [];
+            upper.forEach((v, i) => { if (v !== null) ptUp.push({ x: padX + i * stepX, y: toY(v) }); });
+            lower.forEach((v, i) => { if (v !== null) ptLo.push({ x: padX + i * stepX, y: toY(v) }); });
+            if (ptUp.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(ptUp[0].x, ptUp[0].y);
+                ptUp.forEach(p => ctx.lineTo(p.x, p.y));
+                [...ptLo].reverse().forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.closePath();
+                ctx.fillStyle = isLight ? 'rgba(6,182,212,0.05)' : 'rgba(6,182,212,0.07)';
+                ctx.fill();
+            }
+            drawLine(upper, 'rgba(6,182,212,0.5)', 0.8);
+            drawLine(lower, 'rgba(6,182,212,0.5)', 0.8);
+            drawLine(ma20,  'rgba(6,182,212,0.35)', 0.8);
+        }
+
+        ctx.restore(); // lepas clip
+
+        // ─ Legend di luar clip (tetap terlihat di pojok kiri atas) ─
+        ctx.font = 'bold 9px JetBrains Mono, monospace';
+        const legends = [
+            ...(indState.ma7  && n >= 7  ? [{ label: 'MA7',  color: 'rgba(245,158,11,0.9)' }] : []),
+            ...(indState.ma25 && n >= 25 ? [{ label: 'MA25', color: 'rgba(168,85,247,0.9)' }] : []),
+            ...(indState.bb   && n >= 20 ? [{ label: 'BB20', color: 'rgba(6,182,212,0.9)'  }] : []),
+        ];
+        legends.forEach((l, i) => {
+            const lx = padX + 6 + i * 44;
+            ctx.fillStyle = l.color;
+            ctx.fillRect(lx, 8, 14, 2);
+            ctx.fillText(l.label, lx + 16, 12);
+        });
+    }
     _fmt(v) { return v >= 1000 ? v.toLocaleString('id-ID') : v.toFixed(6); }
+    _fmtShort(v) {
+        if (v >= 1e9) return (v/1e9).toFixed(2)+'B';
+        if (v >= 1e6) return (v/1e6).toFixed(1)+'M';
+        if (v >= 1e3) return (v/1e3).toFixed(1)+'K';
+        if (v >= 1)   return v.toLocaleString('id-ID', {maximumFractionDigits:0});
+        return v.toFixed(6);
+    }
     _tipPos(x, W) { this.tip.style.display = 'block'; const tw = this.tip.getBoundingClientRect().width; this.tip.style.left = (x + 12 + tw > W ? x - tw - 12 : x + 12) + 'px'; this.tip.style.top = '8px'; }
+    _drawPriceAxis(minV, maxV, pad, isLight) {
+        if (!this.axisCanvas || !this.axisCtx) return;
+        const ctx = this.axisCtx;
+        const W = this.axisCanvas.getBoundingClientRect().width || 72;
+        const H = this.axisCanvas.getBoundingClientRect().height || this.canvas.getBoundingClientRect().height;
+        ctx.clearRect(0, 0, W, H);
+
+        const range = maxV - minV || 1;
+        const dH = H - pad * 2;
+        const toY = v => H - pad - ((v - minV) / range) * dH;
+
+        const mainCtx = this.ctx;
+        const mW = this.canvas.getBoundingClientRect().width;
+        const dimColor  = isLight ? 'rgba(0,0,0,0.05)'  : 'rgba(255,255,255,0.04)';
+        const tickColor = isLight ? 'rgba(0,0,0,0.15)'  : 'rgba(255,255,255,0.12)';
+        const lblColor  = isLight ? '#94a3b8' : '#3a3d52';
+
+        // ── Nice-step grid lines (TradingView style) ──
+        // Hitung step yang rounded ke angka bulat sesuai magnitude range
+        const niceStep = (() => {
+            const rawStep = range / 6;
+            const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+            const norm = rawStep / mag;
+            const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+            return nice * mag;
+        })();
+        const firstTick = Math.ceil(minV / niceStep) * niceStep;
+
+        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+
+        for (let v = firstTick; v <= maxV + niceStep * 0.01; v += niceStep) {
+            const y = toY(v);
+            // skip jika terlalu dekat ke tepi (akan bentrok dengan H/L badge)
+            if (y < 14 || y > H - 14) continue;
+            mainCtx.beginPath();
+            mainCtx.setLineDash([3, 6]);
+            mainCtx.moveTo(0, y); mainCtx.lineTo(mW, y);
+            mainCtx.strokeStyle = dimColor; mainCtx.lineWidth = 1;
+            mainCtx.stroke(); mainCtx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(0, y); ctx.lineTo(6, y);
+            ctx.strokeStyle = tickColor; ctx.lineWidth = 1; ctx.stroke();
+            ctx.fillStyle = lblColor;
+            ctx.fillText(this._fmtShort(v), 10, y + 3.5);
+        }
+
+        // ── HIGH pin — exact maxV (green) ──
+        const highY = toY(maxV);
+        mainCtx.beginPath(); mainCtx.setLineDash([2, 5]);
+        mainCtx.moveTo(0, highY); mainCtx.lineTo(mW, highY);
+        mainCtx.strokeStyle = 'rgba(16,185,129,0.35)'; mainCtx.lineWidth = 1;
+        mainCtx.stroke(); mainCtx.setLineDash([]);
+        const hBoxH = 15, hBoxY = highY - hBoxH / 2;
+        ctx.fillStyle = 'rgba(16,185,129,0.2)'; ctx.strokeStyle = 'rgba(16,185,129,0.5)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(0, hBoxY, W - 2, hBoxH, 2) : ctx.rect(0, hBoxY, W - 2, hBoxH);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#10b981'; ctx.font = 'bold 9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+        ctx.fillText('H ' + this._fmtShort(maxV), 4, highY + 3.5);
+
+        // ── LOW pin — exact minV (red) ──
+        const lowY = toY(minV);
+        mainCtx.beginPath(); mainCtx.setLineDash([2, 5]);
+        mainCtx.moveTo(0, lowY); mainCtx.lineTo(mW, lowY);
+        mainCtx.strokeStyle = 'rgba(239,68,68,0.35)'; mainCtx.lineWidth = 1;
+        mainCtx.stroke(); mainCtx.setLineDash([]);
+        const lBoxH = 15, lBoxY = lowY - lBoxH / 2;
+        ctx.fillStyle = 'rgba(239,68,68,0.18)'; ctx.strokeStyle = 'rgba(239,68,68,0.5)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(0, lBoxY, W - 2, lBoxH, 2) : ctx.rect(0, lBoxY, W - 2, lBoxH);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#ef4444'; ctx.font = 'bold 9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+        ctx.fillText('L ' + this._fmtShort(minV), 4, lowY + 3.5);
+
+        // ── Last price highlight box ──
+        const lastVal = this.mode === 'candle' && this._ohlc.length
+            ? this._ohlc[this._ohlc.length - 1].close
+            : (this.data.length ? this.data[this.data.length - 1].value : null);
+
+        if (lastVal !== null) {
+            const lastY = toY(lastVal);
+            const boxH = 16, boxY = lastY - boxH / 2;
+            const isUp = this.data.length < 2 || lastVal >= this.data[0].value;
+            const boxColor = isUp ? '#10b981' : '#ef4444';
+            ctx.fillStyle = boxColor;
+            ctx.beginPath();
+            ctx.roundRect ? ctx.roundRect(0, boxY, W - 2, boxH, 3) : ctx.rect(0, boxY, W - 2, boxH);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 10px JetBrains Mono, monospace'; ctx.textAlign = 'center';
+            ctx.fillText(this._fmtShort(lastVal), W / 2 - 1, lastY + 3.5);
+            mainCtx.beginPath(); mainCtx.setLineDash([4, 4]);
+            mainCtx.moveTo(0, lastY); mainCtx.lineTo(mW, lastY);
+            mainCtx.strokeStyle = boxColor; mainCtx.lineWidth = 1; mainCtx.globalAlpha = 0.5;
+            mainCtx.stroke(); mainCtx.setLineDash([]); mainCtx.globalAlpha = 1;
+        }
+    }
     _move(e) {
         if (!this.data.length) return;
         const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left, W = r.width;
         if (this.mode === 'candle') {
             const o = this._ohlc; if (!o.length) return;
-            let i = Math.max(0, Math.min(Math.floor(x / (W / o.length)), o.length - 1));
+            const padX = 12;
+            const slotW = (W - padX * 2) / o.length;
+            let i = Math.max(0, Math.min(Math.floor((x - padX) / slotW), o.length - 1));
             if (this.hC !== i) {
                 this.hC = i; this.draw(); const c = o[i];
                 this.tip.innerHTML = `<span style="color:var(--text-secondary)">O</span> ${this._fmt(c.open)} <span style="color:var(--green)">H</span> ${this._fmt(c.high)}<br><span style="color:var(--red)">L</span> ${this._fmt(c.low)} <span style="color:var(--text-primary)">C</span> ${this._fmt(c.close)}`;
                 this._tipPos(x, W);
             }
         } else {
-            const step = W / Math.max(1, this.data.length - 1);
-            let i = Math.max(0, Math.min(Math.round(x / step), this.data.length - 1));
-            if (this.hI !== i) { this.hI = i; this.draw(); this.tip.textContent = 'Rp ' + this._fmt(this.data[i].value); this._tipPos(x, W); }
+            const padX = 12;
+            const step = (W - padX * 2) / Math.max(1, this.data.length - 1);
+            const xi = Math.max(0, Math.min(Math.round((x - padX) / step), this.data.length - 1));
+            if (this.hI !== xi) { this.hI = xi; this.draw(); this.tip.textContent = 'Rp ' + this._fmt(this.data[xi].value); this._tipPos(x, W); }
         }
     }
     draw() { if (this.mode === 'candle') this._drawCandle(); else this._drawArea(); }
     _drawArea() {
-        const r = this.canvas.parentElement.getBoundingClientRect(), W = r.width, H = r.height, ctx = this.ctx;
+        const r = this.canvas.getBoundingClientRect(), W = r.width, H = r.height, ctx = this.ctx;
         ctx.clearRect(0, 0, W, H); if (!this.data.length) return;
+        const padX = 12;
         const vals = this.data.map(d => d.value), minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
-        const pad = H * .1, dH = H - pad * 2, stepX = W / Math.max(1, this.data.length - 1);
-        const pts = vals.map((v, i) => ({ x: i * stepX, y: H - pad - ((v - minV) / range) * dH }));
+        const pad = H * .1, dH = H - pad * 2, stepX = (W - padX * 2) / Math.max(1, this.data.length - 1);
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        const toY = v => H - pad - ((v - minV) / range) * dH;
+        const pts = vals.map((v, i) => ({ x: padX + i * stepX, y: toY(v) }));
+        // Gradient fill
         ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); pts.forEach(p => ctx.lineTo(p.x, p.y));
         ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
-        const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, 'rgba(59,130,246,.2)'); g.addColorStop(1, 'rgba(59,130,246,0)');
+        const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, 'rgba(59,130,246,.15)'); g.addColorStop(1, 'rgba(59,130,246,0)');
         ctx.fillStyle = g; ctx.fill();
+        // MA + BB overlays (di bawah line utama)
+        this._drawOverlays(vals, toY, padX, stepX, W, H, pad, isLight);
+        // Main line (di atas overlay)
         ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
         ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
-        
+        // Price axis
+        this._drawPriceAxis(minV, maxV, pad, isLight);
+        // Crosshair dot
         if (this.hI >= 0 && this.hI < pts.length) {
             const p = pts[this.hI];
-            const isLight = document.documentElement.getAttribute('data-theme') === 'light';
             ctx.beginPath(); ctx.setLineDash([3, 4]); ctx.moveTo(p.x, 0); ctx.lineTo(p.x, H);
             ctx.strokeStyle = isLight ? 'rgba(0,0,0,.1)' : 'rgba(255,255,255,.1)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
             ctx.beginPath(); ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2); ctx.fillStyle = isLight ? '#ffffff' : '#08090b'; ctx.fill();
@@ -172,21 +414,32 @@ class AlgoChart {
         }
     }
     _drawCandle() {
-        const r = this.canvas.parentElement.getBoundingClientRect(), W = r.width, H = r.height, ctx = this.ctx;
+        const r = this.canvas.getBoundingClientRect(), W = r.width, H = r.height, ctx = this.ctx;
         ctx.clearRect(0, 0, W, H); const ohlc = this._ohlc; if (!ohlc.length) return;
+        const padX = 12;
         const allP = ohlc.flatMap(c => [c.high, c.low]), minV = Math.min(...allP), maxV = Math.max(...allP), range = maxV - minV || 1;
-        const pad = H * .1, dH = H - pad * 2, toY = v => H - pad - ((v - minV) / range) * dH;
-        const slotW = W / ohlc.length, bW = Math.max(2, slotW * .55);
+        const pad = H * .1, dH = H - pad * 2;
+        const toY = v => H - pad - ((v - minV) / range) * dH;
+        const drawW = W - padX * 2;
+        const slotW = drawW / ohlc.length, bW = Math.max(2, slotW * .55);
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-        if (this.hC >= 0) { ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)'; ctx.fillRect(this.hC * slotW, 0, slotW, H); }
+        // Hover highlight
+        if (this.hC >= 0) { ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)'; ctx.fillRect(padX + this.hC * slotW, 0, slotW, H); }
+        // MA + BB overlays (close prices, di bawah candle)
+        const closes = ohlc.map(c => c.close);
+        const stepX = drawW / Math.max(1, ohlc.length - 1);
+        this._drawOverlays(closes, toY, padX, stepX, W, H, pad, isLight);
+        // Candles
         ohlc.forEach((c, i) => {
-            const cx = (i + .5) * slotW, bull = c.close >= c.open, col = bull ? '#10b981' : '#ef4444';
+            const cx = padX + (i + .5) * slotW, bull = c.close >= c.open, col = bull ? '#10b981' : '#ef4444';
             ctx.strokeStyle = col; ctx.lineWidth = 1;
             ctx.beginPath(); ctx.moveTo(cx, toY(c.high)); ctx.lineTo(cx, toY(c.low)); ctx.stroke();
             const bT = toY(Math.max(c.open, c.close)), bH = Math.max(1.5, toY(Math.min(c.open, c.close)) - bT);
             ctx.fillStyle = bull ? 'rgba(16,185,129,.75)' : 'rgba(239,68,68,.75)';
             ctx.fillRect(cx - bW / 2, bT, bW, bH); ctx.strokeStyle = col; ctx.lineWidth = .8; ctx.strokeRect(cx - bW / 2, bT, bW, bH);
         });
+        // Price axis
+        this._drawPriceAxis(minV, maxV, pad, isLight);
     }
 }
 
@@ -533,20 +786,24 @@ function updateTicker(data) {
 function renderWatchlist(data) {
     try {
         updateTicker(data);
-        const list = document.getElementById('ticker-list'), cnt = document.getElementById('watchlist-count');
-        if (cnt) cnt.textContent = (data && data.length) ? data.length : 0;
-        
+
         // Update Chart Realtime jika data untuk pair aktif masuk
         if (data && data.length) {
+            lastRadarData = data;
             const activeData = data.find(d => d.pair === activePair);
             if (activeData && chart) {
                 chart.appendPoint(activePair, activeData.price);
             }
         }
-        
-        if (!list) return;
-        if (!data || !data.length) { list.innerHTML = '<div class="empty-state">Menunggu data...</div>'; return; }
-        list.innerHTML = ''; lastRadarData = data;
+
+        if (!data || !data.length) return;
+
+        // ── ticker-list (Radar Watchlist — opsional, mungkin tidak ada di DOM) ──
+        const list = document.getElementById('ticker-list');
+        const cnt = document.getElementById('watchlist-count');
+        if (cnt) cnt.textContent = data.length;
+        if (list) {
+            list.innerHTML = '';
 
         const sorted = [...data].sort((a, b) => a.pair.localeCompare(b.pair));
         sorted.forEach(t => {
@@ -584,9 +841,10 @@ function renderWatchlist(data) {
             if (lastP && lastP !== t.price) { flashEl(item, t.price > lastP ? 'up' : 'down'); }
             lastPrices[t.pair] = t.price;
             list.appendChild(item);
-        });
+            });
+        } // end if (list)
 
-        // Market Pulse
+        // ── Market Pulse (Gainers / Losers) ──
         const gList = document.getElementById('gainers-list'), lList = document.getElementById('losers-list');
         const tf = 'change_24h'; // Selalu gunakan data realtime 24h
         if (gList && lList) {
