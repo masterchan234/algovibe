@@ -154,14 +154,24 @@ def get_stats():
         # Open Positions
         positions = conn.execute("SELECT * FROM positions").fetchall()
 
-        # Performance Rekap
-        perf = db.get_daily_stats()
-
-        # All time performance for winrate
-        all_time = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history"
+        # 1. LIVE STATS (Real Money)
+        live_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
         ).fetchone()
-        win_rate = (all_time['wins'] / all_time['trades'] * 100) if all_time['trades'] > 0 else 0
+        
+        # 2. DRY RUN STATS (Live Simulation)
+        dry_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
+        ).fetchone()
+
+        # 3. BACKTEST STATS (AI Knowledge / DNA)
+        dna_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+        ).fetchone()
+
+        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
+        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
+        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
 
         # Sector Sentiment
         sectors = db.get_all_latest_sector_sentiment()
@@ -193,11 +203,11 @@ def get_stats():
 
         return jsonify({
             "daily_trades": perf['total_trades'],
-            "daily_pnl": float(perf['total_pnl_idr']),
-            "daily_wins": perf['win_count'],
-            "daily_losses": perf['loss_count'],
+            "daily_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "win_rate": round(win_rate, 2),
-            "total_trades_all_time": all_time['trades'],
+            "dry_win_rate": round(dry_win_rate, 2),
+            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
+            "total_trades_live": live_stats['trades'] if live_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -382,8 +392,10 @@ def get_recent_trades_api():
             "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp as created_at FROM positions"
         ).fetchall()
 
-        # Fetch recent trades
-        trades = db.get_recent_trades(limit=20)
+        # Fetch recent trades (EXCLUDE BACKTEST)
+        trades = conn.execute(
+            "SELECT pair, reason, pnl_idr, entry_price, amount_idr, created_at FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
 
         results = []
         for p in positions:
@@ -559,12 +571,24 @@ def _build_stats_payload():
         stats_dict = {r['key']: r['value'] for r in conn.execute("SELECT * FROM bot_state").fetchall()}
         positions  = conn.execute("SELECT * FROM positions").fetchall()
         perf       = db.get_daily_stats()
-        all_time   = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history"
+        # 1. LIVE STATS (Real Money)
+        live_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
         ).fetchone()
         
-        # Win Rate All-Time
-        win_rate = (all_time['wins'] / all_time['trades'] * 100) if (all_time and all_time['trades'] > 0) else 0
+        # 2. DRY RUN STATS (Live Simulation)
+        dry_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
+        ).fetchone()
+
+        # 3. BACKTEST STATS (AI Knowledge / DNA)
+        dna_stats = conn.execute(
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+        ).fetchone()
+
+        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
+        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
+        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
 
         unrealized_pnl = 0.0
         for pos in positions:
@@ -589,11 +613,11 @@ def _build_stats_payload():
 
         return {
             "daily_trades": perf['total_trades'],
-            "daily_pnl": float(all_time['total_pnl'] or 0),
-            "daily_wins": perf['win_count'],
-            "daily_losses": perf['loss_count'],
+            "daily_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "win_rate": round(win_rate, 2),
-            "total_trades_all_time": all_time['trades'] if all_time else 0,
+            "dry_win_rate": round(dry_win_rate, 2),
+            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
+            "total_trades_live": live_stats['trades'] if live_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -676,7 +700,7 @@ def _build_trades_payload():
             "SELECT pair, entry_price, amount_crypto, amount_idr, timestamp as created_at FROM positions"
         ).fetchall()
         trades = conn.execute(
-            "SELECT pair, reason, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, amount_crypto, duration_seconds, created_at FROM trade_history ORDER BY created_at DESC LIMIT 30"
+            "SELECT pair, reason, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, amount_crypto, duration_seconds, created_at FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 30"
         ).fetchall()
 
         results = []

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from config import DB_PATH
+from .migrations import run_migrations
 
 class Database:
     def __init__(self, db_path=DB_PATH):
@@ -168,6 +169,9 @@ class Database:
             cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
             
             # Committing is handled by the context manager automatically
+            
+        # ── Jalankan Sistem Migrasi Terpisah ──
+        run_migrations(self.db_path)
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -299,9 +303,9 @@ class Database:
                     SUM(pnl_idr) as total_pnl_idr,
                     AVG(pnl_pct) as avg_pnl_pct
                 FROM trade_history
-                WHERE {date_filter}
+                WHERE {date_filter} AND dry_run = ?
             '''
-            cursor.execute(query)
+            cursor.execute(query, (0 if not date_str else 1,)) # Default to Live for daily report
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
