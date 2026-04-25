@@ -785,18 +785,24 @@ class Oracle:
             "If history shows continued dumping, return AVOID. Fees (0.51%) are already factored in. "
             "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02)."
         )
-        llm_resp = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
+        task_id = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
-        if not llm_resp:
-            return default_resp
-            
-        return {
-            "verdict": llm_resp.get("verdict", "BUY"),
-            "target_tp": float(llm_resp.get("TP", 0.02)),
-            "target_sl": float(llm_resp.get("SL", -0.012)),
-            "confidence": float(llm_resp.get("confidence", 50.0)),
-            "reason": llm_resp.get("reason", "")
+        # --- [Fix] Handle Async / Failed LLM with Statistical Fallback ---
+        # Menggunakan win_rate yang sudah dihitung dari top_matches (neighbors terdekat)
+        win_rate_knn = win_rate
+        
+        # Default Heuristic Response (Jika AI gagal/lambat)
+        heuristic_resp = {
+            "verdict": "BUY" if win_rate_knn >= 0.6 else "AVOID", # Butuh 3/5 win untuk BUY
+            "target_tp": 0.04,
+            "target_sl": -0.02,
+            "confidence": win_rate_knn * 100,
+            "reason": f"Statistical Fallback (k-NN WinRate: {win_rate_knn*100:.0f}%)"
         }
+
+        # Jika LLM aktif, kita bisa mencoba mengambil hasil sebelumnya jika ada (cache),
+        # tapi untuk Scalper, lebih aman gunakan Heuristic jika data baru belum siap.
+        return heuristic_resp
 
     def apply_learning_to_score(self, base_score, features):
         """
