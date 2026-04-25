@@ -75,7 +75,12 @@ class AlgoChart {
         this._lastMin = 0; this._lastMax = 0;
         new ResizeObserver(() => this.resize()).observe(this.canvas.parentElement);
         this.canvas.addEventListener('mousemove', e => this._move(e));
-        this.canvas.addEventListener('mouseleave', () => { this.hI = this.hC = -1; this.tip.style.display = 'none'; this.draw(); });
+        this.canvas.addEventListener('mouseleave', () => { 
+            this.hI = this.hC = -1; 
+            this.hY = -1;
+            this.tip.style.display = 'none'; 
+            this.draw(); 
+        });
     }
     resize() {
         const dpr = devicePixelRatio || 1;
@@ -361,10 +366,34 @@ class AlgoChart {
             mainCtx.strokeStyle = boxColor; mainCtx.lineWidth = 1; mainCtx.globalAlpha = 0.5;
             mainCtx.stroke(); mainCtx.setLineDash([]); mainCtx.globalAlpha = 1;
         }
+
+        // ── CROSSHAIR Price Label ──
+        if (this.hY !== undefined && this.hY !== -1) {
+            const y = this.hY;
+            const price = this._priceAtY(y);
+            const boxH = 18, boxY = y - boxH / 2;
+            ctx.fillStyle = isLight ? '#1e293b' : '#e2e8f0';
+            ctx.beginPath();
+            ctx.roundRect ? ctx.roundRect(0, boxY, W, boxH, 2) : ctx.rect(0, boxY, W, boxH);
+            ctx.fill();
+            ctx.fillStyle = isLight ? '#ffffff' : '#0f172a';
+            ctx.font = 'bold 10px JetBrains Mono, monospace'; ctx.textAlign = 'center';
+            ctx.fillText(this._fmtShort(price), W / 2, y + 3.5);
+        }
+    }
+    _priceAtY(y) {
+        if (!this._lastMin && !this._lastMax) return 0;
+        const r = this.canvas.getBoundingClientRect(), H = r.height;
+        const pad = H * 0.1, dH = H - pad * 2;
+        const pct = 1 - (y - pad) / dH;
+        return this._lastMin + pct * (this._lastMax - this._lastMin);
     }
     _move(e) {
         if (!this.data.length) return;
-        const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left, W = r.width;
+        const r = this.canvas.getBoundingClientRect();
+        const x = e.clientX - r.left, y = e.clientY - r.top, W = r.width;
+        this.hY = y;
+        
         if (this.mode === 'candle') {
             const o = this._ohlc; if (!o.length) return;
             const padX = 12;
@@ -381,6 +410,7 @@ class AlgoChart {
             const xi = Math.max(0, Math.min(Math.round((x - padX) / step), this.data.length - 1));
             if (this.hI !== xi) { this.hI = xi; this.draw(); this.tip.textContent = 'Rp ' + this._fmt(this.data[xi].value); this._tipPos(x, W); }
         }
+        this.draw(); // Redraw for horizontal crosshair
     }
     draw() { if (this.mode === 'candle') this._drawCandle(); else this._drawArea(); }
     _drawArea() {
@@ -388,10 +418,18 @@ class AlgoChart {
         ctx.clearRect(0, 0, W, H); if (!this.data.length) return;
         const padX = 12;
         const vals = this.data.map(d => d.value), minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
+        this._lastMin = minV; this._lastMax = maxV;
         const pad = H * .1, dH = H - pad * 2, stepX = (W - padX * 2) / Math.max(1, this.data.length - 1);
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
         const toY = v => H - pad - ((v - minV) / range) * dH;
         const pts = vals.map((v, i) => ({ x: padX + i * stepX, y: toY(v) }));
+        
+        // Horizontal Crosshair Line
+        if (this.hY !== undefined && this.hY !== -1) {
+            ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.moveTo(0, this.hY); ctx.lineTo(W, this.hY);
+            ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+        }
+
         // Gradient fill
         ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); pts.forEach(p => ctx.lineTo(p.x, p.y));
         ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
@@ -404,7 +442,7 @@ class AlgoChart {
         ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
         // Price axis
         this._drawPriceAxis(minV, maxV, pad, isLight);
-        // Crosshair dot
+        // Vertical Crosshair dot
         if (this.hI >= 0 && this.hI < pts.length) {
             const p = pts[this.hI];
             ctx.beginPath(); ctx.setLineDash([3, 4]); ctx.moveTo(p.x, 0); ctx.lineTo(p.x, H);
@@ -418,13 +456,27 @@ class AlgoChart {
         ctx.clearRect(0, 0, W, H); const ohlc = this._ohlc; if (!ohlc.length) return;
         const padX = 12;
         const allP = ohlc.flatMap(c => [c.high, c.low]), minV = Math.min(...allP), maxV = Math.max(...allP), range = maxV - minV || 1;
+        this._lastMin = minV; this._lastMax = maxV;
         const pad = H * .1, dH = H - pad * 2;
         const toY = v => H - pad - ((v - minV) / range) * dH;
         const drawW = W - padX * 2;
         const slotW = drawW / ohlc.length, bW = Math.max(2, slotW * .55);
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-        // Hover highlight
-        if (this.hC >= 0) { ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)'; ctx.fillRect(padX + this.hC * slotW, 0, slotW, H); }
+        
+        // Horizontal Crosshair Line
+        if (this.hY !== undefined && this.hY !== -1) {
+            ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.moveTo(0, this.hY); ctx.lineTo(W, this.hY);
+            ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+        }
+
+        // Hover highlight + Vertical Crosshair
+        if (this.hC >= 0) { 
+            const cx = padX + (this.hC + .5) * slotW;
+            ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)'; 
+            ctx.fillRect(padX + this.hC * slotW, 0, slotW, H); 
+            ctx.beginPath(); ctx.setLineDash([3, 4]); ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
+            ctx.strokeStyle = isLight ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.06)'; ctx.stroke(); ctx.setLineDash([]);
+        }
         // MA + BB overlays (close prices, di bawah candle)
         const closes = ohlc.map(c => c.close);
         const stepX = drawW / Math.max(1, ohlc.length - 1);
