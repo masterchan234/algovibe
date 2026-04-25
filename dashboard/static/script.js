@@ -989,15 +989,58 @@ function renderTradeHistory(data) {
 }
 
 function renderLogs(data) {
-    const c = document.getElementById('ai-logs'); if (!c) return;
-    const items = data.filter(l => !_logCache.has(l.created_at + l.side + l.pair)).slice(0, 20);
-    items.forEach(log => {
-        _logCache.add(log.created_at + log.side + log.pair);
-        const div = document.createElement('div'); div.className = 'log-entry';
-        const time = new Date(log.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-        div.innerHTML = `<span class="log-time">${time}</span> <span class="log-side">${log.side}</span> <span class="log-pair">${formatPair(log.pair)}</span> <span class="log-detail">${log.price}</span>`;
-        c.prepend(div); while (c.children.length > 30) c.lastChild.remove();
+    const container = document.getElementById('ai-logs');
+    if (!container) return;
+
+    // Filter log baru saja agar tidak duplikat di UI
+    const newItems = data.filter(log => {
+        const key = log.created_at + log.side + log.pair + log.price;
+        if (_logCache.has(key)) return false;
+        _logCache.add(key);
+        return true;
+    }).reverse(); // Reverse agar urutan prepend benar (terlama dulu diproses ke prepend)
+
+    if (newItems.length === 0) return;
+
+    const fragment = document.createDocumentFragment();
+
+    newItems.forEach(log => {
+        const entry = document.createElement('div');
+        const level = (log.level || 'INFO').toUpperCase();
+        entry.className = `log-entry level-${level.toLowerCase()}`;
+        
+        const timeStr = new Date(log.created_at).toLocaleTimeString('id-ID', { 
+            hour: '2-digit', minute: '2-digit', second: '2-digit' 
+        });
+
+        // Mapping Ikon Dinamis
+        let icon = '🔹';
+        if (log.side.includes('AI_ORACLE')) icon = '🧠';
+        else if (log.side.includes('PREDICTION')) icon = '🎯';
+        else if (log.side.includes('WHALE')) icon = '🐋';
+        else if (log.side.includes('REGIME')) icon = '📡';
+        else if (log.side.includes('PUMP')) icon = '⚠️';
+        else if (log.side.includes('ORACLE')) icon = '🔮';
+
+        entry.innerHTML = `
+            <div class="log-header">
+                <span class="log-time">${timeStr}</span>
+                <span class="log-icon">${icon}</span>
+                <span class="log-side">${log.side}</span>
+                <span class="log-pair">${formatPair(log.pair)}</span>
+            </div>
+            <div class="log-msg">${log.price}</div>
+        `;
+        
+        fragment.appendChild(entry);
     });
+
+    container.prepend(fragment);
+
+    // Limit log display (Senior JS: maintain DOM performance)
+    while (container.children.length > 40) {
+        container.lastChild.remove();
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────

@@ -763,15 +763,24 @@ def _build_trades_payload():
         conn.close()
 
 def _build_logs_payload():
-    """Ambil log sinyal AI dan oracle langsung dari DB."""
+    """Ambil log sinyal AI, oracle, dan system events dari DB."""
     conn = get_db_connection()
     try:
+        # 1. Fetch System Events (New Source)
+        events = conn.execute("""
+            SELECT pair, type as side, message as price, level as status, created_at
+            FROM system_events
+            ORDER BY created_at DESC LIMIT 20
+        """).fetchall()
+
+        # 2. Fetch AI Signals dari ticker_history (Legacy fallback for predictions)
         ai_scans = conn.execute("""
             SELECT pair, prediction_prob, trend, updated_at as created_at
             FROM ticker_history WHERE prediction_prob > 0.4
-            ORDER BY updated_at DESC LIMIT 10
+            ORDER BY updated_at DESC LIMIT 5
         """).fetchall()
 
+        # 3. Fetch Oracle data from bot_state
         oracle_data = conn.execute("""
             SELECT key, value, updated_at as created_at FROM bot_state
             WHERE key IN ('market_regime', 'regime_leader', 'latest_whale', 'latest_fake_pump')
@@ -779,7 +788,20 @@ def _build_logs_payload():
         """).fetchall()
 
         results = []
+        
+        # Add System Events first (highest priority)
+        for e in events:
+            results.append({
+                "created_at": str(e['created_at']),
+                "pair": e['pair'].upper() if e['pair'] else 'SYSTEM',
+                "side": e['side'],
+                "price": e['price'],
+                "status": e['status'],
+                "level": e['status'] # Dashboard uses 'level' for UI styling
+            })
+
         for a in ai_scans:
+            # Avoid duplicates if already in system_events
             results.append({
                 "created_at": str(a['created_at']),
                 "pair":  a['pair'].upper(),
@@ -788,28 +810,27 @@ def _build_logs_payload():
                 "status": f"Trend: {a['trend']}",
                 "level": "INFO"
             })
+            
         icon_map = {
             'market_regime': '📡 REGIME',
             'regime_leader': '🔮 ORACLE',
             'latest_whale':  '🐋 WHALE',
             'latest_fake_pump': '⚠️ FAKE PUMP'
         }
-        level_map = {'latest_whale': 'ALERT', 'latest_fake_pump': 'WARN'}
         for o in oracle_data:
             val = o['value'] or ''
             results.append({
                 "created_at": str(o['created_at']),
                 "pair":  val.split('|')[0].upper() if '|' in val else 'GLOBAL',
-                "side":  icon_map.get(o['key'], '🔮 ORACLE'),
+                "side":  icon_map.get(o['key'], 'EVENT'),
                 "price": val.split('|')[1] if '|' in val else val,
                 "status": "DETECTED",
-                "level": level_map.get(o['key'], 'INFO')
+                "level": "ALERT" if "whale" in o['key'] else ("WARN" if "pump" in o['key'] else "INFO")
             })
 
+        # Sort combined results by created_at descending
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return results[:25]
-    except Exception:
-        return []
+        return results[:30]
     finally:
         conn.close()
 

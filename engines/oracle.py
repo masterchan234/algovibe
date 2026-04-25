@@ -800,8 +800,10 @@ class Oracle:
             "reason": f"Statistical Fallback (k-NN WinRate: {win_rate_knn*100:.0f}%)"
         }
 
-        # Jika LLM aktif, kita bisa mencoba mengambil hasil sebelumnya jika ada (cache),
-        # tapi untuk Scalper, lebih aman gunakan Heuristic jika data baru belum siap.
+        # Log decision to system_events for Dashboard visibility
+        msg = f"{heuristic_resp['verdict']} | Conf: {heuristic_resp['confidence']:.1f}% | {heuristic_resp['reason']}"
+        db.log_system_event(pair, 'AI_ORACLE', msg, 'INFO' if heuristic_resp['verdict'] == 'BUY' else 'DEBUG')
+
         return heuristic_resp
 
     def apply_learning_to_score(self, base_score, features):

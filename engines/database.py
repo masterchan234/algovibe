@@ -115,6 +115,20 @@ class Database:
                 )
             ''')
 
+            # Tabel untuk System Events (AI reasoning, Oracle decisions, Risk alerts)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS system_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT,
+                    type TEXT,
+                    message TEXT,
+                    level TEXT DEFAULT 'INFO',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_pair ON system_events(pair)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_time ON system_events(created_at)')
+
             # Tabel untuk daftar koin yang diblokir
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS blacklist (
@@ -411,6 +425,13 @@ class Database:
                 INSERT INTO order_logs (pair, side, price, amount, status, response_json, error_msg)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (pair, side, price, amount, status, resp_str, err_str))
+
+    def log_system_event(self, pair, event_type, message, level='INFO'):
+        with self.get_connection() as conn:
+            conn.execute('''
+                INSERT INTO system_events (pair, type, message, level)
+                VALUES (?, ?, ?, ?)
+            ''', (pair, event_type, message, level))
 
     def add_to_blacklist(self, pair, reason="Manual"):
         with self.get_connection() as conn:
