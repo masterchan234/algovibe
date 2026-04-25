@@ -846,11 +846,12 @@ function renderWatchlist(data) {
 
         // ── Market Pulse (Gainers / Losers) ──
         const gList = document.getElementById('gainers-list'), lList = document.getElementById('losers-list');
-        const tf = 'change_24h'; // Selalu gunakan data realtime 24h
-        if (gList && lList) {
-            gList.innerHTML = ''; lList.innerHTML = '';
-            const gainers = [...data].sort((a, b) => (b[tf] || 0) - (a[tf] || 0)).slice(0, 10);
-            const losers = [...data].sort((a, b) => (a[tf] || 0) - (b[tf] || 0)).slice(0, 10);
+            const tf = 'change_24h'; // Selalu gunakan data realtime 24h
+            if (gList && lList) {
+                gList.innerHTML = ''; lList.innerHTML = '';
+                // Senior Engineer Fix: Filter out zero-change coins from Pulse lists
+                const gainers = data.filter(t => (t[tf] || 0) > 0.01).sort((a, b) => (b[tf] || 0) - (a[tf] || 0)).slice(0, 10);
+                const losers = data.filter(t => (t[tf] || 0) < -0.01).sort((a, b) => (a[tf] || 0) - (b[tf] || 0)).slice(0, 10);
             const renderItem = (t, container, isUp) => {
                 const item = document.createElement('div'); item.className = 'pulse-item ' + (isUp ? 'up' : 'down');
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
@@ -865,7 +866,8 @@ function renderWatchlist(data) {
         const tList = document.getElementById('trending-list');
         if (tList) {
             tList.innerHTML = '';
-            const trending = [...data].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
+            // Senior Engineer Fix: Filter out zero-volume "Ghost" coins
+            const trending = data.filter(t => (t.score || 0) > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
             trending.forEach(t => {
                 const item = document.createElement('div'); item.className = 'trending-item';
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
