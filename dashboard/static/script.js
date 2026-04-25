@@ -34,9 +34,9 @@ document.addEventListener('click', e => {
     const wrap = e.target.closest('.ind-dropdown-wrap');
     if (!wrap) {
         const menu = document.getElementById('ind-menu');
-        const btn  = document.getElementById('ind-menu-btn');
+        const btn = document.getElementById('ind-menu-btn');
         if (menu) menu.style.display = 'none';
-        if (btn)  btn.classList.remove('active');
+        if (btn) btn.classList.remove('active');
     }
 });
 
@@ -76,11 +76,11 @@ class AlgoChart {
         this._lastMin = 0; this._lastMax = 0;
         new ResizeObserver(() => this.resize()).observe(this.canvas.parentElement);
         this.canvas.addEventListener('mousemove', e => this._move(e));
-        this.canvas.addEventListener('mouseleave', () => { 
-            this.hI = this.hC = -1; 
+        this.canvas.addEventListener('mouseleave', () => {
+            this.hI = this.hC = -1;
             this.hY = -1;
-            this.tip.style.display = 'none'; 
-            this.draw(); 
+            this.tip.style.display = 'none';
+            this.draw();
         });
     }
     resize() {
@@ -116,7 +116,7 @@ class AlgoChart {
         const now = Math.floor(Date.now() / 1000);
         const last = this.data[this.data.length - 1];
         const val = parseFloat(price);
-        
+
         if (activeTimeframe === 'LIVE') {
             if (last.value === val) return;
             this.data.push({ time: now, value: val });
@@ -126,7 +126,7 @@ class AlgoChart {
             // Update candle terakhir jika timeframe OHLCV
             const tfMap = { '5m': 300, '15m': 900, '1h': 3600 };
             const seconds = tfMap[activeTimeframe] || 3600;
-            
+
             // Jika candle baru (berdasarkan waktu)
             if (now - last.time >= seconds) {
                 this.data.push({
@@ -225,7 +225,7 @@ class AlgoChart {
 
         // ─ Bollinger Bands (MA20 ± 2σ) ─
         if (indState.bb && n >= 20) {
-            const ma20  = this._sma(vals, 20);
+            const ma20 = this._sma(vals, 20);
             const sigma = this._stddev(vals, ma20, 20);
             const upper = ma20.map((v, i) => v !== null ? v + 2 * sigma[i] : null);
             const lower = ma20.map((v, i) => v !== null ? v - 2 * sigma[i] : null);
@@ -243,7 +243,7 @@ class AlgoChart {
             }
             drawLine(upper, 'rgba(6,182,212,0.5)', 0.8);
             drawLine(lower, 'rgba(6,182,212,0.5)', 0.8);
-            drawLine(ma20,  'rgba(6,182,212,0.35)', 0.8);
+            drawLine(ma20, 'rgba(6,182,212,0.35)', 0.8);
         }
 
         ctx.restore(); // lepas clip
@@ -251,9 +251,9 @@ class AlgoChart {
         // ─ Legend di luar clip (tetap terlihat di pojok kiri atas) ─
         ctx.font = 'bold 9px JetBrains Mono, monospace';
         const legends = [
-            ...(indState.ma7  && n >= 7  ? [{ label: 'MA7',  color: 'rgba(245,158,11,0.9)' }] : []),
+            ...(indState.ma7 && n >= 7 ? [{ label: 'MA7', color: 'rgba(245,158,11,0.9)' }] : []),
             ...(indState.ma25 && n >= 25 ? [{ label: 'MA25', color: 'rgba(168,85,247,0.9)' }] : []),
-            ...(indState.bb   && n >= 20 ? [{ label: 'BB20', color: 'rgba(6,182,212,0.9)'  }] : []),
+            ...(indState.bb && n >= 20 ? [{ label: 'BB20', color: 'rgba(6,182,212,0.9)' }] : []),
         ];
         legends.forEach((l, i) => {
             const lx = padX + 6 + i * 44;
@@ -262,12 +262,13 @@ class AlgoChart {
             ctx.fillText(l.label, lx + 16, 12);
         });
     }
-    _fmt(v) { return v >= 1000 ? v.toLocaleString('id-ID') : v.toFixed(6); }
+    _fmt(v) { return fmtIDR(v); }
     _fmtShort(v) {
-        if (v >= 1e9) return (v/1e9).toFixed(2)+'B';
-        if (v >= 1e6) return (v/1e6).toFixed(1)+'M';
-        if (v >= 1e3) return (v/1e3).toFixed(1)+'K';
-        if (v >= 1)   return v.toLocaleString('id-ID', {maximumFractionDigits:0});
+        if (v >= 1e12) return (v / 1e12).toFixed(2) + 'T';
+        if (v >= 1e9) return (v / 1e9).toFixed(1) + 'M';
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + 'jt';
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + 'rb';
+        if (v >= 1) return v.toLocaleString('id-ID', { maximumFractionDigits: 0 });
         return v.toFixed(6);
     }
     _tipPos(x, W) { this.tip.style.display = 'block'; const tw = this.tip.getBoundingClientRect().width; this.tip.style.left = (x + 12 + tw > W ? x - tw - 12 : x + 12) + 'px'; this.tip.style.top = '8px'; }
@@ -284,9 +285,9 @@ class AlgoChart {
 
         const mainCtx = this.ctx;
         const mW = this.canvas.getBoundingClientRect().width;
-        const dimColor  = isLight ? 'rgba(0,0,0,0.05)'  : 'rgba(255,255,255,0.04)';
-        const tickColor = isLight ? 'rgba(0,0,0,0.15)'  : 'rgba(255,255,255,0.12)';
-        const lblColor  = isLight ? '#94a3b8' : '#3a3d52';
+        const dimColor = isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.04)';
+        const tickColor = isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.12)';
+        const lblColor = isLight ? '#94a3b8' : '#3a3d52';
 
         // ── Nice-step grid lines (TradingView style) ──
         // Hitung step yang rounded ke angka bulat sesuai magnitude range
@@ -394,7 +395,7 @@ class AlgoChart {
         const r = this.canvas.getBoundingClientRect();
         const x = e.clientX - r.left, y = e.clientY - r.top, W = r.width;
         this.hY = y;
-        
+
         if (this.mode === 'candle') {
             const o = this._ohlc; if (!o.length) return;
             const padX = 12;
@@ -409,7 +410,7 @@ class AlgoChart {
             const padX = 12;
             const step = (W - padX * 2) / Math.max(1, this.data.length - 1);
             const xi = Math.max(0, Math.min(Math.round((x - padX) / step), this.data.length - 1));
-            if (this.hI !== xi) { this.hI = xi; this.draw(); this.tip.textContent = 'Rp ' + this._fmt(this.data[xi].value); this._tipPos(x, W); }
+            if (this.hI !== xi) { this.hI = xi; this.draw(); this.tip.textContent = fmtIDR(this.data[xi].value); this._tipPos(x, W); }
         }
         this.draw(); // Redraw for horizontal crosshair
     }
@@ -424,7 +425,7 @@ class AlgoChart {
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
         const toY = v => H - pad - ((v - minV) / range) * dH;
         const pts = vals.map((v, i) => ({ x: padX + i * stepX, y: toY(v) }));
-        
+
         // Horizontal Crosshair Line
         if (this.hY !== undefined && this.hY !== -1) {
             ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.moveTo(0, this.hY); ctx.lineTo(W, this.hY);
@@ -463,7 +464,7 @@ class AlgoChart {
         const drawW = W - padX * 2;
         const slotW = drawW / ohlc.length, bW = Math.max(2, slotW * .55);
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-        
+
         // Horizontal Crosshair Line
         if (this.hY !== undefined && this.hY !== -1) {
             ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.moveTo(0, this.hY); ctx.lineTo(W, this.hY);
@@ -471,10 +472,10 @@ class AlgoChart {
         }
 
         // Hover highlight + Vertical Crosshair
-        if (this.hC >= 0) { 
+        if (this.hC >= 0) {
             const cx = padX + (this.hC + .5) * slotW;
-            ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)'; 
-            ctx.fillRect(padX + this.hC * slotW, 0, slotW, H); 
+            ctx.fillStyle = isLight ? 'rgba(0,0,0,.04)' : 'rgba(255,255,255,.03)';
+            ctx.fillRect(padX + this.hC * slotW, 0, slotW, H);
             ctx.beginPath(); ctx.setLineDash([3, 4]); ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
             ctx.strokeStyle = isLight ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.06)'; ctx.stroke(); ctx.setLineDash([]);
         }
@@ -859,23 +860,23 @@ function renderWatchlist(data) {
         const list = document.getElementById('ticker-list');
         const cnt = document.getElementById('watchlist-count');
         if (cnt) cnt.textContent = data.length;
-        
+
         if (list) {
             const isSearching = marketSearchQuery.length > 0;
             list.style.display = isSearching ? 'block' : 'none';
-            
+
             if (isSearching) {
                 list.innerHTML = '';
                 const query = marketSearchQuery.toLowerCase();
                 const filtered = data.filter(t => t.pair.toLowerCase().includes(query))
-                                     .sort((a, b) => a.pair.localeCompare(b.pair));
-                
+                    .sort((a, b) => a.pair.localeCompare(b.pair));
+
                 if (filtered.length === 0) {
                     list.innerHTML = '<div class="empty-state">Koin tidak ditemukan</div>';
                 } else {
                     filtered.forEach(t => {
                         const isUp = t.change >= 0, diff = (isUp ? '+' : '') + t.change.toFixed(2) + '%';
-                        const price = t.price >= 1000 ? t.price.toLocaleString('id-ID') : t.price.toFixed(6);
+                        const priceHtml = fmtIDR(t.price);
 
                         const conf = t.tech_confidence || 0;
                         const verd = t.tech_verdict || 'HOLD';
@@ -897,12 +898,12 @@ function renderWatchlist(data) {
                         item.className = 'ticker-item ' + (activePair === t.pair ? 'active' : '');
                         item.onclick = () => selectPair(t.pair, effectiveTrend, t.prediction);
                         item.innerHTML = `
-                            <div class="ticker-main"><b>${formatPair(t.pair)}</b> <span>Rp ${price}</span></div>
+                            <div class="ticker-main"><b>${formatPair(t.pair)}</b> <span>${priceHtml}</span></div>
                             <div class="ticker-side">
                                 <span class="${isUp ? 'up' : 'down'}">${diff}</span>
                                 ${badgeHtml}
                             </div>`;
-                        
+
                         const lastP = lastPrices[t.pair];
                         if (lastP && lastP !== t.price) { flashEl(item, t.price > lastP ? 'up' : 'down'); }
                         lastPrices[t.pair] = t.price;
@@ -914,12 +915,12 @@ function renderWatchlist(data) {
 
         // ── Market Pulse (Gainers / Losers) ──
         const gList = document.getElementById('gainers-list'), lList = document.getElementById('losers-list');
-            const tf = 'change_24h'; // Selalu gunakan data realtime 24h
-            if (gList && lList) {
-                gList.innerHTML = ''; lList.innerHTML = '';
-                // Senior Engineer Fix: Filter out zero-change coins from Pulse lists
-                const gainers = data.filter(t => (t[tf] || 0) > 0.01).sort((a, b) => (b[tf] || 0) - (a[tf] || 0)).slice(0, 10);
-                const losers = data.filter(t => (t[tf] || 0) < -0.01).sort((a, b) => (a[tf] || 0) - (b[tf] || 0)).slice(0, 10);
+        const tf = 'change_24h'; // Selalu gunakan data realtime 24h
+        if (gList && lList) {
+            gList.innerHTML = ''; lList.innerHTML = '';
+            // Senior Engineer Fix: Filter out zero-change coins from Pulse lists
+            const gainers = data.filter(t => (t[tf] || 0) > 0.01).sort((a, b) => (b[tf] || 0) - (a[tf] || 0)).slice(0, 10);
+            const losers = data.filter(t => (t[tf] || 0) < -0.01).sort((a, b) => (a[tf] || 0) - (b[tf] || 0)).slice(0, 10);
             const renderItem = (t, container, isUp) => {
                 const item = document.createElement('div'); item.className = 'pulse-item ' + (isUp ? 'up' : 'down');
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
@@ -939,7 +940,7 @@ function renderWatchlist(data) {
             trending.forEach(t => {
                 const item = document.createElement('div'); item.className = 'trending-item';
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
-                item.innerHTML = `<div class="trend-info"><span class="trend-pair">${formatPair(t.pair)}</span><span class="trend-score">Volatilitas: ${t.volatility.toFixed(1)}%</span></div><div class="trend-badge">${((t.score || 0) / 1e6).toFixed(0)}M</div>`;
+                item.innerHTML = `<div class="trend-info"><span class="trend-pair">${formatPair(t.pair)}</span><span class="trend-score">Volatilitas: ${t.volatility.toFixed(1)}%</span></div><div class="trend-badge">${fmtShortIDR(t.score || 0)}</div>`;
                 tList.appendChild(item);
             });
         }
@@ -976,13 +977,13 @@ function renderTradeHistory(data) {
         let pnlPct = t.pnl_pct !== undefined ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)` : '';
 
         // Formatting volume
-        const volCrypto = t.amount_coin ? t.amount_coin.toFixed(t.amount_coin < 1 ? 6 : 2) : '0';
-        const volIDR = t.amount_idr ? Math.round(t.amount_idr).toLocaleString('id-ID') : '0';
+        const volCrypto = formatCrypto(t.amount_coin);
+        const volIDR = fmtIDR(t.amount_idr);
 
         // DNA Rendering (AI & Whale context)
         let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
         if (t.ai_prob && t.ai_prob > 0.7) {
-            dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob*100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
+            dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob * 100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
         }
         if (t.whale_boost && t.whale_boost > 0) {
             dnaHtml += `<span title="Whale Activity Detected" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
@@ -1009,14 +1010,14 @@ function renderTradeHistory(data) {
                 <td>
                     <div style="line-height:1.2">
                         <b>${formatPair(t.pair)}</b><br>
-                        <span class="muted" style="font-size:9px">Beli: ${formatNumber(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Live: ${formatNumber(t.exit_price || t.last_price)}</span>
+                        <span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span><br>
+                        <span class="muted" style="font-size:9px">Live: ${fmtIDR(t.exit_price || t.last_price)}</span>
                     </div>
                 </td>
                 <td>
                     <div style="line-height:1.2">
                         <span style="font-weight:600; font-size:10px">${volCrypto}</span><br>
-                        <span class="muted" style="font-size:9.5px">Rp ${volIDR}</span>
+                        <span class="muted" style="font-size:9.5px">${volIDR}</span>
                     </div>
                 </td>
                 <td>
@@ -1046,14 +1047,14 @@ function renderTradeHistory(data) {
                 <td>
                     <div style="line-height:1.2">
                         <b>${formatPair(t.pair)}</b><br>
-                        <span class="muted" style="font-size:9px">Beli: ${formatNumber(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Jual: ${formatNumber(t.exit_price || t.last_price)}</span>
+                        <span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span><br>
+                        <span class="muted" style="font-size:9px">Jual: ${fmtIDR(t.exit_price || t.last_price)}</span>
                     </div>
                 </td>
                 <td>
                     <div style="line-height:1.2">
                         <span style="font-weight:600; font-size:10px">${volCrypto}</span><br>
-                        <span class="muted" style="font-size:9.5px">Rp ${volIDR}</span>
+                        <span class="muted" style="font-size:9.5px">${volIDR}</span>
                     </div>
                 </td>
                 <td>
@@ -1093,9 +1094,9 @@ function renderLogs(data) {
         const entry = document.createElement('div');
         const level = (log.level || 'INFO').toUpperCase();
         entry.className = `log-entry level-${level.toLowerCase()}`;
-        
-        const timeStr = new Date(log.created_at).toLocaleTimeString('id-ID', { 
-            hour: '2-digit', minute: '2-digit', second: '2-digit' 
+
+        const timeStr = new Date(log.created_at).toLocaleTimeString('id-ID', {
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
         });
 
         // Mapping Ikon Dinamis
@@ -1116,7 +1117,7 @@ function renderLogs(data) {
             </div>
             <div class="log-msg">${log.price}</div>
         `;
-        
+
         fragment.appendChild(entry);
     });
 
@@ -1129,15 +1130,41 @@ function renderLogs(data) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+function fmtIDR(n, s = false) {
+    if (n === undefined || n === null || isNaN(n)) return 'Rp 0';
+    const a = Math.abs(n);
+    // Senior Logic: Use maximumFractionDigits: 0 for large numbers, 2 for smaller ones
+    const v = new Intl.NumberFormat('id-ID', {
+        style: 'currency',
+        currency: 'IDR',
+        maximumFractionDigits: a < 100 ? 2 : 0
+    }).format(a);
+    const prefix = s ? (n >= 0 ? '+' : '−') : (n < 0 ? '−' : '');
+    return prefix + v;
+}
 function formatNumber(v, d = 0) {
     if (v === undefined || v === null || isNaN(v)) return '--';
-    return v >= 1000 ? Math.round(v).toLocaleString('id-ID') : v.toFixed(d > 0 ? d : (v < 1 ? 6 : 2));
+    // Digunakan untuk harga koin yang mungkin sangat kecil
+    if (v < 1) return v.toFixed(6);
+    if (v < 100) return v.toFixed(2);
+    return Math.round(v).toLocaleString('id-ID');
+}
+function formatCrypto(v) {
+    if (v === undefined || v === null || isNaN(v)) return '0';
+    return v < 1 ? v.toFixed(6) : v.toFixed(2);
+}
+function fmtShortIDR(v) {
+    if (v === undefined || v === null || isNaN(v)) return 'Rp 0';
+    if (v >= 1e12) return 'Rp ' + (v / 1e12).toFixed(2) + 'T';
+    if (v >= 1e9) return 'Rp ' + (v / 1e9).toFixed(1) + 'M';
+    if (v >= 1e6) return 'Rp ' + (v / 1e6).toFixed(1) + 'Jt';
+    if (v >= 1e3) return 'Rp ' + (v / 1e3).toFixed(1) + 'Rb';
+    return fmtIDR(v);
 }
 function formatPair(pair) {
     if (!pair) return '';
     return pair.toLowerCase().replace('_idr', '').replace('idr', '').toUpperCase();
 }
-function fmtIDR(n, s = false) { const a = Math.abs(n), v = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(a); return s ? (n >= 0 ? '+' : '\u2212') + v : n < 0 ? '\u2212' + v : v; }
 function flashEl(el, d) { if (!el) return; el.classList.remove('flash-up', 'flash-down'); void el.offsetWidth; el.classList.add(d === 'up' ? 'flash-up' : 'flash-down'); }
 function showToast(m, t = 'info') { /* Simple alert for now or implement toast UI */ console.log(`[TOAST ${t}] ${m}`); }
 
@@ -1179,7 +1206,7 @@ function initSystem() {
 
 window.addEventListener('DOMContentLoaded', () => {
     initSystem();
-    
+
     // Senior Search Implementation
     const searchInput = document.getElementById('market-search');
     if (searchInput) {
@@ -1209,11 +1236,11 @@ window.addEventListener('DOMContentLoaded', () => {
 function renderMarketTrades(data) {
     const tsEl = document.getElementById('trades-last-update');
     if (tsEl) tsEl.textContent = 'UPDATED: ' + new Date().toLocaleTimeString();
-    
+
     if (!data || !data.pair || !activePair || data.pair.toLowerCase() !== activePair.toLowerCase()) return;
     const list = document.getElementById('market-trades-list');
     if (!list) return;
-    
+
     // Clear list if we have no trades yet to avoid showing stale data or placeholder
     if (!data.trades || !data.trades.length) {
         // If it's still empty, keep the placeholder or show a "No Recent Trades" message
@@ -1222,20 +1249,20 @@ function renderMarketTrades(data) {
         }
         return;
     }
-    
+
     list.innerHTML = '';
     data.trades.slice(0, 30).forEach(t => {
         const row = document.createElement('div');
         row.className = `trade-row side-${t.side}`;
         const time = new Date(t.time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        
+
         // Senior JS Polish: Dynamic formatting for huge/tiny numbers
         const pVal = parseFloat(t.price);
-        const price = pVal >= 100 ? pVal.toLocaleString('id-ID') : pVal.toFixed(2);
-        
+        const price = fmtIDR(pVal);
+
         const amountVal = parseFloat(t.amount);
-        const amount = amountVal < 0.001 ? amountVal.toFixed(8) : (amountVal < 1 ? amountVal.toFixed(5) : amountVal.toFixed(2));
-        
+        const amount = formatCrypto(amountVal);
+
         row.innerHTML = `
             <span class="trade-time">${time}</span>
             <span class="trade-price">${price}</span>
