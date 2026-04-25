@@ -1,13 +1,15 @@
 services:
   algovibe:
-    build: .
-    container_name: algovibe_bot
+    image: 80.241.217.181:5000/algovibe:latest
+    container_name: algovibe
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "8080:5000"
     volumes:
+      - ./models:/app/models
       - ./data:/app/data
-      - ./scalper.log:/app/scalper.log
     logging:
       driver: "json-file"
       options:

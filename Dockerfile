@@ -1,12 +1,11 @@
 FROM python:3.12-slim
 
-# Set timezone to Asia/Jakarta (or your preferred timezone)
+# Timezone
 ENV TZ=Asia/Jakarta
 RUN apt-get update && apt-get install -y tzdata && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
 # Install dependencies
@@ -16,8 +15,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
-# Ensure data directory exists
-RUN mkdir -p /app/data
+# Pastikan direktori data & log ada
+RUN mkdir -p /app/data/logs
 
-# Run the scalper
-CMD ["python", "-u", "main.py"]
+# Beri permission ke startup script
+RUN chmod +x /app/start.sh
+
+# Jalankan bot + dashboard sekaligus
+CMD ["/app/start.sh"]

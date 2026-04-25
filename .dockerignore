@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Data & logs (mount via volume saat runtime)
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Dev/test files
+scratch/
+*.profraw
+test_*.py
+patch_*.py
+
+# Secrets — jangan pernah masuk image
+.env
+models/
+data/
