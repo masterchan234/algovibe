@@ -44,6 +44,17 @@ class Database:
                 )
             ''')
             
+            # Tabel untuk Market Depth (Order Book)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS market_depth (
+                    pair TEXT,
+                    price REAL,
+                    vol REAL,
+                    is_bid INTEGER
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_depth_pair ON market_depth(pair)')
+            
             # Tabel untuk histori transaksi yang sudah exit (Take Profit, Stop Loss, Cancel)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS trade_history (
@@ -69,6 +80,11 @@ class Database:
                     history_json TEXT,
                     prediction_prob REAL DEFAULT 0.0,
                     trend TEXT DEFAULT 'N/A',
+                    ch_5m REAL DEFAULT 0.0,
+                    ch_15m REAL DEFAULT 0.0,
+                    ch_1h REAL DEFAULT 0.0,
+                    volatility REAL DEFAULT 0.0,
+                    score REAL DEFAULT 0.0,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -230,12 +246,15 @@ class Database:
             ))
 
     def get_daily_stats(self, date_str=None):
-        """Mengambil rekap performa untuk tanggal tertentu (YYYY-MM-DD). Default = hari ini."""
+        """Mengambil rekap performa untuk 24 jam terakhir. Default = last 24h."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            date_filter = "date(created_at, 'localtime') = date('now', 'localtime')"
+            # Default: Rolling 24 jam terakhir (lebih berguna untuk crypto 24/7)
+            date_filter = "created_at >= datetime('now', '-24 hours')"
+            
             if date_str:
+                # Jika spesifik tanggal, gunakan filter tanggal kalender
                 date_filter = f"date(created_at, 'localtime') = date('{date_str}')"
                 
             query = f'''
@@ -269,19 +288,26 @@ class Database:
 
     # ── METODE UNTUK TICKER HISTORY ──
 
-    def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A'):
+    def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A', 
+                            ch_5m=0.0, ch_15m=0.0, ch_1h=0.0, volatility=0.0, score=0.0):
         import json
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, updated_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, 
+                                          ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
                     prediction_prob=excluded.prediction_prob,
                     trend=excluded.trend,
+                    ch_5m=excluded.ch_5m,
+                    ch_15m=excluded.ch_15m,
+                    ch_1h=excluded.ch_1h,
+                    volatility=excluded.volatility,
+                    score=excluded.score,
                     updated_at=excluded.updated_at
-            ''', (pair, json.dumps(history_list), prediction_prob, trend))
+            ''', (pair, json.dumps(history_list), prediction_prob, trend, ch_5m, ch_15m, ch_1h, volatility, score))
 
     def get_all_ticker_history(self):
         import json
@@ -457,6 +483,19 @@ class Database:
         except Exception as e:
             print(f"Cleanup Error: {e}")
 
+    def update_weight(self, feature_name, weight_value):
+        try:
+            with self.get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO dynamic_weights (feature_name, weight_value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(feature_name) DO UPDATE SET 
+                        weight_value=excluded.weight_value,
+                        updated_at=excluded.updated_at
+                """, (feature_name, weight_value))
+        except Exception as e:
+            print(f"Update Weight Error: {e}")
+
     def get_all_weights(self):
         try:
             with self.get_connection() as conn:
@@ -464,6 +503,48 @@ class Database:
                 return {row['feature_name']: row['weight_value'] for row in cursor.fetchall()}
         except Exception:
             return {}
+
+    def get_new_listings(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT pair_id, MIN(updated_at) as first_seen 
+                    FROM ticker_history 
+                    GROUP BY pair_id 
+                    ORDER BY first_seen DESC 
+                    LIMIT 5
+                """)
+                return [{"pair": row['pair_id'], "first_seen": row['first_seen']} for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def save_market_depth(self, pair, bids, asks):
+        """Simpan Top 10 Bids & Asks ke DB."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute("DELETE FROM market_depth WHERE pair = ?", (pair,))
+                # Simpan bids (is_bid=1)
+                for b in bids:
+                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (?, ?, ?, 1)",
+                               (pair, b['price'], b['vol']))
+                # Simpan asks (is_bid=0)
+                for a in asks:
+                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (?, ?, ?, 0)",
+                               (pair, a['price'], a['vol']))
+        except Exception: pass
+
+    def get_market_depth(self, pair):
+        """Ambil Top 10 Bids & Asks dari DB."""
+        try:
+            with self.get_connection() as conn:
+                bids = conn.execute("SELECT price, vol FROM market_depth WHERE pair = ? AND is_bid = 1 ORDER BY price DESC", (pair,)).fetchall()
+                asks = conn.execute("SELECT price, vol FROM market_depth WHERE pair = ? AND is_bid = 0 ORDER BY price ASC", (pair,)).fetchall()
+                return {
+                    "bids": [{"price": r['price'], "vol": r['vol']} for r in bids],
+                    "asks": [{"price": r['price'], "vol": r['vol']} for r in asks]
+                }
+        except Exception:
+            return {"bids":[], "asks":[]}
 
 # Instantiate a global db object for ease of use
 db = Database()

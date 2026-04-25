@@ -30,6 +30,7 @@ WS_MARKET_TOKEN = (
 
 CHANNEL_SUMMARY = "market:summary-24h"
 CHANNEL_OB_PFX  = "market:order-book-"   # + pair, e.g. market:order-book-btc_idr
+CHANNEL_TRADE_PFX = "market:trade-activity-" # + pair
 
 # Berapa banyak pair teratas (by volume) yang akan di-subscribe order book-nya
 OB_TOP_PAIRS     = 50
@@ -70,6 +71,8 @@ class MarketDataWS:
         self._last_msg_time = 0
         self._connected = threading.Event()  # set saat autentikasi berhasil
         self._ob_subscribed: set = set()     # pair yang sudah di-subscribe order book
+        self._trade_subscribed: set = set()  # pair yang sudah di-subscribe trade
+        self._trades: dict = {}              # {pair: [[ts, price, vol, side, id], ...]}
         self._ws_ref = None                  # ref ke ws instance untuk subscribe dinamis
         self._ob_done = False                # True setelah OB subscribe pertama selesai
         self._pending_subs: dict = {}        # {req_id: channel_name} untuk ACK tracking
@@ -102,6 +105,11 @@ class MarketDataWS:
         """
         with self._lock:
             return dict(self._tickers)
+
+    def get_trades(self, pair: str) -> list:
+        """Ambil data aktivitas market terbaru (trades)."""
+        with self._lock:
+            return list(self._trades.get(pair, []))
 
     def is_connected(self):
         return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
@@ -199,13 +207,12 @@ class MarketDataWS:
             elif channel.startswith(CHANNEL_OB_PFX):
                 pair = channel[len(CHANNEL_OB_PFX):]
                 ob_data = data_wrap.get("data", {})
-                # DEBUG: Log format OB pertama kali per pair (hapus setelah format diketahui)
-                if not hasattr(self, '_ob_format_logged'):
-                    self._ob_format_logged = set()
-                if pair not in self._ob_format_logged:
-                    logger.info(f"[MarketWS] OB FORMAT DEBUG ({pair}): keys={list(ob_data.keys()) if isinstance(ob_data, dict) else type(ob_data).__name__} | sample={str(ob_data)[:300]}")
-                    self._ob_format_logged.add(pair)
                 self._process_orderbook(pair, ob_data)
+
+            elif channel.startswith(CHANNEL_TRADE_PFX):
+                pair = channel[len(CHANNEL_TRADE_PFX):]
+                trade_data = data_wrap.get("data", [])
+                self._process_trades(pair, trade_data)
         except Exception as e:
             logger.error(f"[MarketWS] Critical Error in _on_message: {e}\n{traceback.format_exc()}")
 
@@ -224,11 +231,15 @@ class MarketDataWS:
             vol_idr  = self._safe_float(row[IDX_VOL_IDR])
             vol_coin = str(row[IDX_VOL_COIN] or "0")
 
+            change_24h = ((last - open_p) / open_p * 100) if open_p > 0 else 0
+            
             # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask).
             # Jika data Order Book yang lebih akurat sudah ada, pertahankan nilainya.
             existing = self._tickers.get(pair, {})
             updated[pair] = {
+                "pair":      pair,
                 "last":      last,
+                "change_24h": change_24h,
                 # Gunakan harga real dari OB jika sudah ada, jangan timpa dengan estimasi
                 "buy":       existing.get("buy", last) if existing.get("buy", last) != existing.get("last", last) else last,
                 "sell":      existing.get("sell", last) if existing.get("sell", last) != existing.get("last", last) else last,
@@ -255,10 +266,87 @@ class MarketDataWS:
             if len(self._ob_subscribed) < OB_TOP_PAIRS:
                 need_ob_subscribe = True
                 
+        # ── Dynamic Subscribe for Active Watch Pair ──
+        try:
+            from engines.database import db
+            watch_pair = db.get_state('current_watch_pair')
+            if watch_pair:
+                if watch_pair not in self._ob_subscribed:
+                    self._subscribe_specific_ob(watch_pair)
+                if watch_pair not in self._trade_subscribed:
+                    self.subscribe_market_trades(watch_pair)
+        except Exception: pass
+                
         if need_ob_subscribe and self._ws_ref:
             with self._lock:
                 snapshot = dict(self._tickers)
             self._subscribe_top_orderbooks(snapshot)
+
+    def _subscribe_specific_ob(self, pair: str):
+        """Subscribe ke satu koin spesifik secara langsung."""
+        if not self._ws_ref: return
+        try:
+            req_id = self._next_id()
+            channel = f"{CHANNEL_OB_PFX}{pair}"
+            sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+            self._ws_ref.send(json.dumps(sub_msg))
+            self._ob_subscribed.add(pair)
+            logger.info(f"[MarketWS] Dynamic OB Subscribed: {pair}")
+        except Exception: pass
+
+    def subscribe_market_trades(self, pair: str):
+        """Public API untuk subscribe ke aktivitas trade koin tertentu."""
+        # 1. Fetch initial trades via REST for immediate UI population
+        threading.Thread(target=self._fetch_initial_trades, args=(pair,), daemon=True).start()
+
+        if not self._ws_ref: return
+        try:
+            req_id = self._next_id()
+            channel = f"{CHANNEL_TRADE_PFX}{pair}"
+            sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+            self._ws_ref.send(json.dumps(sub_msg))
+            self._trade_subscribed.add(pair)
+            logger.info(f"[MarketWS] Dynamic Trade Subscribed: {pair} (req_id={req_id})")
+        except Exception as e:
+            logger.error(f"[MarketWS] Failed to subscribe trades for {pair}: {e}")
+
+    def _fetch_initial_trades(self, pair: str):
+        """Ambil data trade terakhir via REST agar dashboard tidak kosong saat awal."""
+        try:
+            import requests
+            url = f"https://indodax.com/api/trades/{pair}"
+            resp = requests.get(url, timeout=5).json()
+            if isinstance(resp, list):
+                # Indodax REST format: [{date, price, amount, tid, type}, ...]
+                formatted = []
+                for t in resp:
+                    # Map to WS format: [pair, timestamp, tid, type, price, vol_idr, vol_coin]
+                    # Note: WS format has pair at [0], timestamp at [1]
+                    item = [
+                        pair, 
+                        int(t.get('date', 0)), 
+                        t.get('tid', 0), 
+                        t.get('type', 'buy'), 
+                        t.get('price', 0), 
+                        0, # vol_idr (approx)
+                        t.get('amount', 0)
+                    ]
+                    formatted.append(item)
+                
+                with self._lock:
+                    if pair not in self._trades: self._trades[pair] = []
+                    # Merge and unique by TID
+                    existing_tids = {str(x[2]) for x in self._trades[pair]}
+                    for item in formatted:
+                        if str(item[2]) not in existing_tids:
+                            self._trades[pair].append(item)
+                    
+                    # Sort by timestamp desc and limit
+                    self._trades[pair].sort(key=lambda x: int(x[1]), reverse=True)
+                    self._trades[pair] = self._trades[pair][:50]
+                logger.info(f"[MarketWS] Initial trades fetched for {pair}: {len(formatted)} items")
+        except Exception as e:
+            logger.error(f"[MarketWS] Error fetching initial trades for {pair}: {e}")
 
     def _subscribe_top_orderbooks(self, summary_snapshot: dict):
         """Subscribe ke order-book channel untuk top N pairs bervolume tinggi."""
@@ -337,21 +425,40 @@ class MarketDataWS:
             return
 
         with self._lock:
-            if pair in self._tickers:
-                if best_bid > 0:
-                    self._tickers[pair]["buy"]       = best_bid
-                if best_ask > 0:
-                    self._tickers[pair]["sell"]      = best_ask
-                self._tickers[pair]["bid_depth"]     = bid_depth
-                self._tickers[pair]["ask_depth"]     = ask_depth
-            else:
-                # Pair belum ada di summary ticker, simpan sementara
+            if pair not in self._tickers:
                 self._tickers[pair] = {
                     "last": best_bid, "buy": best_bid, "sell": best_ask,
                     "high": 0, "low": 0, "open": 0,
                     "vol_idr": 0, "vol_coin": "0",
-                    "bid_depth": bid_depth, "ask_depth": ask_depth
+                    "bid_depth": 0, "ask_depth": 0,
+                    "bids_list": [], "asks_list": []
                 }
+            
+            t = self._tickers[pair]
+            if best_bid > 0: t["buy"] = best_bid
+            if best_ask > 0: t["sell"] = best_ask
+            t["bid_depth"] = bid_depth
+            t["ask_depth"] = ask_depth
+            # Simpan rincian Top 10 untuk Dashboard
+            t["bids_list"] = [{"price": self._safe_float(b.get("price")), "vol": self._safe_float(b.get("idr_volume"))} for b in bids[:10]]
+            t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
+            
+            # ── Push to DB for Dashboard ──
+            from engines.database import db
+            db.save_market_depth(pair, t["bids_list"], t["asks_list"])
+
+    def _process_trades(self, pair: str, data: list):
+        """Parse market:trade-activity-<pair>."""
+        if not data: return
+        with self._lock:
+            if pair not in self._trades: self._trades[pair] = []
+            for t in data:
+                # Format: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
+                self._trades[pair].insert(0, t)
+            # Simpan 50 terakhir
+            self._trades[pair] = self._trades[pair][:50]
+            logger.info(f"[MarketWS] Stored {len(self._trades[pair])} trades for {pair}")
+
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")
