@@ -258,12 +258,12 @@ class Database:
                 conn.execute('''
                     INSERT INTO trade_analytics (
                         pair, entry_timestamp, ai_prob, whale_boost, 
-                        sector_sentiment, imbalance, volatility, pnl_idr, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED')
+                        sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED')
                 ''', (
                     pair, dna.get('timestamp'), dna.get('ai_prob'), dna.get('whale_boost'),
                     dna.get('sector_sentiment'), dna.get('imbalance'), dna.get('volatility'),
-                    pnl_idr
+                    dna.get('rsi'), dna.get('ema_dist'), pnl_idr
                 ))
                 
                 # 2. Simpan ke trade_history (Outcome)
@@ -459,10 +459,11 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute(
                     """INSERT INTO trade_analytics 
-                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
-                     dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'])
+                     dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'],
+                     dna_data.get('rsi'), dna_data.get('ema_dist'))
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")

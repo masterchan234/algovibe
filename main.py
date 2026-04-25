@@ -155,7 +155,7 @@ class ScalperBot:
         
         return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
 
-    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None, taker=False):
         try:
             # ── Oracle Sizing Multiplier ─────────────────────────────────────
             multiplier = self.oracle.get_sizing_multiplier()
@@ -181,7 +181,14 @@ class ScalperBot:
             
             final_tp = dynamic_tp if dynamic_tp is not None else TP_PCT
             final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
-            buy_price     = price * (1 - BUY_MAKER_OFFSET)
+            
+            # [Tuning] Taker vs Maker Entry
+            if taker:
+                buy_price = price
+                log_message(f"⚡ [Taker Entry] Menggunakan harga pasar Rp {buy_price:,.2f} untuk momentum.")
+            else:
+                buy_price = price * (1 - BUY_MAKER_OFFSET)
+                
             amount_crypto = amount_idr / buy_price
             
             # Estimate Targets
@@ -226,8 +233,12 @@ class ScalperBot:
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
-                params = {'post_only': True}
-                order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
+                params = {'post_only': True} if not taker else {}
+                if taker:
+                    # Di Indodax Pro, limit order dengan harga saat ini berfungsi sebagai taker jika post_only=False
+                    order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
+                else:
+                    order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
             dna_data = {
@@ -390,6 +401,22 @@ class ScalperBot:
             
             # Take Top N
             high_speed = [p for p in ranked if p['volatility'] >= MIN_TRACKING_VOLATILITY][:MAX_TRACKED_PAIRS]
+            
+            # --- Market Regime Filter (BTC Protection) ---
+            # Dapatkan harga BTC/IDR untuk menentukan suhu pasar
+            btc_ticker = self.exchange.fetch_ticker("BTC/IDR")
+            btc_last = float(btc_ticker['last'])
+            
+            # Simulasi EMA 20 BTC sederhana (menggunakan data history yang sudah ada di DB)
+            btc_history = db.get_ticker_history("BTC/IDR", limit=20)
+            if btc_history and len(btc_history) >= 20:
+                btc_prices = [h['last'] for h in btc_history]
+                btc_ema = sum(btc_prices) / 20
+                if btc_last < btc_ema:
+                    log_message(f"⚠️ [BTC Filter] BTC sedang bearish ({btc_last} < {btc_ema:.0f}). Bot stand-by.")
+                    time.sleep(30)
+                    continue
+            
             open_positions = self.exit_manager.get_open_positions()
 
             for p in high_speed:
@@ -476,12 +503,29 @@ class ScalperBot:
                     break
 
                 # ── Custom AI Pattern Matcher (k-NN + LLM) ────────────────
+                # [Deep Context Tuning] Ambil indikator teknikal untuk memperkuat prediksi
+                from engines.technicals import calculate_rsi
+                rsi_val = calculate_rsi(history)
+                
+                # Hitung EMA 20 dan jarak harga (EMA Distance)
+                if len(history) >= 20:
+                    prices = np.array(history, dtype=float)
+                    alpha = 2 / (20 + 1)
+                    ema_20 = prices[0]
+                    for price in prices[1:]:
+                        ema_20 = (price * alpha) + (ema_20 * (1 - alpha))
+                    ema_dist = ((p['last'] - ema_20) / ema_20) * 100
+                else:
+                    ema_dist = 0.0
+
                 current_dna = {
                     "ai_prob": tq_prob,
                     "whale_boost": whale_boost,
                     "sector_sentiment": sector_boost,
                     "imbalance": imbalance_ratio,
-                    "volatility": p['volatility']
+                    "volatility": p['volatility'],
+                    "rsi": rsi_val,
+                    "ema_dist": ema_dist
                 }
                                 # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
                 knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
@@ -495,10 +539,13 @@ class ScalperBot:
                 if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
                     
                     if self.daily_trades < MAX_TRADES_PER_DAY:
+                        # [Momentum Tuning] Gunakan Taker Order (Instant Buy) untuk menangkap momentum breakout k-NN
+                        # Biaya lebih tinggi (0.21%) tapi probabilitas tertangkap momentum lebih besar.
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
                                              imbalance=imbalance_ratio, volatility=p['volatility'],
-                                             dynamic_tp=knn_decision['target_tp'], dynamic_sl=knn_decision['target_sl']):
+                                             dynamic_tp=knn_decision['target_tp'], dynamic_sl=knn_decision['target_sl'],
+                                             taker=True):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)
                 else:

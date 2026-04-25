@@ -52,17 +52,42 @@ class AlgovibeBacktester:
         print(f"Simulating {pair}...")
         trades_count = 0
         
-        # Simple Breakout Logic for simulation
+        # Tuned Indicators for higher Win Rate
         df['avg_20'] = df['close'].rolling(window=20).mean()
+        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+        
+        # RSI 14 calculation
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
         df['max_prev_5'] = df['close'].shift(1).rolling(window=5).max()
+        
+        # Fee Indodax (Taker/Maker + Tax) ~ 0.51% round trip
+        FEE_ROUND_TRIP = 0.0051 
         
         i = 20
         while i < len(df) - 20:
             row = df.iloc[i]
+            prev_row = df.iloc[i-1]
             
-            # Entry condition: Price > max of previous 5 and above 20-avg
-            # We add a bit of 'momentum' requirement
-            if row['close'] > row['max_prev_5'] and row['close'] > row['avg_20'] * 1.002:
+            # Entry condition Booster: 
+            # 1. Price > Max 5 bars
+            # 2. Volume > 1.8x Average (Volume Confirmation)
+            # 3. EMA 9 > EMA 9 Previous (Momentum Slope)
+            # 4. BTC Filter: BTC must be in UPTREND
+            avg_vol = df['volume'].iloc[i-15:i].mean()
+            btc_up = row.get('btc_up', True)
+            
+            if (row['close'] > row['max_prev_5'] and 
+                row['volume'] > avg_vol * 1.8 and 
+                row['ema_9'] > prev_row['ema_9'] and
+                btc_up):
+                
+                # Taker Entry Simulation: Buy at Close price
                 entry_price = row['close']
                 entry_time = row['timestamp']
                 
@@ -84,13 +109,19 @@ class AlgovibeBacktester:
                 ai_prob_sim = 65 + (breakout_strength * 1000)
                 ai_prob_sim = min(95, max(66, ai_prob_sim))
                 
+                # Contextual Features
+                rsi_val = row['rsi'] if not np.isnan(row['rsi']) else 50.0
+                ema_dist = ((row['close'] - row['ema_20']) / row['ema_20']) * 100
+                
                 dna = {
                     'timestamp': entry_time.strftime('%Y-%m-%d %H:%M:%S'),
                     'ai_prob': round(ai_prob_sim, 2),
                     'whale_boost': whale_boost,
                     'sector_sentiment': round(random.uniform(0.8, 1.2), 2),
                     'imbalance': round(imbalance_proxy, 2),
-                    'volatility': round(volatility, 2)
+                    'volatility': round(volatility, 2),
+                    'rsi': round(rsi_val, 2),
+                    'ema_dist': round(ema_dist, 4)
                 }
                 
                 # Simulate Outcome
@@ -126,12 +157,15 @@ class AlgovibeBacktester:
                         break
                 
                 if outcome:
-                    pnl_idr = CAPITAL_PER_TRADE * (pnl_pct / 100)
+                    # Deduct Transaction Fees
+                    pnl_pct_net = pnl_pct - (FEE_ROUND_TRIP * 100)
+                    pnl_idr_net = CAPITAL_PER_TRADE * (pnl_pct_net / 100)
+                    
                     db.insert_backtest_data(
                         pair=pair,
                         dna=dna,
-                        pnl_idr=pnl_idr,
-                        pnl_pct=pnl_pct,
+                        pnl_idr=pnl_idr_net,
+                        pnl_pct=pnl_pct_net,
                         entry_price=entry_price,
                         exit_price=exit_price,
                         amount_idr=CAPITAL_PER_TRADE,
@@ -144,10 +178,26 @@ class AlgovibeBacktester:
         print(f"Finished {pair}: {trades_count} trades seeded.")
 
 if __name__ == "__main__":
-    print("--- Algovibe Backtester & DNA Seeder ---")
+    print("--- Algovibe Backtester & DNA Seeder (BTC Filter + Taker Mode) ---")
     backtester = AlgovibeBacktester()
+    
+    # Fetch BTC for Market Filter
+    print("Fetching BTC/IDR for market regime analysis...")
+    btc_df = backtester.fetch_data("BTC/IDR")
+    if btc_df is not None:
+        btc_df['btc_ema'] = btc_df['close'].ewm(span=20, adjust=False).mean()
+        btc_map = btc_df.set_index('timestamp')['close'] > btc_df.set_index('timestamp')['btc_ema']
+    else:
+        btc_map = None
+
     for pair in PAIRS:
         data = backtester.fetch_data(pair)
         if data is not None:
+            # Map BTC trend to pair data
+            if btc_map is not None:
+                data['btc_up'] = data['timestamp'].map(btc_map).fillna(False)
+            else:
+                data['btc_up'] = True # Fallback
+                
             backtester.run_simulation(pair, data)
-    print("\n✅ Database Seeding Complete!")
+    print("\n✅ High-Quality Seeding with BTC Filter Complete!")

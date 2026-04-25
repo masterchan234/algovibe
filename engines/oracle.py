@@ -746,32 +746,45 @@ class Oracle:
         distances = []
         for h in history:
             try:
-                # Normalisasi jarak k-NN (Tuning: Faktor pembagi lebih ketat)
+                # Normalisasi jarak k-NN (Tuned: 5-Factor Feature Space)
                 d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 2.0
                 d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 1.5
                 d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 20.0
+                d_rsi = (current_dna.get('rsi', 50) - h.get('rsi', 50)) / 15.0
+                d_ema = (current_dna.get('ema_dist', 0) - h.get('ema_dist', 0)) / 1.0
                 
-                # Gunakan Manhattan Distance untuk sensitivitas linear lebih baik pada data sparse
-                dist = abs(d_vol) + abs(d_imb) + abs(d_ai)
+                # Gunakan Weighted Manhattan Distance untuk akurasi prediksi maksimal
+                dist = abs(d_vol)*1.5 + abs(d_imb)*1.0 + abs(d_ai)*1.2 + abs(d_rsi)*1.0 + abs(d_ema)*0.8
                 distances.append((dist, h))
             except:
                 continue
                 
         distances.sort(key=lambda x: x[0])
         top_matches = [item[1] for item in distances[:5]]
-        
-        # Susun laporan historis untuk LiteRT-LM
+        # Susun laporan historis mendalam untuk LiteRT-LM reasoning
         win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
-        history_text = ", ".join([f"{'WIN' if t.get('pnl_idr',0)>0 else 'LOSS'} ({t.get('pnl_pct',0):.2f}%)" for t in top_matches])
+        win_rate = win_count / len(top_matches)
+        
+        history_details = []
+        for t in top_matches:
+            outcome = "WIN" if t.get('pnl_idr', 0) > 0 else "LOSS"
+            history_details.append(
+                f"- {outcome} ({t.get('pnl_pct', 0):.2f}%): RSI={t.get('rsi', 50)}, "
+                f"EMA_Dist={t.get('ema_dist', 0):.4f}, Vol={t.get('volatility', 0):.2f}%"
+            )
+        
+        history_text = "\n".join(history_details)
         
         prompt = (
-            f"URGENT TRADE DECISION FOR {pair.upper()}.\n"
-            f"Current Market DNA: Volatility={current_dna.get('volatility',0):.2f}%, "
-            f"Imbalance={current_dna.get('imbalance',1):.2f}, AI_Prob={current_dna.get('ai_prob',0)}%.\n"
-            f"Past 5 closest historical trades resulted in: {history_text}. ({win_count}/5 Wins).\n"
-            "If past trades show winning patterns, be AGGRESSIVE. Set dynamic TP matching the past win percentages. "
-            "If they show losing patterns (falling knife), return AVOID.\n"
-            "Return JSON format: verdict (BUY/AVOID), confidence (0-100), TP (float e.g., 0.03 for 3%), SL (float < 0, e.g., -0.015)."
+            f"URGENT TRADE ANALYSIS FOR {pair.upper()}.\n"
+            f"Current DNA: RSI={current_dna.get('rsi', 50)}, EMA_Dist={current_dna.get('ema_dist', 0):.4f}, "
+            f"Volatility={current_dna.get('volatility', 0):.2f}%, Imbalance={current_dna.get('imbalance', 1):.2f}.\n"
+            f"\nCompare with 5 most similar historical patterns (NET PROFIT AFTER 0.51% FEES):\n{history_text}\n"
+            f"\nWin Rate for these patterns: {win_rate*100:.0f}%. "
+            "Your Task: Unbiased reasoning. Consider 0.51% TRANSACTION FEES as priority. "
+            "Only suggest BUY if the current context strongly suggests a move that covers fees + profit. "
+            "If RSI/EMA suggests overextension, return AVOID. If wins are consistent, match TP history."
+            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float), SL (float)."
         )
         
         # Panggil LLM secara sinkronus agar bisa menunggangi momentum
