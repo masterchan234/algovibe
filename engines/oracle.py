@@ -1,7 +1,9 @@
 import time
+import json
 import logging
 from datetime import datetime, timedelta
 from engines.database import db
+from engines.llm_worker import LLMWorker
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +20,169 @@ class Oracle:
     """
     def __init__(self, market_ws):
         self.market_ws = market_ws
-        self.last_regime = MarketRegime.CHOPPY
-        self.last_regime_update = datetime.now()
+        self.last_regime = None  # Force evaluation on first run
+        self.last_regime_update = datetime.now() - timedelta(minutes=5)
         self.weights = db.get_all_weights() or {
             "ai_prob": 1.0, "whale_boost": 1.0, 
             "sector_sentiment": 1.0, "imbalance": 1.0
         }
         self.health_status = True
         self.latency_history = []
+        self.llm_worker = LLMWorker.get_instance()
+        self.pair_boosts = {} # {pair: {"boost": float, "expiry": datetime}}
+        self.last_top_mover_analysis = datetime.now() - timedelta(minutes=10)
+        self.pump_cooldowns = {} # {pair: last_analysis_time}
+        self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)  # auto-queue BUY candidates
+        
+    def auto_queue_buy_candidates(self, ranked_signals):
+        """
+        Setiap 60 detik, ambil top-5 koin dengan sinyal BUY terkuat dan
+        antri ke LiteRT-LM untuk deep reasoning otomatis.
+        ranked_signals: list of dict {pair, tech_verdict, tech_confidence, ...}
+        """
+        now = datetime.now()
+        if (now - self.last_buy_signal_queue).total_seconds() < 60:
+            return  # cooldown 60 detik
+        self.last_buy_signal_queue = now
+
+        from engines.technicals import get_technical_summary, derive_trade_signal
+        import sqlite3
+        from config import DB_PATH
+
+        # Ambil top 5 koin dengan verdict BUY dan confidence tertinggi
+        buy_candidates = sorted(
+            [r for r in ranked_signals if r.get('tech_verdict') == 'BUY'],
+            key=lambda x: x.get('tech_confidence', 0),
+            reverse=True
+        )[:5]
+
+        if not buy_candidates:
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            for candidate in buy_candidates:
+                pair = candidate['pair']
+                # Skip jika baru di-queue (individual pair cooldown 5 menit)
+                if pair in self.pump_cooldowns:
+                    age = (now - self.pump_cooldowns[pair]).total_seconds()
+                    if age < 300:
+                        continue
+
+                row = conn.execute(
+                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                ).fetchone()
+                prices = json.loads(row['history_json']) if (row and row['history_json']) else []
+                tech   = get_technical_summary(prices)
+                sig    = derive_trade_signal(tech)
+
+                last_price = prices[-1] if prices else 0
+                prompt = (
+                    f"Context: Elite Quantitative Scalper. AUTO-SCAN. Pair: {pair.upper()}. Price: Rp {last_price:,.2f}. "
+                    f"Data: RSI={tech['rsi']}, Vol={tech['volatility']}%, Signal={sig['verdict']} ({sig['confidence']}% confidence). "
+                    f"Reason: {sig['reason']}. "
+                    "Task: Confirm or reject this BUY signal with tactical precision. "
+                    "Output: BUY/HOLD/AVOID verdict + 1 sentence reasoning + Profit Target + Stop Loss (Rp) + ETA (minutes)."
+                )
+                task_id = f"ANALYSIS:{pair}"
+                self.llm_worker.query_async(task_id, prompt)
+                self.pump_cooldowns[pair] = now
+                logger.info(f"[AutoQueue] LLM queued for {pair} (BUY {sig['confidence']}%)")
+        finally:
+            conn.close()
+
+    def process_llm_insights(self):
+        """Called periodically to fetch async LLM insights."""
+        # 1. Check for manual analysis requests from DB (triggered by Dashboard)
+        on_demand_pair = db.get_state("trigger_analysis_pair")
+        if on_demand_pair:
+            db.save_state("trigger_analysis_pair", None)
+            try:
+                import sqlite3
+                from config import DB_PATH
+                from engines.technicals import get_technical_summary
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                try:
+                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (on_demand_pair,)).fetchone()
+                    prices = json.loads(row['history_json']) if (row and row['history_json']) else []
+                    tech = get_technical_summary(prices)
+
+                    depth = conn.execute("SELECT vol, is_bid FROM market_depth WHERE pair = ?", (on_demand_pair,)).fetchall()
+                    bids  = sum(r['vol'] for r in depth if r['is_bid'] == 1)
+                    asks  = sum(r['vol'] for r in depth if r['is_bid'] == 0)
+                    total = bids + asks
+                    tech['buy_pressure'] = round((bids / total * 100), 1) if total > 0 else 50.0
+                finally:
+                    conn.close()
+
+                last_price = prices[-1] if prices else 0
+                prompt = (
+                    f"Context: Elite Quantitative Scalper. Pair: {on_demand_pair.upper()}. Price: Rp {last_price:,.2f}. "
+                    f"Data: RSI={tech['rsi']}, Vol={tech['volatility']}%, Signal={tech['signal']}, BuyPressure={tech['buy_pressure']}%. "
+                    "Task: Provide a sharp tactical analysis. "
+                    "Output: Verdict (BUY/HOLD/AVOID). 1 Sentence Reasoning. "
+                    "Targets: 1 Profit Target, 1 Stop Loss (Rp), and 1 Estimated Time Horizon (e.g. 5-15m)."
+                )
+                self.llm_worker.query_async(f"ANALYSIS:{on_demand_pair}", prompt)
+            except Exception:
+                pass
+
+        # 2. Poll ALL results from the worker and filter by prefix
+        self.llm_worker.check_results()
+        for task_id in list(self.llm_worker.results.keys()):
+            task = self.llm_worker.results[task_id]
+            t_type = task["type"]
+            t_res = task["result"]
+            
+            if t_type == "FAKE_PUMP_ANALYSIS":
+                log_message(f"🤖 [LiteRT Insight] Fake Pump: {t_res}")
+                db.save_state("latest_llm_insight", f"FAKE_PUMP|{t_res}")
+                self.llm_worker.results.pop(task_id)
+            elif t_type == "REGIME_ANALYSIS":
+                log_message(f"🤖 [LiteRT Insight] Regime Shift: {t_res}")
+                db.save_state("latest_llm_insight", f"REGIME|{t_res}")
+                self.llm_worker.results.pop(task_id)
+            elif t_type.startswith("TOP_MOVER:") or t_type.startswith("ANALYSIS:") or t_type.startswith("PUMP_ALERT:"):
+                if t_type.startswith("PUMP_ALERT:"):
+                    label = "PUMP_ALERT"
+                elif t_type.startswith("ANALYSIS:"):
+                    label = "ANALYSIS"
+                else:
+                    label = "TOP_MOVER"
+                
+                pair_name = t_type.split(":")[1].lower()
+                log_message(f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}")
+                db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
+                # ── Coin-Specific Reasoning Storage ──
+                db.save_state(f"llm_reasoning_{pair_name}", t_res)
+                
+                self._update_llm_sentiment(t_res, pair_name)
+                self.llm_worker.results.pop(task_id)
+            elif t_type == "POST_MORTEM":
+                log_message(f"🤖 [LiteRT Insight] Post-Mortem: {t_res}")
+                db.save_state("latest_llm_insight", f"POST_MORTEM|{t_res}")
+                self.llm_worker.results.pop(task_id)
+            
+    def _update_llm_sentiment(self, text: str, pair: str = "GLOBAL"):
+        """Extract sentiment and apply it to a specific pair for 5 minutes."""
+        text_lower = text.lower()
+        boost = 0.0
+        if any(word in text_lower for word in ['bullish', 'opportunity', 'buy', 'pump', 'breakout', 'strong']):
+            boost = 0.15
+        elif any(word in text_lower for word in ['bearish', 'risk', 'avoid', 'dump', 'weak', 'fake', 'trap']):
+            boost = -0.20
+            
+        expiry = datetime.now() + timedelta(minutes=5)
+        self.pair_boosts[pair.lower()] = {"boost": boost, "expiry": expiry}
+
+    def get_sentiment_boost(self, pair: str) -> float:
+        """Get the active AI boost for a pair, if not expired."""
+        data = self.pair_boosts.get(pair.lower())
+        if data and datetime.now() < data["expiry"]:
+            return data["boost"]
+        return 0.0
         
     def is_healthy(self) -> bool:
         """
@@ -80,18 +237,26 @@ class Oracle:
             low = float(t.get('low', 0))
             if high > low:
                 pos_in_range = (last - low) / (high - low)
-                if pos_in_range < 0.05: # Berada di 5% titik terendah
-                    panic_count += 1
-            
-        avg_change = total_change / len(top_50) if top_50 else 0
         
-        # Decide Regime (Amygdala Reflex)
-        if avg_change < -5.0 or down_count > 35 or panic_count > 15:
-            regime = MarketRegime.CRASH
-        elif avg_change < -1.5 or panic_count > 10:
-            regime = MarketRegime.BEARISH
-        elif avg_change > 1.5 and up_count > 25 and panic_count < 5:
+        # Calculate global price change
+        avg_change = sum(p.get('change_24h', 0) for p in top_50) / len(top_50)
+        
+        # Calculate Sentiment Index (0 - 100)
+        # -2.5% or less = 0 (Extreme Fear)
+        # +2.5% or more = 100 (Extreme Greed)
+        sentiment_idx = 50 + (avg_change * 20)
+        sentiment_idx = max(0, min(100, sentiment_idx))
+        db.save_state("market_sentiment_index", int(sentiment_idx))
+
+        up_moves = [p for p in top_50 if p.get('change_24h', 0) > 0.5]
+        down_moves = [p for p in top_50 if p.get('change_24h', 0) < -0.5]
+        
+        if len(up_moves) > len(top_50) * 0.6:
             regime = MarketRegime.BULLISH
+        elif len(down_moves) > len(top_50) * 0.6:
+            regime = MarketRegime.BEARISH
+        elif abs(avg_change) < 0.2:
+            regime = MarketRegime.RANGING
         else:
             regime = MarketRegime.CHOPPY
             
@@ -104,9 +269,42 @@ class Oracle:
             db.save_state("market_regime", regime)
             db.save_state("regime_leader", leader_str)
             
+            # Apply dynamic weight adjustments based on regime
+            self._apply_regime_weights(regime)
+            
+            prompt = f"The crypto market regime shifted from {self.last_regime} to {regime}. The leading coin is {leader_str}. The average 24h change of top 50 pairs is {avg_change:.2f}%. As an expert trader, give a 2-sentence strategic advice for trading in this environment."
+            self.llm_worker.query_async("REGIME_ANALYSIS", prompt)
+            
         self.last_regime = regime
         self.last_regime_update = datetime.now()
         return regime
+
+    def _apply_regime_weights(self, regime):
+        """Sesuaikan bobot global bot berdasarkan fase pasar saat ini."""
+        try:
+            if regime == MarketRegime.BULLISH:
+                db.update_weight('ai_prob', 1.2)
+                db.update_weight('sector_sentiment', 1.3)
+                db.update_weight('imbalance', 1.0)
+                db.update_weight('whale_boost', 1.1)
+            elif regime == MarketRegime.BEARISH:
+                db.update_weight('ai_prob', 0.8)
+                db.update_weight('sector_sentiment', 0.7)
+                db.update_weight('imbalance', 1.2) # Lebih condong ke orderbook di pasar merah
+                db.update_weight('whale_boost', 0.9)
+            elif regime == MarketRegime.RANGING:
+                db.update_weight('ai_prob', 1.0)
+                db.update_weight('sector_sentiment', 1.0)
+                db.update_weight('imbalance', 1.1)
+                db.update_weight('whale_boost', 1.0)
+            else: # CHOPPY
+                db.update_weight('ai_prob', 0.9)
+                db.update_weight('sector_sentiment', 0.9)
+                db.update_weight('imbalance', 1.0)
+                db.update_weight('whale_boost', 1.0)
+            logger.info(f"[Oracle] Adaptive weights applied for {regime} regime.")
+        except Exception as e:
+            logger.error(f"[Oracle] Failed to apply weights: {e}")
 
     def get_adaptive_config(self) -> dict:
         """
@@ -226,11 +424,72 @@ class Oracle:
             
             if buy_wall_idr < (WHALE_THRESHOLD_IDR / 5): # Very thin buy support
                 db.save_state("latest_fake_pump", f"{pair}|{price_change_pct:.1f}")
+                
+                prompt = f"The cryptocurrency {pair} just jumped {price_change_pct:.1f}% in price, but the 'buy wall' (bids) is extremely thin ({buy_wall_idr:,.0f} IDR). Is this a 'fake pump' designed to trap buyers? Provide a 2-sentence analysis."
+                self.llm_worker.query_async("FAKE_PUMP_ANALYSIS", prompt)
+                
                 return True
                 
             return False
         except Exception:
             return False
+
+    def request_periodic_analysis(self, ranked_pairs):
+        """
+        Analyze the top mover every few minutes to keep the dashboard active.
+        """
+        # Cooldown 5 menit agar tidak membebani CPU
+        if (datetime.now() - self.last_top_mover_analysis).total_seconds() < 300:
+            return
+
+        target_pair = None
+        change = 0
+        vol = 0
+
+        if ranked_pairs:
+            top_coin = ranked_pairs[0]
+            target_pair = top_coin.get('pair', 'UNKNOWN')
+            change = top_coin.get('change', 0)
+            vol = top_coin.get('volatility', 0)
+        else:
+            # Fallback jika ranked_pairs kosong: cari koin dengan % change tertinggi dari raw tickers
+            tickers = self.market_ws.get_tickers()
+            if not tickers: return
+            
+            # Cari koin dengan kenaikan tertinggi (exclude stablecoins jika perlu)
+            potential_pairs = [t for t in tickers.values() if 'change_24h' in t]
+            if not potential_pairs: return
+            
+            top_ticker = max(potential_pairs, key=lambda x: abs(x.get('change_24h', 0)))
+            target_pair = top_ticker.get('pair', 'UNKNOWN')
+            change = top_ticker.get('change_24h', 0)
+            vol = 0 # Volatility info not in raw ticker
+            
+        prompt = (
+            f"As a Senior Quantitative Crypto Analyst, analyze the price action of {target_pair.upper()} "
+            f"which has moved {change:.2f}% in the last 24 hours. "
+            "Give a sharp, professional market insight (risk & opportunity) in max 2 short sentences. "
+            "Do not use generic warnings; be specific."
+        )
+        self.llm_worker.query_async(f"TOP_MOVER:{target_pair}", prompt)
+        self.last_top_mover_analysis = datetime.now()
+
+    def request_pump_analysis(self, pair, change):
+        """
+        Triggered when a coin is 'exploding' or crashing rapidly.
+        """
+        last_time = self.pump_cooldowns.get(pair)
+        if last_time and (datetime.now() - last_time).total_seconds() < 900: # 15 min cooldown
+            return
+            
+        status = "PUMPING" if change > 0 else "CRASHING"
+        prompt = (
+            f"URGENT: The coin {pair.upper()} is {status} with a {change:.2f}% move! "
+            "Analyze the orderbook depth and price action. Is this a trap or a real breakout? "
+            "Give a 1-sentence warning or recommendation for scalpers."
+        )
+        self.llm_worker.query_async(f"PUMP_ALERT:{pair}", prompt)
+        self.pump_cooldowns[pair] = datetime.now()
 
     def get_sector_boost(self, pair: str) -> float:
         """
@@ -337,6 +596,15 @@ class Oracle:
             
             self.weights = new_weights
             logger.info(f"[Oracle] Evolution: Adjusted weights after {pair} trade. New Weights: {new_weights}")
+            
+            # [LiteRT-LM] Request Post-Mortem Analysis
+            status = "PROFIT" if is_profit else "LOSS"
+            prompt = (
+                f"Trade Post-Mortem Analysis: The bot just closed a trade for {pair} with a {status} of Rp {pnl_idr:,.0f}. "
+                f"The trade DNA was: {dna}. "
+                f"As a Senior Quantitative Analyst, what is the single most important lesson from this trade? Answer in 1 short sentence."
+            )
+            self.llm_worker.query_async("POST_MORTEM", prompt)
             
         except Exception as e:
             logger.error(f"[Oracle] Learning Error: {e}")

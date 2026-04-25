@@ -46,3 +46,6 @@ data/
 .idea/
 .DS_Store
 *.swp
+
+# AI Models
+models/

@@ -15,6 +15,7 @@ from engines.ws_private import PrivateWS
 from engines.exit_manager import ExitManager
 from engines.predictor import get_prediction
 from engines.oracle import Oracle
+from engines.technicals import get_technical_summary, derive_trade_signal
 from config import (
     DRY_RUN, INITIAL_CAPITAL, MIN_BALANCE_THRESHOLD, MIN_TRADE_IDR,
     MAX_TRADES_PER_DAY, MAX_CONSECUTIVE_LOSSES, MAX_TRACKED_PAIRS,
@@ -55,6 +56,10 @@ class ScalperBot:
         for pair, history in db_history.items():
             self.price_history[pair].extend(history)
             
+        # [LiteRT-LM] High Frequency Insight Thread
+        import threading
+        self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
+            
         # Private WS — menerima order update real-time
         self.private_ws = PrivateWS(
             api_key    = os.getenv('INDODAX_API_KEY', ''),
@@ -63,15 +68,66 @@ class ScalperBot:
         )
         
         log_message("Oracle Engine initialized. Consciousness level: FULL.")
+        
+        # ── Backfill Historical Data (Warm-up) ───────────────────────────
+        self._backfill_historical_data()
+        
         init_msg = (
             f"🚀 *ALGOVIBE SCALPER v3.0* 🚀\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE'}\n"
-            f"Daily Trades: {self.daily_trades}\n"
-            f"Loss Streak: {self.consecutive_losses}\n"
-            f"Oracle: ONLINE"
+            f"Oracle: ONLINE | Backfill: SYNCING"
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(init_msg)
+
+    def _backfill_historical_data(self):
+        """Ambil data candle 1 jam terakhir untuk SEMUA koin (Batch Process)."""
+        log_message("⏳ Starting FULL Historical Backfill (1h window)...")
+        db.save_state("backfill_status", "SYNCING")
+        try:
+            markets = self.exchange.fetch_markets()
+            idr_pairs = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
+            total_pairs = len(idr_pairs)
+            log_message(f"📦 Total pairs to backfill: {total_pairs}")
+            
+            def fetch_one(symbol):
+                try:
+                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=60)
+                    if not ohlcv: return None
+                    prices = [c[4] for c in ohlcv]
+                    pair_id = symbol.replace('/', '').lower()
+                    return (pair_id, prices)
+                except: return None
+
+            batch_size = 20
+            count = 0
+            for i in range(0, total_pairs, batch_size):
+                batch = idr_pairs[i:i + batch_size]
+                log_message(f"🔄 Syncing batch {i//batch_size + 1}... ({min(i+batch_size, total_pairs)}/{total_pairs})")
+                
+                results = self.pool.map(fetch_one, batch)
+                
+                for res in results:
+                    if res:
+                        pair_id, prices = res
+                        self.price_history[pair_id].extend(prices)
+                        if len(prices) >= 5:
+                            last = prices[-1]
+                            ch_5m = ((last - prices[-5]) / prices[-5] * 100) if len(prices) >= 5 else 0
+                            ch_15m = ((last - prices[-15]) / prices[-15] * 100) if len(prices) >= 15 else 0
+                            ch_1h = ((last - prices[0]) / prices[0] * 100) if len(prices) >= 60 else 0
+                            db.save_ticker_history(pair_id, list(self.price_history[pair_id]), 0, "BACKFILLED", 
+                                                 ch_5m, ch_15m, ch_1h, 0, 0)
+                        count += 1
+                
+                import time
+                time.sleep(1.0)
+                
+            log_message(f"✅ FULL Backfill completed for {count} pairs.")
+            db.save_state("backfill_status", "COMPLETED")
+        except Exception as e:
+            log_message(f"⚠️ Backfill failed: {e}")
+            db.save_state("backfill_status", "FAILED")
 
     def get_tickers(self):
         """Ambil data harga terbaru dari WebSocket buffer."""
@@ -199,6 +255,15 @@ class ScalperBot:
             log_message(f"Trade Error: {e}")
             return False
 
+    def _insight_loop(self):
+        """High frequency loop to react to user analysis requests instantly."""
+        while True:
+            try:
+                self.oracle.process_llm_insights()
+            except Exception as e:
+                pass
+            time.sleep(2)
+
     # Dashboard dijalankan oleh indodax-dashboard.service (systemd terpisah)
 
     def run(self):
@@ -214,7 +279,9 @@ class ScalperBot:
         log_message("Starting Private WebSocket…")
         self.private_ws.start()
 
-        log_message("WebSocket clients running. Starting main loop…")
+        log_message("WebSocket clients running. Starting background threads…")
+        self.insight_thread.start()
+        log_message("Starting main loop…")
 
         while True:
             # ── Oracle Health & Regime Check ───────────────────────────────
@@ -225,6 +292,8 @@ class ScalperBot:
                 
             regime = self.oracle.get_market_regime()
             adaptive_cfg = self.oracle.get_adaptive_config()
+            
+            # process_llm_insights is now handled by self.insight_thread for responsiveness
             
             # Update Sector Sentiment every 10 minutes
             if int(time.time()) % 600 < 10:
@@ -269,9 +338,32 @@ class ScalperBot:
                 get_prediction_fn=get_prediction
             )
 
+            # [LiteRT-LM] Top Gainer Commentary (internal 5m cooldown)
+            self.oracle.request_periodic_analysis(ranked)
+
             # [Project Predator] Real-time Fake Pump Detection for Top 5
             for r in ranked[:5]:
-                self.oracle.detect_fake_pump(r['pair'], r['change'])
+                pair   = r['pair']
+                change = r['change']
+                self.oracle.detect_fake_pump(pair, change)
+                if abs(change) > 3.0:
+                    self.oracle.request_pump_analysis(pair, change)
+
+            # [LiteRT-LM] Auto-queue top BUY candidates setiap 60 detik
+            # Perlu tech_verdict di setiap ranked item — hitung untuk top 20
+            ranked_with_signals = []
+            for r in ranked[:20]:
+                try:
+                    h = list(self.price_history.get(r['pair'], []))
+                    t = get_technical_summary(h)
+                    s = derive_trade_signal(t)
+                    r_copy = dict(r)
+                    r_copy['tech_verdict']    = s['verdict']
+                    r_copy['tech_confidence'] = s['confidence']
+                    ranked_with_signals.append(r_copy)
+                except Exception:
+                    pass
+            self.oracle.auto_queue_buy_candidates(ranked_with_signals)
             
             # Manage Shadow Jaring (Liquidity Grab)
             self.exit_manager.manage_shadow_jaring(ranked, tickers)
@@ -281,6 +373,9 @@ class ScalperBot:
                 f"AI_Thresh: {adaptive_cfg['ai_threshold']*100:.0f}% | "
                 f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M"
             )
+            
+            # [Heartbeat] Update status agar dashboard tahu bot menyala
+            db.save_state("heartbeat", time.time())
             
             # Take Top N
             high_speed = [p for p in ranked if p['volatility'] >= MIN_TRACKING_VOLATILITY][:MAX_TRACKED_PAIRS]
@@ -293,15 +388,38 @@ class ScalperBot:
                 
                 trend, breakout, history = self.update_history_and_trend(pair, p['last'])
                 imbalance_ratio = p.get('imbalance', 1.0)
-                # Get Prediction Probability
-                tq_prob = get_prediction(history) if trend == "UP" else 0.0
                 
-                # [Project Predator] Sync prediction to DB for Dashboard
-                db.save_ticker_history(pair, history, prediction_prob=tq_prob, trend=trend)
+                # Get specific AI boost for this pair (valid for 5 mins after analysis)
+                ai_boost = self.oracle.get_sentiment_boost(pair)
                 
+                # Get Prediction Probability (using quantitative math + LLM qualitative opinion)
+                tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if trend == "UP" else 0.0
+                
+                # Calculate Multi-Timeframe Changes (Short-term)
+                # Loop is ~60s, so 5m=5 pts, 15m=15 pts, 60m=60 pts
+                ch_5m = 0.0; ch_15m = 0.0; ch_1h = 0.0
+                if len(history) >= 2:
+                    curr = float(p['last'])
+                    p_5  = float(history[-5]) if len(history) >= 5 else float(history[0])
+                    p_15 = float(history[-15]) if len(history) >= 15 else float(history[0])
+                    p_60 = float(history[-60]) if len(history) >= 60 else float(history[0])
+                    ch_5m  = ((curr - p_5) / p_5) * 100 if p_5 > 0 else 0
+                    ch_15m = ((curr - p_15) / p_15) * 100 if p_15 > 0 else 0
+                    ch_1h  = ((curr - p_60) / p_60) * 100 if p_60 > 0 else 0
+
                 # Predator Boosts (Whale & Sector)
                 whale_boost = self.oracle.get_whale_boost(pair)
                 sector_boost = self.oracle.get_sector_boost(pair)
+
+                # Combine boosts into a final Confidence Score for display
+                # Each boost is a multiplier (e.g. 1.2), we convert it to an additive prob adjustment
+                boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
+                final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
+
+                # [Project Predator] Sync prediction to DB for Dashboard
+                db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
+                                     ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
+                                     volatility=p['volatility'], score=p['score'])
                 
                 # Apply Self-Learning Weights
                 features = {
@@ -324,6 +442,16 @@ class ScalperBot:
                     f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
                     f"BO: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
                 )
+
+                # ── LiteRT-LM Hard Block: SELL signal mencegah entry ──────────────
+                tech = get_technical_summary(history)
+                tech_sig = derive_trade_signal(tech)
+                if tech_sig['verdict'] == 'SELL':
+                    log_message(
+                        f"TECH BLOCK [{pair}]: {tech_sig['reason']} "
+                        f"(confidence {tech_sig['confidence']}%) — Trade dicegah."
+                    )
+                    continue
 
                 # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
                 has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO

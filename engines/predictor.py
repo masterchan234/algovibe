@@ -1,82 +1,70 @@
-def get_prediction(price_history: list) -> float:
+def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: float = 0.0) -> float:
     """
-    Menghitung probabilitas eksekusi menggunakan Microstructure & Statistical Arbitrage.
-    Menerima array history harga (raw ticks, max 100), mengembalikan float 0.0 - 1.0.
+    Menghitung probabilitas eksekusi menggunakan Microstructure, Orderbook Imbalance, & Micro-Pullbacks.
+    Juga menerima `llm_boost` dari Oracle untuk memperhitungkan opini kualitatif AI.
     """
     from config import AI_MIN_HISTORY_POINTS
     
     n = len(price_history)
     if n < AI_MIN_HISTORY_POINTS:
-        return -1.0  # -1 indicates 'Warming Up' status
+        return -1.0  # Warming Up
 
     try:
         prob = 0.40  # Base Score
         current_price = price_history[-1]
 
-        # --- Noise Filtering (EMA Smoothing) ---
-        # Ticks di kripto sangat berisik. Kita haluskan dulu historinya.
-        alpha = 0.2  # Smoothing factor
+        # --- 1. LLM Qualitative Boost ---
+        # Interaksi langsung dengan hasil pemikiran LiteRT-LM (Oracle)
+        prob += llm_boost
+
+        # --- 2. Orderbook Imbalance (Filter Fake Breakout) ---
+        if ticker_data:
+            bid_depth = float(ticker_data.get("bid_depth", 0))
+            ask_depth = float(ticker_data.get("ask_depth", 0))
+            total_depth = bid_depth + ask_depth
+            if total_depth > 0:
+                imbalance = bid_depth / total_depth
+                if imbalance > 0.65:
+                    prob += 0.20  # Strong Buying Pressure
+                elif imbalance < 0.40:
+                    prob -= 0.35  # Fake Breakout / Strong Selling Pressure
+
+        # --- 3. Noise Filtering (EMA Smoothing) ---
+        alpha = 0.2
         smoothed_history = [price_history[0]]
         for i in range(1, n):
             ema = (price_history[i] * alpha) + (smoothed_history[-1] * (1 - alpha))
             smoothed_history.append(ema)
 
-        # Gunakan harga yang sudah dihaluskan untuk analisa tren
         smoothed_current = smoothed_history[-1]
 
-        # 1. Linear Regression Slope (Momentum Sejati) dari Smoothed History
+        # --- 4. Micro-Pullback & Peak Penalty ---
+        # Jangan beli di pucuk (Peak Penalty)
+        recent_10 = price_history[-10:]
+        recent_max = max(recent_10)
+        
+        if current_price >= recent_max:
+            # Harga sedang di ujung atas, rawan Fomo/Terjebak
+            prob -= 0.25 
+        else:
+            # Harga turun sedikit dari pucuk
+            drop_from_max = (recent_max - current_price) / recent_max
+            # Jika turun antara 0.1% hingga 0.4% (Ideal Pullback)
+            if 0.001 <= drop_from_max <= 0.004:
+                prob += 0.30 # Bonus Pullback Entry
+
+        # --- 5. Linear Regression Slope (Trend Check) ---
         sum_x = n * (n - 1) / 2
         sum_y = sum(smoothed_history)
         sum_xy = sum(i * smoothed_history[i] for i in range(n))
         sum_x2 = sum(i * i for i in range(n))
         
-        denominator = (n * sum_x2 - sum_x * sum_x)
-        if denominator == 0:
-            slope = 0
-        else:
-            slope = (n * sum_xy - sum_x * sum_y) / denominator
-            
+        denominator = (n * sum_x2 - sum_x * sum_y) if (n * sum_x2 - sum_x * sum_y) != 0 else 1
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
         slope_pct = (slope / smoothed_current) * 100
         
-        # Momentum harus lebih solid karena sudah di-smooth
-        if slope_pct > 0.003:
-            prob += 0.25
-        elif slope_pct > 0.001:
-            prob += 0.10
-        elif slope_pct < -0.003:
-            prob -= 0.35 # Trend turun jelas
-
-        # 2. Tick Volatility Z-Score (Mendeteksi Anomali / Breakout pada Smoothed Data)
-        mean_price = sum_y / n
-        variance = sum((p - mean_price) ** 2 for p in smoothed_history) / n
-        std_dev = variance ** 0.5
-        
-        if std_dev > 0:
-            z_score = (smoothed_current - mean_price) / std_dev
-            
-            # Membutuhkan Z-Score lebih stabil (karena data sudah dihaluskan)
-            if z_score > 1.8:
-                prob += 0.15
-            elif z_score < -1.5:
-                prob -= 0.20
-        
-        # 3. Micro Mean-Reversion (Anti-Falling-Knife Murni)
-        # Deteksi penurunan tiba-tiba menggunakan data raw
-        if n >= 10:
-            recent_10 = price_history[-10:]
-            recent_max = max(recent_10)
-            drop_from_recent_max = (recent_max - current_price) / recent_max
-            
-            # Penurunan lebih tajam = risiko lebih tinggi
-            if drop_from_recent_max > 0.005: # Turun > 0.5% dalam 10 tick terakhir
-                prob -= 0.40 # Hindari pisau jatuh
-                
-        # 4. Micro-Bounce / Floor Detection (Support)
-        if n >= 20:
-            recent_20 = smoothed_history[-20:]
-            local_min = min(recent_20)
-            if smoothed_current > local_min * 1.0015: # Naik pelan dari support (0.15%)
-                prob += 0.15
+        if slope_pct > 0.002:
+            prob += 0.15 # Trend masih naik
 
         prob = max(0.0, min(prob, 0.99))
         return prob
