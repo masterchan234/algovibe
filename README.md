@@ -7,89 +7,60 @@ Bot ini dibangun menggunakan arsitektur *multiprocessing* Python untuk memastika
 ## 🎯 Fitur Utama
 
 - **Autonomous Background Execution:** Dirancang untuk berjalan stabil 24/7 menggunakan *Systemd Service* (`indodax-scalper.service`).
-- **Parallel Ranking Engine:** Menggunakan 6 vCPUs secara paralel untuk melakukan *scoring* pada semua market Indodax berdasarkan *Volatility*, *Volume*, dan *Spread*.
-- **Trend & Breakout Detection:** Menyimpan *micro-history* harga di RAM (`/mnt/ramdisk`) untuk mendeteksi momentum `UP` trend dan titik *Breakout*.
-- **Strict Risk Management:**
-  - Maksimal 10 transaksi per hari.
-  - Berhenti jika saldo *balance* menyentuh batas minimum threshold.
-- **Indodax Tax Compliant (PMK 68/2022):** Modul `Performance Tracker` yang sudah disesuaikan dengan aturan pajak Indonesia terbaru (PPh 0.1%, PPN 0.11%, dan Maker Fee 0.1%).
+- **Parallel Ranking Engine:** Melakukan *scoring* pada semua market Indodax secara paralel berdasarkan *Volatility*, *Volume*, *Spread*, dan *Orderbook Imbalance*.
+- **SQLite Persistence (High Concurrency):** Menggunakan SQLite dengan mode **WAL (Write-Ahead Logging)** untuk menyimpan histori harga, posisi terbuka, dan log transaksi dengan performa tinggi tanpa perlu RAM Disk.
+- **AI-Powered Analysis:** Terintegrasi dengan **LiteRT-LM (Gemma-4-E2B)** untuk melakukan analisis sentimen dan narasi teknikal secara otomatis di background.
+- **Indodax Tax Compliant (PMK 68/2022):** Perhitungan PnL yang sudah disesuaikan dengan aturan pajak Indonesia terbaru (PPh 0.1%, PPN 0.11%, dan Maker Fee 0.1%).
+- **Interactive Dashboard:** Dashboard berbasis Flask & SocketIO untuk monitoring realtime, visualisasi radar market, dan eksekusi manual.
 - **Dry Run Mode:** Mendukung mode simulasi untuk menguji strategi tanpa menggunakan uang asli.
 
 ## ⚙️ Arsitektur Mesin (*Engines*)
 
 Proyek ini menggunakan pola arsitektur *modular engines*:
-- `discovery.py`: Mengambil data pasar real-time dari API publik Indodax.
-- `ranking.py`: Menyeleksi dan memberikan skor untuk top *high-speed pairs*.
-- `tracker.py`: Memantau dan mencatat pergerakan *micro-history* setiap pair.
-- `signals.py`: Mengeluarkan sinyal *ENTRY_BUY* berdasarkan parameter (Trend UP + Breakout + Spread tipis).
-- `execution.py` & `main.py`: Mengeksekusi order *limit maker* ke bursa.
-- `exit_manager.py`: Memantau order yang sudah masuk dan melakukan eksekusi *SELL* jika menyentuh titik Take Profit (TP) atau Stop Loss (SL).
-- `performance_tracker.py`: Menghitung dan mencetak laporan PnL (*Profit and Loss*) harian secara terperinci.
+- `database.py`: Layer persistensi SQLite untuk semua data stateful.
+- `ws_market.py` & `ws_private.py`: Handler WebSocket untuk data pasar dan update order pribadi.
+- `oracle.py`: Mesin kecerdasan sentral yang mendeteksi *Market Regime* (Bullish/Bearish) dan mengatur bobot strategi secara dinamis.
+- `llm_worker.py`: Integrasi model LiteRT-LM untuk reasoning kualitatif.
+- `exit_manager.py`: Memantau TP/SL dan melakukan eksekusi *SELL* otomatis.
+- `predictor.py`: Logika prediksi harga berbasis data historis.
+- `technicals.py`: Indikator teknikal (RSI, MA, dll) untuk konfirmasi sinyal.
 
 ## 📋 Persyaratan Sistem
 
-- OS Linux (Debian/Ubuntu disarankan)
-- Python 3.11+
-- RAM Disk dikonfigurasi di `/mnt/ramdisk/algotrade` untuk I/O operasi yang sangat cepat.
+- OS Linux (Ubuntu/Debian disarankan)
+- Python 3.12+
+- RAM: Minimal 4GB (disarankan 8GB untuk menjalankan LLM Worker dengan lancar)
+- Disk Space: ~3GB (untuk Model LLM)
 
-## 🚀 Instalasi & Konfigurasi
+## 🚀 Instalasi & Konfigurasi (Native OS)
 
-### Opsi 1: Menggunakan Docker (Direkomendasikan)
-Menjalankan Algovibe dengan Docker Compose adalah cara paling mudah dan bersih. Konfigurasi `docker-compose.yml` sudah mencakup pengaturan *tmpfs* untuk RAM Disk.
-
-1. **Siapkan Environment:**
-   Buat file `.env` dan isi API Key Indodax Anda:
+1. **Clone & Setup Venv:**
    ```bash
-   echo 'INDODAX_API_KEY="your_api_key_here"' > .env
-   echo 'INDODAX_API_SECRET="your_secret_key_here"' >> .env
-   ```
-
-2. **Jalankan Bot:**
-   ```bash
-   docker compose up -d
-   ```
-
-3. **Melihat Log:**
-   ```bash
-   docker compose logs -f
-   ```
-
----
-
-### Opsi 2: Manual / Native OS
-
-1. **Install Dependencies:**
-   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-2. **Setup Konfigurasi Environment:**
-   Buat file `.env` di root direktori proyek ini dan isi dengan API Key Indodax Anda:
+2. **Setup Environment:**
+   Buat file `.env` di root direktori:
    ```env
    INDODAX_API_KEY="your_api_key_here"
    INDODAX_API_SECRET="your_secret_key_here"
+   TELEGRAM_BOT_TOKEN="optional"
+   TELEGRAM_CHAT_ID="optional"
    ```
 
-3. **Setup Konfigurasi Bot:**
-   Sesuaikan parameter manajemen risiko, target TP/SL, dan mode eksekusi (Real/Dry Run) di dalam file `config.py`.
+3. **Konfigurasi Strategi:**
+   Sesuaikan parameter manajemen risiko (TP/SL, Max Trades, dll) di file `config.py`.
 
-4. **Siapkan RAM Disk (Opsional tapi disarankan):**
-   ```bash
-   mkdir -p /mnt/ramdisk/algotrade
-   mount -t tmpfs -o size=512m tmpfs /mnt/ramdisk/algotrade
-   ```
+## 🛠 Menjalankan Bot (sebagai Service)
 
-## 🛠 Menjalankan Bot (Khusus Native OS)
+Gunakan **Systemd User Service** agar bot berjalan otomatis tanpa perlu akses root.
 
-Untuk memastikan bot berjalan secara stabil 24/7 di *background*, sangat disarankan menggunakan *Systemd Service*.
+### 1. Membuat File Service
+Buat direktori jika belum ada: `mkdir -p ~/.config/systemd/user/`
 
-### 1. Membuat File Service (Bot & Dashboard)
-Buat file service untuk bot utama di `/etc/systemd/system/indodax-scalper.service`:
-```bash
-sudo nano /etc/systemd/system/indodax-scalper.service
-```
-
-Isi file tersebut dengan konfigurasi berikut:
+**Bot Utama (`~/.config/systemd/user/indodax-scalper.service`):**
 ```ini
 [Unit]
 Description=Indodax Scalper Autonomous Agent
@@ -97,25 +68,19 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/projects/crypto/algotrade
-ExecStart=/usr/bin/python3 /root/projects/crypto/algotrade/main.py
+WorkingDirectory=/home/chan/projects/algovibe
+ExecStart=/home/chan/projects/algovibe/venv/bin/python /home/chan/projects/algovibe/main.py
 Restart=always
 RestartSec=10
 Environment="PYTHONUNBUFFERED=1"
-StandardOutput=append:/root/projects/crypto/algotrade/data/logs/scalper.log
-StandardError=append:/root/projects/crypto/algotrade/data/logs/scalper.log
+StandardOutput=append:/home/chan/projects/algovibe/data/logs/scalper.log
+StandardError=append:/home/chan/projects/algovibe/data/logs/scalper.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
 
-Lalu, buat service kedua khusus untuk **Dashboard** di `/etc/systemd/system/indodax-dashboard.service`:
-```bash
-sudo nano /etc/systemd/system/indodax-dashboard.service
-```
-
-Isi dengan konfigurasi:
+**Dashboard (`~/.config/systemd/user/indodax-dashboard.service`):**
 ```ini
 [Unit]
 Description=AlgoVibe Dashboard Server
@@ -124,50 +89,33 @@ BindsTo=indodax-scalper.service
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/projects/crypto/algotrade
-ExecStart=/usr/bin/python3 /root/projects/crypto/algotrade/dashboard/server.py
+WorkingDirectory=/home/chan/projects/algovibe
+ExecStart=/home/chan/projects/algovibe/venv/bin/python /home/chan/projects/algovibe/dashboard/server.py
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/root/projects/crypto/algotrade/data/logs/dashboard.log
-StandardError=append:/root/projects/crypto/algotrade/data/logs/dashboard.log
+StandardOutput=append:/home/chan/projects/algovibe/data/logs/dashboard.log
+StandardError=append:/home/chan/projects/algovibe/data/logs/dashboard.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
 
-### 2. Mengaktifkan dan Menjalankan Service
-Jalankan perintah berikut untuk mengaktifkan keduanya agar berjalan otomatis saat boot:
+### 2. Mengaktifkan Service
 ```bash
-# Memuat ulang konfigurasi systemd
-sudo systemctl daemon-reload
+systemctl --user daemon-reload
+systemctl --user enable indodax-scalper.service indodax-dashboard.service
+systemctl --user start indodax-scalper.service indodax-dashboard.service
+```
 
-# Mengaktifkan dan langsung menjalankan service bot dan dashboard
-sudo systemctl enable --now indodax-scalper.service
-sudo systemctl enable --now indodax-dashboard.service
+## 📊 Monitoring & Log
+```bash
+# Cek status
+systemctl --user status indodax-scalper.service indodax-dashboard.service
 
-# Melihat status
-sudo systemctl status indodax-scalper.service indodax-dashboard.service
-
-# Memantau log secara real-time
+# Pantau log realtime
 tail -f data/logs/scalper.log
 tail -f data/logs/dashboard.log
 ```
 
-## 📊 Laporan Performa
-
-Bot akan secara otomatis mencetak laporan PnL setiap pergantian hari. Untuk mencetak laporan 24 jam secara manual, Anda bisa menggunakan perintah berikut:
-
-**Jika menggunakan Docker:**
-```bash
-docker compose exec algovibe_bot python3 -c "from engines.performance_tracker import run_performance_report; run_performance_report()"
-```
-
-**Jika menggunakan Native OS:**
-```bash
-python3 -c "from engines.performance_tracker import run_performance_report; run_performance_report()"
-```
-
 ## ⚠️ Disclaimer
-
 Software ini dibuat untuk tujuan edukasi dan eksperimen algoritma trading. **Gunakan dengan risiko Anda sendiri**. Pembuat tidak bertanggung jawab atas kerugian finansial yang terjadi akibat penggunaan software ini. Sangat disarankan untuk menjalankan bot dalam mode **DRY RUN** terlebih dahulu.

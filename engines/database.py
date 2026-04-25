@@ -157,7 +157,7 @@ class Database:
             cursor.execute('''CREATE TABLE IF NOT EXISTS dynamic_weights (
                 feature_name TEXT PRIMARY KEY,
                 weight_value REAL DEFAULT 1.0,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
             # Initialize weights if empty
@@ -459,7 +459,7 @@ class Database:
     def update_dynamic_weight(self, feature, value):
         with self.get_connection() as conn:
             conn.execute(
-                "UPDATE dynamic_weights SET weight_value = ?, last_updated = CURRENT_TIMESTAMP WHERE feature_name = ?",
+                "UPDATE dynamic_weights SET weight_value = ?, updated_at = CURRENT_TIMESTAMP WHERE feature_name = ?",
                 (value, feature)
             )
 
