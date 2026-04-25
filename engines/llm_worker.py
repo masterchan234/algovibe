@@ -1,104 +1,299 @@
 import multiprocessing as mp
 import time
 import os
+import json
 import logging
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-def _llm_process_loop(req_queue, res_queue, model_path):
+# ── LiteRT-LM Sampler Config untuk Trading ──────────────────────────────────
+# Temperature rendah → output deterministik dan parseable untuk trading logic
+LLM_TEMPERATURE  = 0.10   # Hampir greedy: jawaban konsisten, mudah di-parse
+LLM_TOP_K        = 10     # Narrow sampling untuk mengurangi hallucination
+LLM_MAX_TOKENS   = 300    # Cukup untuk analisis + veto, hemat CPU
+
+# Protocol khusus untuk update consciousness di worker process
+_CONSCIOUSNESS_SIGNAL = "__CONSCIOUSNESS__"
+
+
+def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
     """
-    Background worker process that loads the LiteRT model into CPU RAM.
-    It reads prompts from req_queue, processes them, and puts results into res_queue.
+    Background worker process yang memuat LiteRT model ke CPU RAM.
+
+    Protocol req_queue:
+      - Text   : (task_id, task_type, prompt, "text")
+      - Struct : (task_id, task_type, prompt, "structured")
+      - Context: (None, "__CONSCIOUSNESS__", context_str, "context")
+      - Shutdown: None
+
+    [Fix BUG #3]  Gunakan cache_dir agar XNNPACK artifacts di-reuse (752MB).
+    [Fix ISSUE #7] SamplerConfig temperature rendah → deterministic output.
     """
     import litert_lm
     from utils.logger import log_message
-    
+
     try:
-        engine = litert_lm.Engine(model_path, backend=litert_lm.Backend.CPU)
-        log_message("🧠 LLM Worker: Gemma-4-E2B Engine initialized successfully.")
+        engine = litert_lm.Engine(
+            model_path=model_path,
+            backend=litert_lm.Backend.CPU,
+            cache_dir=cache_dir,
+            max_num_tokens=LLM_MAX_TOKENS,
+        )
+        log_message("🧠 LLM Worker: Gemma-4-E2B Engine initialized (cache reused).")
     except Exception as e:
         log_message(f"🧠 LLM Worker: Failed to load model - {e}")
         return
+
+    sampler = litert_lm.SamplerConfig(
+        temperature=LLM_TEMPERATURE,
+        top_k=LLM_TOP_K,
+    )
+
+    # ── Consciousness: konteks pasar yang di-inject ke setiap conversation ──
+    # Format: list of {"role": "...", "content": "..."}
+    # Di-update secara periodik oleh Oracle via _CONSCIOUSNESS_SIGNAL
+    _consciousness_messages = [
+        {
+            "role": "user",
+            "content": (
+                "Kamu adalah brain dari sebuah quantitative scalping bot di exchange Indodax (Indonesia). "
+                "Tugasmu: analisis sinyal trading kripto, beri verdict BUY/HOLD/AVOID, dan pelajari dari "
+                "setiap trade yang pernah dilakukan. Kamu punya veto power — jika kamu bilang AVOID, "
+                "bot TIDAK AKAN MASUK trade apapun. Jawab selalu ringkas, tepat, dan berdasarkan data."
+            )
+        },
+        {
+            "role": "assistant",
+            "content": "Siap. Saya akan analisis dengan ketat dan hanya merekomendasikan BUY jika evidence kuat. Veto saya bersifat final."
+        }
+    ]
 
     while True:
         try:
             req = req_queue.get()
             if req is None:
-                # Shutdown signal
-                break
-            
-            task_id, task_type, prompt = req
-            
-            response_text = ""
-            with engine.create_conversation() as conversation:
-                for chunk in conversation.send_message_async(prompt):
-                    response_text += chunk["content"][0]["text"]
-            
-            res_queue.put((task_id, task_type, response_text.strip()))
-            
+                break  # Shutdown signal
+
+            task_id, task_type, prompt, mode = req
+
+            # ── Consciousness Update ─────────────────────────────────────────
+            if task_type == _CONSCIOUSNESS_SIGNAL:
+                # Update context yang dipakai di semua inferensi berikutnya
+                base = _consciousness_messages[:2]  # Pertahankan system identity
+                _consciousness_messages.clear()
+                _consciousness_messages.extend(base)
+                # Inject new market awareness
+                _consciousness_messages.append({"role": "user", "content": f"[MARKET UPDATE]\n{prompt}"})
+                _consciousness_messages.append({"role": "assistant", "content": "Konteks terupdate. Siap untuk analisis."})
+                log_message(f"🧠 LLM Consciousness: Updated ({len(prompt)} chars).")
+                continue
+
+            # ── Inference ───────────────────────────────────────────────────
+            ctx = list(_consciousness_messages)  # snapshot agar aman di-pass
+
+            if mode == "structured":
+                result = _run_structured_inference(engine, sampler, ctx, prompt, task_type)
+            else:
+                result = _run_text_inference(engine, sampler, ctx, prompt)
+
+            res_queue.put((task_id, task_type, result))
+
         except Exception as e:
             log_message(f"🧠 LLM Worker: Inference error - {e}")
 
+
+def _run_text_inference(engine, sampler, context_messages: list, prompt: str) -> str:
+    """Inferensi teks biasa dengan consciousness context."""
+    response_text = ""
+    with engine.create_conversation(
+        messages=context_messages,
+        sampler_config=sampler
+    ) as conv:
+        for chunk in conv.send_message_async(prompt):
+            content = chunk.get("content", [])
+            if content and isinstance(content, list):
+                response_text += content[0].get("text", "")
+    return response_text.strip()
+
+
+def _run_structured_inference(engine, sampler, context_messages: list, prompt: str, task_type: str) -> str:
+    """
+    Inferensi dengan Function Calling untuk output JSON terstruktur.
+    Model memanggil submit_verdict() → langsung dapat dict tanpa string parsing.
+    """
+    import litert_lm
+
+    verdict_result = {}
+
+    def submit_verdict(
+        verdict: str,
+        confidence: int,
+        reason: str,
+        stop_loss_pct: float = 1.2,
+        take_profit_pct: float = 2.0,
+    ) -> str:
+        """
+        Submit trading verdict setelah analisis mendalam.
+        Args:
+            verdict: BUY jika layak masuk, HOLD jika tunggu, AVOID jika berbahaya/veto
+            confidence: Keyakinan 0-100. Di bawah 55 dianggap HOLD
+            reason: Satu kalimat ringkas alasan keputusan
+            stop_loss_pct: SL dalam % dari harga entry (default 1.2%)
+            take_profit_pct: TP dalam % dari harga entry (default 2.0%)
+        """
+        nonlocal verdict_result
+        verdict_result = {
+            "verdict":         verdict.upper(),
+            "confidence":      max(0, min(100, int(confidence))),
+            "reason":          str(reason),
+            "stop_loss_pct":   abs(float(stop_loss_pct)),
+            "take_profit_pct": abs(float(take_profit_pct)),
+        }
+        return f"Verdict recorded: {verdict}"
+
+    try:
+        with engine.create_conversation(
+            messages=context_messages,
+            tools=[submit_verdict],
+            automatic_tool_calling=True,
+            sampler_config=sampler,
+        ) as conv:
+            conv.send_message(prompt)
+
+        if verdict_result:
+            return json.dumps(verdict_result)
+        else:
+            logger.warning(f"[LLMWorker] Structured ({task_type}): tool not called, fallback text.")
+            return _run_text_inference(engine, sampler, context_messages, prompt)
+
+    except Exception as e:
+        logger.error(f"[LLMWorker] Structured inference error ({task_type}): {e}")
+        return json.dumps({
+            "verdict": "HOLD", "confidence": 0,
+            "reason": f"inference error: {e}",
+            "stop_loss_pct": 1.2, "take_profit_pct": 2.0,
+        })
+
+
 class LLMWorker:
     """
-    Singleton manager to interact with the background LLM process.
+    Singleton manager untuk berinteraksi dengan background LLM process.
+
+    Fitur:
+    - query_async()       → text inference (commentary, post-mortem)
+    - query_structured()  → structured JSON via Function Calling (veto decisions)
+    - update_consciousness() → inject market context ke semua inferensi berikutnya
     """
     _instance = None
-    
+
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-        
+
     def __init__(self):
+        from config import MODEL_PATH, BASE_PATH
+
         self.req_queue = mp.Queue()
         self.res_queue = mp.Queue()
-        self.model_path = os.path.join(os.path.dirname(__file__), "..", "models", "gemma-4-E2B-it.litertlm")
-        
-        # Start only if model exists
+
+        # [Fix BUG #3] Path dari config, absolutized dengan BASE_PATH
+        self.model_path = os.path.join(BASE_PATH, MODEL_PATH)
+        self.cache_dir  = os.path.dirname(self.model_path)  # reuse .xnnpack_cache
+
         if os.path.exists(self.model_path):
             self.worker_process = mp.Process(
-                target=_llm_process_loop, 
-                args=(self.req_queue, self.res_queue, self.model_path), 
-                daemon=True
+                target=_llm_process_loop,
+                args=(self.req_queue, self.res_queue, self.model_path, self.cache_dir),
+                daemon=True,
+                name="LLMWorker",
             )
             self.worker_process.start()
             self.is_active = True
+            logger.info(f"[LLMWorker] Started. Model: {self.model_path}, Cache: {self.cache_dir}")
         else:
             self.is_active = False
-            logger.warning(f"LLMWorker: Model not found at {self.model_path}")
-            
+            logger.warning(f"[LLMWorker] Model tidak ditemukan: {self.model_path}")
+
         self.task_counter = 0
-        self.results = {}
-        
-    def query_async(self, task_type, prompt):
-        """Send a prompt to the worker."""
+        self.results      = {}
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def query_async(self, task_type: str, prompt: str) -> int | None:
+        """Kirim prompt teks biasa (commentary, regime, post-mortem)."""
         if not self.is_active:
             return None
         self.task_counter += 1
-        self.req_queue.put((self.task_counter, task_type, prompt))
+        self.req_queue.put((self.task_counter, task_type, prompt, "text"))
         return self.task_counter
-        
+
+    def query_structured(self, task_type: str, prompt: str) -> int | None:
+        """
+        Kirim prompt untuk keputusan trading (ANALYSIS/PUMP_ALERT).
+        Hasil: JSON string → parse dengan parse_structured_result().
+        """
+        if not self.is_active:
+            return None
+        self.task_counter += 1
+        self.req_queue.put((self.task_counter, task_type, prompt, "structured"))
+        return self.task_counter
+
+    def update_consciousness(self, context_str: str):
+        """
+        Update market context yang di-inject ke setiap conversation berikutnya.
+        Dipanggil oleh Oracle setiap ~30 menit atau saat regime shift.
+        context_str: string berisi regime, top movers, recent PnL, lessons learned.
+        """
+        if not self.is_active:
+            return
+        # Special signal — task_id=None, task_type=__CONSCIOUSNESS__
+        self.req_queue.put((None, _CONSCIOUSNESS_SIGNAL, context_str, "context"))
+
     def check_results(self):
-        """Poll the response queue."""
-        if not self.is_active: return
+        """Poll response queue dan simpan ke self.results."""
+        if not self.is_active:
+            return
         while not self.res_queue.empty():
             task_id, task_type, result = self.res_queue.get_nowait()
-            self.results[task_id] = {"type": task_type, "result": result, "time": datetime.now()}
-            
-    def get_result(self, task_id):
+            self.results[task_id] = {
+                "type":   task_type,
+                "result": result,
+                "time":   datetime.now(),
+            }
+
+    def get_result(self, task_id: int) -> dict | None:
         self.check_results()
         if task_id in self.results:
             return self.results.pop(task_id)
         return None
-        
-    def get_latest_result_by_type(self, task_type):
+
+    def get_latest_result_by_type(self, task_type: str) -> str | None:
         self.check_results()
-        # Find the most recent result for a specific type
         matches = {k: v for k, v in self.results.items() if v["type"] == task_type}
         if matches:
             latest_id = max(matches.keys())
             return self.results.pop(latest_id)["result"]
         return None
+
+    @staticmethod
+    def parse_structured_result(result_str: str) -> dict:
+        """
+        Parse JSON string dari query_structured().
+        Default ke HOLD/0 jika parsing gagal (safe default).
+        """
+        defaults = {
+            "verdict":         "HOLD",
+            "confidence":      0,
+            "reason":          "LLM tidak tersedia atau parse error",
+            "stop_loss_pct":   1.2,
+            "take_profit_pct": 2.0,
+        }
+        try:
+            parsed = json.loads(result_str)
+            defaults.update(parsed)
+            return defaults
+        except (json.JSONDecodeError, TypeError):
+            return defaults

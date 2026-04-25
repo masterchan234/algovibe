@@ -333,8 +333,7 @@ class ExitManager:
             log_message("Reality Check: Sync complete. No hallucinations found.")
         except Exception as e:
             log_message(f"Reality Check Failed: {e}")
-                
-            return order.get("id", f"DRY-{int(time.time())}")
+            # [Fix BUG #2] Dead code dihapus — 'order' tidak terdefinisi di scope ini
 
     # ── Shadow Jaring (Liquidity Grab) ───────────────────────────────────
 

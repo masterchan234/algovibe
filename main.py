@@ -68,6 +68,9 @@ class ScalperBot:
         )
         
         log_message("Oracle Engine initialized. Consciousness level: FULL.")
+
+        # ── Restore LLM Lessons dari DB (survive restart) ──
+        self.oracle._load_lessons_from_db()
         
         # ── Backfill Historical Data (Warm-up) ───────────────────────────
         self._backfill_historical_data()
@@ -302,6 +305,9 @@ class ScalperBot:
             # [Anti-Hallucination] Reality Check every 30 minutes
             if int(time.time()) % 1800 < 10:
                 self.exit_manager.reconcile_with_exchange()
+
+            # [LiteRT-LM] Consciousness Update every 30 minutes
+            self.oracle.update_consciousness(regime=regime)
                 
             # [Anti-Hallucination] Weight Decay every hour
             if int(time.time()) % 3600 < 10:
@@ -465,6 +471,12 @@ class ScalperBot:
                     break
 
                 if breakout and ai_ready and (trend == "UP" and has_strong_imb):
+                    # ── LLM Veto Gate (bersifat FINAL) ──────────────────────────
+                    vetoed, veto_reason = self.oracle.check_llm_veto(pair)
+                    if vetoed:
+                        log_message(f"🚫 LLM VETO [{pair}]: {veto_reason}")
+                        continue
+
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
@@ -476,6 +488,7 @@ class ScalperBot:
 
 def calculate_score(args):
     """Fungsi pembantu untuk multiprocessing ranking."""
+    import math
     item, config_override = args
     pair, d = item
     try:
@@ -494,14 +507,28 @@ def calculate_score(args):
         # Depth Imbalance (jika ada data OB)
         bid_depth = float(d.get('bid_depth', 0))
         ask_depth = float(d.get('ask_depth', 0))
-        imbalance = (bid_depth / ask_depth) if ask_depth > 0 else 0
+        imbalance = (bid_depth / ask_depth) if ask_depth > 0 else 1.0
 
         max_spread = config_override['max_spread'] * 100
         min_vol = config_override['min_vol']
         
         if spread < max_spread and 0.2 <= volatility <= 8.0 and vol > min_vol:
-            imb_bonus = (imbalance * 50_000_000) if imbalance > 1.2 else 0
-            score = (vol * 0.5) + (volatility * 0.3) - (spread * 0.2) + imb_bonus
+            # ── [Fix ISSUE #9] Normalized Quant Scoring ──
+            # 1. Log Volume (Skala: 10M = log(7), 1T = log(12)) -> mapping ke poin ~0-50
+            log_vol = math.log10(vol) if vol > 0 else 0
+            score_vol = max(0, (log_vol - 7) * 10)
+            
+            # 2. Volatility (Skala: 0-8%) -> mapping ke poin ~0-40
+            score_vola = volatility * 5
+            
+            # 3. Imbalance (Skala bonus max 20 poin)
+            score_imb = min(20, (imbalance - 1) * 10) if imbalance > 1.2 else 0
+            
+            # 4. Spread Penalty (Makin besar spread, makin minus)
+            penalty_spread = spread * 20
+            
+            score = score_vol + score_vola + score_imb - penalty_spread
+            
             return {
                     "pair": pair, "last": last, "spread": spread, 
                     "volatility": volatility, "score": score, "imbalance": imbalance,

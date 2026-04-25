@@ -12,6 +12,7 @@ class MarketRegime:
     BEARISH = "BEARISH"
     CHOPPY  = "CHOPPY"
     CRASH   = "CRASH"
+    RANGING = "RANGING"  # [Fix BUG #1] Sebelumnya undefined, menyebabkan AttributeError
 
 class Oracle:
     """
@@ -23,16 +24,25 @@ class Oracle:
         self.last_regime = None  # Force evaluation on first run
         self.last_regime_update = datetime.now() - timedelta(minutes=5)
         self.weights = db.get_all_weights() or {
-            "ai_prob": 1.0, "whale_boost": 1.0, 
+            "ai_prob": 1.0, "whale_boost": 1.0,
             "sector_sentiment": 1.0, "imbalance": 1.0
         }
         self.health_status = True
         self.latency_history = []
         self.llm_worker = LLMWorker.get_instance()
-        self.pair_boosts = {} # {pair: {"boost": float, "expiry": datetime}}
+        self.pair_boosts = {}  # {pair: {"boost": float, "expiry": datetime}}
         self.last_top_mover_analysis = datetime.now() - timedelta(minutes=10)
-        self.pump_cooldowns = {} # {pair: last_analysis_time}
-        self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)  # auto-queue BUY candidates
+        self.pump_cooldowns = {}  # {pair: last_analysis_time}
+        self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)
+
+        # ── Consciousness & Self-Learning ──────────────────────────────────
+        # lessons: rolling list of lessons dari POST_MORTEM, max 20 entri
+        self._lessons: list = []
+        self.last_consciousness_update = datetime.now() - timedelta(minutes=31)  # force first update
+
+        # veto cache: {pair: {verdict, confidence, reason, ts}}
+        # Diisi saat LLM structured result masuk; dibaca oleh check_llm_veto()
+        self._veto_cache: dict = {}
         
     def auto_queue_buy_candidates(self, ranked_signals):
         """
@@ -86,9 +96,10 @@ class Oracle:
                     "Output: BUY/HOLD/AVOID verdict + 1 sentence reasoning + Profit Target + Stop Loss (Rp) + ETA (minutes)."
                 )
                 task_id = f"ANALYSIS:{pair}"
-                self.llm_worker.query_async(task_id, prompt)
+                # [Veto] Gunakan query_structured agar hasil bisa di-parse sebagai keputusan
+                self.llm_worker.query_structured(task_id, prompt)
                 self.pump_cooldowns[pair] = now
-                logger.info(f"[AutoQueue] LLM queued for {pair} (BUY {sig['confidence']}%)")
+                logger.info(f"[AutoQueue] LLM structured queued for {pair} (BUY {sig['confidence']}%)")
         finally:
             conn.close()
 
@@ -125,7 +136,7 @@ class Oracle:
                     "Output: Verdict (BUY/HOLD/AVOID). 1 Sentence Reasoning. "
                     "Targets: 1 Profit Target, 1 Stop Loss (Rp), and 1 Estimated Time Horizon (e.g. 5-15m)."
                 )
-                self.llm_worker.query_async(f"ANALYSIS:{on_demand_pair}", prompt)
+                self.llm_worker.query_structured(f"ANALYSIS:{on_demand_pair}", prompt)
             except Exception:
                 pass
 
@@ -139,10 +150,12 @@ class Oracle:
             if t_type == "FAKE_PUMP_ANALYSIS":
                 log_message(f"🤖 [LiteRT Insight] Fake Pump: {t_res}")
                 db.save_state("latest_llm_insight", f"FAKE_PUMP|{t_res}")
+                # [Fix BUG #4] TIDAK apply sentiment ke pair manapun — konteks global, bukan pair spesifik
                 self.llm_worker.results.pop(task_id)
             elif t_type == "REGIME_ANALYSIS":
                 log_message(f"🤖 [LiteRT Insight] Regime Shift: {t_res}")
                 db.save_state("latest_llm_insight", f"REGIME|{t_res}")
+                # [Fix BUG #4] TIDAK apply sentiment — ini analisis market global, bukan pair spesifik
                 self.llm_worker.results.pop(task_id)
             elif t_type.startswith("TOP_MOVER:") or t_type.startswith("ANALYSIS:") or t_type.startswith("PUMP_ALERT:"):
                 if t_type.startswith("PUMP_ALERT:"):
@@ -151,31 +164,176 @@ class Oracle:
                     label = "ANALYSIS"
                 else:
                     label = "TOP_MOVER"
-                
+
                 pair_name = t_type.split(":")[1].lower()
-                log_message(f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}")
+
+                # ── Parse structured vs text result ──────────────────────
+                structured = LLMWorker.parse_structured_result(t_res)
+                is_structured = structured.get("confidence", 0) > 0 or structured.get("verdict") in ("BUY","AVOID","HOLD")
+
+                log_message(
+                    f"🤖 [LiteRT Insight] {label} {pair_name}: "
+                    f"{structured['verdict']} ({structured['confidence']}%) — {structured['reason']}"
+                    if is_structured else f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}"
+                )
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
-                # ── Coin-Specific Reasoning Storage ──
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
-                
+
+                # ── Veto Cache: simpan untuk check_llm_veto() ─────────────
+                if is_structured and label in ("ANALYSIS", "PUMP_ALERT"):
+                    self._veto_cache[pair_name] = {
+                        **structured,
+                        "ts": datetime.now()
+                    }
+                    db.save_state(f"llm_veto_{pair_name}", t_res)  # persist lintas restart
+
+                # ── Sentiment (hanya pair spesifik, Fix BUG #4) ──────────
                 self._update_llm_sentiment(t_res, pair_name)
                 self.llm_worker.results.pop(task_id)
             elif t_type == "POST_MORTEM":
                 log_message(f"🤖 [LiteRT Insight] Post-Mortem: {t_res}")
                 db.save_state("latest_llm_insight", f"POST_MORTEM|{t_res}")
+                # ── Self-Learning: masukkan lesson ke consciousness ──
+                self._accumulate_lesson(t_res)
+                # Force consciousness refresh agar lesson langsung terpakai
+                self.last_consciousness_update = datetime.now() - timedelta(minutes=31)
                 self.llm_worker.results.pop(task_id)
             
     def _update_llm_sentiment(self, text: str, pair: str = "GLOBAL"):
-        """Extract sentiment and apply it to a specific pair for 5 minutes."""
+        """
+        Extract sentiment dan apply ke pair SPESIFIK selama 5 menit.
+        [Fix BUG #4] Hanya boleh dipanggil untuk analisis pair tertentu,
+        bukan untuk global commentary (REGIME, FAKE_PUMP, POST_MORTEM).
+        """
+        if pair == "GLOBAL":
+            # Safety guard: jangan apply global sentiment ke semua pair
+            logger.debug("[Oracle] _update_llm_sentiment called with GLOBAL — skipped.")
+            return
+        
         text_lower = text.lower()
         boost = 0.0
-        if any(word in text_lower for word in ['bullish', 'opportunity', 'buy', 'pump', 'breakout', 'strong']):
-            boost = 0.15
-        elif any(word in text_lower for word in ['bearish', 'risk', 'avoid', 'dump', 'weak', 'fake', 'trap']):
-            boost = -0.20
-            
+        
+        # Hitung weighted sentiment: kata positif dan negatif ditimbang
+        positive_hits = sum(1 for w in ['bullish', 'opportunity', 'buy', 'breakout', 'strong', 'uptrend'] if w in text_lower)
+        negative_hits = sum(1 for w in ['bearish', 'risk', 'avoid', 'dump', 'weak', 'fake', 'trap', 'sell', 'downtrend'] if w in text_lower)
+        
+        # Hanya apply boost jika ada konsensus (lebih banyak sinyal satu arah)
+        if positive_hits > negative_hits and positive_hits >= 2:
+            boost = min(0.15, positive_hits * 0.04)   # Max +0.15
+        elif negative_hits > positive_hits and negative_hits >= 2:
+            boost = max(-0.20, -(negative_hits * 0.05))  # Max -0.20
+        
         expiry = datetime.now() + timedelta(minutes=5)
         self.pair_boosts[pair.lower()] = {"boost": boost, "expiry": expiry}
+        logger.debug(f"[Oracle] Sentiment boost for {pair}: {boost:+.2f} (pos={positive_hits}, neg={negative_hits})")
+
+    # ── LLM Veto Power ────────────────────────────────────────────────────────
+
+    def check_llm_veto(self, pair: str) -> tuple:
+        """
+        Cek apakah LLM memveto entry untuk pair ini.
+        Returns: (vetoed: bool, reason: str)
+
+        Veto aktif jika:
+        - LLM verdict == AVOID dengan confidence >= 65%
+        - Analisis masih fresh (< 10 menit)
+
+        Jika tidak ada analisis LLM → TIDAK veto (bot tetap jalan berdasarkan teknikal).
+        """
+        pair_lower = pair.lower()
+        LLM_VETO_THRESHOLD    = 65   # Minimum confidence untuk veto
+        LLM_VETO_TTL_MINUTES  = 10   # Analisis lebih dari 10 menit dianggap stale
+
+        # 1. Cek in-memory cache dulu (lebih cepat)
+        cached = self._veto_cache.get(pair_lower)
+        if cached:
+            age_min = (datetime.now() - cached["ts"]).total_seconds() / 60
+            if age_min <= LLM_VETO_TTL_MINUTES:
+                if cached["verdict"] == "AVOID" and cached["confidence"] >= LLM_VETO_THRESHOLD:
+                    return True, f"LLM VETO ({cached['confidence']}%): {cached['reason']}"
+                return False, cached["reason"]
+
+        # 2. Fallback: cek DB (persist lintas restart/insight_thread delay)
+        try:
+            raw = db.get_state(f"llm_veto_{pair_lower}")
+            if raw:
+                structured = LLMWorker.parse_structured_result(raw)
+                # Tidak ada timestamp di DB — kita tidak tahu usianya, skip veto tapi log
+                if structured["verdict"] == "AVOID" and structured["confidence"] >= LLM_VETO_THRESHOLD:
+                    logger.info(f"[Oracle] LLM DB-Veto for {pair}: {structured['reason']}")
+                    return True, f"LLM VETO (DB) ({structured['confidence']}%): {structured['reason']}"
+        except Exception:
+            pass
+
+        return False, "No LLM verdict"
+
+    # ── Consciousness & Self-Learning ─────────────────────────────────────────
+
+    def update_consciousness(self, regime: str = None, recent_stats: dict = None):
+        """
+        Bangun dan kirim market context terbaru ke LLM sebagai 'kesadaran'.
+        Dipanggil periodik (setiap ~30 menit) atau saat regime shift.
+        """
+        if (datetime.now() - self.last_consciousness_update).total_seconds() < 1800:
+            return  # Cooldown 30 menit
+        self.last_consciousness_update = datetime.now()
+
+        try:
+            regime = regime or db.get_state("market_regime") or "UNKNOWN"
+            sentiment = db.get_state("market_sentiment_index") or "N/A"
+            regime_leader = db.get_state("regime_leader") or "UNKNOWN"
+
+            if not recent_stats:
+                recent_stats = db.get_daily_stats()
+
+            win_rate = 0.0
+            if recent_stats.get("total_trades", 0) > 0:
+                win_rate = recent_stats["win_count"] / recent_stats["total_trades"] * 100
+
+            # Gabungkan lessons terakhir
+            lessons_text = ""
+            if self._lessons:
+                lessons_text = "\nPelajaran dari trade sebelumnya:\n"
+                for i, lesson in enumerate(self._lessons[-5:], 1):  # Max 5 lesson terbaru
+                    lessons_text += f"  {i}. {lesson}\n"
+
+            weights_text = ", ".join(f"{k}={v:.2f}" for k, v in self.weights.items())
+
+            context = (
+                f"=== MARKET CONSCIOUSNESS UPDATE [{datetime.now().strftime('%H:%M')}] ===\n"
+                f"Regime: {regime} | Sentiment Index: {sentiment}/100 | Leader: {regime_leader}\n"
+                f"Performance 24h: {recent_stats.get('total_trades',0)} trades, "
+                f"Win Rate: {win_rate:.1f}%, "
+                f"Total PnL: Rp {recent_stats.get('total_pnl_idr',0):,.0f}\n"
+                f"Active Weights: {weights_text}"
+                f"{lessons_text}"
+                f"=== END UPDATE ==="
+            )
+
+            self.llm_worker.update_consciousness(context)
+            logger.info(f"[Oracle] Consciousness updated: regime={regime}, wr={win_rate:.1f}%")
+        except Exception as e:
+            logger.error(f"[Oracle] Consciousness update failed: {e}")
+
+    def _accumulate_lesson(self, lesson: str):
+        """
+        Tambahkan lesson baru ke rolling list.
+        Lessons ini di-inject ke LLM consciousness setiap update.
+        """
+        if lesson and len(lesson) > 10:
+            self._lessons.append(f"[{datetime.now().strftime('%H:%M')}] {lesson}")
+            if len(self._lessons) > 20:  # Jaga max 20 lesson
+                self._lessons.pop(0)
+            db.save_state("llm_lessons", json.dumps(self._lessons))
+
+    def _load_lessons_from_db(self):
+        """Restore lessons dari DB saat startup (survive restart)."""
+        try:
+            raw = db.get_state("llm_lessons")
+            if raw:
+                self._lessons = json.loads(raw)
+        except Exception:
+            pass
 
     def get_sentiment_boost(self, pair: str) -> float:
         """Get the active AI boost for a pair, if not expired."""
@@ -597,12 +755,15 @@ class Oracle:
             self.weights = new_weights
             logger.info(f"[Oracle] Evolution: Adjusted weights after {pair} trade. New Weights: {new_weights}")
             
-            # [LiteRT-LM] Request Post-Mortem Analysis
+            # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
             status = "PROFIT" if is_profit else "LOSS"
             prompt = (
-                f"Trade Post-Mortem Analysis: The bot just closed a trade for {pair} with a {status} of Rp {pnl_idr:,.0f}. "
-                f"The trade DNA was: {dna}. "
-                f"As a Senior Quantitative Analyst, what is the single most important lesson from this trade? Answer in 1 short sentence."
+                f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
+                f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
+                f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
+                f"vol={dna.get('volatility',0):.2f}%. "
+                f"Sebagai quant analyst, apa satu pelajaran paling penting dari trade ini? "
+                f"Jawab dalam 1 kalimat ringkas bahasa Indonesia."
             )
             self.llm_worker.query_async("POST_MORTEM", prompt)
             
