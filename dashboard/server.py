@@ -696,12 +696,24 @@ def _build_trades_payload():
     """Ambil trade history + open positions dengan live PnL untuk Execution Ledger."""
     conn = get_db_connection()
     try:
-        positions = conn.execute(
-            "SELECT pair, entry_price, amount_crypto, amount_idr, timestamp as created_at FROM positions"
-        ).fetchall()
-        trades = conn.execute(
-            "SELECT pair, reason, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, amount_crypto, duration_seconds, created_at FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 30"
-        ).fetchall()
+        positions = conn.execute("""
+            SELECT p.pair, p.entry_price, p.amount_crypto, p.amount_idr, p.timestamp as created_at,
+                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
+            FROM positions p
+            LEFT JOIN trade_analytics a ON p.pair = a.pair 
+                 AND abs(strftime('%s', p.timestamp) - strftime('%s', a.entry_timestamp)) < 60
+        """).fetchall()
+
+        trades = conn.execute("""
+            SELECT h.pair, h.reason, h.pnl_idr, h.pnl_pct, h.entry_price, h.exit_price, 
+                   h.amount_idr, h.amount_crypto, h.duration_seconds, h.created_at,
+                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
+            FROM trade_history h
+            LEFT JOIN trade_analytics a ON h.pair = a.pair 
+                 AND abs(strftime('%s', h.created_at) - strftime('%s', a.entry_timestamp)) < 60
+            WHERE h.reason != 'BACKTEST' 
+            ORDER BY h.created_at DESC LIMIT 30
+        """).fetchall()
 
         results = []
 
@@ -731,28 +743,36 @@ def _build_trades_payload():
                 "pnl_idr":     round(pnl_idr, 0),
                 "pnl_pct":     round(pnl_pct, 3),
                 "entry_price": entry_price,
-                "last_price":  last_price,
+                "exit_price":  last_price, # Gunakan exit_price agar selaras dengan script.js
                 "amount_idr":  float(p['amount_idr'] or 0),
-                "amount_crypto": amount_crypto,
+                "amount_coin": amount_crypto, # Rename ke amount_coin
                 "duration":    0, # Computed on frontend
                 "created_at":  str(p['created_at'] or ''),
-                "status":      'OPEN'
+                "status":      'OPEN',
+                "ai_prob":     float(p['ai_prob'] or 0) if p['ai_prob'] else None,
+                "whale_boost": float(p['whale_boost'] or 0) if p['whale_boost'] else None,
+                "dna_vol":     float(p['dna_vol'] or 0) if p['dna_vol'] else None,
+                "dna_rsi":     float(p['dna_rsi'] or 0) if p['dna_rsi'] else None
             })
 
         # Trade history (sudah ditutup)
         for t in trades:
             results.append({
                 "pair":        t['pair'] or 'UNKNOWN',
-                "reason":      t['reason'] or 'AI',
+                "reason":      t['reason'] or 'EXIT',
                 "pnl_idr":     float(t['pnl_idr'] or 0),
                 "pnl_pct":     float(t['pnl_pct'] or 0),
                 "entry_price": float(t['entry_price'] or 0),
-                "last_price":  float(t['exit_price'] or 0),
+                "exit_price":  float(t['exit_price'] or 0),
                 "amount_idr":  float(t['amount_idr'] or 0),
-                "amount_crypto": float(t['amount_crypto'] or 0),
+                "amount_coin": float(t['amount_crypto'] or 0),
                 "duration":    int(t['duration_seconds'] or 0),
-                "created_at":  str(t['created_at'] or ''),
-                "status":      'CLOSED'
+                "created_at":  str(t['created_at']),
+                "status":      'CLOSED',
+                "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
+                "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
+                "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
+                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None
             })
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)

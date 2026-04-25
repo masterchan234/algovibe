@@ -960,8 +960,21 @@ function renderTradeHistory(data) {
         let pnlPct = t.pnl_pct !== undefined ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)` : '';
 
         // Formatting volume
-        const volCrypto = t.amount_crypto ? t.amount_crypto.toFixed(t.amount_crypto < 1 ? 6 : 2) : '0';
+        const volCrypto = t.amount_coin ? t.amount_coin.toFixed(t.amount_coin < 1 ? 6 : 2) : '0';
         const volIDR = t.amount_idr ? Math.round(t.amount_idr).toLocaleString('id-ID') : '0';
+
+        // DNA Rendering (AI & Whale context)
+        let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
+        if (t.ai_prob && t.ai_prob > 0.7) {
+            dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob*100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
+        }
+        if (t.whale_boost && t.whale_boost > 0) {
+            dnaHtml += `<span title="Whale Activity Detected" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
+        }
+        if (!t.ai_prob && !t.whale_boost) {
+            dnaHtml += `<span style="font-size:10px; opacity:0.2">--</span>`;
+        }
+        dnaHtml += '</div>';
 
         tr.style.cursor = 'pointer';
         tr.onclick = () => selectPair(t.pair);
@@ -976,11 +989,12 @@ function renderTradeHistory(data) {
             tr.style.background = 'rgba(245, 158, 11, 0.04)';
             tr.innerHTML = `
                 <td><span style="font-weight:600">${time}</span></td>
+                <td>${dnaHtml}</td>
                 <td>
                     <div style="line-height:1.2">
                         <b>${formatPair(t.pair)}</b><br>
                         <span class="muted" style="font-size:9px">Beli: ${formatNumber(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Live: ${formatNumber(t.last_price)}</span>
+                        <span class="muted" style="font-size:9px">Live: ${formatNumber(t.exit_price || t.last_price)}</span>
                     </div>
                 </td>
                 <td>
@@ -1012,11 +1026,12 @@ function renderTradeHistory(data) {
 
             tr.innerHTML = `
                 <td><span style="font-weight:600;color:var(--text-secondary)">${time}</span></td>
+                <td>${dnaHtml}</td>
                 <td>
                     <div style="line-height:1.2">
                         <b>${formatPair(t.pair)}</b><br>
                         <span class="muted" style="font-size:9px">Beli: ${formatNumber(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Jual: ${formatNumber(t.last_price)}</span>
+                        <span class="muted" style="font-size:9px">Jual: ${formatNumber(t.exit_price || t.last_price)}</span>
                     </div>
                 </td>
                 <td>
