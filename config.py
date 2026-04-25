@@ -29,23 +29,24 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================
-# 3. STRATEGY PARAMETERS
+# 3. STRATEGY PARAMETERS (Mean Reversion Mode)
 # ==========================================
-TP_PCT = 0.02   # +2.0% Target Profit (Baseline Minimum)
-SL_PCT = -0.012  # -1.2% Stop Loss (Lebih ketat untuk memotong kerugian lebih cepat)
+TP_PCT = 0.04   # +4.0% Target Profit (Mudah dicapai pada pantulan trend)
+SL_PCT = -0.02  # -2.0% Stop Loss (RR 1:2)
 
 # --- Trailing Stop Loss ---
-TRAILING_STOP_ACTIVATION_PCT = 0.01  # Activate trailing stop when profit hits 1.0%
-TRAILING_STOP_DISTANCE_PCT = 0.005   # Trail price by 0.5% once activated
+TRAILING_STOP_ACTIVATION_PCT = 0.015 # Aktifkan trailing saat profit 1.5%
+TRAILING_STOP_DISTANCE_PCT = 0.005   # Jarak trail 0.5%
 
-MIN_NET_PROFIT_IDR = 300 # Minimum target keuntungan bersih (Rupiah) per trade
+MIN_NET_PROFIT_IDR = 2500 # Target profit bersih minimal harus terasa (Rp 2500 per 500k trade)
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
-# --- Filter Criteria ---
-MAX_ALLOWED_SPREAD_PCT = 0.005 # Max 0.5% spread untuk masuk ranking
-MIN_TRACKING_VOLATILITY = 0.5  # Volatilitas minimal untuk micro-tracking
-STRONG_IMBALANCE_RATIO  = 2.0  # Ratio Bid/Ask untuk sinyal tambahan
+# --- Filter Criteria (Mean Reversion) ---
+MAX_ALLOWED_SPREAD_PCT = 0.005 # Max 0.5% spread
+MIN_TRACKING_VOLATILITY = 0.8  # Pantau koin yang lincah
+# Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
+STRONG_IMBALANCE_RATIO  = 2.0  
 
 # --- AI & Probability ---
 AI_CONFIDENCE_THRESHOLD = 0.60 # Beli jika probabilitas >= 60%
@@ -53,7 +54,7 @@ AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
-BUY_MAKER_OFFSET = 0.002 # Antri beli 0.2% di bawah pucuk harga (Pullback Entry Strategy)
+BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
 SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
 SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
 
@@ -65,8 +66,6 @@ FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
 FEE_BUY_TAKER  = 0.002111  # 0.2111% (0.2% Service + 0.0111% CFX)
 FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
 FEE_SELL_TAKER = 0.004211  # 0.4211% (0.2% Service + 0.21% Tax + 0.0111% CFX)
-
-
 
 # --- Predator Strategy Parameters ---
 WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"

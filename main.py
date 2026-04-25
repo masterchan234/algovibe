@@ -87,8 +87,25 @@ class ScalperBot:
         """Ambil data candle 1 jam terakhir untuk SEMUA koin (Batch Process)."""
         log_message("⏳ Starting FULL Historical Backfill (1h window)...")
         db.save_state("backfill_status", "SYNCING")
+        
+        markets = []
+        retry_count = 0
+        while not markets and retry_count < 5:
+            try:
+                markets = self.exchange.fetch_markets()
+            except ccxt.RateLimitExceeded:
+                retry_count += 1
+                log_message(f"⚠️ [Rate Limit] Terkena blokir Indodax (429). Menunggu 60 detik... (Percobaan {retry_count}/5)")
+                time.sleep(60)
+            except Exception as e:
+                log_message(f"❌ Error fetching markets: {e}")
+                break
+
+        if not markets:
+            log_message("❌ Gagal mengambil data market setelah beberapa percobaan. Melanjutkan dengan data lokal.")
+            return
+
         try:
-            markets = self.exchange.fetch_markets()
             idr_pairs = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
             total_pairs = len(idr_pairs)
             log_message(f"📦 Total pairs to backfill: {total_pairs}")
@@ -123,7 +140,6 @@ class ScalperBot:
                                                  ch_5m, ch_15m, ch_1h, 0, 0)
                         count += 1
                 
-                import time
                 time.sleep(1.0)
                 
             log_message(f"✅ FULL Backfill completed for {count} pairs.")
@@ -142,18 +158,17 @@ class ScalperBot:
         history_deque.append(price)
         history = list(history_deque)
 
-        # Logic UP: Harga di atas rata-rata 10 candle terakhir + momentum positif
-        avg_10 = sum(history[-10:]) / 10 if len(history) >= 10 else history[0]
-        is_up = len(history) >= 10 and price > avg_10 and price >= history[-3]
+        # Logic Mean Reversion / Pullback:
+        # Hitung EMA-20 dan EMA-50 (simplified with SMA untuk speed di tick-data)
+        avg_20 = sum(history[-20:]) / 20 if len(history) >= 20 else history[0]
+        avg_50 = sum(history[-50:]) / 50 if len(history) >= 50 else avg_20
         
-        # Logic Breakout: Current > Max of prev 5, tapi harus di atas rata-rata 20 tick untuk memfilter spike sesaat
-        avg_20 = sum(history[-20:]) / 20 if len(history) >= 20 else avg_10
-        is_breakout = len(history) >= 20 and price > max(history[-6:-1]) and price > avg_20 * 1.001
+        # Trend Uptrend: avg_20 > avg_50
+        # Pullback: Harga turun menyentuh/mendekati avg_20 (misal dalam 0.2%)
+        is_uptrend = avg_20 > avg_50 * 1.001
+        is_pullback = len(history) >= 50 and is_uptrend and price <= avg_20 * 1.002
         
-        # Logic Flat Breakout: Current price > Avg of prev 10 + 0.3% (syarat lebih ketat)
-        is_flat_breakout = len(history) >= 10 and price > avg_10 * 1.003
-        
-        return "UP" if is_up else "SIDEWAYS", (is_breakout or is_flat_breakout), history
+        return "UP" if is_uptrend else "SIDEWAYS", is_pullback, history
 
     def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None, taker=False):
         try:
@@ -177,17 +192,24 @@ class ScalperBot:
                 log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
                 return False
 
-            from config import BUY_MAKER_OFFSET, TP_PCT, SL_PCT
-            
+            from config import TP_PCT, SL_PCT
             final_tp = dynamic_tp if dynamic_tp is not None else TP_PCT
             final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
             
-            # [Tuning] Taker vs Maker Entry
-            if taker:
-                buy_price = price
-                log_message(f"⚡ [Taker Entry] Menggunakan harga pasar Rp {buy_price:,.2f} untuk momentum.")
-            else:
-                buy_price = price * (1 - BUY_MAKER_OFFSET)
+            # [Tuning] Retest Entry Strategy
+            # Kita tidak lagi menggunakan Taker (price). 
+            # Kita menggunakan EMA-9 sebagai harga antri (Limit Order)
+            from engines.technicals import calculate_rsi
+            prices = np.array(history, dtype=float)
+            alpha = 2 / (9 + 1)
+            ema_9 = prices[-1] # Simple approximation or calculate full
+            # Untuk akurasi, kita hitung EMA-9 dari history
+            ema_9 = prices[0]
+            for p_val in prices:
+                ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
+            
+            buy_price = ema_9
+            log_message(f"🎣 [Retest Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
                 
             amount_crypto = amount_idr / buy_price
             
@@ -233,12 +255,9 @@ class ScalperBot:
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
-                params = {'post_only': True} if not taker else {}
-                if taker:
-                    # Di Indodax Pro, limit order dengan harga saat ini berfungsi sebagai taker jika post_only=False
-                    order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
-                else:
-                    order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
+                params = {'post_only': True} 
+                # Gunakan Limit Buy di EMA-9
+                order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
             dna_data = {
@@ -404,7 +423,16 @@ class ScalperBot:
             
             # --- Market Regime Filter (BTC Protection) ---
             # Dapatkan harga BTC/IDR untuk menentukan suhu pasar
-            btc_ticker = self.exchange.fetch_ticker("BTC/IDR")
+            try:
+                btc_ticker = self.exchange.fetch_ticker("BTC/IDR")
+            except ccxt.RateLimitExceeded:
+                log_message("⚠️ [Rate Limit] Gagal ambil harga BTC. Menunggu 30 detik...")
+                time.sleep(30)
+                continue
+            except Exception as e:
+                log_message(f"❌ Error fetching BTC ticker: {e}")
+                time.sleep(10)
+                continue
             btc_last = float(btc_ticker['last'])
             
             # Simulasi EMA 20 BTC sederhana (menggunakan data history yang sudah ada di DB)
@@ -478,7 +506,7 @@ class ScalperBot:
                 
                 log_message(
                     f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
-                    f"BO: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
+                    f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
                 )
 
                 # ── LiteRT-LM Hard Block: SELL signal mencegah entry ──────────────

@@ -776,18 +776,15 @@ class Oracle:
         history_text = "\n".join(history_details)
         
         prompt = (
-            f"URGENT TRADE ANALYSIS FOR {pair.upper()}.\n"
-            f"Current DNA: RSI={current_dna.get('rsi', 50)}, EMA_Dist={current_dna.get('ema_dist', 0):.4f}, "
-            f"Volatility={current_dna.get('volatility', 0):.2f}%, Imbalance={current_dna.get('imbalance', 1):.2f}.\n"
-            f"\nCompare with 5 most similar historical patterns (NET PROFIT AFTER 0.51% FEES):\n{history_text}\n"
-            f"\nWin Rate for these patterns: {win_rate*100:.0f}%. "
-            "Your Task: Unbiased reasoning. Consider 0.51% TRANSACTION FEES as priority. "
-            "Only suggest BUY if the current context strongly suggests a move that covers fees + profit. "
-            "If RSI/EMA suggests overextension, return AVOID. If wins are consistent, match TP history."
-            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float), SL (float)."
+            f"URGENT TRADE ANALYSIS FOR {pair.upper()} (MEAN REVERSION / BTD MODE).\n"
+            f"Current DNA: RSI={current_dna.get("rsi", 50)}, EMA_Dist={current_dna.get("ema_dist", 0):.4f}, "
+            f"Volatility={current_dna.get("volatility", 0):.2f}%, Imbalance={current_dna.get("imbalance", 1):.2f}.\n"
+            f"\nCompare with 5 similar patterns (STRATEGY: BUY THE DIP AT EMA-20, TARGET: 4% TP):\n{history_text}\n"
+            f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
+            "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "
+            "If history shows continued dumping, return AVOID. Fees (0.51%) are already factored in. "
+            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02)."
         )
-        
-        # Panggil LLM secara sinkronus agar bisa menunggangi momentum
         llm_resp = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
         if not llm_resp:

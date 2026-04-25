@@ -25,9 +25,9 @@ TIMEFRAME = '15m'
 SINCE_DAYS = 60
 CAPITAL_PER_TRADE = 500000 # 500k IDR
 
-# Strategy Constants (matching main.py/config.py)
-TP_PCT = 0.02
-SL_PCT = -0.012
+# Strategy Constants (imported from config.py)
+from config import TP_PCT, SL_PCT, CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL
+CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
 
 class AlgovibeBacktester:
     def __init__(self):
@@ -55,6 +55,7 @@ class AlgovibeBacktester:
         # Tuned Indicators for higher Win Rate
         df['avg_20'] = df['close'].rolling(window=20).mean()
         df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
         df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
         
         # RSI 14 calculation
@@ -74,44 +75,44 @@ class AlgovibeBacktester:
             row = df.iloc[i]
             prev_row = df.iloc[i-1]
             
-            # Entry condition Booster: 
-            # 1. Price > Max 5 bars
-            # 2. Volume > 1.8x Average (Volume Confirmation)
-            # 3. EMA 9 > EMA 9 Previous (Momentum Slope)
+            # Entry condition (Mean Reversion / Buy The Dip): 
+            # 1. Trend Makro: EMA-20 > EMA-50 (Sedang Uptrend)
+            # 2. Oversold: RSI < 45 (Mendingin sementara)
+            # 3. Pullback: Low price menyentuh EMA-20
             # 4. BTC Filter: BTC must be in UPTREND
-            avg_vol = df['volume'].iloc[i-15:i].mean()
             btc_up = row.get('btc_up', True)
             
-            if (row['close'] > row['max_prev_5'] and 
-                row['volume'] > avg_vol * 1.8 and 
-                row['ema_9'] > prev_row['ema_9'] and
+            if (row['ema_20'] > row['ema_50'] and 
+                row['rsi'] < 45 and 
+                row['low'] <= row['ema_20'] and
                 btc_up):
                 
-                # Taker Entry Simulation: Buy at Close price
-                entry_price = row['close']
+                # Simulasi Entri: Limit Order di EMA-20
+                entry_price = row['ema_20']
                 entry_time = row['timestamp']
                 
-                # Synthetic DNA generation (Tuned: Derived from price action, not random)
+                # Synthetic DNA generation
                 volatility = ((row['high'] - row['low']) / row['open']) * 100
                 avg_vol = df['volume'].iloc[i-10:i].mean()
                 
-                # Whale Boost: Loncatan volume murni
-                whale_boost = 1.5 if row['volume'] > avg_vol * 1.8 else 1.0
+                # Whale Boost: Volume di atas rata-rata saat retest (indikasi dipertahankan)
+                whale_boost = 1.5 if row['volume'] > avg_vol * 1.5 else 1.0
                 
-                # Imbalance: Tiruan dari intensitas candle (Body vs Wick)
+                # Imbalance proxy
                 body_size = abs(row['close'] - row['open'])
                 wick_size = (row['high'] - row['low']) - body_size
                 imbalance_proxy = 1.0 + (body_size / (wick_size + 0.0001))
                 imbalance_proxy = min(3.5, max(1.1, imbalance_proxy))
                 
-                # AI Prob: Simulasi kepercayaan berdasarkan 'Sharpness' of breakout
-                breakout_strength = (row['close'] / row['avg_20']) - 1.0
-                ai_prob_sim = 65 + (breakout_strength * 1000)
-                ai_prob_sim = min(95, max(66, ai_prob_sim))
+                # AI Prob: Simulasi kepercayaan berdasarkan 'Oversoldness'
+                ai_prob_sim = 95 - row['rsi']  # Semakin oversold (misal 30), semakin pede (65)
+                ai_prob_sim = min(95, max(60, ai_prob_sim + 20)) # Boost base prob
                 
-                # Contextual Features
+                # Tidak perlu loop ke depan lagi, asumsikan limit order di EMA-20 terisi karena low <= ema_20
+                
+                # Contextual Features for learning
                 rsi_val = row['rsi'] if not np.isnan(row['rsi']) else 50.0
-                ema_dist = ((row['close'] - row['ema_20']) / row['ema_20']) * 100
+                ema_dist = ((entry_price - row['ema_20']) / row['ema_20']) * 100
                 
                 dna = {
                     'timestamp': entry_time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -143,15 +144,11 @@ class AlgovibeBacktester:
                         i = j 
                         break
                     
-                    # 2. Check Take Profit
+                    # 2. Check Take Profit (Swing Target 9%)
                     if future_row['high'] >= entry_price * (1 + TP_PCT):
-                        # Add some randomness for dynamic profit (simulating trailing/llm decision)
-                        extra_profit = random.uniform(0, 0.03) if random.random() > 0.7 else 0
-                        actual_tp = TP_PCT + extra_profit
-                        
                         outcome = "PROFIT"
-                        exit_price = entry_price * (1 + actual_tp)
-                        pnl_pct = actual_tp * 100
+                        exit_price = entry_price * (1 + TP_PCT)
+                        pnl_pct = TP_PCT * 100
                         duration_sec = (future_row['timestamp'] - entry_time).total_seconds()
                         i = j
                         break
