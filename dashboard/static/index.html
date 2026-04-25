@@ -87,6 +87,21 @@
             <!-- ══ LEFT SIDEBAR ══ -->
             <aside class="left-sidebar">
 
+                <!-- ── Market Radar (Search & All Pairs) ── -->
+                <div class="sidebar-section" style="margin-bottom: 12px; border-left: 3px solid var(--purple);">
+                    <div class="section-header" style="justify-content: space-between;">
+                        <span class="section-title">🔍 Market Radar</span>
+                        <span id="watchlist-count" class="badge badge-dim">0</span>
+                    </div>
+                    <div class="search-wrap" style="padding: 0 10px 10px 10px;">
+                        <input type="text" id="market-search" placeholder="Cari koin (misal: BTC, PEPE)..." 
+                               style="width: 100%; background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; color: var(--text-primary); font-size: 11px; outline: none; transition: border-color 0.3s;">
+                    </div>
+                    <div id="ticker-list" class="sidebar-list" style="max-height: 300px; overflow-y: auto; display: none;">
+                        <div class="empty-state">Gunakan pencarian untuk menemukan koin</div>
+                    </div>
+                </div>
+
                 <!-- ── Market Pulse (Gainers/Losers) ── -->
                 <div class="sidebar-section" style="margin-bottom: 10px; border-left: 3px solid var(--yellow);">
                     <div class="section-header" style="justify-content: space-between;"

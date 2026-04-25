@@ -2,6 +2,7 @@
 'use strict';
 
 let chart, activePair = null, activeTimeframe = 'LIVE', lastStats = {}, lastPrices = {}, lastRadarData = [], _notifEnabled = false;
+let marketSearchQuery = '';
 let _logCache = new Set();
 const socket = typeof io !== 'undefined' ? io() : null;
 
@@ -538,6 +539,10 @@ async function selectPair(pair, trend, prob) {
     // Notify server to stream orderbook for this pair
     if (socket) socket.emit('watch_pair', { pair: pair });
 
+    // Reset Market Activity List (Instant UI)
+    const mtList = document.getElementById('market-trades-list');
+    if (mtList) mtList.innerHTML = '<div class="empty-state">Menunggu data market baru...</div>';
+
     // Auto-extract and fallback logic from lastRadarData
     let t = trend || 'NEUTRAL';
     let p = prob || 0;
@@ -850,51 +855,62 @@ function renderWatchlist(data) {
 
         if (!data || !data.length) return;
 
-        // ── ticker-list (Radar Watchlist — opsional, mungkin tidak ada di DOM) ──
+        // ── ticker-list (Radar Watchlist) ──
         const list = document.getElementById('ticker-list');
         const cnt = document.getElementById('watchlist-count');
         if (cnt) cnt.textContent = data.length;
+        
         if (list) {
-            list.innerHTML = '';
+            const isSearching = marketSearchQuery.length > 0;
+            list.style.display = isSearching ? 'block' : 'none';
+            
+            if (isSearching) {
+                list.innerHTML = '';
+                const query = marketSearchQuery.toLowerCase();
+                const filtered = data.filter(t => t.pair.toLowerCase().includes(query))
+                                     .sort((a, b) => a.pair.localeCompare(b.pair));
+                
+                if (filtered.length === 0) {
+                    list.innerHTML = '<div class="empty-state">Koin tidak ditemukan</div>';
+                } else {
+                    filtered.forEach(t => {
+                        const isUp = t.change >= 0, diff = (isUp ? '+' : '') + t.change.toFixed(2) + '%';
+                        const price = t.price >= 1000 ? t.price.toLocaleString('id-ID') : t.price.toFixed(6);
 
-        const sorted = [...data].sort((a, b) => a.pair.localeCompare(b.pair));
-        sorted.forEach(t => {
-            const isUp = t.change >= 0, diff = (isUp ? '+' : '') + t.change.toFixed(2) + '%';
-            const price = t.price >= 1000 ? t.price.toLocaleString('id-ID') : t.price.toFixed(6);
+                        const conf = t.tech_confidence || 0;
+                        const verd = t.tech_verdict || 'HOLD';
+                        let badgeHtml = '';
+                        if (conf >= 60) {
+                            const bCls = verd === 'BUY' ? 'sig-buy' : (verd === 'SELL' ? 'sig-sell' : 'sig-hold');
+                            const bIcon = verd === 'BUY' ? '📈' : (verd === 'SELL' ? '📉' : '⏸');
+                            badgeHtml = `<span class="sig-badge ${bCls}" title="${t.tech_reason || ''}">${bIcon} ${verd} ${conf}%</span>`;
+                        }
 
-            // Signal badge (hanya tampil jika confidence >= 60)
-            const conf = t.tech_confidence || 0;
-            const verd = t.tech_verdict || 'HOLD';
-            let badgeHtml = '';
-            if (conf >= 60) {
-                const bCls = verd === 'BUY' ? 'sig-buy' : (verd === 'SELL' ? 'sig-sell' : 'sig-hold');
-                const bIcon = verd === 'BUY' ? '📈' : (verd === 'SELL' ? '📉' : '⏸');
-                badgeHtml = `<span class="sig-badge ${bCls}" title="${t.tech_reason || ''}">${bIcon} ${verd} ${conf}%</span>`;
+                        let effectiveTrend = t.trend;
+                        if (!effectiveTrend || effectiveTrend === 'BACKFILLED' || effectiveTrend === 'N/A') {
+                            if (verd === 'BUY') effectiveTrend = 'BULLISH';
+                            else if (verd === 'SELL') effectiveTrend = 'BEARISH';
+                            else effectiveTrend = 'RANGING';
+                        }
+
+                        const item = document.createElement('div');
+                        item.className = 'ticker-item ' + (activePair === t.pair ? 'active' : '');
+                        item.onclick = () => selectPair(t.pair, effectiveTrend, t.prediction);
+                        item.innerHTML = `
+                            <div class="ticker-main"><b>${formatPair(t.pair)}</b> <span>Rp ${price}</span></div>
+                            <div class="ticker-side">
+                                <span class="${isUp ? 'up' : 'down'}">${diff}</span>
+                                ${badgeHtml}
+                            </div>`;
+                        
+                        const lastP = lastPrices[t.pair];
+                        if (lastP && lastP !== t.price) { flashEl(item, t.price > lastP ? 'up' : 'down'); }
+                        lastPrices[t.pair] = t.price;
+                        list.appendChild(item);
+                    });
+                }
             }
-
-            // Fallback to LiteRT-LM Reasoner logic if ML is still Backfilling
-            let effectiveTrend = t.trend;
-            if (!effectiveTrend || effectiveTrend === 'BACKFILLED' || effectiveTrend === 'N/A') {
-                if (verd === 'BUY') effectiveTrend = 'BULLISH';
-                else if (verd === 'SELL') effectiveTrend = 'BEARISH';
-                else effectiveTrend = 'RANGING';
-            }
-
-            const item = document.createElement('div');
-            item.className = 'ticker-item ' + (activePair === t.pair ? 'active' : '');
-            item.onclick = () => selectPair(t.pair, effectiveTrend, t.prediction);
-            item.innerHTML = `
-                <div class="ticker-main"><b>${formatPair(t.pair)}</b> <span>Rp ${price}</span></div>
-                <div class="ticker-side">
-                    <span class="${isUp ? 'up' : 'down'}">${diff}</span>
-                    ${badgeHtml}
-                </div>`;
-            const lastP = lastPrices[t.pair];
-            if (lastP && lastP !== t.price) { flashEl(item, t.price > lastP ? 'up' : 'down'); }
-            lastPrices[t.pair] = t.price;
-            list.appendChild(item);
-            });
-        } // end if (list)
+        }
 
         // ── Market Pulse (Gainers / Losers) ──
         const gList = document.getElementById('gainers-list'), lList = document.getElementById('losers-list');
@@ -1163,6 +1179,25 @@ function initSystem() {
 
 window.addEventListener('DOMContentLoaded', () => {
     initSystem();
+    
+    // Senior Search Implementation
+    const searchInput = document.getElementById('market-search');
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            marketSearchQuery = e.target.value.trim();
+            refreshWatchlist();
+        });
+        // UI Polish: Neon purple glow on focus
+        searchInput.addEventListener('focus', () => {
+            searchInput.style.borderColor = 'var(--purple)';
+            searchInput.style.boxShadow = '0 0 8px rgba(168, 85, 247, 0.2)';
+        });
+        searchInput.addEventListener('blur', () => {
+            searchInput.style.borderColor = 'var(--border)';
+            searchInput.style.boxShadow = 'none';
+        });
+    }
+
     setTimeout(async () => {
         try {
             const d = await (await fetch('/api/radar')).json();
@@ -1175,7 +1210,7 @@ function renderMarketTrades(data) {
     const tsEl = document.getElementById('trades-last-update');
     if (tsEl) tsEl.textContent = 'UPDATED: ' + new Date().toLocaleTimeString();
     
-    if (!data || data.pair.toLowerCase() !== activePair.toLowerCase()) return;
+    if (!data || !data.pair || !activePair || data.pair.toLowerCase() !== activePair.toLowerCase()) return;
     const list = document.getElementById('market-trades-list');
     if (!list) return;
     
@@ -1193,9 +1228,14 @@ function renderMarketTrades(data) {
         const row = document.createElement('div');
         row.className = `trade-row side-${t.side}`;
         const time = new Date(t.time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const price = parseFloat(t.price).toLocaleString('id-ID');
+        
+        // Senior JS Polish: Dynamic formatting for huge/tiny numbers
+        const pVal = parseFloat(t.price);
+        const price = pVal >= 100 ? pVal.toLocaleString('id-ID') : pVal.toFixed(2);
+        
         const amountVal = parseFloat(t.amount);
-        const amount = amountVal < 1 ? amountVal.toFixed(8) : amountVal.toFixed(4);
+        const amount = amountVal < 0.001 ? amountVal.toFixed(8) : (amountVal < 1 ? amountVal.toFixed(5) : amountVal.toFixed(2));
+        
         row.innerHTML = `
             <span class="trade-time">${time}</span>
             <span class="trade-price">${price}</span>

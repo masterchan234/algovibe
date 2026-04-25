@@ -1906,9 +1906,9 @@ tr:hover td { background: var(--bg-hover); }
 .trade-row.side-buy { color: var(--green); }
 .trade-row.side-sell { color: var(--red); }
 
-.trade-time { color: var(--text-muted); font-size: 8px; font-family: var(--font-mono); }
-.trade-price { font-weight: 700; font-family: var(--font-mono); }
-.trade-amount { text-align: right; color: var(--text-secondary); font-family: var(--font-mono); }
+.trade-time { color: var(--text-muted); font-size: 7.5px; font-family: var(--font-mono); display: flex; align-items: center; }
+.trade-price { font-weight: 700; font-family: var(--font-mono); font-size: 10px; }
+.trade-amount { text-align: right; color: var(--text-secondary); font-family: var(--font-mono); font-size: 10px; }
 
 
 /* ── Indicator Dropdown ─────────────────────────────────── */
