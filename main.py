@@ -483,12 +483,16 @@ class ScalperBot:
                     "imbalance": imbalance_ratio,
                     "volatility": p['volatility']
                 }
-                
-                # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
+                                # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
                 knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
                 
-                if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= 60.0:
-                    log_message(f"🧠 [K-NN Match] {pair} dominasi profit histori. Target TP: {knn_decision['target_tp']*100:.1f}%.")
+                # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas
+                current_vol = p['volatility']
+                dynamic_threshold = 60.0
+                if current_vol > 2.0: dynamic_threshold = 75.0
+                elif current_vol < 0.6: dynamic_threshold = 55.0
+
+                if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
                     
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 

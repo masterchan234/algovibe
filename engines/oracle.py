@@ -746,12 +746,13 @@ class Oracle:
         distances = []
         for h in history:
             try:
-                # Normalisasi jarak k-NN
-                d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 10.0
-                d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 5.0
-                d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 100.0
+                # Normalisasi jarak k-NN (Tuning: Faktor pembagi lebih ketat)
+                d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 2.0
+                d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 1.5
+                d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 20.0
                 
-                dist = math.sqrt(d_vol**2 + d_imb**2 + d_ai**2)
+                # Gunakan Manhattan Distance untuk sensitivitas linear lebih baik pada data sparse
+                dist = abs(d_vol) + abs(d_imb) + abs(d_ai)
                 distances.append((dist, h))
             except:
                 continue

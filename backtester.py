@@ -22,7 +22,7 @@ PAIRS = [
 ]
 
 TIMEFRAME = '15m'
-SINCE_DAYS = 30
+SINCE_DAYS = 60
 CAPITAL_PER_TRADE = 500000 # 500k IDR
 
 # Strategy Constants (matching main.py/config.py)
@@ -66,18 +66,30 @@ class AlgovibeBacktester:
                 entry_price = row['close']
                 entry_time = row['timestamp']
                 
-                # Synthetic DNA generation
+                # Synthetic DNA generation (Tuned: Derived from price action, not random)
                 volatility = ((row['high'] - row['low']) / row['open']) * 100
-                # Synthetic Whale Boost: Higher if volume > 1.5x average volume
                 avg_vol = df['volume'].iloc[i-10:i].mean()
-                whale_boost = 1.5 if row['volume'] > avg_vol * 1.5 else 1.0
+                
+                # Whale Boost: Loncatan volume murni
+                whale_boost = 1.5 if row['volume'] > avg_vol * 1.8 else 1.0
+                
+                # Imbalance: Tiruan dari intensitas candle (Body vs Wick)
+                body_size = abs(row['close'] - row['open'])
+                wick_size = (row['high'] - row['low']) - body_size
+                imbalance_proxy = 1.0 + (body_size / (wick_size + 0.0001))
+                imbalance_proxy = min(3.5, max(1.1, imbalance_proxy))
+                
+                # AI Prob: Simulasi kepercayaan berdasarkan 'Sharpness' of breakout
+                breakout_strength = (row['close'] / row['avg_20']) - 1.0
+                ai_prob_sim = 65 + (breakout_strength * 1000)
+                ai_prob_sim = min(95, max(66, ai_prob_sim))
                 
                 dna = {
                     'timestamp': entry_time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'ai_prob': random.randint(68, 88), # Simulated bot confidence
+                    'ai_prob': round(ai_prob_sim, 2),
                     'whale_boost': whale_boost,
-                    'sector_sentiment': round(random.uniform(0.7, 1.3), 2),
-                    'imbalance': round(random.uniform(1.2, 2.8), 2),
+                    'sector_sentiment': round(random.uniform(0.8, 1.2), 2),
+                    'imbalance': round(imbalance_proxy, 2),
                     'volatility': round(volatility, 2)
                 }
                 
