@@ -140,8 +140,8 @@ class PrivateWS:
             # Fetch / refresh token sebelum connect
             if not self._conn_token or self._token_expired():
                 if not self._generate_token():
-                    logger.warning("[PrivateWS] Retrying token in 10s…")
-                    time.sleep(10)
+                    logger.warning("[PrivateWS] Retrying token in 60s…")
+                    time.sleep(60)
                     continue
 
             try:

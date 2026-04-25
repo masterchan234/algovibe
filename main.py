@@ -422,18 +422,17 @@ class ScalperBot:
             high_speed = [p for p in ranked if p['volatility'] >= MIN_TRACKING_VOLATILITY][:MAX_TRACKED_PAIRS]
             
             # --- Market Regime Filter (BTC Protection) ---
-            # Dapatkan harga BTC/IDR untuk menentukan suhu pasar
-            try:
-                btc_ticker = self.exchange.fetch_ticker("BTC/IDR")
-            except ccxt.RateLimitExceeded:
-                log_message("⚠️ [Rate Limit] Gagal ambil harga BTC. Menunggu 30 detik...")
-                time.sleep(30)
-                continue
-            except Exception as e:
-                log_message(f"❌ Error fetching BTC ticker: {e}")
-                time.sleep(10)
-                continue
-            btc_last = float(btc_ticker['last'])
+            # Ambil harga BTC/IDR dari WebSocket (btcidr) untuk menghindari REST Rate Limit
+            btc_data = tickers.get('btcidr')
+            if btc_data:
+                btc_last = float(btc_data['last'])
+            else:
+                # Fallback: Jika WS belum ada data BTC, ambil dari history terakhir di DB
+                btc_history = db.get_ticker_history("BTC/IDR", limit=1)
+                btc_last = btc_history[0]['last'] if btc_history else 0
+                if btc_last == 0:
+                    log_message("⚠️ Data BTC tidak tersedia di WS/DB. Melewati filter regime.")
+                    btc_last = 999_999_999 # Anggap bullish agar tidak nyangkut
             
             # Simulasi EMA 20 BTC sederhana (menggunakan data history yang sudah ada di DB)
             btc_history = db.get_ticker_history("BTC/IDR", limit=20)

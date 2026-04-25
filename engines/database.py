@@ -361,6 +361,24 @@ class Database:
                     continue
             return result
 
+    def get_ticker_history(self, pair, limit=20):
+        """Ambil list harga terakhir untuk pair tertentu."""
+        import json
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+            ).fetchone()
+            if row and row['history_json']:
+                try:
+                    history = json.loads(row['history_json'])
+                    # Kembalikan data terakhir dalam format list of dict agar kompatibel dengan main.py
+                    # Di main.py kita pakai: btc_prices = [h['last'] for h in btc_history]
+                    # Jadi kita harus return list of dict dengan key 'last'
+                    return [{"last": float(p)} for p in history[-limit:]]
+                except:
+                    return []
+            return []
+
     # ── METODE UNTUK BOT STATE ──
 
     def save_state(self, key, value):

@@ -311,42 +311,11 @@ class MarketDataWS:
             logger.error(f"[MarketWS] Failed to subscribe trades for {pair}: {e}")
 
     def _fetch_initial_trades(self, pair: str):
-        """Ambil data trade terakhir via REST agar dashboard tidak kosong saat awal."""
-        try:
-            import requests
-            url = f"https://indodax.com/api/trades/{pair}"
-            resp = requests.get(url, timeout=5).json()
-            if isinstance(resp, list):
-                # Indodax REST format: [{date, price, amount, tid, type}, ...]
-                formatted = []
-                for t in resp:
-                    # Map to WS format: [pair, timestamp, tid, type, price, vol_idr, vol_coin]
-                    # Note: WS format has pair at [0], timestamp at [1]
-                    item = [
-                        pair, 
-                        int(t.get('date', 0)), 
-                        t.get('tid', 0), 
-                        t.get('type', 'buy'), 
-                        t.get('price', 0), 
-                        0, # vol_idr (approx)
-                        t.get('amount', 0)
-                    ]
-                    formatted.append(item)
-                
-                with self._lock:
-                    if pair not in self._trades: self._trades[pair] = []
-                    # Merge and unique by TID
-                    existing_tids = {str(x[2]) for x in self._trades[pair]}
-                    for item in formatted:
-                        if str(item[2]) not in existing_tids:
-                            self._trades[pair].append(item)
-                    
-                    # Sort by timestamp desc and limit
-                    self._trades[pair].sort(key=lambda x: int(x[1]), reverse=True)
-                    self._trades[pair] = self._trades[pair][:50]
-                logger.info(f"[MarketWS] Initial trades fetched for {pair}: {len(formatted)} items")
-        except Exception as e:
-            logger.error(f"[MarketWS] Error fetching initial trades for {pair}: {e}")
+        """
+        [MODIFIED] Dinonaktifkan untuk menghindari Rate Limit (429) saat startup.
+        Bot akan menunggu data trade masuk via WebSocket secara alami.
+        """
+        pass
 
     def _subscribe_top_orderbooks(self, summary_snapshot: dict):
         """Subscribe ke order-book channel untuk top N pairs bervolume tinggi."""
