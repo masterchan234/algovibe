@@ -249,6 +249,35 @@ class Database:
                 pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int
             ))
 
+    def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
+        """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""
+        try:
+            with self.get_connection() as conn:
+                # 1. Simpan ke trade_analytics (DNA)
+                conn.execute('''
+                    INSERT INTO trade_analytics (
+                        pair, entry_timestamp, ai_prob, whale_boost, 
+                        sector_sentiment, imbalance, volatility, pnl_idr, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED')
+                ''', (
+                    pair, dna.get('timestamp'), dna.get('ai_prob'), dna.get('whale_boost'),
+                    dna.get('sector_sentiment'), dna.get('imbalance'), dna.get('volatility'),
+                    pnl_idr
+                ))
+                
+                # 2. Simpan ke trade_history (Outcome)
+                conn.execute('''
+                    INSERT INTO trade_history (
+                        pair, entry_price, exit_price, amount_crypto, amount_idr,
+                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ''', (
+                    pair, entry_price, exit_price, amount_idr/entry_price, amount_idr,
+                    pnl_idr, pnl_pct, 'BACKTEST', duration_seconds
+                ))
+        except Exception as e:
+            print(f"DB Error (insert_backtest_data): {e}")
+
     def get_daily_stats(self, date_str=None):
         """Mengambil rekap performa untuk 24 jam terakhir. Default = last 24h."""
         with self.get_connection() as conn:
