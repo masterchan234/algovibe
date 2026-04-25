@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Timezone
 ENV TZ=Asia/Jakarta
-RUN apt-get update && apt-get install -y tzdata && \
+RUN apt-get update && apt-get install -y tzdata curl ca-certificates && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
