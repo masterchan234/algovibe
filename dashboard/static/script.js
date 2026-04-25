@@ -1189,6 +1189,46 @@ function fireNotif(t, b) { if (_notifEnabled && Notification.permission === 'gra
 function toggleSection(el) { if (el) el.classList.toggle('collapsed'); }
 function refreshWatchlist() { if (lastRadarData.length) renderWatchlist(lastRadarData); }
 
+// ── Mobile Navigation Logic ──
+function switchMobileTab(tab, el) {
+    // Haptic Feedback for Premium Feel
+    if (window.navigator && window.navigator.vibrate) {
+        window.navigator.vibrate(10);
+    }
+
+    // UI Update
+    document.querySelectorAll('.mobile-nav-item').forEach(item => item.classList.remove('active'));
+    el.classList.add('active');
+
+    // Body Class Update
+    document.body.classList.remove('tab-market', 'tab-chart', 'tab-trades');
+    document.body.classList.add('tab-' + tab);
+
+    // Trigger Chart Resize if switching to chart
+    if (tab === 'chart' && chart) {
+        setTimeout(() => chart.resize(), 100);
+    }
+    
+    closeAllSidebars();
+}
+
+function toggleSidebar(side) {
+    const selector = side === 'left' ? '.left-sidebar' : '.right-sidebar';
+    const el = document.querySelector(selector);
+    const overlay = document.getElementById('sidebar-overlay');
+    
+    if (el) {
+        const isOpen = el.classList.toggle('show');
+        if (overlay) overlay.classList.toggle('show', isOpen);
+    }
+}
+
+function closeAllSidebars() {
+    document.querySelectorAll('.left-sidebar, .right-sidebar').forEach(s => s.classList.remove('show'));
+    const overlay = document.getElementById('sidebar-overlay');
+    if (overlay) overlay.classList.remove('show');
+}
+
 // ── Initialization ───────────────────────────────────────────
 function initSystem() {
     chart = new AlgoChart('custom-chart', 'chart-tooltip');
@@ -1206,6 +1246,9 @@ function initSystem() {
 
 window.addEventListener('DOMContentLoaded', () => {
     initSystem();
+    
+    // Default Mobile State
+    document.body.classList.add('tab-chart');
 
     // Senior Search Implementation
     const searchInput = document.getElementById('market-search');

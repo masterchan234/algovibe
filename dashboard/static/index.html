@@ -15,12 +15,18 @@
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 
-<body>
+<body class="tab-chart">
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeAllSidebars()"></div>
     <div class="app-container">
 
         <!-- ═══════════════════════════════════════════ TOP HEADER ═══ -->
         <header class="top-nav" id="top-nav">
             <div class="nav-left">
+                <button class="mobile-menu-btn" onclick="toggleSidebar('left')" aria-label="Menu">
+                    <span class="bar"></span>
+                    <span class="bar"></span>
+                    <span class="bar"></span>
+                </button>
                 <div class="logo-section">
                     <div class="logo-icon">AV</div>
                     <div class="logo-text">
@@ -335,6 +341,22 @@
     <div id="market-ticker">
         <div id="ticker-content"></div>
     </div>
+
+    <!-- ── Mobile Bottom Navigation ── -->
+    <nav class="mobile-nav">
+        <div class="mobile-nav-item" onclick="switchMobileTab('market', this)">
+            <span class="icon">📊</span>
+            <span class="label">Market</span>
+        </div>
+        <div class="mobile-nav-item active" onclick="switchMobileTab('chart', this)">
+            <span class="icon">📈</span>
+            <span class="label">Chart</span>
+        </div>
+        <div class="mobile-nav-item" onclick="switchMobileTab('trades', this)">
+            <span class="icon">📜</span>
+            <span class="label">Trades</span>
+        </div>
+    </nav>
 
     <script src="script.js"></script>
 </body>

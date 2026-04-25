@@ -1969,3 +1969,229 @@ tr:hover td { background: var(--bg-hover); }
     transition: opacity 0.15s;
 }
 .ind-chk.hidden { opacity: 0; }
+
+/* ══════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVE — ADVANCED ADAPTATION
+   ══════════════════════════════════════════════════════════════ */
+
+/* --- Mobile Menu Button (Hamburger) --- */
+.mobile-menu-btn {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 10px;
+    z-index: 1001;
+}
+.mobile-menu-btn .bar {
+    width: 20px;
+    height: 2px;
+    background: var(--text-primary);
+    border-radius: 2px;
+    transition: 0.3s;
+}
+
+/* --- Mobile Bottom Navigation --- */
+.mobile-nav {
+    display: none;
+    position: fixed;
+    bottom: 26px; /* Di atas running ticker */
+    left: 0;
+    width: 100%;
+    height: 60px;
+    background: rgba(15, 16, 20, 0.95);
+    backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border);
+    grid-template-columns: repeat(3, 1fr);
+    z-index: 1000;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+}
+.mobile-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    transition: 0.2s;
+}
+.mobile-nav-item .icon { font-size: 18px; }
+.mobile-nav-item.active { color: var(--blue); }
+.mobile-nav-item.active .icon { filter: drop-shadow(0 0 8px var(--blue)); }
+
+/* --- Tablet & Mobile Media Queries --- */
+@media (max-width: 1100px) {
+    :root { --sidebar-w: 220px; --right-w: 260px; }
+    .logo-text { display: none; }
+}
+
+@media (max-width: 900px) {
+    .main-layout {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+    
+    /* Sidebars hidden by default on small screens */
+    .left-sidebar, .right-sidebar {
+        display: none;
+        position: fixed;
+        top: 0;
+        height: 100%;
+        background: var(--bg-base);
+        z-index: 2000;
+        width: 85%;
+        max-width: 320px;
+        padding-top: 60px;
+        box-shadow: 20px 0 50px rgba(0,0,0,0.8);
+    }
+    .left-sidebar { left: 0; border-right: 1px solid var(--border); }
+    .right-sidebar { right: 0; border-left: 1px solid var(--border); }
+    
+    .left-sidebar.show, .right-sidebar.show { display: block; }
+
+    /* Header adjustments */
+    .mobile-menu-btn { display: flex; }
+    .nav-center, .nav-right .btn-outline:not(#theme-toggle) { display: none; }
+    .top-nav { height: 50px; padding: 0 10px; }
+    
+    /* Main Area Adjustments */
+    .main-content { padding: 8px; height: calc(100vh - 144px); } /* 50 header + 60 nav + 26 ticker + padding */
+    .app-container { height: calc(100vh - 86px); }
+
+    /* Show only active tab content */
+    .mobile-nav { display: grid; }
+    
+    body.tab-market .main-content { display: none; }
+    body.tab-market .left-sidebar { display: block; width: 100%; max-width: none; position: static; box-shadow: none; padding-top: 0; flex: 1; }
+    
+    body.tab-chart .main-content { display: flex; }
+    body.tab-chart .left-sidebar, body.tab-chart .right-sidebar { display: none; }
+    
+    body.tab-trades .main-content { display: none; }
+    body.tab-trades .right-sidebar { display: flex; width: 100%; max-width: none; position: static; box-shadow: none; padding-top: 0; flex: 1; }
+
+    /* Execution Ledger on mobile - make it scrollable horizontally if needed */
+    .ledger-table-wrap { overflow-x: auto; }
+    .ledger-table { min-width: 600px; }
+
+    /* Stats bar on mobile */
+    .stats-bar { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .stat-item { padding: 8px; }
+    .stat-label { font-size: 8px; }
+    .stat-value { font-size: 11px; }
+}
+
+/* Landscape & Small height optimizations */
+@media (max-height: 500px) {
+    .top-nav { display: none; }
+    .mobile-nav { height: 40px; }
+    .mobile-nav-item .icon { font-size: 14px; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   UI/UX SPECIALIST POLISH — PREMIUM MOBILE EXPERIENCE
+   ══════════════════════════════════════════════════════════════ */
+
+/* --- Advanced Animations --- */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideInLeft { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes pulseGlow { 0% { box-shadow: 0 0 5px rgba(59,130,246,0.2); } 50% { box-shadow: 0 0 15px rgba(59,130,246,0.5); } 100% { box-shadow: 0 0 5px rgba(59,130,246,0.2); } }
+
+/* --- Refined Mobile Nav --- */
+.mobile-nav {
+    border-radius: 24px 24px 0 0;
+    margin-bottom: 0;
+    padding-bottom: constant(safe-area-inset-bottom);
+    padding-bottom: env(safe-area-inset-bottom);
+    height: calc(60px + env(safe-area-inset-bottom));
+}
+
+.mobile-nav-item {
+    position: relative;
+    overflow: hidden;
+}
+
+.mobile-nav-item::after {
+    content: '';
+    position: absolute;
+    bottom: 8px;
+    width: 4px;
+    height: 4px;
+    background: var(--blue);
+    border-radius: 50%;
+    opacity: 0;
+    transition: 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    transform: scale(0);
+}
+
+.mobile-nav-item.active::after {
+    opacity: 1;
+    transform: scale(1);
+    width: 12px;
+    border-radius: 10px;
+}
+
+.mobile-nav-item:active {
+    transform: scale(0.92);
+}
+
+/* --- Smooth Tab Transitions --- */
+.main-content, .left-sidebar, .right-sidebar {
+    animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* --- Backdrop Overlay for Sidebars --- */
+.sidebar-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.4);
+    backdrop-filter: blur(4px);
+    z-index: 1500;
+    animation: fadeIn 0.3s ease;
+}
+.sidebar-overlay.show { display: block; }
+
+/* --- Mobile Header Polish --- */
+@media (max-width: 900px) {
+    .top-nav {
+        background: rgba(12, 13, 17, 0.8) !important;
+        backdrop-filter: blur(15px);
+        border-bottom: 1px solid var(--border);
+    }
+    
+    .bot-status-badge {
+        padding: 4px 10px;
+        font-size: 8px;
+    }
+    
+    /* Better spacing for panels on mobile */
+    .panel {
+        border-radius: 12px;
+        margin-bottom: 8px;
+    }
+    
+    .sidebar-section {
+        border-radius: 12px;
+        margin: 0 8px 12px 8px;
+    }
+}
+
+/* --- Floating "Live" Indicator --- */
+.live-dot-floating {
+    width: 6px;
+    height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    position: absolute;
+    top: 15px;
+    right: 30%;
+    box-shadow: 0 0 8px var(--green);
+}
