@@ -14,6 +14,8 @@ Bot ini dibangun menggunakan arsitektur *multiprocessing* Python untuk memastika
   - Berhenti jika saldo *balance* menyentuh batas minimum threshold.
 - **Indodax Tax Compliant (PMK 68/2022):** Modul `Performance Tracker` yang sudah disesuaikan dengan aturan pajak Indonesia terbaru (PPh 0.1%, PPN 0.11%, dan Maker Fee 0.1%).
 - **Dry Run Mode:** Mendukung mode simulasi untuk menguji strategi tanpa menggunakan uang asli.
+- **Real-Time Professional Dashboard:** Dashboard visual berbasis Web (Flask + Socket.io) yang menampilkan pergerakan harga per detik, orderbook, dan aktivitas pasar secara instan.
+- **All-Time Analytics:** Laporan PnL, Win Rate, dan performa yang dihitung secara akumulatif (All-Time) untuk memberikan gambaran strategi jangka panjang.
 
 ## ⚙️ Arsitektur Mesin (*Engines*)
 
@@ -24,7 +26,9 @@ Proyek ini menggunakan pola arsitektur *modular engines*:
 - `signals.py`: Mengeluarkan sinyal *ENTRY_BUY* berdasarkan parameter (Trend UP + Breakout + Spread tipis).
 - `execution.py` & `main.py`: Mengeksekusi order *limit maker* ke bursa.
 - `exit_manager.py`: Memantau order yang sudah masuk dan melakukan eksekusi *SELL* jika menyentuh titik Take Profit (TP) atau Stop Loss (SL).
-- `performance_tracker.py`: Menghitung dan mencetak laporan PnL (*Profit and Loss*) harian secara terperinci.
+- `performance_tracker.py`: Menghitung laporan PnL harian secara terperinci.
+- `ws_market.py`: Mesin WebSocket untuk konsumsi data market real-time (1s ticks) yang digunakan oleh bot dan dashboard.
+- `ws_private.py`: Mesin WebSocket untuk memantau update order dan saldo secara privat.
 
 ## 📋 Persyaratan Sistem
 
@@ -153,6 +157,12 @@ sudo systemctl status indodax-scalper.service indodax-dashboard.service
 tail -f data/logs/scalper.log
 tail -f data/logs/dashboard.log
 ```
+### 3. Dashboard Real-Time
+Dashboard dapat diakses melalui browser pada alamat `http://<ip-server>:5000`. Fitur dashboard meliputi:
+- **Left Sidebar**: Ticker trending (Market Pulse) dan Radar Watchlist.
+- **Center Panel**: Chart pergerakan harga (Live ticks, 5m, 15m, 1h, 24h) dengan deteksi regime pasar (AI Score).
+- **Right Sidebar**: Orderbook real-time dan **Market Activity** (Histori perdagangan pasar terakhir yang diperbarui secara instan).
+- **Global Metrics**: All-time PnL, Win Rate, dan Status Bot.
 
 ## 📊 Laporan Performa
 

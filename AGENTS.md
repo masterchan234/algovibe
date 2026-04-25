@@ -37,8 +37,8 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - `engines/ws_private.py`: private/order updates feed.
 - `engines/exit_manager.py`: open-position monitoring and exits.
 - `engines/oracle.py`, `engines/predictor.py`: adaptive regime/AI scoring logic.
-- `engines/database.py`: SQLite schema + state/history persistence.
-- `dashboard/server.py`: Flask API/static dashboard (runs as standalone `indodax-dashboard.service`).
+- `engines/database.py`: SQLite schema + state/history persistence (calculates All-Time PnL/Winrate).
+- `dashboard/server.py`: Flask + Socket.io server with real-time 3-column layout, WebSocket push loop, and dynamic pair subscription for `Market Activity`.
 
 ## 5) Code Conventions in This Repo
 - Keep edits modular; prefer changing one engine at a time.
