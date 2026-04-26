@@ -487,12 +487,13 @@ class Oracle:
         Return configuration overrides based on the current market regime.
         """
         regime = self.get_market_regime()
-        from config import AI_CONFIDENCE_THRESHOLD, MIN_VOLUME_FILTER, MAX_ALLOWED_SPREAD_PCT
+        from config import AI_CONFIDENCE_THRESHOLD, MIN_VOLUME_FILTER, MAX_ALLOWED_SPREAD_PCT, MIN_PRICE_FILTER
         
         overrides = {
             "ai_threshold": AI_CONFIDENCE_THRESHOLD,
             "min_vol": MIN_VOLUME_FILTER,
-            "max_spread": MAX_ALLOWED_SPREAD_PCT
+            "max_spread": MAX_ALLOWED_SPREAD_PCT,
+            "min_price": MIN_PRICE_FILTER
         }
         
         if regime == MarketRegime.BULLISH:

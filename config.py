@@ -31,7 +31,7 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.15    # [AGGRESSIVE] Gunakan 15% saldo per koin
+CAPITAL_PER_TRADE_PCT = 0.25    # [AGGRESSIVE] Gunakan 25% saldo per koin (Fixed for 90k Balance)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = 12000          # Minimum order Indodax (10k + buffer)
 
@@ -92,4 +92,16 @@ SECTOR_MAP = {
 
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
-DRY_RUN = True
+DRY_RUN = False
+
+# --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
+# Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.
+BLACKLIST_COINS = [
+    "usdtidr", "usdcidr", "paxgidr",  # Stablecoins (No profit in scalping)
+    "pxgidr", "vexidr", "dgbidr",     # Low liquidity / "Zombie" coins
+    "bfidr", "sumoidr"                # Common pump & dump traps
+]
+
+# --- [Anti-Shitcoin] Filter Harga Rendah ---
+# Mengabaikan koin seharga "perak" yang sering memberikan sinyal palsu (misal 1 ke 2 = 100%)
+MIN_PRICE_FILTER = 10 

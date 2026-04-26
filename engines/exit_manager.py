@@ -64,7 +64,9 @@ class ExitManager:
                 if is_timeout or is_too_far:
                     reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
                     try:
-                        self.exchange.cancel_order(order_id, pair)
+                        # [Senior Fix] Standard CCXT Symbol for Validation
+                        symbol_cancel = pair.upper().replace("IDR", "/IDR")
+                        self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr")})
                         # Hapus lokal sebagai fallback jika PrivateWS miss event
                         db.delete_position(pair)
                         
@@ -277,17 +279,24 @@ class ExitManager:
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_MAKER
 
+            # [Senior Fix] Standard CCXT Symbol for Validation
+            symbol = pair.upper().replace("IDR", "/IDR")
+            
             if self.dry_run:
                 order = {
                     "id": f"DRY-{int(time.time())}",
                     "status": "closed",
                     "price": exit_price,
-                    "amount": amount
+                    "amount": amount,
+                    "symbol": symbol
                 }
                 print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
-                params = {'post_only': True} if reason == "TAKE_PROFIT" else {}
-                order = self.exchange.create_limit_sell_order(pair, amount, exit_price, params)
+                params = {
+                    'post_only': True if reason == "TAKE_PROFIT" else False,
+                    'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
+                }
+                order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)

@@ -49,7 +49,8 @@ class ScalperBot:
         
         # Memory-based history tracking with DB Recovery
         self.price_history = defaultdict(lambda: deque(maxlen=100))
-        self.blacklist = set(db.get_blacklist())
+        from config import BLACKLIST_COINS
+        self.blacklist = set(db.get_blacklist()) | set(BLACKLIST_COINS)
         self.pool = ThreadPool(processes=4)
         
         # Load history from DB (Warm-up prevention)
@@ -200,9 +201,9 @@ class ScalperBot:
             if DRY_RUN:
                 amount_idr = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
             else:
-                balance = self.exchange.fetch_balance()['free']['IDR']
+                balance = getattr(self, 'cached_balance', 0)
                 if balance < MIN_BALANCE_THRESHOLD:
-                    log_message(f"STOP: Balance below {MIN_BALANCE_THRESHOLD}")
+                    log_message(f"STOP: Balance {balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                     return False
                 amount_idr = balance * CAPITAL_PER_TRADE_PCT * multiplier
 
@@ -232,6 +233,9 @@ class ScalperBot:
                 buy_price = ema_9
                 log_message(f"🎣 [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
                 
+            # [Senior Fix] Standard CCXT Symbol for Validation
+            symbol = pair.upper().replace("IDR", "/IDR")
+            
             amount_crypto = amount_idr / buy_price
             
             # Estimate Targets
@@ -244,6 +248,7 @@ class ScalperBot:
                     'status': 'closed',
                     'price': buy_price,
                     'amount': amount_crypto,
+                    'symbol': symbol,
                     'timestamp': datetime.now().isoformat()
                 }
                 # Semantic Rationale for Predator Features
@@ -276,9 +281,12 @@ class ScalperBot:
                 log_message(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
                 
-                params = {'post_only': True} 
+                params = {
+                    'post_only': True,
+                    'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
+                } 
                 # Gunakan Limit Buy di EMA-9
-                order = self.exchange.create_limit_buy_order(pair, amount_crypto, buy_price, params)
+                order = self.exchange.create_limit_buy_order(symbol, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
             dna_data = {
@@ -440,6 +448,16 @@ class ScalperBot:
                 except Exception:
                     pass
             self.oracle.auto_queue_buy_candidates(ranked_with_signals)
+            
+            # [Senior Optimization] Cache Balance once per loop to avoid Rate Limits
+            if not DRY_RUN:
+                try:
+                    bal_data = self.exchange.fetch_balance()
+                    self.cached_balance = bal_data['free'].get('IDR', 0)
+                except Exception as e:
+                    log_message(f"⚠️ Balance Fetch Error: {e}")
+                    if "toomanyrequests" in str(e).lower():
+                        time.sleep(10)
             
             # Manage Shadow Jaring (Liquidity Grab)
             self.exit_manager.manage_shadow_jaring(ranked, tickers)
@@ -696,8 +714,10 @@ class ScalperBot:
                         # Menghitung volatilitas aktual sebelum entry untuk target presisi
                         from engines.technicals import calculate_atr
                         try:
+                            # [Senior Fix] Standard CCXT Symbol for Validation
+                            symbol_atr = pair.upper().replace("IDR", "/IDR")
                             # Ambil data OHLCV 1m terbaru (limit 20 candle)
-                            ohlcv_atr = self.exchange.fetch_ohlcv(pair, timeframe='1m', limit=20)
+                            ohlcv_atr = self.exchange.fetch_ohlcv(symbol_atr, timeframe='1m', limit=20)
                             if ohlcv_atr:
                                 highs = [c[2] for c in ohlcv_atr]
                                 lows = [c[3] for c in ohlcv_atr]
@@ -733,13 +753,24 @@ class ScalperBot:
                         mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
                         log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
 
-                        if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
-                                             whale_boost=whale_boost, sector_boost=sector_boost,
-                                             imbalance=imbalance_ratio, volatility=p['volatility'],
-                                             dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
-                                             taker=use_taker):
-                            self.daily_trades += 1
-                            db.save_state("daily_trades", self.daily_trades)
+                        try:
+                            if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
+                                                 whale_boost=whale_boost, sector_boost=sector_boost,
+                                                 imbalance=imbalance_ratio, volatility=p['volatility'],
+                                                 dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
+                                                 taker=use_taker):
+                                self.daily_trades += 1
+                                db.save_state("daily_trades", self.daily_trades)
+                        except Exception as e:
+                            err_msg = str(e).lower()
+                            if "toomanyrequests" in err_msg:
+                                log_message("🛑 [Rate Limit] Terlalu banyak permintaan! Hibernasi 60 detik agar IP kembali bersih...")
+                                time.sleep(60)
+                            else:
+                                log_message(f"⚠️ Trade Error: {e}")
+                        
+                        # [Senior Fix] Rate Limiter: Beri jeda 1 detik agar tidak kena blokir IP Indodax
+                        time.sleep(1)
                 else:
                     # Pola kalah dominan, jangan masuk
                     if knn_decision['verdict'] == "AVOID":
@@ -772,9 +803,13 @@ def calculate_score(args):
 
         max_spread = config_override['max_spread'] * 100
         min_vol = config_override['min_vol']
+        min_price = config_override.get('min_price', 0)
         
+        # [Anti-Shitcoin] Filter koin harga receh (1-10 perak)
+        if last < min_price:
+            return None
+
         # [Senior Engineer Fix] Lepaskan batas atas volatilitas untuk Dashboard Ranking.
-        # Koin yang sedang 'pumping' (>8%) justru yang paling trending.
         if spread < max_spread and volatility >= 0.1 and vol > min_vol:
             # ── [Enhanced Quant Scoring: Relative Momentum] ──
             # [Smart Thinking] Gunakan Volatility-Adjusted Change.
