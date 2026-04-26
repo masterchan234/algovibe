@@ -37,6 +37,28 @@ def calculate_volatility(prices, window=20):
     returns = np.diff(prices) / prices[:-1]
     return float(np.std(returns[-window:]) * 100)
 
+def calculate_atr(highs, lows, closes, period=14):
+    """
+    Hitung Average True Range (ATR).
+    Standard formula: max(H-L, abs(H-Cp), abs(L-Cp))
+    """
+    if len(closes) < period + 1:
+        # Fallback: Estimasi dari standard deviation jika data kurang
+        return np.std(np.diff(closes)) if len(closes) > 1 else closes[-1] * 0.01
+
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1])
+        )
+        tr_list.append(tr)
+    
+    # Simple Moving Average dari True Range
+    atr = np.mean(tr_list[-period:])
+    return float(atr)
+
 def get_technical_summary(prices):
     """Kembalikan rangkuman teknikal lengkap."""
     if not prices or len(prices) < 2:

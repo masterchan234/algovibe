@@ -110,7 +110,7 @@ class ScalperBot:
         try:
             idr_pairs = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
             total_pairs = len(idr_pairs)
-            log_message(f"📦 Total pairs to backfill: {total_pairs}")
+            log_message(f"📦 Total pairs to backfill (Full Market Sync): {total_pairs}")
             
             def fetch_one(symbol):
                 try:
@@ -366,6 +366,9 @@ class ScalperBot:
                     except Exception as e:
                         log_message(f"⚠️ LOGS: Gagal merotasi log: {e}")
 
+                # [Senior Maintenance] Prune Database Logs
+                db.prune_old_data(hours=24)
+
                 self.daily_trades = 0
                 self.consecutive_losses = 0
                 self.start_day = current_day
@@ -605,7 +608,8 @@ class ScalperBot:
                     ema_20 = prices[0]
                     for price in prices[1:]:
                         ema_20 = (price * alpha) + (ema_20 * (1 - alpha))
-                    ema_dist = ((p['last'] - ema_20) / ema_20) * 100
+                    # [Fix] Sinkronisasi rumus dengan backtester: positif = pullback di bawah EMA
+                    ema_dist = ((ema_20 - p['last']) / ema_20) * 100
                 else:
                     ema_dist = 0.0
 
@@ -633,12 +637,35 @@ class ScalperBot:
                 if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
                     
                     if self.daily_trades < MAX_TRADES_PER_DAY:
+                        # [Backtest Insight] Dynamic ATR-based TP/SL 
+                        # Menghitung volatilitas aktual sebelum entry untuk target presisi
+                        from engines.technicals import calculate_atr
+                        try:
+                            # Ambil data OHLCV 1m terbaru (limit 20 candle)
+                            ohlcv_atr = self.exchange.fetch_ohlcv(pair, timeframe='1m', limit=20)
+                            if ohlcv_atr:
+                                highs = [c[2] for c in ohlcv_atr]
+                                lows = [c[3] for c in ohlcv_atr]
+                                closes = [c[4] for c in ohlcv_atr]
+                                atr_val = calculate_atr(highs, lows, closes)
+                                
+                                # TP = 2.5x ATR, SL = 1.5x ATR (Backtest v2.1 optimized)
+                                # Cap TP 2-8%, SL 1-4%
+                                final_dyn_tp = min(0.08, max(0.02, (atr_val * 2.5) / p['last']))
+                                final_dyn_sl = -min(0.04, max(0.01, (atr_val * 1.5) / p['last']))
+                                log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}%")
+                            else:
+                                final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
+                        except Exception as e:
+                            log_message(f"⚠️ ATR Calculation failed: {e}")
+                            final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
+
                         # [Momentum Tuning] Gunakan Taker Order (Instant Buy) untuk menangkap momentum breakout k-NN
                         # Biaya lebih tinggi (0.21%) tapi probabilitas tertangkap momentum lebih besar.
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
                                              imbalance=imbalance_ratio, volatility=p['volatility'],
-                                             dynamic_tp=knn_decision['target_tp'], dynamic_sl=knn_decision['target_sl'],
+                                             dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
                                              taker=True):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)

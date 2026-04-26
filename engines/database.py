@@ -661,5 +661,25 @@ class Database:
         except Exception:
             return {"bids":[], "asks":[]}
 
+    def prune_old_data(self, hours=24):
+        """Hapus log sistem yang lebih lama dari X jam agar DB tidak bengkak."""
+        try:
+            with self.get_connection() as conn:
+                # 1. Prune system_events (logs)
+                res1 = conn.execute(
+                    "DELETE FROM system_events WHERE timestamp < datetime('now', ?)",
+                    (f'-{hours} hours',)
+                )
+                # 2. Prune market_depth (data orderbook lama yang tidak relevan)
+                # (biasanya sudah di-update tiap detik, tapi untuk jaga-jaga)
+                
+                count = res1.rowcount
+                if count > 0:
+                    logging.info(f"[DB] Pruned {count} old system events (> {hours}h).")
+                return count
+        except Exception as e:
+            logging.error(f"[DB] Failed to prune old data: {e}")
+            return 0
+
 # Instantiate a global db object for ease of use
 db = Database()

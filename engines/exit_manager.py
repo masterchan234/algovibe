@@ -98,31 +98,59 @@ class ExitManager:
             dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
             initial_sl_price = entry_price * (1 + dynamic_sl_pct)
             
-            # --- Trailing Stop Logic ---
-            # Retrieve or initialize highest price seen and current trailing stop price
+            # --- [Advanced] Adaptive Trailing Stop Logic ---
             highest_price = data.get('highest_price', entry_price)
             trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
+            
+            current_profit_pct = (current_price - entry_price) / entry_price
             
             if current_price > highest_price:
                 highest_price = current_price
                 positions[pair]['highest_price'] = highest_price
                 
-                # Check if we should activate or update trailing stop
-                profit_pct = (highest_price - entry_price) / entry_price
-                if profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
-                    # Calculate new trailing SL
-                    new_trailing_sl = highest_price * (1 - TRAILING_STOP_DISTANCE_PCT)
-                    # Never lower the trailing stop once raised
+                # Jarak trailing adaptif: Semakin untung, semakin ketat
+                # [Optimization] Mengunci profit lebih agresif saat harga melonjak
+                dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.5%
+                if current_profit_pct >= 0.04:   # Profit > 4%
+                    dist_pct = 0.002            # Jarak sangat ketat (0.2%)
+                elif current_profit_pct >= 0.02: # Profit > 2%
+                    dist_pct = 0.0035           # Jarak ketat (0.35%)
+
+                if current_profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                    new_trailing_sl = highest_price * (1 - dist_pct)
                     if new_trailing_sl > trailing_sl_price:
                         trailing_sl_price = new_trailing_sl
                         positions[pair]['trailing_sl_price'] = trailing_sl_price
+                
+                # [Senior Sync] Update DB agar state trailing tidak hilang saat restart
+                db.upsert_position(pair, positions[pair])
             
-            # Active SL is whichever is higher: initial or trailing
             active_sl_price = max(initial_sl_price, trailing_sl_price)
 
-            # --- Execution Checks ---
+            # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
+            # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.
+            ai_veto, veto_reason = False, ""
+            if self.oracle:
+                ai_veto, veto_reason = self.oracle.check_llm_veto(pair)
             
-            # 1. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
+            # 1. AI Emergency Exit (Highest Priority)
+            if ai_veto and current_profit_pct > -0.005: # Hanya exit jika bukan sedang dalam kerugian besar (cut loss AI)
+                msg = (
+                    f"🚨 *AI EMERGENCY EXIT* 🚨\n"
+                    f"Pair: `{pair}`\n"
+                    f"Alasan: `{veto_reason}`\n"
+                    f"Profit: {current_profit_pct*100:+.2f}% (Closing now)"
+                )
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
+                order_id = self.execute_exit(pair, amount, current_price, "AI_VETO_EXIT",
+                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                if order_id:
+                    positions[pair]["status"] = "EXITING"
+                    continue
+
+            # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
             if current_price >= tp_price:
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 entry_time = datetime.fromisoformat(data['timestamp'])
@@ -146,7 +174,7 @@ class ExitManager:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id
 
-            # 2. Stop Loss (Initial or Trailing)
+            # 3. Stop Loss (Initial or Trailing)
             elif current_price <= active_sl_price:
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 entry_time = datetime.fromisoformat(data['timestamp'])

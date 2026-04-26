@@ -2195,3 +2195,66 @@ tr:hover td { background: var(--bg-hover); }
     right: 30%;
     box-shadow: 0 0 8px var(--green);
 }
+/* ══════════════════════════════════════════════════════════════
+   PREMIUM EXECUTION LEDGER STYLING
+   ══════════════════════════════════════════════════════════════ */
+.ledger-stats-bar {
+    background: rgba(255, 255, 255, 0.03);
+    padding: 6px 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(4px);
+}
+
+.ledger-stats-bar .value {
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    text-shadow: 0 0 0px transparent;
+}
+
+.ledger-stats-bar .value.up {
+    color: var(--green) !important;
+    text-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+}
+
+.ledger-stats-bar .value.down {
+    color: var(--red) !important;
+    text-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+}
+
+.ledger-stats-bar span:first-child {
+    font-family: 'Inter', sans-serif;
+    opacity: 0.6;
+    margin-bottom: 1px;
+}
+
+/* DNA Badge in Ledger Table */
+.dna-pill {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-panel-2);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    transition: all 0.3s ease;
+}
+
+.dna-pill:hover {
+    border-color: var(--purple);
+    color: var(--purple);
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.2);
+}
+
+/* Animations for stats change */
+@keyframes flash-up {
+    0% { background: rgba(16, 185, 129, 0.2); }
+    100% { background: transparent; }
+}
+
+@keyframes flash-down {
+    0% { background: rgba(239, 68, 68, 0.2); }
+    100% { background: transparent; }
+}
+
+.flash-up { animation: flash-up 1s ease-out; }
+.flash-down { animation: flash-down 1s ease-out; }

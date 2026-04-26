@@ -629,19 +629,23 @@ function renderStats(data) {
             statusText.textContent = data.backfill_status === 'DRY_RUN' ? 'DRY RUN' : 'LIVE';
         }
 
+        const isDryRun = data.backfill_status === 'DRY_RUN' || (document.getElementById('dry-run-badge') && document.getElementById('dry-run-badge').style.display !== 'none');
+        
         const pnlEl = document.getElementById('daily-pnl');
         if (pnlEl) {
-            const np = fmtIDR(data.daily_pnl, true);
+            const val = isDryRun ? data.all_time_pnl_dry : data.all_time_pnl;
+            const np = fmtIDR(val, true);
             if (pnlEl.textContent !== np) {
                 pnlEl.textContent = np;
-                pnlEl.className = 'value ' + (data.daily_pnl >= 0 ? 'up' : 'down');
-                flashEl(pnlEl, data.daily_pnl >= 0 ? 'up' : 'down');
+                pnlEl.className = 'value ' + (val >= 0 ? 'up' : 'down');
+                flashEl(pnlEl, val >= 0 ? 'up' : 'down');
             }
         }
-        const wr = document.getElementById('win-rate');
-        if (wr) {
-            wr.textContent = data.win_rate.toFixed(1) + '%';
-            wr.className = 'value ' + (data.win_rate >= 50 ? 'up' : 'down');
+        const wrEl = document.getElementById('win-rate');
+        if (wrEl) {
+            const wrVal = isDryRun ? data.dry_win_rate : data.win_rate;
+            wrEl.textContent = wrVal.toFixed(1) + '%';
+            wrEl.className = 'value ' + (wrVal >= 50 ? 'up' : 'down');
         }
         const unr = document.getElementById('unrealized-pnl');
         if (unr) {

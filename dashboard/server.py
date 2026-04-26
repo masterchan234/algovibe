@@ -213,8 +213,8 @@ def get_stats():
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
         return jsonify({
-            "daily_trades": perf['total_trades'],
-            "daily_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "all_time_pnl_dry": float(dry_stats['total_pnl'] or 0) if dry_stats else 0,
             "win_rate": round(win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
