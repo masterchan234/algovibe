@@ -108,10 +108,26 @@ class ScalperBot:
             return
 
         try:
-            idr_pairs = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
-            total_pairs = len(idr_pairs)
-            log_message(f"📦 Total pairs to backfill (Full Market Sync): {total_pairs}")
+            full_idr_list = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
             
+            # [Smart Sync] Hanya sinkronisasi koin yang datanya kurang di memori (< 50 points)
+            idr_pairs = []
+            skipped = 0
+            for symbol in full_idr_list:
+                pair_id = symbol.replace('/', '').lower()
+                if len(self.price_history[pair_id]) < 50:
+                    idr_pairs.append(symbol)
+                else:
+                    skipped += 1
+            
+            total_pairs = len(idr_pairs)
+            log_message(f"📦 Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")
+            
+            if not idr_pairs:
+                log_message("✅ All market data is already warm. Skipping full backfill.")
+                db.save_state("backfill_status", "COMPLETED")
+                return
+
             def fetch_one(symbol):
                 try:
                     ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=60)
@@ -654,9 +670,7 @@ class ScalperBot:
                 # Turunkan threshold jika ada pullback nyata ke EMA (confirmed setup)
                 if ema_dist > 0.10: dynamic_threshold = max(45.0, dynamic_threshold - 10.0)
 
-                # Final Prediction Score (AI Confidence + Real-time Orderbook Boost)
-                total_confidence = knn_decision['confidence'] + scalper_boost
-                
+
                 if total_confidence >= dynamic_threshold:
                     log_message(f"🚀 [Scalper Boost] {pair}: Confidence {knn_decision['confidence']:.1f}% + Boost {scalper_boost:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold})")
                     
@@ -676,18 +690,18 @@ class ScalperBot:
                                 # [Fee-Aware & Rebound Logic]
                                 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
                                 round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
-                                base_sl_pct = (atr_val * 1.5) / p['last']
+                                # [Anti-Panic Sell] Gunakan ATR 2.5x untuk ruang napas lebih luas
+                                base_sl_pct = (atr_val * 2.5) / p['last']
                                 
-                                # Jika RSI sangat rendah (< 30), probabilitas rebound tinggi. 
-                                # Berikan ruang SL lebih lebar (+20%) agar tidak terkena 'wick' sebelum mantul.
-                                rebound_multiplier = 1.2 if rsi_val < 30 else 1.0
+                                # Jika RSI sangat rendah (< 35), berikan ruang SL lebih lebar (+25%)
+                                rebound_multiplier = 1.25 if rsi_val < 35 else 1.0
                                 final_sl_val = base_sl_pct * rebound_multiplier
                                 
-                                # Pastikan SL minimal lebih besar dari Round Trip Fee + buffer 0.3%
-                                final_sl_val = max(final_sl_val, round_trip_fee + 0.003)
+                                # [Senior Fix] Pastikan SL minimal 3.5% agar tidak terkena Panic Sell akibat noise
+                                final_sl_val = max(0.035, final_sl_val)
                                 
-                                final_dyn_tp = min(0.08, max(0.02, (atr_val * 2.5) / p['last']))
-                                final_dyn_sl = -min(0.05, final_sl_val) # Cap max SL 5%
+                                final_dyn_tp = min(0.12, max(0.02, (atr_val * 4.0) / p['last']))
+                                final_dyn_sl = -min(0.06, final_sl_val) # Cap max SL 6%
                                 
                                 log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}% (Rebound: {rebound_multiplier}x)")
                             else:
