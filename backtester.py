@@ -244,10 +244,9 @@ if __name__ == "__main__":
     try:
         from engines.database import db
         # Hapus analytics dan history agar bot mulai dengan 'Slate' yang bersih
-        conn = db._get_conn()
-        conn.execute("DELETE FROM trade_analytics")
-        conn.execute("DELETE FROM trade_history")
-        conn.commit()
+        with db.get_connection() as conn:
+            conn.execute("DELETE FROM trade_analytics")
+            conn.execute("DELETE FROM trade_history")
         print("✅ Database DNA dibersihkan. Memulai pembelajaran dari nol...")
     except Exception as e:
         print(f"⚠️ Gagal membersihkan database: {e}")
