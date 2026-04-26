@@ -236,6 +236,23 @@ if __name__ == "__main__":
     print("  Strategy: Mean Reversion + Reversal Confirm + ATR TP/SL")
     print("=" * 60)
 
+    # --- [Senior Feature] Fresh Brain Mode ---
+    # Sebelum memulai backtest, kita bersihkan histori lama agar AI hanya belajar 
+    # dari data simulasi terbaru yang sudah menggunakan strategi yang telah di-tuning.
+    print("\n" + "="*50)
+    print("🧠 [BRAIN RESET] Menghapus DNA lama dari database...")
+    try:
+        from engines.database import db
+        # Hapus analytics dan history agar bot mulai dengan 'Slate' yang bersih
+        conn = db._get_conn()
+        conn.execute("DELETE FROM trade_analytics")
+        conn.execute("DELETE FROM trade_history")
+        conn.commit()
+        print("✅ Database DNA dibersihkan. Memulai pembelajaran dari nol...")
+    except Exception as e:
+        print(f"⚠️ Gagal membersihkan database: {e}")
+    print("="*50 + "\n")
+
     backtester = AlgovibeBacktester()
 
     # [NEW] Dynamic Pair Discovery — ambil semua koin dari Indodax
