@@ -506,8 +506,14 @@ class ScalperBot:
                 boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
                 final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
 
-                # [Project Predator] Sync prediction to DB for Dashboard
+                # [Senior Engineer] Derive Real-time Signal for Dashboard
+                tech = get_technical_summary(history)
+                tech_sig = derive_trade_signal(tech)
+                signal_verdict = tech_sig['verdict']
+
+                # [Project Predator] Sync prediction & signal to DB for Dashboard
                 db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
+                                     signal=signal_verdict,
                                      ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
                                      volatility=p['volatility'], score=p['score'])
 
@@ -662,7 +668,8 @@ def calculate_score(args):
             return {
                     "pair": pair, "last": last, "spread": spread, 
                     "volatility": volatility, "score": score, "imbalance": imbalance,
-                    "change": d.get('change_24h', 0)
+                    "change": d.get('change_24h', 0),
+                    "vol_idr": vol
             }
     except: pass
     return None

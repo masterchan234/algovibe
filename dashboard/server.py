@@ -704,7 +704,7 @@ def _build_radar_payload():
     
     try:
         rows = conn.execute(
-            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, history_json FROM ticker_history"
+            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at FROM ticker_history"
         ).fetchall()
         results = []
         for row in rows:
@@ -723,15 +723,13 @@ def _build_radar_payload():
                 prev = float(history[-1]) if history else last
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
                 
-                # Sinyal teknikal tetap pakai history (untuk trend)
-                tech = get_technical_summary(history)
-                sig  = derive_trade_signal(tech)
 
                 results.append({
                     "pair":       pair,
                     "price":      last,
                     "change":     round(change, 2),
                     "change_24h": round(ch_24h, 2),
+                    "vol_idr":    float(ws_data.get("vol_idr", 0)),
                     "ch_5m":      float(row['ch_5m'] or 0),
                     "ch_15m":     float(row['ch_15m'] or 0),
                     "ch_1h":      float(row['ch_1h'] or 0),
@@ -739,9 +737,8 @@ def _build_radar_payload():
                     "score":      float(row['score'] or 0),
                     "prediction": float(row['prediction_prob'] or 0.0),
                     "trend":      row['trend'] or 'N/A',
-                    "tech_verdict":    sig['verdict'],
-                    "tech_confidence": sig['confidence'],
-                    "tech_reason":     sig['reason'],
+                    "signal":     row["signal"] or "HOLD",
+                    "updated_at": row["updated_at"]
                 })
             except Exception:
                 continue

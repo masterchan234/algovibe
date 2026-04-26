@@ -82,6 +82,7 @@ class Database:
                     history_json TEXT,
                     prediction_prob REAL DEFAULT 0.0,
                     trend TEXT DEFAULT 'N/A',
+                    signal TEXT DEFAULT 'HOLD',
                     ch_5m REAL DEFAULT 0.0,
                     ch_15m REAL DEFAULT 0.0,
                     ch_1h REAL DEFAULT 0.0,
@@ -340,26 +341,27 @@ class Database:
 
     # ── METODE UNTUK TICKER HISTORY ──
 
-    def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A', 
+    def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A', signal='HOLD',
                             ch_5m=0.0, ch_15m=0.0, ch_1h=0.0, volatility=0.0, score=0.0):
         import json
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, 
+                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                           ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
                     prediction_prob=excluded.prediction_prob,
                     trend=excluded.trend,
+                    signal=excluded.signal,
                     ch_5m=excluded.ch_5m,
                     ch_15m=excluded.ch_15m,
                     ch_1h=excluded.ch_1h,
                     volatility=excluded.volatility,
                     score=excluded.score,
                     updated_at=excluded.updated_at
-            ''', (pair, json.dumps(history_list), prediction_prob, trend, ch_5m, ch_15m, ch_1h, volatility, score))
+            ''', (pair, json.dumps(history_list), prediction_prob, trend, signal, ch_5m, ch_15m, ch_1h, volatility, score))
 
     def get_all_ticker_history(self):
         import json

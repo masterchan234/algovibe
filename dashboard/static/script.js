@@ -931,16 +931,63 @@ function renderWatchlist(data) {
             losers.forEach(t => renderItem(t, lList, false));
         }
 
-        // Trending
+        // Momentum Radar (Filter Signal-Only)
         const tList = document.getElementById('trending-list');
         if (tList) {
             tList.innerHTML = '';
-            // Senior Engineer Fix: Filter out zero-volume "Ghost" coins
-            const trending = data.filter(t => (t.score || 0) > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
-            trending.forEach(t => {
-                const item = document.createElement('div'); item.className = 'trending-item';
+            
+            // Senior UX Fix: Filter koin yang benar-benar aktif (Score > 30)
+            const radar = data.filter(t => (t.score || 0) > 30).sort((a, b) => (b.score || 0) - (a.score || 0));
+            
+            if (radar.length === 0) {
+                tList.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim); font-size:0.8rem;">Menunggu Momentum Pasar...</div>';
+            }
+
+            radar.forEach(t => {
+                const s = t.score || 0;
+                let label = '🟡 Accumulating';
+                let color = '#eccc68'; 
+
+                if (s > 80) { label = '🔴 Hyper-Drive';  color = '#ff4757'; }
+                else if (s > 50) { label = '🟠 Momentum';    color = '#ffa502'; }
+
+                // LOGIKA SIGNAL EXPIRY (120 Detik)
+                let sig = t.signal || 'HOLD';
+                let sigColor = 'var(--text-dim)';
+                
+                // Cek kesegaran sinyal
+                const now = new Date();
+                const lastUpdate = t.updated_at ? new Date(t.updated_at + 'Z') : null; // Force UTC
+                const diffSec = lastUpdate ? (now - lastUpdate) / 1000 : 999;
+                
+                if (diffSec > 120) {
+                    sig = 'WAIT';
+                    sigColor = 'var(--text-dim)';
+                } else {
+                    if (sig === 'BUY') sigColor = '#2ecc71';
+                    if (sig === 'SELL') sigColor = '#e74c3c';
+                }
+
+                const chg = t.change || 0;
+                const chgClass = chg >= 0 ? 'up' : 'down';
+                const chgSign = chg >= 0 ? '+' : '';
+
+                const item = document.createElement('div'); 
+                item.className = 'trending-item';
+                item.style.padding = '10px 12px';
+                item.style.borderBottom = '1px solid var(--border-soft)';
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
-                item.innerHTML = `<div class="trend-info"><span class="trend-pair">${formatPair(t.pair)}</span><span class="trend-score">Vola: ${t.volatility.toFixed(1)}%</span></div><div class="trend-badge" style="background:var(--blue-dim); color:var(--blue); border:1px solid var(--blue-soft);">🔥 ${Math.round(t.score || 0)}</div>`;
+                
+                item.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                        <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${formatPair(t.pair)}</span>
+                        <span style="font-weight:bold; color:${sigColor}; font-size:0.8rem; border:1px solid ${sigColor}44; padding:2px 6px; border-radius:4px; min-width:45px; text-align:center;">${sig}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.75rem;">
+                        <span style="color:var(--text-dim);"><span class="${chgClass}">${chgSign}${chg.toFixed(2)}%</span> | Vol: ${fmtShortIDR(t.vol_idr || 0)}</span>
+                        <span style="color:${color}; font-weight:600;">${label}</span>
+                    </div>
+                `;
                 tList.appendChild(item);
             });
         }

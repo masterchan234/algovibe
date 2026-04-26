@@ -16,6 +16,7 @@ MIGRATIONS = [
     ("add_target_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_tp_pct REAL DEFAULT 0.04"),
     ("add_target_sl_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_sl_pct REAL DEFAULT -0.02"),
     ("add_ai_confidence_to_trade_history", "ALTER TABLE trade_history ADD COLUMN ai_confidence REAL DEFAULT 0.0"),
+    ("add_signal_to_ticker_history", "ALTER TABLE ticker_history ADD COLUMN signal TEXT DEFAULT 'HOLD'"),
 ]
 
 def run_migrations(db_path):
