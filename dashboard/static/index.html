@@ -135,14 +135,13 @@
 
 
 
-                <!-- ── System Events Log ── -->
-                <div class="panel log-panel" style="max-height: 150px;">
-                    <div class="panel-header">
-                        <span>SYSTEM EVENTS</span>
-                        <span class="live-dot"></span>
+                <!-- Sector Sentiment Panel (Pindah dari Kanan) -->
+                <div class="sidebar-section" style="margin-bottom: 10px; border-left: 3px solid var(--purple);">
+                    <div class="section-header" onclick="toggleSection(this.parentElement)">
+                        <span class="section-title">📊 Sector Sentiment</span>
                     </div>
-                    <div class="log-container" id="ai-logs">
-                        <div class="log-placeholder">Memuat event...</div>
+                    <div id="sector-list" class="sidebar-list" style="max-height: 250px; overflow-y: auto; padding: 10px;">
+                        <div class="empty-state">Memuat data sektor...</div>
                     </div>
                 </div>
 
@@ -325,13 +324,14 @@
                     </div>
                 </div>
 
-                <!-- Sector Sentiment Panel -->
-                <div class="panel sector-panel">
+                <!-- System Events Log (Pindah dari Kiri) -->
+                <div class="panel log-panel" style="flex: 1; min-height: 150px; display: flex; flex-direction: column;">
                     <div class="panel-header">
-                        <span>Sector Sentiment</span>
+                        <span>SYSTEM EVENTS</span>
+                        <span class="live-dot"></span>
                     </div>
-                    <div class="sector-list" id="sector-list">
-                        <div class="empty-state">Memuat data sektor...</div>
+                    <div class="log-container" id="ai-logs" style="flex: 1; overflow-y: auto; padding: 8px;">
+                        <div class="log-placeholder">Memuat event...</div>
                     </div>
                 </div>
 

@@ -21,7 +21,8 @@ from config import (
     DRY_RUN, INITIAL_CAPITAL, MIN_BALANCE_THRESHOLD, MIN_TRADE_IDR,
     MAX_TRADES_PER_DAY, MAX_CONSECUTIVE_LOSSES, MAX_TRACKED_PAIRS,
     MIN_VOLUME_FILTER, MIN_TRACKING_VOLATILITY, STRONG_IMBALANCE_RATIO,
-    AI_CONFIDENCE_THRESHOLD, CAPITAL_PER_TRADE_PCT, AI_MIN_HISTORY_POINTS
+    AI_CONFIDENCE_THRESHOLD, CAPITAL_PER_TRADE_PCT, AI_MIN_HISTORY_POINTS,
+    LOG_FILE
 )
 from utils.logger import log_message, send_telegram_message, run_performance_report
 
@@ -348,19 +349,30 @@ class ScalperBot:
             # [Anti-Hallucination] Weight Decay every hour
             if int(time.time()) % 3600 < 10:
                 self.oracle.apply_weight_decay()
-                
+
             # Daily Reset
             current_day = datetime.now().day
             if current_day != self.start_day:
                 run_performance_report(log_fn=log_message)
+                
+                # [Senior Maintenance] Auto-Rotate Logs (> 24 jam)
+                # Menghapus file log teks agar tidak membengkak, database tetap aman.
+                if os.path.exists(LOG_FILE):
+                    try:
+                        # Truncate file log (start fresh for the new day)
+                        with open(LOG_FILE, 'w') as f:
+                            f.write(f"--- Log rotated at {datetime.now()} ---\n")
+                        log_message("📜 LOGS: File log telah dirotasi otomatis (Daily Reset).")
+                    except Exception as e:
+                        log_message(f"⚠️ LOGS: Gagal merotasi log: {e}")
+
                 self.daily_trades = 0
                 self.consecutive_losses = 0
                 self.start_day = current_day
                 db.save_state("daily_trades", 0)
                 db.save_state("consecutive_losses", 0)
                 db.save_state("start_day", self.start_day)
-                db.purge_old_data() # [Fix] Hapus data lama harian
-                log_message("New day detected. Counters reset & Database cleaned.")
+                log_message("New day detected. Counters reset & Logs rotated.")
 
             # ── Ambil tickers ──────────────────────────────────────────────
             tickers = self.get_tickers()
