@@ -108,8 +108,9 @@ class MarketDataWS:
 
     def get_trades(self, pair: str) -> list:
         """Ambil data aktivitas market terbaru (trades)."""
+        p = pair.lower().replace('/', '')
         with self._lock:
-            return list(self._trades.get(pair, []))
+            return list(self._trades.get(p, []))
 
     def is_connected(self):
         return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
@@ -311,11 +312,39 @@ class MarketDataWS:
             logger.error(f"[MarketWS] Failed to subscribe trades for {pair}: {e}")
 
     def _fetch_initial_trades(self, pair: str):
-        """
-        [MODIFIED] Dinonaktifkan untuk menghindari Rate Limit (429) saat startup.
-        Bot akan menunggu data trade masuk via WebSocket secara alami.
-        """
-        pass
+        """Ambil data trade terakhir via REST untuk mengisi UI saat pertama kali subscribe."""
+        p_rest = pair.lower().replace('/', '')
+        try:
+            # Indodax REST: /api/trades/<pair>
+            import requests
+            url = f"https://indodax.com/api/trades/{p_rest}"
+            resp = requests.get(url, timeout=5).json()
+            
+            # Format REST: [{"date": "...", "price": "...", "amount": "...", "tid": "...", "type": "buy"}, ...]
+            # Kita konversi ke format WS internal kita agar konsisten
+            # [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
+            converted = []
+            for t in resp:
+                price = float(t['price'])
+                amount = float(t['amount'])
+                converted.append([
+                    p_rest,
+                    int(t['date']),
+                    t['tid'],
+                    t['type'],
+                    price,
+                    price * amount,
+                    amount
+                ])
+            
+            with self._lock:
+                # Jangan override data WS yang mungkin sudah masuk
+                existing = self._trades.get(p_rest, [])
+                if not existing:
+                    self._trades[p_rest] = converted
+                    logger.info(f"[MarketWS] Pre-filled {len(converted)} trades for {p_rest}")
+        except Exception as e:
+            logger.warning(f"[MarketWS] Failed initial trades for {p_rest}: {e}")
 
     def _subscribe_top_orderbooks(self, summary_snapshot: dict):
         """Subscribe ke order-book channel untuk top N pairs bervolume tinggi."""
