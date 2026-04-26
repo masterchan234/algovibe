@@ -143,6 +143,9 @@ class Database:
             cursor.execute('''CREATE TABLE IF NOT EXISTS sector_history (
                 sector TEXT,
                 sentiment_score REAL,
+                momentum_score REAL DEFAULT 0.0,
+                leader_pair TEXT DEFAULT 'N/A',
+                leader_change REAL DEFAULT 0.0,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
 
@@ -462,11 +465,11 @@ class Database:
 
     # ── Sector & Shadow Order Methods (Predator) ─────────────────────────
 
-    def save_sector_sentiment(self, sector, score):
+    def save_sector_sentiment(self, sector, score, momentum=0.0, leader='N/A', leader_ch=0.0):
         with self.get_connection() as conn:
             conn.execute(
-                "INSERT INTO sector_history (sector, sentiment_score) VALUES (?, ?)",
-                (sector, score)
+                "INSERT INTO sector_history (sector, sentiment_score, momentum_score, leader_pair, leader_change) VALUES (?, ?, ?, ?, ?)",
+                (sector, score, momentum, leader, leader_ch)
             )
 
     def get_latest_sector_sentiment(self, sector):
@@ -482,12 +485,19 @@ class Database:
         with self.get_connection() as conn:
             # Menggunakan subquery untuk mengambil entri terbaru per sektor
             cursor = conn.execute("""
-                SELECT sector, sentiment_score 
+                SELECT sector, sentiment_score, momentum_score, leader_pair, leader_change
                 FROM sector_history s1
                 WHERE timestamp = (SELECT MAX(timestamp) FROM sector_history s2 WHERE s1.sector = s2.sector)
             """)
             rows = cursor.fetchall()
-            return {row['sector']: row['sentiment_score'] for row in rows}
+            return {
+                row['sector']: {
+                    "score": row['sentiment_score'],
+                    "momentum": row['momentum_score'],
+                    "leader": row['leader_pair'],
+                    "leader_ch": row['leader_change']
+                } for row in rows
+            }
 
     def upsert_shadow_order(self, pair, order_id, price, amount):
         with self.get_connection() as conn:

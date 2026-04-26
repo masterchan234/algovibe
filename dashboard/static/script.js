@@ -997,12 +997,40 @@ function renderWatchlist(data) {
 function renderSectors(sectors) {
     const c = document.getElementById('sector-list'); if (!c) return;
     c.innerHTML = ''; const entries = Object.entries(sectors);
-    if (!entries.length) { c.innerHTML = '<div class="empty-state">Belum ada data</div>'; return; }
-    const maxS = Math.max(...entries.map(([, v]) => Math.abs(v)), 1);
-    entries.sort((a, b) => b[1] - a[1]).forEach(([sec, score]) => {
-        const pct = Math.min(100, Math.abs(score) / maxS * 100), col = score >= 0 ? '#10b981' : '#ef4444', lbl = (score >= 0 ? '+' : '') + score.toFixed(1);
-        const div = document.createElement('div'); div.className = 'sector-item';
-        div.innerHTML = `<div class="sector-header"><span class="sector-name">${sec}</span><span class="sector-score" style="color:${col}">${lbl}</span></div><div class="sector-track"><div class="sector-fill" style="width:${pct}%;background:${col}"></div></div>`;
+    if (!entries.length) { c.innerHTML = '<div class="empty-state">Belum ada data sektor</div>'; return; }
+    
+    // Sort by 24h score descending
+    entries.sort((a, b) => b[1].score - a[1].score).forEach(([sec, data]) => {
+        const score = data.score || 0;
+        const momentum = data.momentum || 0;
+        const leader = data.leader || 'N/A';
+        const leaderCh = data.leader_ch || 0;
+        
+        const col = score >= 0 ? '#10b981' : '#ef4444';
+        const momCol = momentum >= 0 ? '#10b981' : '#ef4444';
+        const momIcon = momentum >= 0 ? '🔥' : '🧊';
+        
+        // Bar percentage calculation (Max 10%)
+        const pct = Math.min(100, (Math.abs(score) / 10) * 100);
+        
+        const div = document.createElement('div'); 
+        div.className = 'sector-item';
+        div.style.marginBottom = '12px';
+        div.style.padding = '4px 0';
+        
+        div.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <span style="font-weight:bold; color:var(--text-bright); font-size:0.85rem;">${sec}</span>
+                <span style="font-weight:bold; color:${col}; font-size:0.85rem;">${score >= 0 ? '+' : ''}${score.toFixed(2)}%</span>
+            </div>
+            <div class="sector-track" style="height:4px; background:var(--border-soft); border-radius:2px; margin-bottom:6px; overflow:hidden;">
+                <div class="sector-fill" style="width:${pct}%; height:100%; background:${col}; border-radius:2px; transition:width 0.5s ease;"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--text-dim);">
+                <span>${momIcon} Heat (1h): <span style="color:${momCol}; font-weight:600;">${momentum >= 0 ? '+' : ''}${momentum.toFixed(2)}%</span></span>
+                <span>Leader: <span style="color:var(--blue); font-weight:600;">${leader}</span></span>
+            </div>
+        `;
         c.appendChild(div);
     });
 }

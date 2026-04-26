@@ -677,25 +677,51 @@ class Oracle:
     def update_sector_sentiment(self):
         """
         Calculate and persist global sector sentiment.
-        Called periodically (e.g., every 5-10 minutes).
+        Includes 24h average, 1h momentum, and sector leader identification.
         """
         try:
             from config import SECTOR_MAP
-            tickers = self.market_ws.get_tickers()
-            if not tickers: return
             
-            # {SECTOR: [change1, change2, ...]}
+            # Ambil data performa terbaru dari database (Mempunyai ch_1h)
+            with db.get_connection() as conn:
+                rows = conn.execute("SELECT pair, ch_1h, score FROM ticker_history").fetchall()
+            
+            # Ambil tickers live untuk change_24h
+            ws_tickers = self.market_ws.get_tickers()
+            if not ws_tickers: return
+            
+            # {SECTOR: {"changes_24h": [], "changes_1h": [], "leader": None, "leader_ch": -999}}
             sector_data = {}
-            for pair, data in tickers.items():
-                s = SECTOR_MAP.get(pair.lower())
+            for row in rows:
+                pair = row['pair'].lower()
+                s = SECTOR_MAP.get(pair)
                 if s:
-                    if s not in sector_data: sector_data[s] = []
-                    sector_data[s].append(data.get('change_24h', 0))
-            
-            # Calculate and save average
-            for sector, changes in sector_data.items():
-                avg_change = sum(changes) / len(changes)
-                db.save_sector_sentiment(sector, avg_change)
+                    if s not in sector_data:
+                        sector_data[s] = {"24h": [], "1h": [], "leader": "N/A", "leader_ch": -999}
+                    
+                    ch_24h = float(ws_tickers.get(pair, {}).get('change_24h', 0))
+                    ch_1h  = float(row['ch_1h'] or 0)
+                    
+                    sector_data[s]["24h"].append(ch_24h)
+                    sector_data[s]["1h"].append(ch_1h)
+                    
+                    # Update leader based on 24h performance (motor penggerak narasi)
+                    if ch_24h > sector_data[s]["leader_ch"]:
+                        sector_data[s]["leader_ch"] = ch_24h
+                        sector_data[s]["leader"] = pair.upper().replace('IDR', '')
+
+            # Save to history
+            for sector, d in sector_data.items():
+                if not d["24h"]: continue
+                avg_24h = sum(d["24h"]) / len(d["24h"])
+                avg_1h  = sum(d["1h"]) / len(d["1h"])
+                db.save_sector_sentiment(
+                    sector, 
+                    avg_24h, 
+                    momentum=avg_1h, 
+                    leader=d["leader"], 
+                    leader_ch=d["leader_ch"]
+                )
                 
         except Exception as e:
             logger.error(f"[Oracle] Sector Update Error: {e}")

@@ -74,10 +74,18 @@ JARING_DEPTH_PCT = -0.07          # Pasang jaring 7% di bawah harga pasar
 
 # --- Sector Mapping (Indodax Pro) ---
 SECTOR_MAP = {
-    "dogeidr": "MEME", "pepeidr": "MEME", "shibidr": "MEME", "flokiidr": "MEME",
-    "fetidr": "AI", "agixidr": "AI", "rndridr": "AI", "oceanidr": "AI",
-    "btcidr": "BLUECHIP", "ethidr": "BLUECHIP", "solidr": "BLUECHIP", "bnbidr": "BLUECHIP",
-    "maticidr": "L2", "opidr": "L2", "arbidr": "L2"
+    # MEME
+    "dogeidr": "MEME", "pepeidr": "MEME", "shibidr": "MEME", "flokiidr": "MEME", "bonkidr": "MEME",
+    # AI & DePIN
+    "fetidr": "AI", "agixidr": "AI", "rndridr": "AI", "oceanidr": "AI", "arkhamidr": "AI", "grtidr": "AI", "ioidr": "AI",
+    # BLUECHIP / L1
+    "btcidr": "L1", "ethidr": "L1", "solidr": "L1", "bnbidr": "L1", "xrpidr": "L1", "adadr": "L1", "dotidr": "L1", "avaxidr": "L1", "nearidr": "L1",
+    # L2 & SCALING
+    "maticidr": "L2", "opidr": "L2", "arbidr": "L2", "strkidr": "L2", "mantaidr": "L2", "celoidr": "L2",
+    # RWA & DEFI
+    "ondoidr": "RWA", "linkidr": "DEFI", "uniidr": "DEFI", "aaveidr": "DEFI", "mkrp_idr": "RWA", "chzidr": "RWA",
+    # STORAGE & INFRA
+    "filidr": "STORAGE", "aridr": "STORAGE", "storjidr": "STORAGE", "ldoidr": "DEFI"
 }
 
 # Set ke False untuk eksekusi order nyata ke Indodax.
