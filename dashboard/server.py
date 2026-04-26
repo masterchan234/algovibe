@@ -396,50 +396,10 @@ def get_ohlcv(pair, tf):
 
 @app.route('/api/trades/recent')
 def get_recent_trades_api():
-    conn = get_db_connection()
-    try:
-        # Fetch open positions
-        positions = conn.execute(
-            "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp as created_at FROM positions"
-        ).fetchall()
+    return jsonify(_build_trades_payload())
 
-        # Fetch recent trades (EXCLUDE BACKTEST)
-        trades = conn.execute(
-            "SELECT pair, reason, pnl_idr, entry_price, amount_idr, created_at FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 20"
-        ).fetchall()
+# Redundant function block removed. See implementation around line 787.
 
-        results = []
-        for p in positions:
-            results.append({
-                "pair": p['pair'] or "UNKNOWN",
-                "reason": "OPEN POSITION",
-                "pnl_idr": 0,
-                "entry_price": float(p['entry_price'] or 0),
-                "amount_idr": float(p['amount_idr'] or 0),
-                "created_at": p['created_at'] or "1970-01-01T00:00:00",
-                "status": "OPEN"
-            })
-
-        for t in trades:
-            results.append({
-                "pair": t['pair'] or "UNKNOWN",
-                "reason": t['reason'] or "UNKNOWN",
-                "pnl_idr": t['pnl_idr'] or 0,
-                "entry_price": float(t.get('entry_price') or 0),
-                "amount_idr": float(t.get('amount_idr') or 0),
-                "created_at": t['created_at'] or "1970-01-01T00:00:00",
-                "status": "CLOSED"
-            })
-
-        # Sort combined results by created_at descending
-        results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return jsonify(results[:20])
-    except Exception as e:
-        import traceback
-        print("API ERROR:", traceback.format_exc())
-        return jsonify([])
-    finally:
-        conn.close()
 
 @app.route('/api/radar')
 def get_radar_data():
@@ -668,10 +628,20 @@ def _build_stats_payload():
             "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
         ).fetchone()[0] or '--/-- --:--'
 
+        from config import DRY_RUN
+        
+        # PnL & Win Rate Selection (Live vs Dry Run)
+        if DRY_RUN:
+            active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
+            active_win_rate = dry_win_rate
+        else:
+            active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
+            active_win_rate = win_rate
+
         return {
             "daily_trades": perf['total_trades'],
-            "daily_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "win_rate": round(win_rate, 2),
+            "daily_pnl": active_pnl,
+            "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
             "total_trades_live": live_stats['trades'] if live_stats else 0,
@@ -758,16 +728,17 @@ def _build_trades_payload():
                  AND abs(strftime('%s', p.timestamp) - strftime('%s', a.entry_timestamp)) < 60
         """).fetchall()
 
+        # Fetch recent trades (FILTER BY CURRENT MODE)
+        from config import DRY_RUN
+        dr_val = 1 if DRY_RUN else 0
+        
         trades = conn.execute("""
-            SELECT h.pair, h.reason, h.pnl_idr, h.pnl_pct, h.entry_price, h.exit_price, 
-                   h.amount_idr, h.amount_crypto, h.duration_seconds, h.created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
-            FROM trade_history h
-            LEFT JOIN trade_analytics a ON h.pair = a.pair 
-                 AND abs(strftime('%s', h.created_at) - strftime('%s', a.entry_timestamp)) < 60
-            WHERE h.reason != 'BACKTEST' 
-            ORDER BY h.created_at DESC LIMIT 30
-        """).fetchall()
+            SELECT pair, reason, pnl_idr, pnl_pct, entry_price, exit_price, 
+                   amount_idr, amount_crypto, duration_seconds, created_at
+            FROM trade_history
+            WHERE reason != 'BACKTEST' AND dry_run = ?
+            ORDER BY created_at DESC LIMIT 100
+        """, (dr_val,)).fetchall()
 
         results = []
 
@@ -839,14 +810,14 @@ def _build_trades_payload():
                 "duration":    int(t['duration_seconds'] or 0),
                 "created_at":  str(t['created_at']),
                 "status":      'CLOSED',
-                "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
-                "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
-                "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
-                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None
+                "ai_prob":     None,
+                "whale_boost": None,
+                "dna_vol":     None,
+                "dna_rsi":     None
             })
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return results[:30]
+        return results[:100]
     except Exception:
         return []
     finally:

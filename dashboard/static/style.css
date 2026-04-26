@@ -97,7 +97,42 @@
     /* Glow effects */
     --glow-green:  0 0 16px rgba(16, 185, 129, 0.25);
     --glow-red:    0 0 16px rgba(239, 68, 68, 0.25);
-    --glow-blue:   0 0 16px rgba(59, 130, 246, 0.25);
+    /* ── Ledger Tabs ─────────────────────────────────────────── */
+.ledger-tabs .tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ledger-tabs .tab-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255,255,255,0.05);
+}
+.ledger-tabs .tab-btn.active {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.ledger-tabs .badge {
+    background: rgba(255,255,255,0.1);
+    color: var(--text-primary);
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 10px;
+    font-family: var(--font-mono);
+}
+.ledger-tabs .tab-btn.active .badge {
+    background: var(--blue);
+    color: white;
+}
     --glow-yellow: 0 0 16px rgba(245, 158, 11, 0.25);
 
     /* Typography */

@@ -517,6 +517,24 @@ class ScalperBot:
             
 
 
+            # [Senior Fix] Pastikan koin yang sedang di-HOLD selalu masuk radar tracking
+            open_positions = db.get_open_positions()
+            held_pairs = [pos[0] for pos in open_positions] if open_positions else []
+            
+            # Tambahkan koin yang di-hold ke high_speed jika belum ada
+            current_track_pairs = [p['pair'] for p in high_speed]
+            for hp in held_pairs:
+                if hp not in current_track_pairs:
+                    try:
+                        # Ambil data ticker terbaru dari WS untuk koin yang di-hold
+                        tickers_snapshot = self.market_ws.get_tickers()
+                        ticker_data = tickers_snapshot.get(hp)
+                        if ticker_data:
+                            # Masukkan data ticker ke high_speed list agar diproses di loop bawah
+                            high_speed.append(ticker_data)
+                    except Exception as e:
+                        log_message(f"⚠️ Warning: Gagal sinkronisasi tracking untuk {hp}: {e}")
+
             for p in high_speed:
                 pair = p['pair']
                 
@@ -667,9 +685,8 @@ class ScalperBot:
                 if current_vol > 2.0: dynamic_threshold = 68.0
                 elif current_vol < 0.6: dynamic_threshold = 50.0
                 
-                # Turunkan threshold jika ada pullback nyata ke EMA (confirmed setup)
-                if ema_dist > 0.10: dynamic_threshold = max(45.0, dynamic_threshold - 10.0)
-
+                # Hitung Total Confidence: K-NN Pattern + Order Book Pressure
+                total_confidence = knn_decision['confidence'] + scalper_boost
 
                 if total_confidence >= dynamic_threshold:
                     log_message(f"🚀 [Scalper Boost] {pair}: Confidence {knn_decision['confidence']:.1f}% + Boost {scalper_boost:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold})")

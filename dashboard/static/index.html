@@ -237,10 +237,13 @@
 
                 <!-- Execution Ledger -->
                 <div class="panel history-panel">
-                    <div class="panel-header" style="justify-content: space-between; align-items: center;">
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <span>Execution Ledger</span>
-                            <span id="ledger-count" class="count-badge">0</span>
+                    <div class="panel-header" style="justify-content: space-between; align-items: center; border-bottom: none;">
+                        <div style="display:flex; align-items:center; gap:15px;">
+                            <span style="font-weight:700; letter-spacing:0.5px;">Execution Ledger</span>
+                            <div class="ledger-tabs" style="display:flex; background: rgba(0,0,0,0.2); padding: 3px; border-radius: 6px; gap: 2px;">
+                                <button id="tab-open" class="tab-btn active" onclick="switchLedgerTab('OPEN')">OPEN <span id="open-count" class="badge">0</span></button>
+                                <button id="tab-closed" class="tab-btn" onclick="switchLedgerTab('CLOSED')">CLOSED <span id="closed-count" class="badge">0</span></button>
+                            </div>
                         </div>
                         <div class="ledger-stats-bar" style="display:flex; gap:20px; font-weight:600;">
                             <div style="display:flex; flex-direction:column; align-items:flex-end;">

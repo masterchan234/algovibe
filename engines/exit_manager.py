@@ -141,15 +141,34 @@ class ExitManager:
                     log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
 
             # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
-            # Jika sudah untung bersih dan RSI mulai jenuh (>70), jangan serakah, EXIT SEKARANG.
-            current_rsi = data.get('rsi', 50)
-            if current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 70:
-                log_msg = f"⚡ [Rapid TP] {pair}: Locked profit +{current_profit_pct*100:.2f}% (RSI: {current_rsi:.0f})"
-                log_message(log_msg)
-                db.log_system_event(pair, 'RAPID_TP', log_msg, 'SUCCESS')
+            # Syarat 1: Profit > 1.0% -> Amankan sekarang (Abaikan RSI)
+            # Syarat 2: Profit > Fee + 0.2% dan RSI mulai jenuh (>60)
+            # Syarat 3: Stagnancy Exit (Hold > 20m & Profit > Fee) -> Free up capital
+            try:
+                current_rsi = data.get('rsi', 50)
+                is_profit_secure = current_profit_pct >= 0.01
+                is_rapid_momentum_fade = current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 60
                 
-                order_id = self.execute_exit(pair, amount, current_price, "RAPID_TP", 
-                                          entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                # Hitung umur posisi dengan aman
+                import pandas as pd
+                pos_ts = pd.to_datetime(data['timestamp'])
+                pos_age_min = (pd.Timestamp.now() - pos_ts).total_seconds() / 60
+                is_stagnant_profit = pos_age_min > 20 and current_profit_pct > (round_trip_fee + 0.001)
+
+                if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
+                    reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
+                    log_msg = f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% (Age: {pos_age_min:.0f}m)"
+                    log_message(log_msg)
+                    db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
+                    
+                    order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                                              entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        positions[pair]["exit_order_id"] = order_id
+                    continue
+            except Exception as e:
+                log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
                 if order_id:
                     positions[pair]["status"] = "EXITING"
                     positions[pair]["exit_order_id"] = order_id

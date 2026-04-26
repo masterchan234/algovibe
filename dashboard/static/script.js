@@ -629,11 +629,9 @@ function renderStats(data) {
             statusText.textContent = data.backfill_status === 'DRY_RUN' ? 'DRY RUN' : 'LIVE';
         }
 
-        const isDryRun = data.backfill_status === 'DRY_RUN' || (document.getElementById('dry-run-badge') && document.getElementById('dry-run-badge').style.display !== 'none');
-
         const pnlEl = document.getElementById('daily-pnl');
         if (pnlEl) {
-            const val = isDryRun ? data.all_time_pnl_dry : data.all_time_pnl;
+            const val = data.daily_pnl || 0;
             const np = fmtIDR(val, true);
             if (pnlEl.textContent !== np) {
                 pnlEl.textContent = np;
@@ -643,7 +641,7 @@ function renderStats(data) {
         }
         const wrEl = document.getElementById('win-rate');
         if (wrEl) {
-            const wrVal = isDryRun ? data.dry_win_rate : data.win_rate;
+            const wrVal = data.win_rate || 0;
             wrEl.textContent = wrVal.toFixed(1) + '%';
             wrEl.className = 'value ' + (wrVal >= 50 ? 'up' : 'down');
         }
@@ -998,13 +996,41 @@ function renderSectors(sectors) {
     });
 }
 
+let currentLedgerTab = 'OPEN';
+let lastTradeData = [];
+
+function switchLedgerTab(mode) {
+    currentLedgerTab = mode;
+    // Update UI buttons
+    document.querySelectorAll('.ledger-tabs .tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.id === `tab-${mode.toLowerCase()}`);
+    });
+    // Re-render data terakhir
+    if (lastTradeData.length) renderTradeHistory(lastTradeData);
+}
+
 function renderTradeHistory(data) {
-    const tbody = document.getElementById('trade-history-body'), cnt = document.getElementById('ledger-count');
-    if (!tbody || !cnt) return;
-    cnt.textContent = data.length;
+    lastTradeData = data;
+    const tbody = document.getElementById('trade-history-body');
+    const openCnt = document.getElementById('open-count');
+    const closedCnt = document.getElementById('closed-count');
+    
+    if (!tbody) return;
+
+    // Hitung stats untuk badge (Eksplisit filter berdasarkan status)
+    const openTrades = data.filter(t => t.status === 'OPEN');
+    const closedTrades = data.filter(t => t.status === 'CLOSED');
+
+    if (openCnt) openCnt.textContent = openTrades.length;
+    if (closedCnt) closedCnt.textContent = closedTrades.length;
+
     tbody.innerHTML = '';
 
-    data.slice(0, 50).forEach(t => {
+    // Filter data berdasarkan tab aktif
+    const displayData = currentLedgerTab === 'OPEN' ? openTrades : closedTrades;
+    console.log(`[Ledger] Mode: ${currentLedgerTab}, Show: ${displayData.length} items`);
+
+    displayData.slice(0, 50).forEach(t => {
         const time = t.created_at
             ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
             : '--:--';
