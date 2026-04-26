@@ -74,17 +74,44 @@ class AlgovibeBacktester:
             ]
 
     def fetch_data(self, pair):
-        print(f"  Fetching {pair}...")
+        pair_id = pair.replace('/', '').lower()
+        print(f"  Analysing data availability for {pair}...")
+        
+        # [Smart Sync] Cek apakah data sudah ada di database lokal (Shared dengan Live Bot)
+        db_history = db.get_ticker_history(pair_id, limit=1000)
+        if db_history and len(db_history) >= 200:
+            print(f"  ✅ Reusing {len(db_history)} local data points from DB (Redundancy Eliminated)")
+            # Format data dari DB ke DataFrame
+            # Urutan di DB biasanya DESC, kita butuh ASC untuk simulasi
+            prices = [h['last'] for h in reversed(db_history)]
+            timestamps = [h['updated_at'] for h in reversed(db_history)]
+            df = pd.DataFrame({
+                'timestamp': pd.to_datetime(timestamps),
+                'close': prices,
+                'open': prices, 'high': prices, 'low': prices, 'volume': [0]*len(prices) # Fallback
+            })
+            return df
+
+        # Jika data di DB tidak ada atau kurang, barulah fetch dari exchange
+        print(f"  ☁️ Fetching fresh data from Exchange for {pair}...")
         try:
             since = self.exchange.parse8601(
                 (datetime.now() - timedelta(days=SINCE_DAYS)).isoformat()
             )
             ohlcv = self.exchange.fetch_ohlcv(pair, TIMEFRAME, since=since)
+            if not ohlcv: return None
+            
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # [Smart Sync] Simpan hasil download ke DB agar Live Bot bisa memanfaatkannya
+            # Kita simpan history harga terakhir (close) ke ticker_history
+            close_prices = df['close'].tolist()
+            db.save_ticker_history(pair_id, close_prices, 0, "BACKFILLED")
+            
             return df
         except Exception as e:
-            print(f"  Error fetching {pair}: {e}")
+            print(f"  [ERROR] Gagal fetching {pair}: {e}")
             return None
 
     def run_simulation(self, pair, df):
