@@ -830,7 +830,8 @@ class Oracle:
         top_matches = [item[1] for item in distances[:5]]
         # Susun laporan historis mendalam untuk LiteRT-LM reasoning
         win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
-        win_rate = win_count / len(top_matches)
+        win_rate = win_count / len(top_matches) if top_matches else 0
+        win_rate_knn = win_rate
         
         history_details = []
         for t in top_matches:
