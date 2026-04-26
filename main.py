@@ -49,7 +49,7 @@ class ScalperBot:
         # Memory-based history tracking with DB Recovery
         self.price_history = defaultdict(lambda: deque(maxlen=100))
         self.blacklist = set(db.get_blacklist())
-        self.pool = ThreadPool(processes=8)
+        self.pool = ThreadPool(processes=4)
         
         # Load history from DB (Warm-up prevention)
         log_message("Loading price history from database...")
@@ -120,7 +120,7 @@ class ScalperBot:
                     return (pair_id, prices)
                 except: return None
 
-            batch_size = 20
+            batch_size = 10
             count = 0
             for i in range(0, total_pairs, batch_size):
                 batch = idr_pairs[i:i + batch_size]
@@ -141,7 +141,7 @@ class ScalperBot:
                                                  ch_5m, ch_15m, ch_1h, 0, 0)
                         count += 1
                 
-                time.sleep(1.0)
+                time.sleep(2.5)
                 
             log_message(f"✅ FULL Backfill completed for {count} pairs.")
             db.save_state("backfill_status", "COMPLETED")
@@ -419,8 +419,35 @@ class ScalperBot:
             # [Heartbeat] Update status agar dashboard tahu bot menyala
             db.save_state("heartbeat", time.time())
             
-            # Take Top N
-            high_speed = [p for p in ranked if p['volatility'] >= MIN_TRACKING_VOLATILITY][:MAX_TRACKED_PAIRS]
+            # ── [Priority Tracking] Open Positions > Watch Pair > Volatility ──
+            open_positions = self.exit_manager.get_open_positions()
+            watch_pair = db.get_state('current_watch_pair', 'btcidr')
+            
+            # Kumpulkan semua kandidat
+            priority_pairs = list(open_positions.keys())
+            if watch_pair not in priority_pairs:
+                priority_pairs.append(watch_pair)
+                
+            # Tambahkan top volatility pairs hingga mencapai MAX_TRACKED_PAIRS
+            high_speed_tickers = []
+            seen_pairs = set()
+            
+            # 1. Masukkan koin prioritas (Open + Watch)
+            for pair in priority_pairs:
+                ticker = next((p for p in ranked if p['pair'] == pair), None)
+                if ticker:
+                    high_speed_tickers.append(ticker)
+                    seen_pairs.add(pair)
+            
+            # 2. Masukkan koin volatilitas tinggi lainnya (sisanya)
+            for p in ranked:
+                if len(high_speed_tickers) >= MAX_TRACKED_PAIRS:
+                    break
+                if p['pair'] not in seen_pairs and p['volatility'] >= MIN_TRACKING_VOLATILITY:
+                    high_speed_tickers.append(p)
+                    seen_pairs.add(p['pair'])
+            
+            high_speed = high_speed_tickers
             
             # --- Market Regime Filter (BTC Protection) ---
             # Ambil harga BTC/IDR dari WebSocket (btcidr) untuk menghindari REST Rate Limit
@@ -445,13 +472,12 @@ class ScalperBot:
                     time.sleep(30)
                     continue
             
-            open_positions = self.exit_manager.get_open_positions()
+
 
             for p in high_speed:
                 pair = p['pair']
-                if pair in open_positions or pair in self.blacklist:
-                    continue
                 
+                # [Fix] Update history ALWAYS (Penting untuk Dashboard Sync)
                 trend, breakout, history = self.update_history_and_trend(pair, p['last'])
                 imbalance_ratio = p.get('imbalance', 1.0)
                 
@@ -462,7 +488,6 @@ class ScalperBot:
                 tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if trend == "UP" else 0.0
                 
                 # Calculate Multi-Timeframe Changes (Short-term)
-                # Loop is ~60s, so 5m=5 pts, 15m=15 pts, 60m=60 pts
                 ch_5m = 0.0; ch_15m = 0.0; ch_1h = 0.0
                 if len(history) >= 2:
                     curr = float(p['last'])
@@ -478,7 +503,6 @@ class ScalperBot:
                 sector_boost = self.oracle.get_sector_boost(pair)
 
                 # Combine boosts into a final Confidence Score for display
-                # Each boost is a multiplier (e.g. 1.2), we convert it to an additive prob adjustment
                 boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
                 final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
 
@@ -486,6 +510,10 @@ class ScalperBot:
                 db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
                                      ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
                                      volatility=p['volatility'], score=p['score'])
+
+                # SKIP TRADE TRIGGER JIKA SUDAH PUNYA POSISI ATAU BLACKLIST
+                if pair in open_positions or pair in self.blacklist:
+                    continue
                 
                 # Apply Self-Learning Weights
                 features = {
@@ -560,9 +588,9 @@ class ScalperBot:
                 
                 # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas
                 current_vol = p['volatility']
-                dynamic_threshold = 60.0
-                if current_vol > 2.0: dynamic_threshold = 75.0
-                elif current_vol < 0.6: dynamic_threshold = 55.0
+                dynamic_threshold = 55.0
+                if current_vol > 2.0: dynamic_threshold = 70.0
+                elif current_vol < 0.6: dynamic_threshold = 50.0
 
                 if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
                     

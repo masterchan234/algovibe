@@ -793,7 +793,7 @@ class Oracle:
         
         # Default Heuristic Response (Jika AI gagal/lambat)
         heuristic_resp = {
-            "verdict": "BUY" if win_rate_knn >= 0.6 else "AVOID", # Butuh 3/5 win untuk BUY
+            "verdict": "BUY" if win_rate_knn >= 0.5 else "AVOID", # Relaxed: Butuh 50% win untuk BUY
             "target_tp": 0.04,
             "target_sl": -0.02,
             "confidence": win_rate_knn * 100,

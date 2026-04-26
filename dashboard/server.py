@@ -41,6 +41,17 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+# [Project Predator] Sync Trade Streams for Open Positions on Startup
+try:
+    _conn = get_db_connection()
+    _open_pos = _conn.execute("SELECT pair FROM positions").fetchall()
+    for _p in _open_pos:
+        mws.subscribe_market_trades(_p['pair'])
+    _conn.close()
+    print(f"✅ Subscribed to {len(_open_pos)} open position trade streams.")
+except Exception as _e:
+    print(f"⚠️ Failed to sync initial trade streams: {_e}")
+
 def _get_pair_technicals(pair):
     """Ambil histori harga dari JSON blob dan hitung technical summary."""
     conn = get_db_connection()
@@ -591,21 +602,67 @@ def _build_stats_payload():
         dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
 
         unrealized_pnl = 0.0
+        ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
+        
         for pos in positions:
-            try:
-                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pos['pair'],)).fetchone()
-                if row and row['history_json']:
-                    history = json.loads(row['history_json'])
-                    ep = float(pos['entry_price'] or 0)
-                    if history and ep > 0:
-                        unrealized_pnl += (float(history[-1]) - ep) * float(pos['amount_crypto'] or 0)
-            except Exception:
-                continue
+            pair = pos['pair']
+            ep = float(pos['entry_price'] or 0)
+            if ep <= 0: continue
+            
+            # Ambil harga live (Prioritas: Trade Stream > Summary > DB)
+            last_price = 0
+            ws_trades = mws.get_trades(pair)
+            if ws_trades:
+                try: last_price = float(ws_trades[0][4])
+                except: pass
+            
+            if last_price <= 0:
+                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
+                
+            if last_price <= 0:
+                # Fallback terakhir ke DB history
+                try:
+                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                    if row and row['history_json']:
+                        history = json.loads(row['history_json'])
+                        if history: last_price = float(history[-1])
+                except: pass
+            
+            if last_price > 0:
+                unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
 
+        # Injeksi Harga Realtime (Prioritas: Trade Stream > Summary > DB)
+        ws_tickers = mws.get_tickers()
+        ws_trades = mws.get_trades(CURRENT_WATCH_PAIR)
         tech_data = _get_pair_technicals(CURRENT_WATCH_PAIR)
-        ai_reasoning = db.get_state(f"llm_reasoning_{CURRENT_WATCH_PAIR}")
+        
+        # 1. Ambil dari Trade Stream (Paling Cepat / Sub-detik)
+        ws_price = 0
+        if ws_trades:
+            try: ws_price = float(ws_trades[0][4]) # Index 4 is price
+            except: pass
+            
+        # 2. Fallback ke Summary Stream
+        if ws_price <= 0:
+            ws_price = float(ws_tickers.get(CURRENT_WATCH_PAIR, {}).get('last', 0))
+            
+        if ws_price > 0:
+            tech_data['last_price'] = ws_price
+
+        ai_reasoning, updated_at = db.get_state_with_time(f"llm_reasoning_{CURRENT_WATCH_PAIR}")
+        
+        # Validasi Kesegaran Analisis (Jika > 3 menit, anggap stale dan gunakan Technical Fallback)
+        is_stale = True
+        if updated_at:
+            try:
+                # SQLite CURRENT_TIMESTAMP is UTC
+                dt = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                if (datetime.utcnow() - dt).total_seconds() < 180:
+                    is_stale = False
+            except: pass
+                
         _last_price = tech_data.get('last_price')
-        combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
+        combined_reasoning = ai_reasoning if (ai_reasoning and not is_stale) else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
         history_since = conn.execute(
             "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
@@ -717,25 +774,41 @@ def _build_trades_payload():
 
         results = []
 
+        # Ambil buffer harga realtime untuk Ledger (Prioritas: Trade Stream > Summary)
+        ws_tickers = mws.get_tickers()
+        
         # Posisi terbuka — hitung live unrealized PnL dari harga terakhir
         for p in positions:
+            pair = p['pair']
             entry_price  = float(p['entry_price'] or 0)
             amount_crypto = float(p['amount_crypto'] or 0)
-            last_price   = entry_price  # fallback
-            pnl_idr      = 0.0
-            pnl_pct      = 0.0
-            try:
-                row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (p['pair'],)
-                ).fetchone()
-                if row and row['history_json']:
-                    history = json.loads(row['history_json'])
-                    if history and entry_price > 0:
-                        last_price = float(history[-1])
-                        pnl_idr   = (last_price - entry_price) * amount_crypto
-                        pnl_pct   = ((last_price - entry_price) / entry_price) * 100
-            except Exception:
-                pass
+            
+            # 1. Prioritaskan harga dari Trade Stream (Execution Live)
+            ws_trades = mws.get_trades(pair)
+            last_price = 0
+            if ws_trades:
+                try: last_price = float(ws_trades[0][4])
+                except: pass
+            
+            # 2. Fallback ke Summary Stream
+            if last_price <= 0:
+                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
+            
+            # 3. Fallback ke database history jika WS belum sinkron
+            if last_price <= 0:
+                try:
+                    row = conn.execute(
+                        "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    ).fetchone()
+                    if row and row['history_json']:
+                        history = json.loads(row['history_json'])
+                        if history: last_price = float(history[-1])
+                except Exception: pass
+
+            if last_price <= 0: last_price = entry_price # Final fallback
+            
+            pnl_idr      = (last_price - entry_price) * amount_crypto
+            pnl_pct      = ((last_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
 
             results.append({
                 "pair":        p['pair'] or 'UNKNOWN',

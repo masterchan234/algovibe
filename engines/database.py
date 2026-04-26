@@ -413,6 +413,14 @@ class Database:
             row = cursor.fetchone()
             return row['value'] if row else default
 
+    def get_state_with_time(self, key):
+        """Ambil value dan timestamp updated_at."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value, updated_at FROM bot_state WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return (row['value'], row['updated_at']) if row else (None, None)
+
     # ── METODE UNTUK AUDIT LOG & BLACKLIST ──
 
     def log_order(self, pair, side, price, amount, status, response=None, error=None):

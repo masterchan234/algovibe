@@ -49,7 +49,7 @@ MIN_TRACKING_VOLATILITY = 0.8  # Pantau koin yang lincah
 STRONG_IMBALANCE_RATIO  = 2.0  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.60 # Beli jika probabilitas >= 60%
+AI_CONFIDENCE_THRESHOLD = 0.55 # Beli jika probabilitas >= 55%
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
