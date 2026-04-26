@@ -860,62 +860,9 @@ function renderWatchlist(data) {
 
         if (!data || !data.length) return;
 
-        // ── ticker-list (Radar Watchlist) ──
-        const list = document.getElementById('ticker-list');
+        // Update global count
         const cnt = document.getElementById('watchlist-count');
         if (cnt) cnt.textContent = data.length;
-
-        if (list) {
-            const isSearching = marketSearchQuery.length > 0;
-            list.style.display = isSearching ? 'block' : 'none';
-
-            if (isSearching) {
-                list.innerHTML = '';
-                const query = marketSearchQuery.toLowerCase();
-                const filtered = data.filter(t => t.pair.toLowerCase().includes(query))
-                    .sort((a, b) => a.pair.localeCompare(b.pair));
-
-                if (filtered.length === 0) {
-                    list.innerHTML = '<div class="empty-state">Koin tidak ditemukan</div>';
-                } else {
-                    filtered.forEach(t => {
-                        const isUp = t.change >= 0, diff = (isUp ? '+' : '') + t.change.toFixed(2) + '%';
-                        const priceHtml = fmtIDR(t.price);
-
-                        const conf = t.tech_confidence || 0;
-                        const verd = t.tech_verdict || 'HOLD';
-                        let badgeHtml = '';
-                        if (conf >= 60) {
-                            const bCls = verd === 'BUY' ? 'sig-buy' : (verd === 'SELL' ? 'sig-sell' : 'sig-hold');
-                            const bIcon = verd === 'BUY' ? '📈' : (verd === 'SELL' ? '📉' : '⏸');
-                            badgeHtml = `<span class="sig-badge ${bCls}" title="${t.tech_reason || ''}">${bIcon} ${verd} ${conf}%</span>`;
-                        }
-
-                        let effectiveTrend = t.trend;
-                        if (!effectiveTrend || effectiveTrend === 'BACKFILLED' || effectiveTrend === 'N/A') {
-                            if (verd === 'BUY') effectiveTrend = 'BULLISH';
-                            else if (verd === 'SELL') effectiveTrend = 'BEARISH';
-                            else effectiveTrend = 'RANGING';
-                        }
-
-                        const item = document.createElement('div');
-                        item.className = 'ticker-item ' + (activePair === t.pair ? 'active' : '');
-                        item.onclick = () => selectPair(t.pair, effectiveTrend, t.prediction);
-                        item.innerHTML = `
-                            <div class="ticker-main"><b>${formatPair(t.pair)}</b> <span>${priceHtml}</span></div>
-                            <div class="ticker-side">
-                                <span class="${isUp ? 'up' : 'down'}">${diff}</span>
-                                ${badgeHtml}
-                            </div>`;
-
-                        const lastP = lastPrices[t.pair];
-                        if (lastP && lastP !== t.price) { flashEl(item, t.price > lastP ? 'up' : 'down'); }
-                        lastPrices[t.pair] = t.price;
-                        list.appendChild(item);
-                    });
-                }
-            }
-        }
 
         // ── Market Pulse (Gainers / Losers) ──
         const gList = document.getElementById('gainers-list'), lList = document.getElementById('losers-list');
@@ -940,8 +887,20 @@ function renderWatchlist(data) {
         if (tList) {
             tList.innerHTML = '';
             
-            // Senior UX Fix: Filter koin yang benar-benar aktif (Score > 30)
-            const radar = data.filter(t => (t.score || 0) > 30).sort((a, b) => (b.score || 0) - (a.score || 0));
+            // Senior UX Fix: Filter koin aktif (Score > 30)
+            // Namun jika user sedang mencari secara manual, tampilkan semua yang cocok tanpa filter skor.
+            const isSearching = marketSearchQuery.length > 0;
+            const query = marketSearchQuery.toLowerCase();
+            
+            const radar = data.filter(t => {
+                if (isSearching) {
+                    return t.pair.toLowerCase().includes(query);
+                }
+                return (t.score || 0) > 30;
+            }).sort((a, b) => {
+                if (isSearching) return a.pair.localeCompare(b.pair);
+                return (b.score || 0) - (a.score || 0);
+            });
             
             if (radar.length === 0) {
                 tList.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim); font-size:0.8rem;">Menunggu Momentum Pasar...</div>';
