@@ -454,13 +454,22 @@ class ScalperBot:
                     high_speed_tickers.append(ticker)
                     seen_pairs.add(pair)
             
-            # 2. Masukkan koin volatilitas tinggi lainnya (sisanya)
+            # 2. Masukkan koin berdasarkan Momentum Relatif (Score / Volatility)
+            # [Smart Engineering] Kita gunakan Volatility-Adjusted Scoring.
+            # Koin besar (BTC/ETH) akan masuk radar HANYA jika bergerak kuat relatif terhadap volatilitasnya.
             for p in ranked:
                 if len(high_speed_tickers) >= MAX_TRACKED_PAIRS:
                     break
-                if p['pair'] not in seen_pairs and p['volatility'] >= MIN_TRACKING_VOLATILITY:
-                    high_speed_tickers.append(p)
-                    seen_pairs.add(p['pair'])
+                
+                # Hanya masukkan jika ada momentum nyata relatif terhadap volatilitas (Relative Score > Threshold)
+                # Rumus: Skor Momentum / Volatilitas. Jika > 1.0 berarti bergerak di atas normal.
+                relative_momentum = p['score'] / max(0.1, p['volatility'])
+                
+                if p['pair'] not in seen_pairs:
+                    # Threshold 0.5 berarti koin tersebut punya 'kehidupan' momentum
+                    if relative_momentum > 0.5 or p['volatility'] >= MIN_TRACKING_VOLATILITY:
+                        high_speed_tickers.append(p)
+                        seen_pairs.add(p['pair'])
             
             high_speed = high_speed_tickers
             
@@ -733,29 +742,28 @@ def calculate_score(args):
         # [Senior Engineer Fix] Lepaskan batas atas volatilitas untuk Dashboard Ranking.
         # Koin yang sedang 'pumping' (>8%) justru yang paling trending.
         if spread < max_spread and volatility >= 0.1 and vol > min_vol:
-            # ── [Enhanced Quant Scoring] ──
+            # ── [Enhanced Quant Scoring: Relative Momentum] ──
+            # [Smart Thinking] Gunakan Volatility-Adjusted Change.
+            # Rumus: (Abs_Change * Log_Volume) / max(0.5, Volatility)
+            # Ini akan menonjolkan koin besar saat mereka 'breakout' dari range normalnya.
+            change_24h = d.get('change_24h', 0)
+            rel_momentum = (abs(change_24h) * 5) / max(0.5, volatility)
+            
             # 1. Volume Power (Logarithmic scaling)
-            # 10M -> 0, 100M -> 10, 1B -> 20, 10B -> 30, 100B -> 40
             log_vol = math.log10(vol) if vol > 0 else 0
-            score_vol = max(0, (log_vol - 7) * 10)
+            score_vol = max(0, (log_vol - 7) * 8)
             
-            # 2. Volatility Momentum (Tanpa Hard Cap)
-            # Volatilitas 10% memberikan skor 40.
-            score_vola = volatility * 4
-            
-            # 3. Price Action (24h change contribution)
-            score_change = abs(d.get('change_24h', 0)) * 2
-            
-            # 4. Spread Penalty (Makin besar spread, makin tidak likuid)
-            penalty_spread = spread * 15
+            # 2. Spread Penalty (Makin besar spread, makin tidak likuid)
+            penalty_spread = spread * 12
             
             # Final Score (Normalized roughly to 0-100+)
-            score = score_vol + score_vola + score_change - penalty_spread
+            # Koin stagnan (Change kecil vs Volatility besar) akan otomatis tereliminasi.
+            score = score_vol + (rel_momentum * 10) - penalty_spread
             
             return {
                     "pair": pair, "last": last, "spread": spread, 
                     "volatility": volatility, "score": score, "imbalance": imbalance,
-                    "change": d.get('change_24h', 0),
+                    "change": change_24h,
                     "vol_idr": vol
             }
     except: pass
