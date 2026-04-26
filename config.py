@@ -19,7 +19,8 @@ DB_PATH         = f"{DATA_PATH}/algotrade.db"
 # ==========================================
 # 2. TRADING RULES & SIZING
 # ==========================================
-INITIAL_CAPITAL        = 10000000
+#INITIAL_CAPITAL        = 10000000
+INITIAL_CAPITAL        = 90000
 MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
@@ -61,7 +62,6 @@ SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
 SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
 
 # --- Sizing ---
-CAPITAL_PER_TRADE_PCT = 0.05 # Gunakan 5% modal per trade (Prop-firm standard for scalping)
 
 # --- Indodax Pro Fee Structure (Image Reference) ---
 FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
