@@ -637,22 +637,27 @@ def calculate_score(args):
         max_spread = config_override['max_spread'] * 100
         min_vol = config_override['min_vol']
         
-        if spread < max_spread and 0.2 <= volatility <= 8.0 and vol > min_vol:
-            # ── [Fix ISSUE #9] Normalized Quant Scoring ──
-            # 1. Log Volume (Skala: 10M = log(7), 1T = log(12)) -> mapping ke poin ~0-50
+        # [Senior Engineer Fix] Lepaskan batas atas volatilitas untuk Dashboard Ranking.
+        # Koin yang sedang 'pumping' (>8%) justru yang paling trending.
+        if spread < max_spread and volatility >= 0.1 and vol > min_vol:
+            # ── [Enhanced Quant Scoring] ──
+            # 1. Volume Power (Logarithmic scaling)
+            # 10M -> 0, 100M -> 10, 1B -> 20, 10B -> 30, 100B -> 40
             log_vol = math.log10(vol) if vol > 0 else 0
             score_vol = max(0, (log_vol - 7) * 10)
             
-            # 2. Volatility (Skala: 0-8%) -> mapping ke poin ~0-40
-            score_vola = volatility * 5
+            # 2. Volatility Momentum (Tanpa Hard Cap)
+            # Volatilitas 10% memberikan skor 40.
+            score_vola = volatility * 4
             
-            # 3. Imbalance (Skala bonus max 20 poin)
-            score_imb = min(20, (imbalance - 1) * 10) if imbalance > 1.2 else 0
+            # 3. Price Action (24h change contribution)
+            score_change = abs(d.get('change_24h', 0)) * 2
             
-            # 4. Spread Penalty (Makin besar spread, makin minus)
-            penalty_spread = spread * 20
+            # 4. Spread Penalty (Makin besar spread, makin tidak likuid)
+            penalty_spread = spread * 15
             
-            score = score_vol + score_vola + score_imb - penalty_spread
+            # Final Score (Normalized roughly to 0-100+)
+            score = score_vol + score_vola + score_change - penalty_spread
             
             return {
                     "pair": pair, "last": last, "spread": spread, 

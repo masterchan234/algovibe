@@ -940,7 +940,7 @@ function renderWatchlist(data) {
             trending.forEach(t => {
                 const item = document.createElement('div'); item.className = 'trending-item';
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
-                item.innerHTML = `<div class="trend-info"><span class="trend-pair">${formatPair(t.pair)}</span><span class="trend-score">Volatilitas: ${t.volatility.toFixed(1)}%</span></div><div class="trend-badge">${fmtShortIDR(t.score || 0)}</div>`;
+                item.innerHTML = `<div class="trend-info"><span class="trend-pair">${formatPair(t.pair)}</span><span class="trend-score">Vola: ${t.volatility.toFixed(1)}%</span></div><div class="trend-badge" style="background:var(--blue-dim); color:var(--blue); border:1px solid var(--blue-soft);">🔥 ${Math.round(t.score || 0)}</div>`;
                 tList.appendChild(item);
             });
         }
