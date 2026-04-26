@@ -486,7 +486,7 @@ class ScalperBot:
                 
                 if p['pair'] not in seen_pairs:
                     # Threshold 0.5 berarti koin tersebut punya 'kehidupan' momentum
-                    if relative_momentum > 0.5 or p['volatility'] >= MIN_TRACKING_VOLATILITY:
+                    if relative_momentum > 0.2 or p['volatility'] >= MIN_TRACKING_VOLATILITY:
                         high_speed_tickers.append(p)
                         seen_pairs.add(p['pair'])
             
