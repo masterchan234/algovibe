@@ -845,8 +845,8 @@ class Oracle:
         
         prompt = (
             f"URGENT TRADE ANALYSIS FOR {pair.upper()} (MEAN REVERSION / BTD MODE).\n"
-            f"Current DNA: RSI={current_dna.get("rsi", 50)}, EMA_Dist={current_dna.get("ema_dist", 0):.4f}, "
-            f"Volatility={current_dna.get("volatility", 0):.2f}%, Imbalance={current_dna.get("imbalance", 1):.2f}.\n"
+            f"Current DNA: RSI={current_dna.get('rsi', 50)}, EMA_Dist={current_dna.get('ema_dist', 0):.4f}, "
+            f"Volatility={current_dna.get('volatility', 0):.2f}%, Imbalance={current_dna.get('imbalance', 1):.2f}.\n"
             f"\nCompare with 5 similar patterns (STRATEGY: BUY THE DIP AT EMA-20, TARGET: 4% TP):\n{history_text}\n"
             f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
             "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "

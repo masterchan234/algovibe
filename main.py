@@ -198,20 +198,23 @@ class ScalperBot:
             final_tp = dynamic_tp if dynamic_tp is not None else TP_PCT
             final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
             
-            # [Tuning] Retest Entry Strategy
-            # Kita tidak lagi menggunakan Taker (price). 
-            # Kita menggunakan EMA-9 sebagai harga antri (Limit Order)
-            from engines.technicals import calculate_rsi
+            # [Senior Fix] Definisikan history dari buffer real-time
+            history = list(self.price_history[pair])
             prices = np.array(history, dtype=float)
-            alpha = 2 / (9 + 1)
-            ema_9 = prices[-1] # Simple approximation or calculate full
-            # Untuk akurasi, kita hitung EMA-9 dari history
-            ema_9 = prices[0]
-            for p_val in prices:
-                ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
-            
-            buy_price = ema_9
-            log_message(f"🎣 [Retest Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
+
+            if taker:
+                # Mode Agresif: Langsung hajar kanan di harga market
+                buy_price = price
+                log_message(f"🚀 [Taker Execute] Mengejar momentum di harga Market: Rp {buy_price:,.2f}")
+            else:
+                # Mode Hemat Fee: Antri di EMA-9 (Retest Entry)
+                alpha = 2 / (9 + 1)
+                ema_9 = prices[0]
+                for p_val in prices:
+                    ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
+                
+                buy_price = ema_9
+                log_message(f"🎣 [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
                 
             amount_crypto = amount_idr / buy_price
             

@@ -42,7 +42,11 @@ class Database:
                     entry_order_id TEXT,
                     exit_order_id TEXT,
                     timestamp DATETIME,
-                    dry_run BOOLEAN
+                    dry_run BOOLEAN,
+                    target_tp_pct REAL DEFAULT 0.05,
+                    target_sl_pct REAL DEFAULT -0.02,
+                    trailing_sl_price REAL DEFAULT 0.0,
+                    highest_price REAL DEFAULT 0.0
                 )
             ''')
             
