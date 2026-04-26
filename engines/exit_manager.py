@@ -144,7 +144,10 @@ class ExitManager:
             # Jika sudah untung bersih dan RSI mulai jenuh (>70), jangan serakah, EXIT SEKARANG.
             current_rsi = data.get('rsi', 50)
             if current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 70:
-                log_message(f"⚡ [Rapid TP] {pair}: Profit bersih terdeteksi (+{current_profit_pct*100:.2f}%) & RSI Jenuh ({current_rsi:.0f}). Menutup posisi...")
+                log_msg = f"⚡ [Rapid TP] {pair}: Locked profit +{current_profit_pct*100:.2f}% (RSI: {current_rsi:.0f})"
+                log_message(log_msg)
+                db.log_system_event(pair, 'RAPID_TP', log_msg, 'SUCCESS')
+                
                 order_id = self.execute_exit(pair, amount, current_price, "RAPID_TP", 
                                           entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                 if order_id:
