@@ -128,19 +128,29 @@ class ExitManager:
             active_sl_price = max(initial_sl_price, trailing_sl_price)
 
             # --- [Defensive] Break-Even Stop Loss ---
-            # Jika profit sudah menyentuh 1.5%, pindahkan SL ke harga entry + fee (risk-free trade)
-            # Menggunakan fee taker tertinggi dari config untuk keamanan maksimum.
+            # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
             from config import FEE_BUY_TAKER, FEE_SELL_TAKER
             round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
             break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
             
-            if current_profit_pct >= 0.015 and active_sl_price < break_even_price:
+            if current_profit_pct >= 0.01 and active_sl_price < break_even_price:
                 active_sl_price = break_even_price
-                # Simpan ke state agar permanen
                 if positions[pair].get('trailing_sl_price', 0) < break_even_price:
                     positions[pair]['trailing_sl_price'] = break_even_price
                     db.upsert_position(pair, positions[pair])
                     log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
+
+            # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
+            # Jika sudah untung bersih dan RSI mulai jenuh (>70), jangan serakah, EXIT SEKARANG.
+            current_rsi = data.get('rsi', 50)
+            if current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 70:
+                log_message(f"⚡ [Rapid TP] {pair}: Profit bersih terdeteksi (+{current_profit_pct*100:.2f}%) & RSI Jenuh ({current_rsi:.0f}). Menutup posisi...")
+                order_id = self.execute_exit(pair, amount, current_price, "RAPID_TP", 
+                                          entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                if order_id:
+                    positions[pair]["status"] = "EXITING"
+                    positions[pair]["exit_order_id"] = order_id
+                continue
 
             # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
             # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.

@@ -630,7 +630,7 @@ function renderStats(data) {
         }
 
         const isDryRun = data.backfill_status === 'DRY_RUN' || (document.getElementById('dry-run-badge') && document.getElementById('dry-run-badge').style.display !== 'none');
-        
+
         const pnlEl = document.getElementById('daily-pnl');
         if (pnlEl) {
             const val = isDryRun ? data.all_time_pnl_dry : data.all_time_pnl;
@@ -886,12 +886,12 @@ function renderWatchlist(data) {
         const tList = document.getElementById('trending-list');
         if (tList) {
             tList.innerHTML = '';
-            
+
             // Senior UX Fix: Filter koin aktif (Score > 30)
             // Namun jika user sedang mencari secara manual, tampilkan semua yang cocok tanpa filter skor.
             const isSearching = marketSearchQuery.length > 0;
             const query = marketSearchQuery.toLowerCase();
-            
+
             const radar = data.filter(t => {
                 if (isSearching) {
                     return t.pair.toLowerCase().includes(query);
@@ -901,7 +901,7 @@ function renderWatchlist(data) {
                 if (isSearching) return a.pair.localeCompare(b.pair);
                 return (b.score || 0) - (a.score || 0);
             });
-            
+
             if (radar.length === 0) {
                 tList.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim); font-size:0.8rem;">Menunggu Momentum Pasar...</div>';
             }
@@ -909,20 +909,20 @@ function renderWatchlist(data) {
             radar.forEach(t => {
                 const s = t.score || 0;
                 let label = '🟡 Accumulating';
-                let color = '#eccc68'; 
+                let color = '#eccc68';
 
-                if (s > 80) { label = '🔴 Hyper-Drive';  color = '#ff4757'; }
-                else if (s > 50) { label = '🟠 Momentum';    color = '#ffa502'; }
+                if (s > 80) { label = '🔴 Hyper-Drive'; color = '#ff4757'; }
+                else if (s > 50) { label = '🟠 Momentum'; color = '#ffa502'; }
 
                 // LOGIKA SIGNAL EXPIRY (120 Detik)
                 let sig = t.signal || 'HOLD';
                 let sigColor = 'var(--text-dim)';
-                
+
                 // Cek kesegaran sinyal
                 const now = new Date();
                 const lastUpdate = t.updated_at ? new Date(t.updated_at + 'Z') : null; // Force UTC
                 const diffSec = lastUpdate ? (now - lastUpdate) / 1000 : 999;
-                
+
                 if (diffSec > 120) {
                     sig = 'WAIT';
                     sigColor = 'var(--text-dim)';
@@ -935,12 +935,12 @@ function renderWatchlist(data) {
                 const chgClass = chg >= 0 ? 'up' : 'down';
                 const chgSign = chg >= 0 ? '+' : '';
 
-                const item = document.createElement('div'); 
+                const item = document.createElement('div');
                 item.className = 'trending-item';
                 item.style.padding = '10px 12px';
                 item.style.borderBottom = '1px solid var(--border-soft)';
                 item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
-                
+
                 item.innerHTML = `
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                         <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${formatPair(t.pair)}</span>
@@ -961,26 +961,26 @@ function renderSectors(sectors) {
     const c = document.getElementById('sector-list'); if (!c) return;
     c.innerHTML = ''; const entries = Object.entries(sectors);
     if (!entries.length) { c.innerHTML = '<div class="empty-state">Belum ada data sektor</div>'; return; }
-    
+
     // Sort by 24h score descending
     entries.sort((a, b) => b[1].score - a[1].score).forEach(([sec, data]) => {
         const score = data.score || 0;
         const momentum = data.momentum || 0;
         const leader = data.leader || 'N/A';
         const leaderCh = data.leader_ch || 0;
-        
+
         const col = score >= 0 ? '#10b981' : '#ef4444';
         const momCol = momentum >= 0 ? '#10b981' : '#ef4444';
         const momIcon = momentum >= 0 ? '🔥' : '🧊';
-        
+
         // Bar percentage calculation (Max 10%)
         const pct = Math.min(100, (Math.abs(score) / 10) * 100);
-        
-        const div = document.createElement('div'); 
+
+        const div = document.createElement('div');
         div.className = 'sector-item';
         div.style.marginBottom = '12px';
         div.style.padding = '4px 0';
-        
+
         div.innerHTML = `
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                 <span style="font-weight:bold; color:var(--text-bright); font-size:0.85rem;">${sec}</span>
@@ -1246,7 +1246,7 @@ function switchMobileTab(tab, el) {
     if (tab === 'chart' && chart) {
         setTimeout(() => chart.resize(), 100);
     }
-    
+
     closeAllSidebars();
 }
 
@@ -1254,7 +1254,7 @@ function toggleSidebar(side) {
     const selector = side === 'left' ? '.left-sidebar' : '.right-sidebar';
     const el = document.querySelector(selector);
     const overlay = document.getElementById('sidebar-overlay');
-    
+
     if (el) {
         const isOpen = el.classList.toggle('show');
         if (overlay) overlay.classList.toggle('show', isOpen);
@@ -1284,7 +1284,7 @@ function initSystem() {
 
 window.addEventListener('DOMContentLoaded', () => {
     initSystem();
-    
+
     // Default Mobile State
     document.body.classList.add('tab-chart');
 

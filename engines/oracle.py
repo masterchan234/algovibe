@@ -535,13 +535,14 @@ class Oracle:
 
     def get_sizing_multiplier(self) -> float:
         """
-        Adjust capital allocation based on market risk.
+        Adjust capital allocation based on market risk (Aggressive Mode).
         """
         regime = self.get_market_regime()
         if regime == MarketRegime.CRASH: return 0.0 # Stop trading
-        if regime == MarketRegime.BEARISH: return 0.5 # Half size
-        if regime == MarketRegime.CHOPPY: return 0.8 # Conservative
-        return 1.0 # Full speed
+        if regime == MarketRegime.BEARISH: return 0.6 # Moderate size
+        if regime == MarketRegime.CHOPPY: return 0.9 # Almost full
+        if regime == MarketRegime.BULLISH: return 1.5 # [AGGRESSIVE] 1.5x Size
+        return 1.2 # [RANGING] 1.2x Size
 
     def get_rationale(self, pair: str, decision: str) -> str:
         """

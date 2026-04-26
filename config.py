@@ -26,17 +26,19 @@ MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 150
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
-MIN_TRADE_IDR          = 10000  # Min IDR for Indodax Pro
 
 # ==========================================
-# 3. STRATEGY PARAMETERS (Mean Reversion Mode)
-# ==========================================
-TP_PCT = 0.04   # +4.0% Target Profit (Mudah dicapai pada pantulan trend)
-SL_PCT = -0.02  # -2.0% Stop Loss (RR 1:2)
+# --- [Risk & Sizing] ---
+MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
+CAPITAL_PER_TRADE_PCT = 0.15    # [AGGRESSIVE] Gunakan 15% saldo per koin
+MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
+MIN_TRADE_IDR = 12000          # Minimum order Indodax (10k + buffer)
 
-# --- Trailing Stop Loss ---
-TRAILING_STOP_ACTIVATION_PCT = 0.015 # Aktifkan trailing saat profit 1.5%
-TRAILING_STOP_DISTANCE_PCT = 0.005   # Jarak trail 0.5%
+# --- [Scalping Targets] ---
+TP_PCT = 0.04                   # Target ATR (Default)
+SL_PCT = -0.02                  # Stop Loss (Default)
+TRAILING_STOP_ACTIVATION_PCT = 0.01  # Aktifkan trailing cepat di +1.0%
+TRAILING_STOP_DISTANCE_PCT = 0.003   # Jarak ketat 0.3%
 
 MIN_NET_PROFIT_IDR = 2500 # Target profit bersih minimal harus terasa (Rp 2500 per 500k trade)
 PENDING_BUY_TIMEOUT_MINUTES = 3
