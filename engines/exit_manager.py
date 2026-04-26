@@ -127,6 +127,21 @@ class ExitManager:
             
             active_sl_price = max(initial_sl_price, trailing_sl_price)
 
+            # --- [Defensive] Break-Even Stop Loss ---
+            # Jika profit sudah menyentuh 1.5%, pindahkan SL ke harga entry + fee (risk-free trade)
+            # Menggunakan fee taker tertinggi dari config untuk keamanan maksimum.
+            from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+            round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
+            break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
+            
+            if current_profit_pct >= 0.015 and active_sl_price < break_even_price:
+                active_sl_price = break_even_price
+                # Simpan ke state agar permanen
+                if positions[pair].get('trailing_sl_price', 0) < break_even_price:
+                    positions[pair]['trailing_sl_price'] = break_even_price
+                    db.upsert_position(pair, positions[pair])
+                    log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
+
             # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
             # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.
             ai_veto, veto_reason = False, ""
@@ -181,9 +196,19 @@ class ExitManager:
                 duration = datetime.now() - entry_time
                 duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
 
-                is_trailing_hit = active_sl_price > initial_sl_price
-                reason_str = "TRAILING STOP" if is_trailing_hit else "STOP LOSS"
-                log_reason = "TAKE_PROFIT" if (is_trailing_hit and pnl_pct > 0) else "STOP_LOSS" # Categorize positive trail as TP for DB
+                # Deteksi tipe exit proteksi
+                is_trailing_hit = active_sl_price > break_even_price
+                is_be_hit = active_sl_price == break_even_price
+                
+                if is_be_hit:
+                    reason_str = "BREAK-EVEN SL"
+                    log_reason = "BREAK_EVEN"
+                elif is_trailing_hit:
+                    reason_str = "TRAILING STOP"
+                    log_reason = "TRAILING_STOP"
+                else:
+                    reason_str = "STOP LOSS"
+                    log_reason = "STOP_LOSS"
                 
                 msg = (
                     f"⚠️ *{reason_str}* ⚠️\n"
@@ -208,10 +233,15 @@ class ExitManager:
         try:
             from config import FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
             
-            if reason in ("STOP_LOSS", "HARD_STOP_LOSS"):
+            # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN")
+            
+            if is_emergency:
+                # Gunakan SELL_TAKER_OFFSET (5%) untuk memaksa market sell instan
                 exit_price = price * (1 - SELL_TAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_TAKER
             else:
+                # Maker mode untuk Take Profit standar
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_MAKER
 

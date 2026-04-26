@@ -627,14 +627,26 @@ class ScalperBot:
                 
                 # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas & EMA Distance
                 # [Backtest Insight] ema_dist > 0.1% terbukti 8.6x lebih sering WIN
+                # [Scalper's Edge] Forward-Looking Momentum
+                # Untuk scalping, Order Book Imbalance (BP) adalah indikator masa depan terkuat.
+                # Jika bid jauh lebih tebal dari ask (Buy Pressure), kita perkuat prediksinya.
+                scalper_boost = 0.0
+                if imbalance_ratio > 1.8: scalper_boost = 15.0 # Strong Bid Dominance
+                elif imbalance_ratio > 1.3: scalper_boost = 8.0 # Moderate Bid Dominance
+                
                 current_vol = p['volatility']
                 dynamic_threshold = 55.0
                 if current_vol > 2.0: dynamic_threshold = 68.0
                 elif current_vol < 0.6: dynamic_threshold = 50.0
+                
                 # Turunkan threshold jika ada pullback nyata ke EMA (confirmed setup)
                 if ema_dist > 0.10: dynamic_threshold = max(45.0, dynamic_threshold - 10.0)
 
-                if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
+                # Final Prediction Score (AI Confidence + Real-time Orderbook Boost)
+                total_confidence = knn_decision['confidence'] + scalper_boost
+                
+                if total_confidence >= dynamic_threshold:
+                    log_message(f"🚀 [Scalper Boost] {pair}: Confidence {knn_decision['confidence']:.1f}% + Boost {scalper_boost:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold})")
                     
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         # [Backtest Insight] Dynamic ATR-based TP/SL 
@@ -649,24 +661,40 @@ class ScalperBot:
                                 closes = [c[4] for c in ohlcv_atr]
                                 atr_val = calculate_atr(highs, lows, closes)
                                 
-                                # TP = 2.5x ATR, SL = 1.5x ATR (Backtest v2.1 optimized)
-                                # Cap TP 2-8%, SL 1-4%
+                                # [Fee-Aware & Rebound Logic]
+                                from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+                                round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
+                                base_sl_pct = (atr_val * 1.5) / p['last']
+                                
+                                # Jika RSI sangat rendah (< 30), probabilitas rebound tinggi. 
+                                # Berikan ruang SL lebih lebar (+20%) agar tidak terkena 'wick' sebelum mantul.
+                                rebound_multiplier = 1.2 if rsi_val < 30 else 1.0
+                                final_sl_val = base_sl_pct * rebound_multiplier
+                                
+                                # Pastikan SL minimal lebih besar dari Round Trip Fee + buffer 0.3%
+                                final_sl_val = max(final_sl_val, round_trip_fee + 0.003)
+                                
                                 final_dyn_tp = min(0.08, max(0.02, (atr_val * 2.5) / p['last']))
-                                final_dyn_sl = -min(0.04, max(0.01, (atr_val * 1.5) / p['last']))
-                                log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}%")
+                                final_dyn_sl = -min(0.05, final_sl_val) # Cap max SL 5%
+                                
+                                log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}% (Rebound: {rebound_multiplier}x)")
                             else:
                                 final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
                         except Exception as e:
                             log_message(f"⚠️ ATR Calculation failed: {e}")
                             final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
 
-                        # [Momentum Tuning] Gunakan Taker Order (Instant Buy) untuk menangkap momentum breakout k-NN
-                        # Biaya lebih tinggi (0.21%) tapi probabilitas tertangkap momentum lebih besar.
+                        # [Senior Tuning] Execution Intelligence
+                        # Taker (Instant) jika momentum meledak, Maker (Limit) jika sinyal standar untuk hemat fee.
+                        use_taker = (total_confidence > 75.0) or (imbalance_ratio > 2.5)
+                        mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
+                        log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
+
                         if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
                                              whale_boost=whale_boost, sector_boost=sector_boost,
                                              imbalance=imbalance_ratio, volatility=p['volatility'],
                                              dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
-                                             taker=True):
+                                             taker=use_taker):
                             self.daily_trades += 1
                             db.save_state("daily_trades", self.daily_trades)
                 else:

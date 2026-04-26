@@ -804,6 +804,24 @@ class Oracle:
                 # Weighted Manhattan: ema_dist bobot 2.5x (vs sebelumnya 0.8x)
                 # RSI diturunkan ke 0.6x (backtest: RSI hampir sama antara WIN dan LOSE)
                 dist = abs(d_vol)*1.2 + abs(d_imb)*1.0 + abs(d_ai)*1.0 + abs(d_rsi)*0.6 + abs(d_ema)*2.5
+                
+                # [Senior Optimization] Recency Bias (Forward-Looking)
+                # Pola yang terjadi baru-baru ini lebih relevan untuk scalping.
+                # Berikan diskon jarak 25% jika data terjadi kurang dari 10 jam lalu.
+                try:
+                    from datetime import datetime, timedelta
+                    created_at = h.get('created_at') # DNA usually has this from DB
+                    if created_at:
+                        if isinstance(created_at, str):
+                            dt_dna = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        else:
+                            dt_dna = created_at
+                        
+                        if (datetime.now(dt_dna.tzinfo) - dt_dna).total_seconds() < 36000: # 10 Hours
+                            dist *= 0.75 # Make it look 'closer' (more relevant)
+                except:
+                    pass
+
                 distances.append((dist, h))
             except:
                 continue
@@ -837,21 +855,41 @@ class Oracle:
         task_id = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
         # --- [Fix] Handle Async / Failed LLM with Statistical Fallback ---
-        # Menggunakan win_rate yang sudah dihitung dari top_matches (neighbors terdekat)
-        win_rate_knn = win_rate
+        # [Senior Refactor] Removed Hard Veto (AVOID) per user request.
+        # K-NN now acts as a 'Confidence Weight' rather than a blocker.
+        # If history is bad, it just gives low confidence instead of Vetoing.
         
-        # Default Heuristic Response (Jika AI gagal/lambat)
+        current_rsi = current_dna.get('rsi', 50)
+        current_ema_dist = current_dna.get('ema_dist', 0)
+        
+        # Is the technical setup very strong?
+        is_strong_setup = current_rsi < 40 or current_ema_dist > 0.10
+        
+        verdict = "BUY" # Hard Veto removed: Always allow technical evaluation
+        
+        # Base confidence from k-NN historical win rate
+        base_confidence = win_rate_knn * 100
+        
+        if is_strong_setup:
+            # Jika setup teknikal kuat, kita boost confidence-nya agar tidak terhalang histori buruk
+            # Memberikan bot 'keberanian' untuk mencoba pattern baru yang potensial
+            confidence = max(base_confidence, 65.0) 
+            reason = f"Momentum-First Mode (RSI {current_rsi:.0f} > k-NN History)"
+        else:
+            confidence = base_confidence
+            reason = f"Historical Weighted (k-NN WinRate: {win_rate_knn*100:.0f}%)"
+
         heuristic_resp = {
-            "verdict": "BUY" if win_rate_knn >= 0.5 else "AVOID", # Relaxed: Butuh 50% win untuk BUY
+            "verdict": verdict,
             "target_tp": 0.04,
             "target_sl": -0.02,
-            "confidence": win_rate_knn * 100,
-            "reason": f"Statistical Fallback (k-NN WinRate: {win_rate_knn*100:.0f}%)"
+            "confidence": confidence,
+            "reason": reason
         }
 
-        # Log decision to system_events for Dashboard visibility
-        msg = f"{heuristic_resp['verdict']} | Conf: {heuristic_resp['confidence']:.1f}% | {heuristic_resp['reason']}"
-        db.log_system_event(pair, 'AI_ORACLE', msg, 'INFO' if heuristic_resp['verdict'] == 'BUY' else 'DEBUG')
+        # Log to Dashboard
+        msg = f"🧠 AI Rank: {heuristic_resp['confidence']:.1f}% | {heuristic_resp['reason']}"
+        db.log_system_event(pair, 'AI_ORACLE', msg, 'INFO')
 
         return heuristic_resp
 
