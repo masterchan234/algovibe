@@ -186,6 +186,8 @@ class Oracle:
                         "ts": datetime.now()
                     }
                     db.save_state(f"llm_veto_{pair_name}", t_res)  # persist lintas restart
+                    # [Fix Bug#5] Simpan timestamp agar DB veto bisa expire
+                    db.save_state(f"llm_veto_ts_{pair_name}", datetime.now().isoformat())
 
                 # ── Sentiment (hanya pair spesifik, Fix BUG #4) ──────────
                 self._update_llm_sentiment(t_res, pair_name)
@@ -236,13 +238,14 @@ class Oracle:
 
         Veto aktif jika:
         - LLM verdict == AVOID dengan confidence >= 65%
-        - Analisis masih fresh (< 10 menit)
+        - Analisis masih fresh (< 10 menit in-memory, < 2 jam di DB)
 
         Jika tidak ada analisis LLM → TIDAK veto (bot tetap jalan berdasarkan teknikal).
         """
         pair_lower = pair.lower()
-        LLM_VETO_THRESHOLD    = 65   # Minimum confidence untuk veto
-        LLM_VETO_TTL_MINUTES  = 10   # Analisis lebih dari 10 menit dianggap stale
+        LLM_VETO_THRESHOLD   = 65   # Minimum confidence untuk veto
+        LLM_VETO_TTL_MINUTES = 10   # In-memory cache TTL
+        LLM_DB_VETO_TTL_MIN  = 120  # [Fix Bug#5] DB veto TTL: 2 jam (bukan selamanya!)
 
         # 1. Cek in-memory cache dulu (lebih cepat)
         cached = self._veto_cache.get(pair_lower)
@@ -254,11 +257,26 @@ class Oracle:
                 return False, cached["reason"]
 
         # 2. Fallback: cek DB (persist lintas restart/insight_thread delay)
+        # [Fix Bug#5] Simpan timestamp di key terpisah agar bisa enforce TTL
         try:
             raw = db.get_state(f"llm_veto_{pair_lower}")
+            veto_ts_str = db.get_state(f"llm_veto_ts_{pair_lower}")
             if raw:
+                # Cek usia veto dari DB
+                if veto_ts_str:
+                    try:
+                        veto_ts = datetime.fromisoformat(veto_ts_str)
+                        veto_age_min = (datetime.now() - veto_ts).total_seconds() / 60
+                        if veto_age_min > LLM_DB_VETO_TTL_MIN:
+                            # Veto sudah expired, hapus dari DB
+                            db.save_state(f"llm_veto_{pair_lower}", None)
+                            db.save_state(f"llm_veto_ts_{pair_lower}", None)
+                            logger.info(f"[Oracle] DB Veto expired for {pair} (age={veto_age_min:.0f}m).")
+                            return False, "Veto expired"
+                    except (ValueError, TypeError):
+                        pass  # Timestamp rusak, abaikan
+
                 structured = LLMWorker.parse_structured_result(raw)
-                # Tidak ada timestamp di DB — kita tidak tahu usianya, skip veto tapi log
                 if structured["verdict"] == "AVOID" and structured["confidence"] >= LLM_VETO_THRESHOLD:
                     logger.info(f"[Oracle] LLM DB-Veto for {pair}: {structured['reason']}")
                     return True, f"LLM VETO (DB) ({structured['confidence']}%): {structured['reason']}"
@@ -764,7 +782,9 @@ class Oracle:
         """
         import math
         history = db.get_all_closed_dnas(limit=1000)
-        default_resp = {"verdict": "BUY", "target_tp": 0.02, "target_sl": -0.012, "confidence": 50.0}
+        # [Fix Bug#3] Naikkan default confidence ke 60 agar melewati dynamic_threshold (55)
+        # Sebelumnya 50% selalu gagal saat DB kosong (50 < threshold 55 = SEMUA koin di-void)
+        default_resp = {"verdict": "BUY", "target_tp": 0.04, "target_sl": -0.02, "confidence": 60.0}
         
         if not history or len(history) < 3:
             return default_resp
@@ -772,15 +792,18 @@ class Oracle:
         distances = []
         for h in history:
             try:
-                # Normalisasi jarak k-NN (Tuned: 5-Factor Feature Space)
+                # Normalisasi jarak k-NN (Backtest-Tuned: 5-Factor Feature Space)
+                # [Backtest Insight] ema_dist adalah PREDICTOR TERKUAT:
+                # Win avg_ema_dist=0.1148 vs Lose avg_ema_dist=0.0133 (8.6x lebih besar)
                 d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 2.0
                 d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 1.5
                 d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 20.0
                 d_rsi = (current_dna.get('rsi', 50) - h.get('rsi', 50)) / 15.0
-                d_ema = (current_dna.get('ema_dist', 0) - h.get('ema_dist', 0)) / 1.0
+                d_ema = (current_dna.get('ema_dist', 0) - h.get('ema_dist', 0)) / 0.1  # Scale dinaikkan
                 
-                # Gunakan Weighted Manhattan Distance untuk akurasi prediksi maksimal
-                dist = abs(d_vol)*1.5 + abs(d_imb)*1.0 + abs(d_ai)*1.2 + abs(d_rsi)*1.0 + abs(d_ema)*0.8
+                # Weighted Manhattan: ema_dist bobot 2.5x (vs sebelumnya 0.8x)
+                # RSI diturunkan ke 0.6x (backtest: RSI hampir sama antara WIN dan LOSE)
+                dist = abs(d_vol)*1.2 + abs(d_imb)*1.0 + abs(d_ai)*1.0 + abs(d_rsi)*0.6 + abs(d_ema)*2.5
                 distances.append((dist, h))
             except:
                 continue

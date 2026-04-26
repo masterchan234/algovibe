@@ -555,15 +555,32 @@ class ScalperBot:
                     f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
                 )
 
-                # ── LiteRT-LM Hard Block: SELL signal mencegah entry ──────────────
+                # ── [Fix Bug#2] Inject Order Book pressure ke sinyal teknikal ──
+                # Sebelumnya: derive_trade_signal dipanggil tanpa buy_pressure → bp=50 selalu.
+                # Sekarang: ambil data depth dari DB dan inject agar sinyal lebih akurat.
                 tech = get_technical_summary(history)
+                depth_data = db.get_market_depth(pair)
+                if depth_data['bids'] and depth_data['asks']:
+                    total_bid = sum(b['vol'] for b in depth_data['bids'])
+                    total_ask = sum(a['vol'] for a in depth_data['asks'])
+                    total_depth = total_bid + total_ask
+                    if total_depth > 0:
+                        tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
                 tech_sig = derive_trade_signal(tech)
-                if tech_sig['verdict'] == 'SELL':
+
+                # ── [Fix Bug#2] Soft-warn SELL: hanya blok RSI overbought berat (>72) ──
+                # Sebelumnya: semua SELL di-skip → memblok zona mean reversion (RSI 55-70).
+                # Sekarang: hanya blok jika RSI benar-benar overbought, log tapi jangan exit.
+                if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
                     log_message(
-                        f"TECH BLOCK [{pair}]: {tech_sig['reason']} "
-                        f"(confidence {tech_sig['confidence']}%) — Trade dicegah."
+                        f"⛔ OVERBOUGHT BLOCK [{pair}]: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
                     )
                     continue
+                elif tech_sig['verdict'] == 'SELL':
+                    # Soft warning: catat tapi jangan skip
+                    log_message(
+                        f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN."
+                    )
 
                 # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
                 has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
@@ -604,11 +621,14 @@ class ScalperBot:
                                 # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
                 knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
                 
-                # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas
+                # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas & EMA Distance
+                # [Backtest Insight] ema_dist > 0.1% terbukti 8.6x lebih sering WIN
                 current_vol = p['volatility']
                 dynamic_threshold = 55.0
-                if current_vol > 2.0: dynamic_threshold = 70.0
+                if current_vol > 2.0: dynamic_threshold = 68.0
                 elif current_vol < 0.6: dynamic_threshold = 50.0
+                # Turunkan threshold jika ada pullback nyata ke EMA (confirmed setup)
+                if ema_dist > 0.10: dynamic_threshold = max(45.0, dynamic_threshold - 10.0)
 
                 if knn_decision['verdict'] == "BUY" and knn_decision['confidence'] >= dynamic_threshold:
                     

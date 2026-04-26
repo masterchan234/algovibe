@@ -73,7 +73,12 @@ def derive_trade_signal(tech):
     """
     Konversi output get_technical_summary() + buy_pressure menjadi
     sinyal trading: BUY / HOLD / SELL beserta confidence (0-100) dan alasan.
-    Confidence < 60 → badge tidak ditampilkan di UI (dianggap HOLD lemah).
+
+    [Fix Signal Void Bug]:
+    - Tier 1 BUY: Deep oversold (RSI<30) — tidak butuh Order Book.
+    - Tier 2 BUY: RSI<40 + strong momentum — tidak butuh Order Book.
+    - Tier 3 BUY: RSI<48 + slope + buy_pressure (konfirmasi premium).
+    - SELL diperketat ke RSI>72 agar tidak memblok zona mean reversion (55-70).
     """
     rsi   = tech.get('rsi', 50)
     slope = tech.get('slope', 0)
@@ -83,27 +88,39 @@ def derive_trade_signal(tech):
     confidence = 50
     reason     = 'Kondisi mixed, sinyal tidak cukup kuat.'
 
-    # ── BUY CONDITIONS ─────────────────────────────────────────────────
-    if rsi < 35 and slope > 0 and bp > 55:
+    # ── BUY CONDITIONS (3 Tier) ────────────────────────────────────────
+
+    # Tier 1: Deep Oversold — tidak perlu Order Book (RSI sendiri sudah cukup)
+    if rsi < 30 and slope > -0.001:
         verdict    = 'BUY'
-        confidence = int(min(95, 60 + (35 - rsi) * 1.5 + (bp - 55) * 0.5))
-        reason     = f"RSI oversold ({rsi}) + momentum bullish + bid dominance ({bp:.0f}%)"
+        confidence = int(min(95, 65 + (30 - rsi) * 1.8))
+        reason     = f"RSI deep oversold ({rsi:.0f}) — zona pantul historis tinggi"
 
-    elif rsi < 45 and slope > 0.002 and bp > 60:
+    # Tier 2: Oversold + Momentum — cukup 2 faktor tanpa Order Book
+    elif rsi < 40 and slope > 0.001:
         verdict    = 'BUY'
-        confidence = int(min(85, 55 + (45 - rsi) * 1.0 + (bp - 60) * 0.5))
-        reason     = f"Momentum bullish kuat (slope={slope:.4f}), bid dominance {bp:.0f}%"
+        confidence = int(min(85, 58 + (40 - rsi) * 1.2 + slope * 500))
+        reason     = f"RSI oversold ({rsi:.0f}) + momentum naik (slope={slope:.4f})"
 
-    # ── SELL CONDITIONS ────────────────────────────────────────────────
-    elif rsi > 65 and (slope < 0 or bp < 45):
-        verdict    = 'SELL'
-        confidence = int(min(95, 60 + (rsi - 65) * 1.5 + max(0, (45 - bp)) * 0.5))
-        reason     = f"RSI overbought ({rsi}), tekanan jual dominan ({100-bp:.0f}%)"
+    # Tier 3: Pre-oversold + Slope kuat + Bid Dominance (sinyal paling solid)
+    elif rsi < 48 and slope > 0.002 and bp > 55:
+        verdict    = 'BUY'
+        confidence = int(min(88, 55 + (48 - rsi) * 1.0 + (bp - 55) * 0.6))
+        reason     = f"Momentum bullish + bid dominance ({bp:.0f}%), RSI={rsi:.0f}"
 
-    elif rsi > 55 and slope < -0.002:
+    # ── SELL CONDITIONS (diperketat, jangan block zona mean reversion) ──
+
+    # Hanya blok jika RSI benar-benar overbought (>72) dan ada tekanan jual nyata
+    elif rsi > 72 and (slope < -0.001 or bp < 42):
         verdict    = 'SELL'
-        confidence = int(min(85, 55 + (rsi - 55) * 1.0 + abs(slope) * 100))
-        reason     = f"Momentum bearish (slope={slope:.4f}), RSI melemah ({rsi})"
+        confidence = int(min(95, 60 + (rsi - 72) * 1.8 + max(0, (42 - bp)) * 0.5))
+        reason     = f"RSI overbought ({rsi:.0f}), tekanan jual kuat ({100-bp:.0f}%)"
+
+    # Momentum turun tajam — hati-hati tapi bukan hard block
+    elif rsi > 60 and slope < -0.004:
+        verdict    = 'SELL'
+        confidence = int(min(78, 55 + (rsi - 60) * 0.8 + abs(slope) * 80))
+        reason     = f"Momentum bearish kuat (slope={slope:.4f}), RSI={rsi:.0f}"
 
     return {
         'verdict':    verdict,
