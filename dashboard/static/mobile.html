@@ -247,9 +247,10 @@
             <div class="mobile-tab-content tab-market-content">
                 <div class="panel glass-panel sticky-search">
                     <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search / Momentum</div>
-                    <div class="search-wrap" style="padding: 8px 0 0 0;">
+                    <div class="search-wrap" style="padding: 8px 0 0 0; position: relative; display: flex; align-items: center;">
                         <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
-                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px; color: #fff; font-size: 13px; outline: none;">
+                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 35px 10px 10px; color: #fff; font-size: 13px; outline: none;">
+                        <button class="search-clear-btn" style="position: absolute; right: 10px; background: none; border: none; color: #888; font-size: 18px; padding: 5px; display: none; cursor: pointer;">×</button>
                     </div>
                 </div>
 
@@ -281,9 +282,10 @@
                 <!-- Sticky Search also in Chart Tab -->
                 <div class="panel glass-panel sticky-search">
                     <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search Opportunity</div>
-                    <div class="search-wrap" style="padding: 8px 0 0 0;">
+                    <div class="search-wrap" style="padding: 8px 0 0 0; position: relative; display: flex; align-items: center;">
                         <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
-                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px; color: #fff; font-size: 13px; outline: none;">
+                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 35px 10px 10px; color: #fff; font-size: 13px; outline: none;">
+                        <button class="search-clear-btn" style="position: absolute; right: 10px; background: none; border: none; color: #888; font-size: 18px; padding: 5px; display: none; cursor: pointer;">×</button>
                     </div>
                     <!-- Dynamic Results for Chart Tab (Only shown when searching) -->
                     <div class="radar-list-container" style="max-height: 250px; overflow-y: auto; margin-top: 5px; background: rgba(0,0,0,0.4); border-radius: 8px; display:none;"></div>

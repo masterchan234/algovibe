@@ -1368,13 +1368,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
     // Senior Search Implementation (Unified for Market & Chart tabs)
     const searchInputs = document.querySelectorAll('.market-search-input');
+    const clearBtns = document.querySelectorAll('.search-clear-btn');
+
     searchInputs.forEach(input => {
         input.addEventListener('input', (e) => {
             const val = e.target.value.trim();
             marketSearchQuery = val;
             
-            // Sync all search inputs
+            // Sync all search inputs & toggle clear buttons
             searchInputs.forEach(si => { if(si !== e.target) si.value = val; });
+            clearBtns.forEach(btn => btn.style.display = val.length > 0 ? 'block' : 'none');
             
             refreshWatchlist();
         });
@@ -1387,6 +1390,15 @@ window.addEventListener('DOMContentLoaded', () => {
         input.addEventListener('blur', () => {
             input.style.borderColor = 'var(--border)';
             input.style.boxShadow = 'none';
+        });
+    });
+
+    clearBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            marketSearchQuery = '';
+            searchInputs.forEach(si => si.value = '');
+            clearBtns.forEach(b => b.style.display = 'none');
+            refreshWatchlist();
         });
     });
 
