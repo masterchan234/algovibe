@@ -25,241 +25,251 @@ class ExitManager:
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
+        # log_message(f"[ExitManager] Monitoring {len(positions)} positions...")
         if not positions:
             return
 
         for pair, data in list(positions.items()):
-            # Jangan eksekusi jika sedang dalam proses jual (menunggu konfirmasi WS)
-            if data.get('status') == "EXITING":
-                continue
+            try:
+                # Jangan eksekusi jika sedang dalam proses jual (menunggu konfirmasi WS)
+                if data.get('status') == "EXITING":
+                    continue
 
-            # Ambil harga terakhir dari ticker terbaru
-            if pair not in current_tickers:
-                continue
+                # Ambil harga terakhir dari ticker terbaru
+                if pair not in current_tickers:
+                    # log_message(f"Skipping {pair}: No ticker data")
+                    continue
+                    
+                current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
+                entry_price = data.get('entry_price', 0)
+                amount = data.get('amount_crypto', 0)
                 
-            current_price = float(current_tickers[pair]['last'])
-            entry_price = data['entry_price']
-            amount = data['amount_crypto']
+                # Diagnostic: Log status for open positions
+                # log_message(f"Monitoring {pair}: Price={current_price:,.2f}, Entry={entry_price:,.2f}, Status={data.get('status')}")
             
             # --- AUTO-CANCEL LOGIC UNTUK PENDING_BUY ---
-            if data.get('status') == "PENDING_BUY":
-                if self.dry_run:
-                    # Di mode simulasi, anggap selalu filled seketika (sudah dihandle OPEN di main.py, 
-                    # fallback hapus aja kalau somehow nyangkut)
-                    continue
-
-                order_id = data.get('entry_order_id')
-                if not order_id:
-                    continue
-                    
-                entry_time = datetime.fromisoformat(data['timestamp'])
-                time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
-                
-                # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
-                spread_pct = (current_price - entry_price) / entry_price
-                
-                is_timeout = time_elapsed > PENDING_BUY_TIMEOUT_MINUTES
-                is_too_far = spread_pct > PENDING_BUY_MAX_SPREAD_PCT
-                
-                if is_timeout or is_too_far:
-                    reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
-                    try:
-                        # [Senior Fix] Standard CCXT Symbol for Validation
-                        symbol_cancel = pair.upper().replace("IDR", "/IDR")
-                        self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr")})
-                        # Hapus lokal sebagai fallback jika PrivateWS miss event
-                        db.delete_position(pair)
+                if data.get('status') == "PENDING_BUY":
+                    if self.dry_run:
+                        # Di mode simulasi, anggap selalu filled seketika (sudah dihandle OPEN di main.py, 
+                        # fallback hapus aja kalau somehow nyangkut)
+                        continue
+    
+                    order_id = data.get('entry_order_id')
+                    if not order_id:
+                        continue
                         
-                        msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
-                        print(msg.replace('*', '').replace('\n', ' | '))
-                        send_telegram_message(msg)
-                    except Exception as e:
-                        print(f"Failed to auto-cancel {pair}: {e}")
+                    entry_time = datetime.fromisoformat(data['timestamp'])
+                    time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
                     
-                    # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
-                continue
-            # --- END AUTO-CANCEL ---
-
-            # Import the required variables dynamically
-            from config import (
-                FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR,
-                TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT
-            )
-            
-            # Base TP calculation from percentage
-            dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
-            base_tp_price = entry_price * (1 + dynamic_tp_pct)
-            
-            # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
-            exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
-            
-            # Target TP minimal agar tidak rugi fee
-            tp_price = max(base_tp_price, exact_tp_price)
-            
-            # Default Initial Stop Loss
-            dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
-            initial_sl_price = entry_price * (1 + dynamic_sl_pct)
-            
-            # --- [Advanced] Adaptive Trailing Stop Logic ---
-            highest_price = data.get('highest_price', entry_price)
-            trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
-            
-            current_profit_pct = (current_price - entry_price) / entry_price
-            
-            if current_price > highest_price:
-                highest_price = current_price
-                positions[pair]['highest_price'] = highest_price
+                    # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
+                    spread_pct = (current_price - entry_price) / entry_price
+                    
+                    is_timeout = time_elapsed > PENDING_BUY_TIMEOUT_MINUTES
+                    is_too_far = spread_pct > PENDING_BUY_MAX_SPREAD_PCT
+                    
+                    if is_timeout or is_too_far:
+                        reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
+                        try:
+                            # [Senior Fix] Standard CCXT Symbol for Validation
+                            symbol_cancel = pair.upper().replace("IDR", "/IDR")
+                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr")})
+                            # Hapus lokal sebagai fallback jika PrivateWS miss event
+                            db.delete_position(pair)
+                            
+                            msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
+                            print(msg.replace('*', '').replace('\n', ' | '))
+                            send_telegram_message(msg)
+                        except Exception as e:
+                            print(f"Failed to auto-cancel {pair}: {e}")
+                        
+                        # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
+                    continue
+                # --- END AUTO-CANCEL ---
+    
+                # Import the required variables dynamically
+                from config import (
+                    FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR,
+                    TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT
+                )
                 
-                # Jarak trailing adaptif: Semakin untung, semakin ketat
-                # [Optimization] Mengunci profit lebih agresif saat harga melonjak
-                dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.5%
-                if current_profit_pct >= 0.04:   # Profit > 4%
-                    dist_pct = 0.002            # Jarak sangat ketat (0.2%)
-                elif current_profit_pct >= 0.02: # Profit > 2%
-                    dist_pct = 0.0035           # Jarak ketat (0.35%)
-
-                if current_profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
-                    new_trailing_sl = highest_price * (1 - dist_pct)
-                    if new_trailing_sl > trailing_sl_price:
-                        trailing_sl_price = new_trailing_sl
-                        positions[pair]['trailing_sl_price'] = trailing_sl_price
+                # Base TP calculation from percentage
+                dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
+                base_tp_price = entry_price * (1 + dynamic_tp_pct)
                 
-                # [Senior Sync] Update DB agar state trailing tidak hilang saat restart
-                db.upsert_position(pair, positions[pair])
-            
-            active_sl_price = max(initial_sl_price, trailing_sl_price)
-
-            # --- [Defensive] Break-Even Stop Loss ---
-            # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
-            from config import FEE_BUY_TAKER, FEE_SELL_TAKER
-            round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
-            break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
-            
-            if current_profit_pct >= 0.01 and active_sl_price < break_even_price:
-                active_sl_price = break_even_price
-                if positions[pair].get('trailing_sl_price', 0) < break_even_price:
-                    positions[pair]['trailing_sl_price'] = break_even_price
+                # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
+                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
+                
+                # Target TP minimal agar tidak rugi fee
+                tp_price = max(base_tp_price, exact_tp_price)
+                
+                # Default Initial Stop Loss
+                dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
+                initial_sl_price = entry_price * (1 + dynamic_sl_pct)
+                
+                # --- [Advanced] Adaptive Trailing Stop Logic ---
+                highest_price = data.get('highest_price', entry_price)
+                trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
+                
+                current_profit_pct = (current_price - entry_price) / entry_price
+                
+                if current_price > highest_price:
+                    highest_price = current_price
+                    positions[pair]['highest_price'] = highest_price
+                    
+                    # Jarak trailing adaptif: Semakin untung, semakin ketat
+                    # [Optimization] Mengunci profit lebih agresif saat harga melonjak
+                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.5%
+                    if current_profit_pct >= 0.04:   # Profit > 4%
+                        dist_pct = 0.002            # Jarak sangat ketat (0.2%)
+                    elif current_profit_pct >= 0.02: # Profit > 2%
+                        dist_pct = 0.0035           # Jarak ketat (0.35%)
+    
+                    if current_profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                        new_trailing_sl = highest_price * (1 - dist_pct)
+                        if new_trailing_sl > trailing_sl_price:
+                            trailing_sl_price = new_trailing_sl
+                            positions[pair]['trailing_sl_price'] = trailing_sl_price
+                    
+                    # [Senior Sync] Update DB agar state trailing tidak hilang saat restart
                     db.upsert_position(pair, positions[pair])
-                    log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
-
-            # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
-            # Syarat 1: Profit > 1.0% -> Amankan sekarang (Abaikan RSI)
-            # Syarat 2: Profit > Fee + 0.2% dan RSI mulai jenuh (>60)
-            # Syarat 3: Stagnancy Exit (Hold > 20m & Profit > Fee) -> Free up capital
-            try:
-                current_rsi = data.get('rsi', 50)
-                is_profit_secure = current_profit_pct >= 0.01
-                is_rapid_momentum_fade = current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 60
                 
-                # Hitung umur posisi dengan aman
-                import pandas as pd
-                pos_ts = pd.to_datetime(data['timestamp'])
-                pos_age_min = (pd.Timestamp.now() - pos_ts).total_seconds() / 60
-                is_stagnant_profit = pos_age_min > 20 and current_profit_pct > (round_trip_fee + 0.001)
-
-                if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
-                    reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
-                    log_msg = f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% (Age: {pos_age_min:.0f}m)"
-                    log_message(log_msg)
-                    db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
+                active_sl_price = max(initial_sl_price, trailing_sl_price)
+    
+                # --- [Defensive] Break-Even Stop Loss ---
+                # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
+                from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+                round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
+                break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
+                
+                if current_profit_pct >= 0.01 and active_sl_price < break_even_price:
+                    active_sl_price = break_even_price
+                    if positions[pair].get('trailing_sl_price', 0) < break_even_price:
+                        positions[pair]['trailing_sl_price'] = break_even_price
+                        db.upsert_position(pair, positions[pair])
+                        log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
+    
+                # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
+                # Syarat 1: Profit > 1.0% -> Amankan sekarang (Abaikan RSI)
+                # Syarat 2: Profit > Fee + 0.2% dan RSI mulai jenuh (>60)
+                # Syarat 3: Stagnancy Exit (Hold > 20m & Profit > Fee) -> Free up capital
+                try:
+                    current_rsi = data.get('rsi', 50)
+                    is_profit_secure = current_profit_pct >= 0.01
+                    is_rapid_momentum_fade = current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 60
                     
-                    order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
-                                              entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    # Hitung umur posisi dengan aman
+                    import pandas as pd
+                    pos_ts = pd.to_datetime(data['timestamp'])
+                    pos_age_min = (pd.Timestamp.now() - pos_ts).total_seconds() / 60
+                    is_stagnant_profit = pos_age_min > 20 and current_profit_pct > (round_trip_fee + 0.001)
+    
+                    if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
+                        reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
+                        log_msg = f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% (Age: {pos_age_min:.0f}m)"
+                        log_message(log_msg)
+                        db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
+                        
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id:
+                            positions[pair]["status"] = "EXITING"
+                            positions[pair]["exit_order_id"] = order_id
+                        continue
+                except Exception as e:
+                    log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
                     if order_id:
                         positions[pair]["status"] = "EXITING"
                         positions[pair]["exit_order_id"] = order_id
                     continue
+    
+                # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
+                # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.
+                ai_veto, veto_reason = False, ""
+                if self.oracle:
+                    ai_veto, veto_reason = self.oracle.check_llm_veto(pair)
+                
+                # 1. AI Emergency Exit (Highest Priority)
+                if ai_veto and current_profit_pct > -0.005: # Hanya exit jika bukan sedang dalam kerugian besar (cut loss AI)
+                    msg = (
+                        f"🚨 *AI EMERGENCY EXIT* 🚨\n"
+                        f"Pair: `{pair}`\n"
+                        f"Alasan: `{veto_reason}`\n"
+                        f"Profit: {current_profit_pct*100:+.2f}% (Closing now)"
+                    )
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    
+                    order_id = self.execute_exit(pair, amount, current_price, "AI_VETO_EXIT",
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        continue
+    
+                # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
+                if current_price >= tp_price:
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    entry_time = datetime.fromisoformat(data['timestamp'])
+                    duration = datetime.now() - entry_time
+                    duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+    
+                    msg = (
+                        f"🎯 *TAKE PROFIT* 🎯\n"
+                        f"Pair: `{pair}`\n"
+                        f"Entry: Rp {entry_price:,.2f}\n"
+                        f"Exit: Rp {current_price:,.2f}\n"
+                        f"PnL: {pnl_pct:+.2f}%\n"
+                        f"Hold: {duration_str}"
+                    )
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    
+                    order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        positions[pair]["exit_order_id"] = order_id
+    
+                # 3. Stop Loss (Initial or Trailing)
+                elif current_price <= active_sl_price:
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    entry_time = datetime.fromisoformat(data['timestamp'])
+                    duration = datetime.now() - entry_time
+                    duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+    
+                    # Deteksi tipe exit proteksi
+                    is_trailing_hit = active_sl_price > break_even_price
+                    is_be_hit = active_sl_price == break_even_price
+                    
+                    if is_be_hit:
+                        reason_str = "BREAK-EVEN SL"
+                        log_reason = "BREAK_EVEN"
+                    elif is_trailing_hit:
+                        reason_str = "TRAILING STOP"
+                        log_reason = "TRAILING_STOP"
+                    else:
+                        reason_str = "STOP LOSS"
+                        log_reason = "STOP_LOSS"
+                    
+                    msg = (
+                        f"⚠️ *{reason_str}* ⚠️\n"
+                        f"Pair: `{pair}`\n"
+                        f"Entry: Rp {entry_price:,.2f}\n"
+                        f"Exit: Rp {current_price:,.2f}\n"
+                        f"PnL: {pnl_pct:+.2f}%\n"
+                        f"Hold: {duration_str}"
+                    )
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    
+                    order_id = self.execute_exit(pair, amount, current_price, log_reason,
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        positions[pair]["exit_order_id"] = order_id
             except Exception as e:
-                log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
-                if order_id:
-                    positions[pair]["status"] = "EXITING"
-                    positions[pair]["exit_order_id"] = order_id
-                continue
-
-            # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
-            # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.
-            ai_veto, veto_reason = False, ""
-            if self.oracle:
-                ai_veto, veto_reason = self.oracle.check_llm_veto(pair)
-            
-            # 1. AI Emergency Exit (Highest Priority)
-            if ai_veto and current_profit_pct > -0.005: # Hanya exit jika bukan sedang dalam kerugian besar (cut loss AI)
-                msg = (
-                    f"🚨 *AI EMERGENCY EXIT* 🚨\n"
-                    f"Pair: `{pair}`\n"
-                    f"Alasan: `{veto_reason}`\n"
-                    f"Profit: {current_profit_pct*100:+.2f}% (Closing now)"
-                )
-                print(msg.replace('*', '').replace('\n', ' | '))
-                send_telegram_message(msg)
-                
-                order_id = self.execute_exit(pair, amount, current_price, "AI_VETO_EXIT",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                if order_id:
-                    positions[pair]["status"] = "EXITING"
-                    continue
-
-            # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
-            if current_price >= tp_price:
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                entry_time = datetime.fromisoformat(data['timestamp'])
-                duration = datetime.now() - entry_time
-                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
-
-                msg = (
-                    f"🎯 *TAKE PROFIT* 🎯\n"
-                    f"Pair: `{pair}`\n"
-                    f"Entry: Rp {entry_price:,.2f}\n"
-                    f"Exit: Rp {current_price:,.2f}\n"
-                    f"PnL: {pnl_pct:+.2f}%\n"
-                    f"Hold: {duration_str}"
-                )
-                print(msg.replace('*', '').replace('\n', ' | '))
-                send_telegram_message(msg)
-                
-                order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                if order_id:
-                    positions[pair]["status"] = "EXITING"
-                    positions[pair]["exit_order_id"] = order_id
-
-            # 3. Stop Loss (Initial or Trailing)
-            elif current_price <= active_sl_price:
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                entry_time = datetime.fromisoformat(data['timestamp'])
-                duration = datetime.now() - entry_time
-                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
-
-                # Deteksi tipe exit proteksi
-                is_trailing_hit = active_sl_price > break_even_price
-                is_be_hit = active_sl_price == break_even_price
-                
-                if is_be_hit:
-                    reason_str = "BREAK-EVEN SL"
-                    log_reason = "BREAK_EVEN"
-                elif is_trailing_hit:
-                    reason_str = "TRAILING STOP"
-                    log_reason = "TRAILING_STOP"
-                else:
-                    reason_str = "STOP LOSS"
-                    log_reason = "STOP_LOSS"
-                
-                msg = (
-                    f"⚠️ *{reason_str}* ⚠️\n"
-                    f"Pair: `{pair}`\n"
-                    f"Entry: Rp {entry_price:,.2f}\n"
-                    f"Exit: Rp {current_price:,.2f}\n"
-                    f"PnL: {pnl_pct:+.2f}%\n"
-                    f"Hold: {duration_str}"
-                )
-                print(msg.replace('*', '').replace('\n', ' | '))
-                send_telegram_message(msg)
-                
-                order_id = self.execute_exit(pair, amount, current_price, log_reason,
-                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                if order_id:
-                    positions[pair]["status"] = "EXITING"
-                    positions[pair]["exit_order_id"] = order_id
+                log_message(f"🚨 Critical error in monitoring loop for {pair}: {e}")
+                import traceback
+                log_message(traceback.format_exc())
 
         self.save_positions(positions)
 
@@ -364,7 +374,9 @@ class ExitManager:
             
             return order.get('id')
         except Exception as e:
-            print(f"Critical error in execute_exit for {pair}: {e}")
+            err_msg = f"Critical error in execute_exit for {pair}: {e}"
+            print(err_msg)
+            db.log_system_event(pair, "EXIT_ERROR", err_msg, 'ERROR')
             return None
                 
     def handle_order_update(self, order):
@@ -402,7 +414,13 @@ class ExitManager:
                     return
 
             # 2. Cek apakah ini Buy Order reguler yang baru terisi
-            # (Sudah di-handle oleh main.py saat create_order, tapi bisa di-sync di sini jika perlu)
+            positions = db.get_open_positions()
+            for p_pair, p_data in positions.items():
+                if p_data.get('entry_order_id') == order_id and p_data.get('status') == "PENDING_BUY":
+                    log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
+                    db.update_position_status(p_pair, "OPEN")
+                    send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nStatus: `OPEN`")
+                    return
             
         except Exception as e:
             print(f"Error handling order update: {e}")
@@ -423,8 +441,24 @@ class ExitManager:
                 coin = pair.replace('idr', '').upper()
                 amount_on_exchange = float(balance['total'].get(coin, 0))
                 
-                # Jika di DB ada posisi tapi di bursa koinnya tidak ada (sudah terjual manual/error)
-                if amount_on_exchange < (pos['amount'] * 0.9): # Toleransi 10% untuk pembulatan
+                # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
+                if pos.get('status') == "PENDING_BUY":
+                    if amount_on_exchange >= (pos['amount_crypto'] * 0.9):
+                        log_message(f"🔄 Reality Sync: {pair} was PENDING_BUY but balance exists. Promoting to OPEN and syncing amount.")
+                        pos['status'] = "OPEN"
+                        pos['amount_crypto'] = amount_on_exchange
+                        db.upsert_position(pair, pos)
+                        continue
+
+                # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
+                if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:
+                    if 0.8 < (amount_on_exchange / pos['amount_crypto']) < 1.2:
+                        # log_message(f"⚖️ Amount Sync: {pair} amount adjusted {pos['amount_crypto']} -> {amount_on_exchange}")
+                        pos['amount_crypto'] = amount_on_exchange
+                        db.upsert_position(pair, pos)
+                # Gunakan amount_crypto yang konsisten dengan schema DB
+                target_amount = pos.get('amount_crypto') or pos.get('amount', 0)
+                if amount_on_exchange < (target_amount * 0.8): # Toleransi lebih longgar 20%
                     log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Marking as GHOST.")
                     db.delete_position(pair)
                     if pair in self.jaring_orders:

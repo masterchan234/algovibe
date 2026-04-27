@@ -75,6 +75,9 @@ class ScalperBot:
         # ── Restore LLM Lessons dari DB (survive restart) ──
         self.oracle._load_lessons_from_db()
         
+        # ── Reality Sync on Startup ──
+        self.exit_manager.reconcile_with_exchange()
+        
         # ── Backfill Historical Data (Warm-up) ───────────────────────────
         self._backfill_historical_data()
         
@@ -537,7 +540,7 @@ class ScalperBot:
 
             # [Senior Fix] Pastikan koin yang sedang di-HOLD selalu masuk radar tracking
             open_positions = db.get_open_positions()
-            held_pairs = [pos[0] for pos in open_positions] if open_positions else []
+            held_pairs = list(open_positions.keys()) if open_positions else []
             
             # Tambahkan koin yang di-hold ke high_speed jika belum ada
             current_track_pairs = [p['pair'] for p in high_speed]
@@ -594,7 +597,7 @@ class ScalperBot:
                 db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
                                      signal=signal_verdict,
                                      ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
-                                     volatility=p['volatility'], score=p['score'])
+                                     volatility=p.get('volatility', 0), score=p.get('score', 0))
 
                 # SKIP TRADE TRIGGER JIKA SUDAH PUNYA POSISI ATAU BLACKLIST
                 if pair in open_positions or pair in self.blacklist:

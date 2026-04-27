@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import logging
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -671,7 +672,7 @@ class Database:
             with self.get_connection() as conn:
                 # 1. Prune system_events (logs)
                 res1 = conn.execute(
-                    "DELETE FROM system_events WHERE timestamp < datetime('now', ?)",
+                    "DELETE FROM system_events WHERE created_at < datetime('now', ?)",
                     (f'-{hours} hours',)
                 )
                 # 2. Prune market_depth (data orderbook lama yang tidak relevan)
