@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AlgoVibe Mobile — Trading Terminal</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        /* Premium Mobile Experience Styles */
+        body {
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at top right, #1a1a2e, #0f0f1a);
+            color: #e0e0e0;
+        }
+
+        .glass-panel {
+            background: rgba(30, 30, 50, 0.6) !important;
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 16px !important;
+            overflow: hidden;
+        }
+
+        .mobile-header {
+            height: 60px;
+            background: rgba(15, 15, 26, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        /* Trade Cards Layout */
+        .cards-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 10px;
+        }
+
+        .trade-card {
+            background: rgba(40, 40, 70, 0.4);
+            border-radius: 12px;
+            padding: 12px;
+            border: 1px solid rgba(255,255,255,0.05);
+            animation: slideUp 0.3s ease-out;
+        }
+
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .card-pair { font-size: 16px; font-weight: 700; color: #fff; }
+        .card-pnl { font-size: 14px; font-weight: 700; }
+        .card-pnl.up { color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.3); }
+        .card-pnl.down { color: #ff4d4d; text-shadow: 0 0 10px rgba(255,77,77,0.3); }
+
+        .card-body {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            font-size: 12px;
+            color: #b0b0b0;
+        }
+
+        .card-footer {
+            margin-top: 12px;
+            display: flex;
+            gap: 8px;
+        }
+
+        /* CTA: Emergency Exit Button */
+        .btn-exit {
+            flex: 1;
+            background: linear-gradient(135deg, #ff4d4d, #b30000);
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 12px;
+            text-transform: uppercase;
+            box-shadow: 0 4px 15px rgba(255, 77, 77, 0.2);
+            transition: 0.2s;
+        }
+
+        .btn-exit:active { transform: scale(0.95); opacity: 0.8; }
+
+        .btn-view {
+            width: 40px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* SPA-style Tab Display with Animations */
+        .mobile-tab-content {
+            display: none;
+            opacity: 0;
+            transform: translateY(10px);
+            animation: tabFadeIn 0.3s forwards cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        @keyframes tabFadeIn {
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        body.tab-market .tab-market-content { display: block; }
+        body.tab-chart .tab-chart-content { display: block; }
+        body.tab-trades .tab-trades-content { display: block; }
+
+        /* Global Stats Summary */
+        .global-pnl-summary {
+            padding: 15px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(135deg, rgba(50, 50, 80, 0.4), rgba(30, 30, 50, 0.4));
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .pnl-label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+        .pnl-value { font-size: 20px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+
+        .floating-trade-btn:active { transform: scale(0.9) rotate(5deg); }
+
+        /* Container & Scrolling */
+        .app-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .mobile-content {
+            flex: 1;
+            overflow-y: auto !important;
+            padding: 12px;
+            padding-bottom: 100px;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        /* Chart TF Buttons */
+        .chart-tf-btn {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #888;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        .chart-tf-btn.active {
+            background: #2563eb;
+            color: white;
+            border-color: #3b82f6;
+        }
+    </style>
+</head>
+
+<body class="tab-chart">
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeAllSidebars()"></div>
+
+    <div class="app-container">
+        <!-- ── Top Header ── -->
+        <header class="mobile-header" style="height: 60px; padding: 0 15px; display: flex; justify-content: space-between; align-items: center;">
+            <div class="logo-section">
+                <div class="logo-icon" style="width:28px; height:28px; font-size:12px; background: #2563eb;">AV</div>
+                <div id="bot-status-badge" class="bot-status-badge status-loading">
+                    <span class="status-dot"></span>
+                    <span id="bot-status-text" style="font-size: 10px; font-weight: 700;">BOT ACTIVE</span>
+                </div>
+            </div>
+            <div id="market-regime-badge" class="regime-badge" style="margin: 0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
+                <span id="market-regime-text" style="font-size: 10px; font-weight: 700;">BULLISH</span>
+            </div>
+        </header>
+
+        <main class="mobile-content">
+
+            <!-- TAB 1: MARKET -->
+            <div class="mobile-tab-content tab-market-content">
+                <div class="panel glass-panel" style="margin-bottom: 12px;">
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">🔍 Search Opportunity</div>
+                    <div class="search-wrap" style="padding: 12px;">
+                        <input type="text" id="market-search" placeholder="Search pair (e.g. BTC, ETH)..." 
+                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 12px; color: #fff; font-size: 14px; outline: none;">
+                    </div>
+                </div>
+
+                <div class="panel glass-panel" style="margin-bottom: 12px;">
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">📡 Momentum Radar</div>
+                    <div id="trending-list" class="sidebar-list" style="max-height: none;">
+                        <div class="empty-state">Scanning markets...</div>
+                    </div>
+                </div>
+            </div>
+
+        <!-- TAB 2: CHART (Default) -->
+            <div class="mobile-tab-content tab-chart-content">
+                <div class="panel glass-panel chart-panel" style="margin-bottom: 12px;">
+                    <div class="chart-header" style="flex-direction: column; align-items: flex-start; gap: 8px;">
+                        <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+                            <h1 id="active-pair" style="font-size: 1.4rem; color: #fff;">BTC/IDR</h1>
+                            <!-- Timeframe Selectors (Same as Desktop) -->
+                            <div class="chart-timeframes" style="display:flex; gap:4px; background: rgba(0,0,0,0.3); padding:2px; border-radius:6px;">
+                                <button class="chart-tf-btn active" onclick="setChartTimeframe('LIVE')">LIVE</button>
+                                <button class="chart-tf-btn" onclick="setChartTimeframe('5m')">5M</button>
+                                <button class="chart-tf-btn" onclick="setChartTimeframe('24h')">24H</button>
+                            </div>
+                        </div>
+                        <div class="chart-meta" style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+                            <span class="chart-subtitle" id="pair-trend" style="color: #00ff88;">STRONG BULLISH</span>
+                            <div class="chart-controls" style="display:flex; gap:5px;">
+                                <button id="chart-area-btn" class="chart-toggle active" style="font-size: 9px; padding: 2px 6px;" onclick="setChartMode('area')">LINE</button>
+                                <button id="chart-candle-btn" class="chart-toggle" style="font-size: 9px; padding: 2px 6px;" onclick="setChartMode('candle')">CANDLE</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="chart-canvas" style="position:relative; margin-top: 10px; height: 220px;">
+                        <canvas id="custom-chart"></canvas>
+                        <canvas id="price-axis-canvas"></canvas>
+                        <div id="chart-tooltip" class="chart-tooltip"></div>
+                    </div>
+                </div>
+
+                <div class="panel glass-panel llm-panel" style="margin-bottom: 12px;">
+                    <div class="panel-header" style="color: #a855f7; font-size: 11px; border-bottom: 1px solid rgba(255,255,255,0.05);">🧠 AI Insights</div>
+                    <div id="llm-insight-text" style="font-size: 12px; padding: 12px; line-height: 1.5; color: #ccc;">
+                        Analyzing market data...
+                    </div>
+                </div>
+
+                <!-- Orderbook & Market Activity Section (New for Mobile Chart) -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                    <div class="panel glass-panel" style="height: 250px;">
+                        <div class="panel-header" style="font-size: 10px;">📊 Orderbook</div>
+                        <div id="ob-container" style="flex: 1; overflow: hidden; display: flex; flex-direction: column; font-size: 10px;">
+                            <div class="ob-header" style="display: grid; grid-template-columns: 1fr 1fr; padding: 4px 8px; color: rgba(255,255,255,0.4); font-size: 8px;">
+                                <span>BID</span>
+                                <span style="text-align: right;">ASK</span>
+                            </div>
+                            <div class="ob-lists" style="flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; overflow: hidden; padding: 4px;">
+                                <div id="ob-bids" class="ob-list side-bids" style="display: flex; flex-direction: column; gap: 1px;"></div>
+                                <div id="ob-asks" class="ob-list side-asks" style="display: flex; flex-direction: column; gap: 1px; text-align: right;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel glass-panel" style="height: 250px;">
+                        <div class="panel-header" style="font-size: 10px;">🕒 Recent Trades</div>
+                        <div class="trades-container" style="flex: 1; overflow-y: auto; padding: 4px; font-size: 9px; font-family: var(--font-mono);">
+                            <div id="market-trades-list" class="market-trades-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: TRADES & LOGS -->
+            <div class="mobile-tab-content tab-trades-content">
+                <!-- GLOBAL SUMMARY (Now inside Trades Tab only) -->
+                <div class="global-pnl-summary" style="margin-bottom: 15px; padding: 15px; border-radius: 16px; background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.1);">
+                    <div>
+                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Net Profit Today</div>
+                        <div id="daily-pnl" class="pnl-value" style="color: #00ff88; font-size: 20px; font-weight: 800;">Rp 0</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Win Rate</div>
+                        <div id="win-rate" class="pnl-value" style="color: #fff; font-size: 20px; font-weight: 800;">0%</div>
+                    </div>
+                </div>
+
+                <div class="panel glass-panel" style="margin-bottom: 12px; min-height: 200px;">
+                    <div class="panel-header" style="justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <span style="font-weight:700;">Active Positions</span>
+                        <div class="ledger-tabs" style="background: rgba(0,0,0,0.3); padding: 3px; border-radius: 8px;">
+                            <button id="tab-open" class="tab-btn active" style="font-size: 10px; border-radius: 6px;" onclick="switchLedgerTab('OPEN')">OPEN <span id="open-count" class="badge">0</span></button>
+                            <button id="tab-closed" class="tab-btn" style="font-size: 10px; border-radius: 6px;" onclick="switchLedgerTab('CLOSED')">CLOSED <span id="closed-count" class="badge">0</span></button>
+                        </div>
+                    </div>
+                    
+                    <div id="trade-cards-container" class="cards-list">
+                        <div class="empty-state">No active trades.</div>
+                    </div>
+                </div>
+
+                <div class="panel glass-panel log-panel">
+                    <div class="panel-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">SYSTEM EVENTS</div>
+                    <div class="log-container" id="ai-logs" style="max-height: 400px; font-size: 11px;">
+                        <div class="log-placeholder">Waiting for events...</div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- ── Bottom Nav ── -->
+        <nav class="mobile-nav">
+            <div class="mobile-nav-item" onclick="switchMobileTab('market', this)">
+                <span class="icon">📊</span>
+                <span class="label">Market</span>
+            </div>
+            <div class="mobile-nav-item active" onclick="switchMobileTab('chart', this)">
+                <span class="icon">📈</span>
+                <span class="label">Chart</span>
+            </div>
+            <div class="mobile-nav-item" onclick="switchMobileTab('trades', this)">
+                <span class="icon">📜</span>
+                <span class="label">Trades</span>
+            </div>
+        </nav>
+    </div>
+
+    <!-- Hidden elements required by script.js to avoid errors -->
+    <div id="watchlist-count" style="display:none"></div>
+    <div id="market-sentiment-wrap" style="display:none">
+        <span id="sentiment-icon"></span>
+        <span id="sentiment-value"></span>
+    </div>
+    <div id="market-ticker" style="display:none"><div id="ticker-content"></div></div>
+
+    <script src="script.js"></script>
+    <script>
+        // Detection: If user rotates back to large screen, redirect to desktop
+        window.addEventListener('resize', () => {
+            if (window.innerWidth > 900) { window.location.href = 'index.html'; }
+        });
+        
+        // Custom Haptic for Mobile Page
+        document.querySelectorAll('.tab-btn, .mobile-nav-item, .chart-tf-btn').forEach(el => {
+            el.addEventListener('click', () => {
+                if (navigator.vibrate) navigator.vibrate(8);
+            });
+        });
+    </script>
+</body>
+
+</html>

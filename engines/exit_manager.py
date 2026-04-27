@@ -36,6 +36,29 @@ class ExitManager:
             return
 
         modified_pairs = set()
+        
+        # --- [MANUAL DASHBOARD EXIT] ---
+        manual_exit_pair = db.get_state("trigger_exit_pair")
+        if manual_exit_pair:
+            db.save_state("trigger_exit_pair", "") # Reset immediately
+            if manual_exit_pair in positions and positions[manual_exit_pair].get('status') == "OPEN":
+                log_message(f"🚨 [MANUAL EXIT] Triggered from dashboard for {manual_exit_pair}")
+                data = positions[manual_exit_pair]
+                # Ambil harga terakhir dari ticker terbaru
+                price = float(current_tickers[manual_exit_pair].get('last') or current_tickers[manual_exit_pair].get('buy') or 0)
+                if price > 0:
+                    order_id = self.execute_exit(
+                        manual_exit_pair, data.get('amount_crypto', 0), price, "MANUAL_DASHBOARD_EXIT",
+                        entry_price=data.get('entry_price', 0), amount_idr=data.get('amount_idr', 0),
+                        position_data=data
+                    )
+                    if order_id:
+                        positions[manual_exit_pair]["status"] = "EXITING"
+                        positions[manual_exit_pair]["exit_order_id"] = order_id
+                        modified_pairs.add(manual_exit_pair)
+                        self.save_positions(positions, modified_pairs)
+                        return # Exit early to process manual order
+
 
         # --- [PORTFOLIO BASKET EXIT / CROSS-ASSET HEDGING] ---
         # Menutup serentak semua posisi ketika profit gabungan cukup untuk meng-cover posisi yang rugi

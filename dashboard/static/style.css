@@ -2114,8 +2114,17 @@ tr:hover td { background: var(--bg-hover); }
     .ledger-table { min-width: 600px; }
 
     /* Stats bar on mobile */
-    .stats-bar { grid-template-columns: repeat(2, 1fr); gap: 6px; }
-    .stat-item { padding: 8px; }
+    .ledger-stats-bar { display: grid !important; grid-template-columns: repeat(2, 1fr); gap: 10px !important; padding: 10px 0; }
+    .ledger-stats-bar > div { align-items: flex-start !important; background: var(--bg-panel-2); padding: 8px; border-radius: 8px; }
+}
+
+/* --- Global Mobile Optimization Tokens --- */
+@media (max-width: 900px) {
+    :root {
+        --font-size-base: 13px;
+    }
+    .panel-header { font-size: 11px; padding: 8px 12px; }
+    .btn { padding: 6px 12px; font-size: 11px; }
     .stat-label { font-size: 8px; }
     .stat-value { font-size: 11px; }
 }

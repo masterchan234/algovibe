@@ -312,6 +312,12 @@ def trigger_analysis(pair):
     db.save_state("trigger_analysis_pair", pair.lower())
     return jsonify({"status": "requested", "pair": pair})
 
+@app.route('/api/exit/<pair>', methods=['POST'])
+def trigger_exit(pair):
+    """Force an emergency exit for a specific pair via dashboard."""
+    db.save_state("trigger_exit_pair", pair.lower())
+    return jsonify({"status": "exit_requested", "pair": pair})
+
 @app.route('/api/bot-status')
 def get_bot_status():
     """Status bot: online/offline/dry_run, uptime, last trade."""

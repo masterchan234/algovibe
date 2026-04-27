@@ -419,38 +419,67 @@ class AlgoChart {
         const r = this.canvas.getBoundingClientRect(), W = r.width, H = r.height, ctx = this.ctx;
         ctx.clearRect(0, 0, W, H); if (!this.data.length) return;
         const padX = 12;
-        const vals = this.data.map(d => d.value), minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
+        const vals = this.data.map(d => d.value), minV = Math.min(...vals), maxV = Math.max(...vals), range = (maxV - minV) || 1;
         this._lastMin = minV; this._lastMax = maxV;
         const pad = H * .1, dH = H - pad * 2, stepX = (W - padX * 2) / Math.max(1, this.data.length - 1);
         const isLight = document.documentElement.getAttribute('data-theme') === 'light';
         const toY = v => H - pad - ((v - minV) / range) * dH;
         const pts = vals.map((v, i) => ({ x: padX + i * stepX, y: toY(v) }));
 
-        // Horizontal Crosshair Line
+        // 1. GRID LINES (Drawn first)
+        this._drawPriceAxis(minV, maxV, pad, isLight);
+
+        // 2. CROSSHAIR GUIDES
         if (this.hY !== undefined && this.hY !== -1) {
             ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.moveTo(0, this.hY); ctx.lineTo(W, this.hY);
-            ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+            ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
         }
 
-        // Gradient fill
-        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); pts.forEach(p => ctx.lineTo(p.x, p.y));
-        ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
-        const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, 'rgba(59,130,246,.15)'); g.addColorStop(1, 'rgba(59,130,246,0)');
-        ctx.fillStyle = g; ctx.fill();
-        // MA + BB overlays (di bawah line utama)
+        // 3. OVERLAYS (MA, BB)
         this._drawOverlays(vals, toY, padX, stepX, W, H, pad, isLight);
-        // Main line (di atas overlay)
-        ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-        ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
-        // Price axis
-        this._drawPriceAxis(minV, maxV, pad, isLight);
-        // Vertical Crosshair dot
+
+        // 4. MAIN GRADIENT (SMOOTH)
+        const prob = this.currentProb || 0;
+        const lineCol = prob > 0.75 ? '#a855f7' : '#3b82f6';
+        const glowCol = prob > 0.75 ? 'rgba(168,85,247,0.6)' : 'rgba(59,130,246,0.6)';
+        const gradCol = prob > 0.75 ? 'rgba(168,85,247,0.25)' : 'rgba(59,130,246,0.25)';
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 0; i < pts.length - 1; i++) {
+            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 2;
+            ctx.bezierCurveTo(cp1x, pts[i].y, cp1x, pts[i+1].y, pts[i+1].x, pts[i+1].y);
+        }
+        ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, gradCol);
+        g.addColorStop(0.5, gradCol.replace('0.25', '0.05'));
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.fill();
+
+        // 5. MAIN LINE (NEON GLOW)
+        ctx.save();
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = glowCol;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 0; i < pts.length - 1; i++) {
+            const cp1x = pts[i].x + (pts[i+1].x - pts[i].x) / 2;
+            ctx.bezierCurveTo(cp1x, pts[i].y, cp1x, pts[i+1].y, pts[i+1].x, pts[i+1].y);
+        }
+        ctx.strokeStyle = lineCol;
+        ctx.lineWidth = 2.8;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+        ctx.restore();
+
+        // 6. VERTICAL CROSSHAIR
         if (this.hI >= 0 && this.hI < pts.length) {
             const p = pts[this.hI];
             ctx.beginPath(); ctx.setLineDash([3, 4]); ctx.moveTo(p.x, 0); ctx.lineTo(p.x, H);
-            ctx.strokeStyle = isLight ? 'rgba(0,0,0,.1)' : 'rgba(255,255,255,.1)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
-            ctx.beginPath(); ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2); ctx.fillStyle = isLight ? '#ffffff' : '#08090b'; ctx.fill();
-            ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fillStyle = '#3b82f6'; ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
         }
     }
     _drawCandle() {
@@ -485,12 +514,30 @@ class AlgoChart {
         this._drawOverlays(closes, toY, padX, stepX, W, H, pad, isLight);
         // Candles
         ohlc.forEach((c, i) => {
-            const cx = padX + (i + .5) * slotW, bull = c.close >= c.open, col = bull ? '#10b981' : '#ef4444';
-            ctx.strokeStyle = col; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.moveTo(cx, toY(c.high)); ctx.lineTo(cx, toY(c.low)); ctx.stroke();
-            const bT = toY(Math.max(c.open, c.close)), bH = Math.max(1.5, toY(Math.min(c.open, c.close)) - bT);
-            ctx.fillStyle = bull ? 'rgba(16,185,129,.75)' : 'rgba(239,68,68,.75)';
-            ctx.fillRect(cx - bW / 2, bT, bW, bH); ctx.strokeStyle = col; ctx.lineWidth = .8; ctx.strokeRect(cx - bW / 2, bT, bW, bH);
+            const cx = padX + (i + .5) * slotW, bull = c.close >= c.open;
+            const col = bull ? '#10b981' : '#ef4444';
+            const borderCol = bull ? '#059669' : '#b91c1c';
+            
+            // Wick
+            ctx.strokeStyle = col; 
+            ctx.lineWidth = 1;
+            ctx.beginPath(); 
+            ctx.moveTo(cx, toY(c.high)); 
+            ctx.lineTo(cx, toY(c.low)); 
+            ctx.stroke();
+            
+            // Body
+            const bT = toY(Math.max(c.open, c.close));
+            const bH = Math.max(1.5, toY(Math.min(c.open, c.close)) - bT);
+            
+            // Shadow for depth
+            ctx.fillStyle = bull ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)';
+            ctx.fillRect(cx - bW / 2, bT, bW, bH);
+            
+            // Border
+            ctx.strokeStyle = borderCol;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(cx - bW / 2, bT, bW, bH);
         });
         // Price axis
         this._drawPriceAxis(minV, maxV, pad, isLight);
@@ -585,8 +632,40 @@ async function selectPair(pair, trend, prob) {
     }
 
     refreshWatchlist();
-    if (chart) chart.loadData(pair);
+    if (chart) {
+        chart.currentProb = p;
+        chart.loadData(pair);
+    }
+
+    // UX Focus: If on mobile market tab, switch to chart tab after selection
+    const nav = document.querySelector('.mobile-nav');
+    if (nav && document.body.classList.contains('tab-market')) {
+        const chartBtn = document.querySelector('.mobile-nav-item[onclick*="chart"]');
+        if (chartBtn) switchMobileTab('chart', chartBtn);
+    }
 }
+
+function switchMobileTab(tabId, el) {
+    if (!el) return;
+    
+    // Haptic Feedback for Premium Feel
+    if (window.navigator && window.navigator.vibrate) {
+        window.navigator.vibrate(8);
+    }
+
+    document.querySelectorAll('.mobile-nav-item').forEach(item => item.classList.remove('active'));
+    el.classList.add('active');
+
+    document.body.classList.remove('tab-market', 'tab-chart', 'tab-trades');
+    document.body.classList.add('tab-' + tabId);
+
+    // Trigger chart resize after animation
+    if (tabId === 'chart' && chart && chart.resize) {
+        setTimeout(() => chart.resize(), 150);
+    }
+    closeAllSidebars();
+}
+
 
 function renderOrderBook(data) {
     try {
@@ -635,7 +714,7 @@ function renderStats(data) {
             const np = fmtIDR(val, true);
             if (pnlEl.textContent !== np) {
                 pnlEl.textContent = np;
-                pnlEl.className = 'value ' + (val >= 0 ? 'up' : 'down');
+                pnlEl.style.color = val >= 0 ? 'var(--green)' : 'var(--red)';
                 flashEl(pnlEl, val >= 0 ? 'up' : 'down');
             }
         }
@@ -999,144 +1078,137 @@ function renderSectors(sectors) {
 let currentLedgerTab = 'OPEN';
 let lastTradeData = [];
 
-function switchLedgerTab(mode) {
-    currentLedgerTab = mode;
-    // Update UI buttons
-    document.querySelectorAll('.ledger-tabs .tab-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.id === `tab-${mode.toLowerCase()}`);
-    });
-    // Re-render data terakhir
-    if (lastTradeData.length) renderTradeHistory(lastTradeData);
+async function forceExit(pair) {
+    if (window.navigator && window.navigator.vibrate) window.navigator.vibrate([50, 30, 50]);
+    if (!confirm(`🚨 FORCE EXIT ${pair.toUpperCase()}?\nBot akan langsung melakukan Market Sell (Hajar Kiri) secepatnya.`)) return;
+    
+    try {
+        const res = await fetch(`/api/exit/${pair}`, { method: 'POST' });
+        const d = await res.json();
+        if (d.status === 'exit_requested') {
+            alert(`✅ Sinyal Jual Terkirim: ${pair.toUpperCase()} sedang diproses.`);
+        }
+    } catch (e) {
+        alert('❌ Gagal mengirim sinyal: ' + e.message);
+    }
 }
 
 function renderTradeHistory(data) {
     lastTradeData = data;
+    const isMobilePage = !!document.getElementById('trade-cards-container');
     const tbody = document.getElementById('trade-history-body');
+    const cardsContainer = document.getElementById('trade-cards-container');
     const openCnt = document.getElementById('open-count');
     const closedCnt = document.getElementById('closed-count');
     
-    if (!tbody) return;
+    if (!tbody && !cardsContainer) return;
 
-    // Hitung stats untuk badge (Eksplisit filter berdasarkan status)
+    // Hitung stats untuk badge
     const openTrades = data.filter(t => t.status === 'OPEN');
     const closedTrades = data.filter(t => t.status === 'CLOSED');
 
     if (openCnt) openCnt.textContent = openTrades.length;
     if (closedCnt) closedCnt.textContent = closedTrades.length;
 
-    tbody.innerHTML = '';
+    if (tbody) tbody.innerHTML = '';
+    if (cardsContainer) cardsContainer.innerHTML = '';
 
     // Filter data berdasarkan tab aktif
     const displayData = currentLedgerTab === 'OPEN' ? openTrades : closedTrades;
-    console.log(`[Ledger] Mode: ${currentLedgerTab}, Show: ${displayData.length} items`);
 
     displayData.slice(0, 50).forEach(t => {
         const time = t.created_at
             ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
             : '--:--';
-        const tr = document.createElement('tr');
+        
+        const pair = formatPair(t.pair);
+        const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
+        const pnlIdr = fmtIDR(t.pnl_idr, true);
+        const pnlPct = t.pnl_pct !== undefined ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '';
 
-        let pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
-        let pnlIdr = fmtIDR(t.pnl_idr, true);
-        let pnlPct = t.pnl_pct !== undefined ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)` : '';
+        if (isMobilePage && cardsContainer) {
+            // RENDER CARDS FOR MOBILE
+            const card = document.createElement('div');
+            card.className = 'trade-card';
+            
+            const is_open = t.status === 'OPEN';
+            const durStr = t.status === 'OPEN' 
+                ? (t.created_at ? formatDuration(Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : '--')
+                : formatDuration(t.duration || 0);
 
-        // Formatting volume
-        const volCrypto = formatCrypto(t.amount_coin);
-        const volIDR = fmtIDR(t.amount_idr);
+            card.innerHTML = `
+                <div class="card-header">
+                    <span class="card-pair">${pair}</span>
+                    <span class="card-pnl ${pnlCls}">${pnlPct}</span>
+                </div>
+                <div class="card-body">
+                    <div>Entry: <b>${formatNumber(t.entry_price)}</b></div>
+                    <div>Live: <b class="${pnlCls}">${formatNumber(t.exit_price || t.last_price)}</b></div>
+                    <div>Value: <b>${fmtShortIDR(t.amount_idr)}</b></div>
+                    <div>Time: <b>${durStr}</b></div>
+                </div>
+                ${is_open ? `
+                <div class="card-footer">
+                    <button class="btn-exit" onclick="forceExit('${t.pair}')">🚨 Emergency Exit</button>
+                    <button class="btn-view" onclick="selectPair('${t.pair}')">📈</button>
+                </div>
+                ` : `
+                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${t.reason || 'AI'}</div>
+                `}
+            `;
+            cardsContainer.appendChild(card);
+        } else if (tbody) {
+            // RENDER TABLE ROWS FOR DESKTOP
+            const tr = document.createElement('tr');
+            
+            // DNA Rendering
+            let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
+            if (t.ai_prob && t.ai_prob > 0.7) dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob * 100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
+            if (t.whale_boost && t.whale_boost > 0) dnaHtml += `<span title="Whale Activity Detected" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
+            if (!t.ai_prob && !t.whale_boost) dnaHtml += `<span style="font-size:10px; opacity:0.2">--</span>`;
+            dnaHtml += '</div>';
 
-        // DNA Rendering (AI & Whale context)
-        let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
-        if (t.ai_prob && t.ai_prob > 0.7) {
-            dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob * 100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
-        }
-        if (t.whale_boost && t.whale_boost > 0) {
-            dnaHtml += `<span title="Whale Activity Detected" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
-        }
-        if (!t.ai_prob && !t.whale_boost) {
-            dnaHtml += `<span style="font-size:10px; opacity:0.2">--</span>`;
-        }
-        dnaHtml += '</div>';
+            const volCrypto = formatCrypto(t.amount_coin);
+            const volIDR = fmtIDR(t.amount_idr);
+            const pnlText = ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)`;
 
-        tr.style.cursor = 'pointer';
-        tr.onclick = () => selectPair(t.pair);
+            tr.style.cursor = 'pointer';
+            tr.onclick = () => selectPair(t.pair);
 
-        if (t.status === 'OPEN') {
-            let durStr = '--';
-            if (t.created_at) {
+            if (t.status === 'OPEN') {
                 const s = Math.floor((Date.now() - new Date(t.created_at).getTime()) / 1000);
-                durStr = s > 3600 ? Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm' : (s > 60 ? Math.floor(s / 60) + 'm' : s + 's');
+                const durStr = formatDuration(s);
+                tr.style.background = 'rgba(245, 158, 11, 0.04)';
+                tr.innerHTML = `
+                    <td><span style="font-weight:600">${time}</span></td>
+                    <td>${dnaHtml}</td>
+                    <td><b>${pair}</b><br><span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span></td>
+                    <td><b>${volCrypto}</b><br><span class="muted" style="font-size:9px">${volIDR}</span></td>
+                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${durStr}</span></td>
+                    <td><b class="${pnlCls}">${pnlIdr}</b><br><span class="${pnlCls}" style="font-size:9px">${pnlText}</span></td>`;
+            } else {
+                const durStr = formatDuration(t.duration || 0);
+                let reason = t.reason || 'AI';
+                let rIcon = reason.includes('TP') ? '🎯' : (reason.includes('SL') ? '🛑' : '🤖');
+                tr.innerHTML = `
+                    <td><span style="font-weight:600;color:var(--text-secondary)">${time}</span></td>
+                    <td>${dnaHtml}</td>
+                    <td><b>${pair}</b><br><span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span></td>
+                    <td><b>${volCrypto}</b><br><span class="muted" style="font-size:9px">${volIDR}</span></td>
+                    <td><span style="font-weight:600;font-size:10px">${rIcon} ${reason}</span><br><span class="muted" style="font-size:9px">⏳ ${durStr}</span></td>
+                    <td><b class="${pnlCls}">${pnlIdr}</b><br><span class="${pnlCls}" style="font-size:9px">${pnlText}</span></td>`;
             }
-
-            tr.style.background = 'rgba(245, 158, 11, 0.04)';
-            tr.innerHTML = `
-                <td><span style="font-weight:600">${time}</span></td>
-                <td>${dnaHtml}</td>
-                <td>
-                    <div style="line-height:1.2">
-                        <b>${formatPair(t.pair)}</b><br>
-                        <span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Live: ${fmtIDR(t.exit_price || t.last_price)}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.2">
-                        <span style="font-weight:600; font-size:10px">${volCrypto}</span><br>
-                        <span class="muted" style="font-size:9.5px">${volIDR}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.2">
-                        <span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN POSITION</span><br>
-                        <span class="muted" style="font-size:9.5px">⏳ ${durStr}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.3">
-                        <b class="${pnlCls}">${pnlIdr}</b><br>
-                        <span class="${pnlCls}" style="font-size:9.5px">${pnlPct}</span>
-                    </div>
-                </td>`;
-        } else {
-            let durStr = t.duration ? (t.duration > 3600 ? Math.floor(t.duration / 3600) + 'h ' + Math.floor((t.duration % 3600) / 60) + 'm' : (t.duration > 60 ? Math.floor(t.duration / 60) + 'm' : t.duration + 's')) : '--';
-
-            let reason = t.reason || 'AI';
-            let rIcon = '🤖';
-            if (reason.includes('TP')) rIcon = '🎯';
-            else if (reason.includes('SL')) rIcon = '🛑';
-            else if (reason.includes('Force')) rIcon = '⚠️';
-
-            tr.innerHTML = `
-                <td><span style="font-weight:600;color:var(--text-secondary)">${time}</span></td>
-                <td>${dnaHtml}</td>
-                <td>
-                    <div style="line-height:1.2">
-                        <b>${formatPair(t.pair)}</b><br>
-                        <span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span><br>
-                        <span class="muted" style="font-size:9px">Jual: ${fmtIDR(t.exit_price || t.last_price)}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.2">
-                        <span style="font-weight:600; font-size:10px">${volCrypto}</span><br>
-                        <span class="muted" style="font-size:9.5px">${volIDR}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.2">
-                        <span style="font-weight:600; font-size:10px">${rIcon} ${reason}</span><br>
-                        <span class="muted" style="font-size:9.5px">⏳ ${durStr}</span>
-                    </div>
-                </td>
-                <td>
-                    <div style="line-height:1.3">
-                        <b class="${pnlCls}">${pnlIdr}</b><br>
-                        <span class="${pnlCls}" style="font-size:9.5px">${pnlPct}</span>
-                    </div>
-                </td>`;
+            tbody.appendChild(tr);
         }
-        tbody.appendChild(tr);
     });
 }
+
+function formatDuration(s) {
+    if (s > 3600) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    if (s > 60) return Math.floor(s / 60) + 'm';
+    return s + 's';
+}
+
 
 function renderLogs(data) {
     const container = document.getElementById('ai-logs');
@@ -1253,28 +1325,7 @@ function fireNotif(t, b) { if (_notifEnabled && Notification.permission === 'gra
 function toggleSection(el) { if (el) el.classList.toggle('collapsed'); }
 function refreshWatchlist() { if (lastRadarData.length) renderWatchlist(lastRadarData); }
 
-// ── Mobile Navigation Logic ──
-function switchMobileTab(tab, el) {
-    // Haptic Feedback for Premium Feel
-    if (window.navigator && window.navigator.vibrate) {
-        window.navigator.vibrate(10);
-    }
-
-    // UI Update
-    document.querySelectorAll('.mobile-nav-item').forEach(item => item.classList.remove('active'));
-    el.classList.add('active');
-
-    // Body Class Update
-    document.body.classList.remove('tab-market', 'tab-chart', 'tab-trades');
-    document.body.classList.add('tab-' + tab);
-
-    // Trigger Chart Resize if switching to chart
-    if (tab === 'chart' && chart) {
-        setTimeout(() => chart.resize(), 100);
-    }
-
-    closeAllSidebars();
-}
+// ── Sidebar Logic ──
 
 function toggleSidebar(side) {
     const selector = side === 'left' ? '.left-sidebar' : '.right-sidebar';
@@ -1313,6 +1364,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
     // Default Mobile State
     document.body.classList.add('tab-chart');
+    const chartBtn = document.querySelector('.mobile-nav-item[onclick*="chart"]');
+    if (chartBtn) chartBtn.classList.add('active');
 
     // Senior Search Implementation
     const searchInput = document.getElementById('market-search');
