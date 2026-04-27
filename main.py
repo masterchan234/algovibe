@@ -331,7 +331,7 @@ class ScalperBot:
             try:
                 self.oracle.process_llm_insights()
             except Exception as e:
-                pass
+                log_message(f"Error in _insight_loop: {e}")
             time.sleep(2)
 
     # Dashboard dijalankan oleh indodax-dashboard.service (systemd terpisah)

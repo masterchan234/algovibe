@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from engines.database import db
 from engines.llm_worker import LLMWorker
+from utils.logger import log_message
 
 logger = logging.getLogger(__name__)
 
