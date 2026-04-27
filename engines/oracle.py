@@ -74,7 +74,6 @@ class Oracle:
         try:
             for candidate in buy_candidates:
                 pair = candidate['pair']
-                # Skip jika baru di-queue (individual pair cooldown 5 menit)
                 if pair in self.pump_cooldowns:
                     age = (now - self.pump_cooldowns[pair]).total_seconds()
                     if age < 300:
@@ -87,16 +86,44 @@ class Oracle:
                 tech   = get_technical_summary(prices)
                 sig    = derive_trade_signal(tech)
 
+                # Ambil data Order Book dari DB
+                depth_rows = conn.execute(
+                    "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
+                ).fetchall()
+                bids = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 1]
+                asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
+                total_bid = sum(v for _, v in bids)
+                total_ask = sum(v for _, v in asks)
+                total_ob = total_bid + total_ask
+                buy_pressure = round((total_bid / total_ob * 100), 1) if total_ob > 0 else 50.0
+                imbalance_ratio = round(total_bid / total_ask, 2) if total_ask > 0 else 1.0
+
+                # Ambil market trades terbaru dari WS
+                ws_trades_raw = self.market_ws.get_trades(pair) if hasattr(self.market_ws, 'get_trades') else []
+                trade_flow = "No data"
+                if ws_trades_raw:
+                    flow_lines = []
+                    for t in ws_trades_raw[:5]:
+                        try:
+                            side = t[3] if len(t) > 3 else '?'
+                            price = float(t[4]) if len(t) > 4 else 0
+                            flow_lines.append(f"{side.upper()}@{price:,.0f}")
+                        except Exception:
+                            continue
+                    trade_flow = ", ".join(flow_lines)
+
                 last_price = prices[-1] if prices else 0
                 prompt = (
-                    f"Context: Elite Quantitative Scalper. AUTO-SCAN. Pair: {pair.upper()}. Price: Rp {last_price:,.2f}. "
-                    f"Data: RSI={tech['rsi']}, Vol={tech['volatility']}%, Signal={sig['verdict']} ({sig['confidence']}% confidence). "
-                    f"Reason: {sig['reason']}. "
-                    "Task: Confirm or reject this BUY signal with tactical precision. "
-                    "Output: BUY/HOLD/AVOID verdict + 1 sentence reasoning + Profit Target + Stop Loss (Rp) + ETA (minutes)."
+                    f"Context: Elite Quantitative Scalper. AUTO-SCAN. Pair: {pair.upper()}. Price: Rp {last_price:,.2f}.\n"
+                    f"Technical: RSI={tech['rsi']}, Volatility={tech['volatility']}%, Signal={sig['verdict']} ({sig['confidence']}%). Reason: {sig['reason']}.\n"
+                    f"Order Book: Imbalance={imbalance_ratio}x, BuyPressure={buy_pressure}%, "
+                    f"BidDepth=Rp{total_bid:,.0f}, AskDepth=Rp{total_ask:,.0f}.\n"
+                    f"Market Flow (Last 5): {trade_flow}.\n"
+                    "Task: Using ALL data above — technicals, orderbook depth, and real trade flow — "
+                    "confirm or reject this BUY signal with tactical precision. "
+                    "Output: BUY/HOLD/AVOID verdict + 1 sentence reasoning (mention orderbook signals if relevant) + Profit Target + Stop Loss (Rp) + ETA (minutes)."
                 )
                 task_id = f"ANALYSIS:{pair}"
-                # [Veto] Gunakan query_structured agar hasil bisa di-parse sebagai keputusan
                 self.llm_worker.query_structured(task_id, prompt)
                 self.pump_cooldowns[pair] = now
                 logger.info(f"[AutoQueue] LLM structured queued for {pair} (BUY {sig['confidence']}%)")
@@ -120,20 +147,49 @@ class Oracle:
                     prices = json.loads(row['history_json']) if (row and row['history_json']) else []
                     tech = get_technical_summary(prices)
 
-                    depth = conn.execute("SELECT vol, is_bid FROM market_depth WHERE pair = ?", (on_demand_pair,)).fetchall()
-                    bids  = sum(r['vol'] for r in depth if r['is_bid'] == 1)
-                    asks  = sum(r['vol'] for r in depth if r['is_bid'] == 0)
-                    total = bids + asks
-                    tech['buy_pressure'] = round((bids / total * 100), 1) if total > 0 else 50.0
+                    depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (on_demand_pair,)).fetchall()
+                    bids  = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 1]
+                    asks  = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 0]
+                    total_bid_vol = sum(v for _, v in bids)
+                    total_ask_vol = sum(v for _, v in asks)
+                    total_vol = total_bid_vol + total_ask_vol
+                    tech['buy_pressure'] = round((total_bid_vol / total_vol * 100), 1) if total_vol > 0 else 50.0
+                    
+                    # Imbalance ratio & best prices
+                    imbalance_ratio = round(total_bid_vol / total_ask_vol, 2) if total_ask_vol > 0 else 1.0
+                    best_bid = max((p for p, _ in bids), default=0)
+                    best_ask = min((p for p, _ in asks), default=0)
+                    spread_pct = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
                 finally:
                     conn.close()
 
+                # Ambil market trades terbaru dari WS (via injected market_ws)
+                ws_trades = self.market_ws.get_trades(on_demand_pair)
+                trade_summary = "Tidak ada data trade terbaru."
+                if ws_trades:
+                    recent = ws_trades[:5]
+                    lines = []
+                    for t in recent:
+                        try:
+                            side = t[3] if len(t) > 3 else '?'
+                            price = float(t[4]) if len(t) > 4 else 0
+                            vol = float(t[6]) if len(t) > 6 else 0
+                            lines.append(f"{side.upper()} @ Rp{price:,.0f} ({vol:.4f})")
+                        except Exception:
+                            continue
+                    trade_summary = " | ".join(lines) if lines else "Tidak ada."
+
                 last_price = prices[-1] if prices else 0
                 prompt = (
-                    f"Context: Elite Quantitative Scalper. Pair: {on_demand_pair.upper()}. Price: Rp {last_price:,.2f}. "
-                    f"Data: RSI={tech['rsi']}, Vol={tech['volatility']}%, Signal={tech['signal']}, BuyPressure={tech['buy_pressure']}%. "
-                    "Task: Provide a sharp tactical analysis. "
-                    "Output: Verdict (BUY/HOLD/AVOID). 1 Sentence Reasoning. "
+                    f"Context: Elite Quantitative Scalper. Pair: {on_demand_pair.upper()}. Price: Rp {last_price:,.2f}.\n"
+                    f"Technical: RSI={tech['rsi']}, Volatility={tech['volatility']}%, Signal={tech['signal']}, BuyPressure={tech['buy_pressure']}%.\n"
+                    f"Order Book: Bid/Ask Imbalance={imbalance_ratio}x (>1 = bullish pressure). "
+                    f"Best Bid=Rp{best_bid:,.2f}, Best Ask=Rp{best_ask:,.2f}, Spread={spread_pct}%. "
+                    f"Bid Depth=Rp{total_bid_vol:,.0f}, Ask Depth=Rp{total_ask_vol:,.0f}.\n"
+                    f"Market Activity (Last 5 Trades): {trade_summary}\n"
+                    "Task: Based on ALL the data above (technicals, orderbook depth, and recent trade flow), "
+                    "provide a sharp tactical analysis. "
+                    "Output: Verdict (BUY/HOLD/AVOID). 1 Sentence Reasoning incorporating orderbook signals. "
                     "Targets: 1 Profit Target, 1 Stop Loss (Rp), and 1 Estimated Time Horizon (e.g. 5-15m)."
                 )
                 self.llm_worker.query_structured(f"ANALYSIS:{on_demand_pair}", prompt)
