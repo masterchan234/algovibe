@@ -9,7 +9,6 @@
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         /* Premium Mobile Experience Styles */
         body {
@@ -243,6 +242,29 @@
             color: white;
             border-color: #3b82f6;
         }
+        /* Settings Sidebar */
+        .settings-sidebar {
+            position: fixed;
+            top: 0; right: -100%;
+            width: 85%; max-width: 320px; height: 100%;
+            background: rgba(15, 15, 25, 0.95);
+            backdrop-filter: blur(20px);
+            z-index: 2100;
+            transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            padding: 25px;
+            box-shadow: -10px 0 30px rgba(0,0,0,0.5);
+            border-left: 1px solid rgba(255,255,255,0.1);
+        }
+        .settings-sidebar.active { right: 0; }
+        .sidebar-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 2050;
+            display: none;
+            backdrop-filter: blur(3px);
+        }
+
         /* Login Modal Styles */
         .login-overlay {
             position: fixed;
@@ -303,20 +325,50 @@
         </div>
     </div>
 
-    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeAllSidebars()"></div>
+    <!-- Settings Sidebar -->
+    <div id="settings-sidebar" class="settings-sidebar">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+            <h2 style="color: #fff; font-size: 18px; margin: 0;">Settings</h2>
+            <button onclick="toggleSettings(false)" style="background: none; border: none; color: #888; font-size: 24px;">×</button>
+        </div>
+
+        <div class="panel glass-panel" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+            <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); color: #a855f7; padding: 10px;">⚙️ Bot Config</div>
+            <div style="padding: 15px;">
+                <label style="display:block; font-size:10px; color:#666; margin-bottom:5px;">INDODAX API KEY</label>
+                <input type="text" id="setting-api-key" class="login-input" style="padding: 10px; font-size: 13px; margin-bottom: 15px;">
+                
+                <label style="display:block; font-size:10px; color:#666; margin-bottom:5px;">INDODAX API SECRET</label>
+                <input type="password" id="setting-api-secret" class="login-input" style="padding: 10px; font-size: 13px; margin-bottom: 15px;">
+                
+                <button onclick="saveSettings()" class="login-btn" style="padding: 10px; font-size: 13px; background: #10b981;">Update Keys</button>
+                <div id="settings-status" style="margin-top:10px; font-size:11px; text-align:center;"></div>
+            </div>
+        </div>
+
+        <div class="panel glass-panel" style="background: rgba(255,255,255,0.02);">
+            <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); padding: 10px;">🛡️ Account</div>
+            <div style="padding: 15px;">
+                <div style="font-size: 12px; color: #888; margin-bottom: 10px;">User: <b id="display-username" style="color:#fff;">admin</b></div>
+                <button onclick="handleLogout()" style="width: 100%; background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; padding: 10px; border-radius: 10px; font-size: 12px;">Logout</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSettings(false)"></div>
 
     <div class="app-container">
         <!-- ── Top Header ── -->
         <header class="mobile-header" style="height: 60px; padding: 0 15px; display: flex; justify-content: space-between; align-items: center;">
-            <div class="logo-section">
-                <div class="logo-icon" style="width:28px; height:28px; font-size:12px; background: #2563eb;">AV</div>
-                <div id="bot-status-badge" class="bot-status-badge status-loading">
-                    <span class="status-dot"></span>
-                    <span id="bot-status-text" style="font-size: 10px; font-weight: 700;">BOT ACTIVE</span>
-                </div>
+            <div class="logo-area" style="display: flex; align-items: center; gap: 10px;">
+                <div class="logo-icon" style="width: 32px; height: 32px; font-size: 12px; background: linear-gradient(135deg, #a855f7, #2563eb);">AV</div>
+                <div class="logo-text" style="font-weight: 800; font-size: 18px; letter-spacing: -0.5px;">AlgoVibe</div>
             </div>
-            <div id="market-regime-badge" class="regime-badge" style="margin: 0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
-                <span id="market-regime-text" style="font-size: 10px; font-weight: 700;">BULLISH</span>
+            <div class="header-actions" style="display: flex; gap: 12px; align-items: center;">
+                <div id="ws-status" class="status-badge" style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; font-size: 9px; padding: 4px 8px; border-radius: 20px; font-weight: bold; display: flex; align-items: center; gap: 5px;">
+                    <span style="width: 6px; height: 6px; background: #ef4444; border-radius: 50%;"></span> OFFLINE
+                </div>
+                <button onclick="toggleSettings(true)" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 8px; border-radius: 10px; cursor: pointer;">⚙️</button>
             </div>
         </header>
 
@@ -473,14 +525,6 @@
                 </div>
             </div>
 
-            <!-- TAB 4: AUTH (Conditional) -->
-            <div class="mobile-tab-content tab-auth-content" style="display:none; text-align:center; padding: 50px 20px;">
-                <div class="logo-icon" style="width:60px; height:60px; margin: 0 auto 20px; background: rgba(255,255,255,0.05); font-size: 24px; opacity: 0.5;">🔒</div>
-                <h3 style="color: #fff; margin-bottom: 10px;">Login Required</h3>
-                <p style="color: #888; font-size: 14px; margin-bottom: 20px;">Authentication is needed to manage trades.</p>
-                <button onclick="showLoginModal()" class="login-btn" style="max-width: 200px; margin: 0 auto;">Sign In</button>
-            </div>
-
         </main>
 
         <!-- ── Bottom Nav ── -->
@@ -508,6 +552,9 @@
     </div>
     <div id="market-ticker" style="display:none"><div id="ticker-content"></div></div>
 
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="pull_to_refresh.js"></script>
     <script src="script.js"></script>
     <script>
         // Detection: If user rotates back to large screen, redirect to desktop
@@ -523,5 +570,4 @@
         });
     </script>
 </body>
-
 </html>

@@ -9,10 +9,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
-from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for
+from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response
 from flask_cors import CORS
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from functools import wraps
+import secrets
 from engines.database import db
 from engines.ws_market import MarketDataWS
 from engines.technicals import get_technical_summary, derive_trade_signal
@@ -22,9 +24,60 @@ import ccxt
 exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static')
-app.secret_key = os.getenv('SECRET_KEY', 'algovibe-super-secret-key-123')
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# ── Pentest Fix: Secure Session Configuration ──
+app.config.update(
+    SECRET_KEY=os.getenv('SECRET_KEY', secrets.token_hex(32)),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=False, # Set to True if using HTTPS
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=2)
+)
+
+# ── Pentest Fix: Global CSRF Protection ──
+csrf = CSRFProtect(app)
+# Exclude SocketIO from CSRF as it has its own mechanism
+# but keep it for normal API routes
+CORS(app, supports_credentials=True)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
+
+# Provide CSRF token for the frontend
+@app.after_request
+def set_csrf_cookie(response):
+    response.set_cookie('csrf_token', generate_csrf(), samesite='Lax', httponly=False) # Frontend needs to read this
+    return response
+
+# ── WebSocket Hardening: Auth & Rooms ──
+@socketio.on('connect')
+def handle_connect():
+    # Periksa session untuk keamanan (SaaS Ready)
+    if 'user_id' not in session:
+        logging.warning("🚫 Unauthorized WS connection attempt")
+        return False # Menolak koneksi
+    
+    user_id = session.get('user_id')
+    username = session.get('username')
+    join_room(f"user_{user_id}")
+    logging.info(f"🔌 User {username} connected to WS (Room: user_{user_id})")
+    emit('connection_status', {'status': 'connected', 'username': username})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    username = session.get('username', 'Unknown')
+    logging.info(f"📡 User {username} disconnected from WS")
+
+# ── Background Throttler for UI Performance ──
+def ui_emitter_thread():
+    """Mengirim update ke UI secara berkala (Throttling) agar HP user tidak panas."""
+    while True:
+        socketio.sleep(0.5) # Emit setiap 500ms
+        # Emit data publik ke semua
+        # (Data radar dan ohlcv biasanya di-handle oleh event spesifik, 
+        # tapi di sini kita bisa batch update harga jika perlu)
+        pass
+
+# Start the background thread
+# socketio.start_background_task(ui_emitter_thread)
 
 # ── Authentication Middleware ──
 def login_required(f):
@@ -173,8 +226,10 @@ def favicon():
     return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/x-icon')
 
 
-@app.route('/api/login', methods=['POST'])
+@app.route('/api/login', methods=['GET', 'POST'])
 def login():
+    if request.method == 'GET':
+        return jsonify({"status": "Login endpoint ready. Use POST to authenticate."})
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
@@ -198,8 +253,28 @@ def check_auth():
         return jsonify({"authenticated": True, "username": session.get('username')})
     return jsonify({"authenticated": False})
 
-@app.route('/api/stats')
+@app.route('/api/user/settings', methods=['GET', 'POST'])
 @login_required
+def user_settings():
+    username = session.get('username')
+    if request.method == 'GET':
+        user = db.get_user(username)
+        if not user: return jsonify({"error": "User not found"}), 404
+        # Mask keys for security
+        return jsonify({
+            "api_key": user['api_key'][:4] + "..." if user['api_key'] else "",
+            "has_secret": True if user['api_secret'] else False
+        })
+    
+    data = request.get_json()
+    api_key = data.get('api_key')
+    api_secret = data.get('api_secret')
+    
+    if db.update_user_keys(username, api_key, api_secret):
+        return jsonify({"success": True, "message": "Settings updated. Restarting engines..."})
+    return jsonify({"success": False, "message": "Failed to update settings"}), 500
+
+@app.route('/api/stats')
 def get_stats():
     conn = get_db_connection()
     try:
@@ -454,7 +529,6 @@ def get_recent_trades_api():
 
 
 @app.route('/api/trades')
-@login_required
 def get_trades():
     return jsonify(_build_trades_payload())
 

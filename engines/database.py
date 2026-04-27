@@ -730,5 +730,18 @@ class Database:
             return user
         return None
 
+    def update_user_keys(self, username, api_key, api_secret):
+        """Update API keys for a specific user."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET api_key = ?, api_secret = ? WHERE username = ?",
+                    (api_key, api_secret, username)
+                )
+            return True
+        except Exception as e:
+            logging.error(f"[DB] Error updating keys: {e}")
+            return False
+
 # Instantiate a global db object for ease of use
 db = Database()
