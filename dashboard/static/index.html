@@ -12,6 +12,7 @@
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="mobile_fix.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 
@@ -82,7 +83,7 @@
             <aside class="left-sidebar">
 
                 <!-- ── Market Radar (Search & All Pairs) ── -->
-                <div class="sidebar-section" style="margin-bottom: 12px; border-left: 3px solid var(--purple);">
+                <div class="sidebar-section panel" style="margin-bottom: 12px; border-left: 3px solid var(--purple);">
                     <div class="section-header" style="justify-content: space-between;">
                         <span class="section-title">🔍 Market Radar</span>
                         <span id="watchlist-count" class="badge badge-dim">0</span>
@@ -95,18 +96,18 @@
                 </div>
 
                 <!-- ── Trending Section (Momentum Radar) ── -->
-                <div class="sidebar-section" style="margin-bottom: 10px; border-left: 3px solid var(--blue);">
+                <div class="sidebar-section panel" style="margin-bottom: 10px; border-left: 3px solid var(--blue);">
                     <div class="section-header" onclick="toggleSection(this.parentElement)">
                         <span class="section-title">📡 Momentum Radar</span>
                     </div>
                     <div id="trending-list" class="sidebar-list"
-                        style="max-height: 250px; overflow-y: auto; padding-right: 2px;">
+                        class="sidebar-list" style=" padding-right: 2px;">
                         <div class="empty-state">Menunggu data aktivitas...</div>
                     </div>
                 </div>
 
                 <!-- ── Market Pulse (Gainers/Losers) ── -->
-                <div class="sidebar-section" style="margin-bottom: 10px; border-left: 3px solid var(--yellow);">
+                <div class="sidebar-section panel" style="margin-bottom: 10px; border-left: 3px solid var(--yellow);">
                     <div class="section-header" style="justify-content: space-between;"
                         onclick="toggleSection(this.parentElement)">
                         <span class="section-title">🔥 Market Pulse</span>
@@ -114,7 +115,7 @@
                             style="font-size: 8px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.1em;">REAL-TIME</span>
                     </div>
                     <div class="market-pulse-container"
-                        style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        class="market-pulse-container" style=">
                         <div class="pulse-col">
                             <div class="pulse-label"
                                 style="font-size: 8px; color: var(--green); font-weight: 700; margin-bottom: 4px; letter-spacing: 0.1em;">
@@ -134,11 +135,11 @@
 
 
                 <!-- Sector Sentiment Panel (Pindah dari Kanan) -->
-                <div class="sidebar-section" style="margin-bottom: 10px; border-left: 3px solid var(--purple);">
+                <div class="sidebar-section panel" style="margin-bottom: 10px; border-left: 3px solid var(--purple);">
                     <div class="section-header" onclick="toggleSection(this.parentElement)">
                         <span class="section-title">📊 Sector Sentiment</span>
                     </div>
-                    <div id="sector-list" class="sidebar-list" style="max-height: 250px; overflow-y: auto; padding: 10px;">
+                    <div id="sector-list" class="sidebar-list" class="sidebar-list" style=" padding: 10px;">
                         <div class="empty-state">Memuat data sektor...</div>
                     </div>
                 </div>
@@ -148,8 +149,43 @@
             <!-- ══ CENTER AREA ══ -->
             <section class="center-area">
 
-                <!-- Chart Panel -->
-                <div class="panel chart-panel">
+                <!-- LLM Insight Panel -->
+                <div class="panel llm-panel" style="margin-bottom: 12px; border-left: 3px solid #a855f7;">
+                    <div class="panel-header" style="color: #a855f7; display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 16px;">🧠</span>
+                            <span style="font-weight: 700; letter-spacing: 0.5px;">LiteRT-LM Reasoner</span>
+                        </div>
+                        <span id="llm-insight-type" style="font-size: 9px; opacity: 0.6; font-weight: 600; text-transform: uppercase;">ANALYSIS READY</span>
+                    </div>
+                    
+                    <div class="reasoner-strip" style="background: rgba(168, 85, 247, 0.05); padding: 10px 16px; border-bottom: 1px solid rgba(168, 85, 247, 0.1);">
+                        <div style="display: flex; flex-direction: column; gap: 2px;">
+                            <span id="reasoner-pair" class="reasoner-pair-label">SELECT PAIR</span>
+                            <div style="display: flex; align-items: baseline; gap: 8px;">
+                                <span id="reasoner-price" class="reasoner-price-val">Rp 0</span>
+                                <span id="reasoner-change" class="reasoner-change-val" style="font-size: 12px; font-weight: 600;">0.00%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Technical Pulse Bar (Optimized for Chart Focus) -->
+                    <div id="technical-pulse-wrap" class="tech-pulse-container" style="padding: 12px 16px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; background: rgba(0,0,0,0.1);">
+                        <div class="tech-badge" id="rsi-badge" style="text-align: center;">RSI: --</div>
+                        <div class="tech-badge" id="vol-badge" style="text-align: center;">VOL: --</div>
+                        <div class="tech-badge" id="imb-badge" style="text-align: center;">IMB: --</div>
+                        <div class="tech-badge" id="trend-badge" style="text-align: center;">TREND: --</div>
+                        <div class="tech-badge" id="spread-badge" style="text-align: center;">SPR: --</div>
+                        <div class="tech-badge tech-signal-main" id="tech-signal" style="text-align: center; background: var(--blue); color: white;">NEUTRAL</div>
+                    </div>
+
+                    <div class="llm-content" id="llm-insight-text" style="padding: 16px; font-size: 13.5px; line-height: 1.7; color: var(--text-primary); background: var(--bg-panel-2);">
+                        Menunggu sinyal pasar untuk memulai analisa AI...
+                    </div>
+                </div>
+
+                <!-- Chart Panel (Now comes after or before AI for context, but we keep it here and style it) -->
+                <div class="panel chart-panel" style="margin-bottom: 12px;">
                     <div class="chart-header">
                         <div class="chart-title-area">
                             <h1 id="active-pair">SELECT PAIR</h1>
@@ -206,32 +242,7 @@
                         <canvas id="custom-chart"></canvas>
                         <canvas id="price-axis-canvas"></canvas>
                         <div id="chart-tooltip" class="chart-tooltip"></div>
-                        <div id="chart-empty" class="chart-empty">Pilih pair dari watchlist untuk melihat chart</div>
-                    </div>
-                </div>
-
-                <!-- LLM Insight Panel -->
-                <div class="panel llm-panel" style="margin-bottom: 20px; border-left: 3px solid #a855f7;">
-                    <div class="panel-header" style="color: #a855f7;">
-                        <span>🧠 LiteRT-LM Reasoner</span>
-                        <span id="llm-insight-type" style="font-size: 10px; opacity: 0.7;">AWAITING INSIGHT</span>
-                    </div>
-                    <div class="reasoner-strip">
-                        <span id="reasoner-pair" class="reasoner-pair-label">--</span>
-                        <span id="reasoner-price" class="reasoner-price-val">Rp --</span>
-                        <span id="reasoner-change" class="reasoner-change-val">--</span>
-                    </div>
-                    <!-- Technical Pulse Bar -->
-                    <div id="technical-pulse-wrap" class="tech-pulse-container">
-                        <div class="tech-badge" id="rsi-badge">RSI: --</div>
-                        <div class="tech-badge" id="vol-badge">VOL: --</div>
-                        <div class="tech-badge" id="imb-badge">IMB: --</div>
-                        <div class="tech-badge" id="trend-badge">TREND: --</div>
-                        <div class="tech-badge" id="spread-badge">SPR: --</div>
-                        <div class="tech-badge tech-signal-main" id="tech-signal">NEUTRAL</div>
-                    </div>
-                    <div class="llm-content" id="llm-insight-text">
-                        Memuat inferensi AI lokal...
+                        <div id="chart-empty" class="chart-empty">Pilih koin untuk visualisasi data</div>
                     </div>
                 </div>
 
@@ -342,7 +353,7 @@
     </div>
 
     <!-- Live Running Ticker (Bottom) -->
-    <div id="market-ticker">
+    <div id="market-ticker" class="hide-mobile">
         <div id="ticker-content"></div>
     </div>
 
@@ -362,6 +373,7 @@
         </div>
     </nav>
 
+    <script src="pull_to_refresh.js"></script>
     <script src="script.js"></script>
 </body>
 

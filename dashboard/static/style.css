@@ -2094,30 +2094,40 @@ tr:hover td { background: var(--bg-hover); }
     .top-nav { height: 50px; padding: 0 10px; }
     
     /* Main Area Adjustments */
-    .main-content { padding: 8px; height: calc(100vh - 144px); } /* 50 header + 60 nav + 26 ticker + padding */
+    .center-area { padding: 8px; height: calc(100vh - 144px); } /* 50 header + 60 nav + 26 ticker + padding */
     .app-container { height: calc(100vh - 86px); }
 
     /* Show only active tab content */
     .mobile-nav { display: grid; }
     
-    body.tab-market .main-content { display: none; }
-    body.tab-market .left-sidebar { display: block; width: 100%; max-width: none; position: static; box-shadow: none; padding-top: 0; flex: 1; }
+    /* Market Tab: Show Watchlist/Radar */
+    body.tab-market .center-area { display: none !important; }
+    body.tab-market .left-sidebar { display: flex !important; width: 100% !important; max-width: none !important; position: static !important; box-shadow: none !important; padding-top: 0 !important; flex: 1 !important; height: calc(100vh - 136px) !important; overflow-y: auto !important; }
     
-    body.tab-chart .main-content { display: flex; }
-    body.tab-chart .left-sidebar, body.tab-chart .right-sidebar { display: none; }
+    /* Chart Tab: Focus on Chart (TOP) and Reasoner (BOTTOM) */
+    body.tab-chart .center-area { display: flex !important; flex-direction: column !important; gap: 10px !important; height: calc(100vh - 136px) !important; overflow-y: auto !important; padding: 10px !important; }
+    body.tab-chart .chart-panel { display: flex !important; order: -1 !important; visibility: visible !important; opacity: 1 !important; }
+    body.tab-chart .llm-panel { display: flex !important; order: 0 !important; visibility: visible !important; opacity: 1 !important; }
+    body.tab-chart .history-panel { display: none !important; } /* Hide ledger on chart tab for maximum focus */
+    body.tab-chart .left-sidebar, body.tab-chart .right-sidebar { display: none !important; }
     
-    body.tab-trades .main-content { display: none; }
-    body.tab-trades .right-sidebar { display: flex; width: 100%; max-width: none; position: static; box-shadow: none; padding-top: 0; flex: 1; }
+    /* Trades Tab: Show History/Logs */
+    body.tab-trades .center-area { display: none !important; }
+    body.tab-trades .right-sidebar { display: flex !important; width: 100% !important; max-width: none !important; position: static !important; box-shadow: none !important; padding-top: 0 !important; flex: 1 !important; height: calc(100vh - 136px) !important; overflow-y: auto !important; flex-direction: column !important; }
+    body.tab-trades .right-sidebar .panel { margin-bottom: 12px !important; flex: none !important; min-height: 200px !important; }
+
+    /* Chart & AI Sizing */
+    .chart-panel { height: auto !important; min-height: 320px !important; }
+    #chart-canvas { height: 260px !important; }
+    .llm-panel { flex: none !important; min-height: 200px !important; }
 
     /* Execution Ledger on mobile - make it scrollable horizontally if needed */
-    .ledger-table-wrap { overflow-x: auto; }
-    .ledger-table { min-width: 600px; }
+    .table-wrapper { overflow-x: auto; }
+    .table-wrapper table { min-width: 600px; }
 
     /* Stats bar on mobile */
-    .stats-bar { grid-template-columns: repeat(2, 1fr); gap: 6px; }
-    .stat-item { padding: 8px; }
-    .stat-label { font-size: 8px; }
-    .stat-value { font-size: 11px; }
+    .ledger-stats-bar { display: grid !important; grid-template-columns: repeat(2, 1fr); gap: 10px !important; }
+    .ledger-stats-bar > div { align-items: flex-start !important; }
 }
 
 /* Landscape & Small height optimizations */
@@ -2175,7 +2185,7 @@ tr:hover td { background: var(--bg-hover); }
 }
 
 /* --- Smooth Tab Transitions --- */
-.main-content, .left-sidebar, .right-sidebar {
+.center-area, .left-sidebar, .right-sidebar {
     animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 

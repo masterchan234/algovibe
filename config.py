@@ -41,7 +41,7 @@ SL_PCT = -0.02                  # Stop Loss (Default)
 TRAILING_STOP_ACTIVATION_PCT = 0.01  # Aktifkan trailing cepat di +1.0%
 TRAILING_STOP_DISTANCE_PCT = 0.003   # Jarak ketat 0.3%
 
-MIN_NET_PROFIT_IDR = 2500 # Target profit bersih minimal harus terasa (Rp 2500 per 500k trade)
+MIN_NET_PROFIT_IDR = 500  # Adjusted for small capital (90k). Rp 500 is ~2% of a 22k trade.
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 

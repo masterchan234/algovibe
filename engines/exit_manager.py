@@ -3,7 +3,13 @@ import os
 import time
 from datetime import datetime
 
-from config import TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT
+from config import (
+    TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
+    FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
+    MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
+    SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
+    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS
+)
 from engines.database import db
 from utils.logger import log_message, send_telegram_message
 
@@ -19,9 +25,9 @@ class ExitManager:
     def get_open_positions(self):
         return db.get_open_positions()
 
-    def save_positions(self, positions):
-        # Fallback method if needed, but we should use db.upsert_position instead
-        pass
+    def save_positions(self, positions, modified_pairs):
+        for pair in modified_pairs:
+            db.upsert_position(pair, positions[pair])
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
@@ -29,6 +35,66 @@ class ExitManager:
         if not positions:
             return
 
+        modified_pairs = set()
+
+        # --- [PORTFOLIO BASKET EXIT / CROSS-ASSET HEDGING] ---
+        # Menutup serentak semua posisi ketika profit gabungan cukup untuk meng-cover posisi yang rugi
+        try:
+            open_pairs_for_basket = []
+            total_net_pnl = 0
+            has_losers = False
+            
+            for pair, data in positions.items():
+                if data.get('status') == "OPEN" and pair in current_tickers:
+                    current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
+                    entry_price = data.get('entry_price', 0)
+                    amount = data.get('amount_crypto', 0)
+                    amount_idr = data.get('amount_idr', 0)
+                    
+                    sell_value = amount * current_price
+                    fee_sell = sell_value * FEE_SELL_TAKER
+                    fee_buy = amount_idr * FEE_BUY_MAKER
+                    
+                    gross_pnl = (current_price - entry_price) * amount
+                    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                    
+                    if net_pnl_idr < 0:
+                        has_losers = True
+                        
+                    total_net_pnl += net_pnl_idr
+                    open_pairs_for_basket.append((pair, data, current_price, amount))
+            
+            # Eksekusi jika: >1 posisi, ada posisi yang rugi, dan total profit bersih melampaui MIN_NET_PROFIT_IDR
+            if len(open_pairs_for_basket) > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers:
+                msg = (
+                    f"🧺 *PORTFOLIO BASKET EXIT* 🧺\n"
+                    f"Menutup {len(open_pairs_for_basket)} posisi serentak untuk menutupi kerugian!\n"
+                    f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
+                )
+                print(msg.replace('*', '').replace('\n', ' | '))
+                send_telegram_message(msg)
+                
+                for pair, data, current_price, amount in open_pairs_for_basket:
+                    reason = "BASKET_EXIT"
+                    log_msg = f"⚡ [BASKET_EXIT] {pair}: Liquidated as part of portfolio rescue."
+                    log_message(log_msg)
+                    db.log_system_event(pair, reason, log_msg, 'SUCCESS')
+                    
+                    order_id = self.execute_exit(
+                        pair, amount, current_price, reason,
+                        entry_price=data.get('entry_price', 0),
+                        amount_idr=data.get('amount_idr', 0),
+                        position_data=data
+                    )
+                    if order_id:
+                        positions[pair]["status"] = "EXITING"
+                        positions[pair]["exit_order_id"] = order_id
+                        modified_pairs.add(pair)
+                
+                self.save_positions(positions, modified_pairs)
+                return # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
+        except Exception as e:
+            log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
         for pair, data in list(positions.items()):
             try:
                 # Jangan eksekusi jika sedang dalam proses jual (menunggu konfirmasi WS)
@@ -71,7 +137,7 @@ class ExitManager:
                         reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
                         try:
                             # [Senior Fix] Standard CCXT Symbol for Validation
-                            symbol_cancel = pair.upper().replace("IDR", "/IDR")
+                            symbol_cancel = f"{pair[:-3].upper()}/IDR"
                             self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr"), 'side': 'buy'})
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
@@ -92,18 +158,13 @@ class ExitManager:
                     continue
                 # --- END AUTO-CANCEL ---
     
-                # Import the required variables dynamically
-                from config import (
-                    FEE_BUY_MAKER, FEE_SELL_MAKER, MIN_NET_PROFIT_IDR,
-                    TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT
-                )
-                
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
                 
-                # Rumus: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
-                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_MAKER))
+                # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
+                # [Senior Fix] Gunakan FEE_SELL_TAKER karena kita ingin eksekusi instan (Taker)
+                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_TAKER))
                 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
@@ -136,14 +197,18 @@ class ExitManager:
                             trailing_sl_price = new_trailing_sl
                             positions[pair]['trailing_sl_price'] = trailing_sl_price
                     
-                    # [Senior Sync] Update DB agar state trailing tidak hilang saat restart
-                    db.upsert_position(pair, positions[pair])
+                    # [Senior Sync] Debounce DB update to reduce I/O
+                    last_saved_highest = data.get('last_saved_highest_price', 0)
+                    last_saved_trailing = data.get('last_saved_trailing_sl', 0)
+                    if highest_price > last_saved_highest * 1.002 or trailing_sl_price > last_saved_trailing * 1.002:
+                        positions[pair]['last_saved_highest_price'] = highest_price
+                        positions[pair]['last_saved_trailing_sl'] = trailing_sl_price
+                        modified_pairs.add(pair)
                 
                 active_sl_price = max(initial_sl_price, trailing_sl_price)
     
                 # --- [Defensive] Break-Even Stop Loss ---
                 # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
-                from config import FEE_BUY_TAKER, FEE_SELL_TAKER
                 round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
                 break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
                 
@@ -151,23 +216,30 @@ class ExitManager:
                     active_sl_price = break_even_price
                     if positions[pair].get('trailing_sl_price', 0) < break_even_price:
                         positions[pair]['trailing_sl_price'] = break_even_price
-                        db.upsert_position(pair, positions[pair])
+                        modified_pairs.add(pair)
                         log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
-                # Syarat 1: Profit > 1.0% -> Amankan sekarang (Abaikan RSI)
-                # Syarat 2: Profit > Fee + 0.2% dan RSI mulai jenuh (>60)
-                # Syarat 3: Stagnancy Exit (Hold > 20m & Profit > Fee) -> Free up capital
+                # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
                 try:
                     current_rsi = data.get('rsi', 50)
-                    is_profit_secure = current_profit_pct >= 0.01
-                    is_rapid_momentum_fade = current_profit_pct > (round_trip_fee + 0.002) and current_rsi > 60
+                    
+                    sell_value_est = amount * current_price
+                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_MAKER
+                    fee_sell_est = sell_value_est * FEE_SELL_TAKER
+                    net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
+
+                    # Syarat 1: Profit Bersih sudah melampaui target minimum (Jangan menunggu!)
+                    is_profit_secure = net_pnl_idr >= MIN_NET_PROFIT_IDR
+                    
+                    # Syarat 2: Profit sudah aman (cover fee + buffer) dan RSI mulai jenuh (>60)
+                    is_rapid_momentum_fade = net_pnl_idr > 1000 and current_rsi > 60
                     
                     # Hitung umur posisi dengan aman
-                    import pandas as pd
-                    pos_ts = pd.to_datetime(data['timestamp'])
-                    pos_age_min = (pd.Timestamp.now() - pos_ts).total_seconds() / 60
-                    is_stagnant_profit = pos_age_min > 20 and current_profit_pct > (round_trip_fee + 0.001)
+                    pos_ts = datetime.fromisoformat(data['timestamp'])
+                    pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
+                    # Syarat 3: Stagnancy Exit (Hold > 20m & Profit sudah cover fee) -> Free up capital
+                    is_stagnant_profit = pos_age_min > 20 and net_pnl_idr > 100
     
                     if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
                         reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
@@ -211,13 +283,14 @@ class ExitManager:
                         positions[pair]["status"] = "EXITING"
                         continue
     
+                # Prepare PnL and duration strings for potential exit
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                entry_time = datetime.fromisoformat(data['timestamp'])
+                duration = datetime.now() - entry_time
+                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+
                 # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
                 if current_price >= tp_price:
-                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    entry_time = datetime.fromisoformat(data['timestamp'])
-                    duration = datetime.now() - entry_time
-                    duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
-    
                     msg = (
                         f"🎯 *TAKE PROFIT* 🎯\n"
                         f"Pair: `{pair}`\n"
@@ -237,11 +310,6 @@ class ExitManager:
     
                 # 3. Stop Loss (Initial or Trailing)
                 elif current_price <= active_sl_price:
-                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    entry_time = datetime.fromisoformat(data['timestamp'])
-                    duration = datetime.now() - entry_time
-                    duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
-    
                     # Deteksi tipe exit proteksi
                     is_trailing_hit = active_sl_price > break_even_price
                     is_be_hit = active_sl_price == break_even_price
@@ -277,14 +345,12 @@ class ExitManager:
                 import traceback
                 log_message(traceback.format_exc())
 
-        self.save_positions(positions)
+        self.save_positions(positions, modified_pairs)
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
-            from config import FEE_SELL_MAKER, FEE_SELL_TAKER, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
-            
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT")
             
             if is_emergency:
                 # Gunakan SELL_TAKER_OFFSET (5%) untuk memaksa market sell instan
@@ -308,7 +374,7 @@ class ExitManager:
                 log_message(f"Warning: Failed to fetch real balance for Piggyback on {pair}: {e}")
 
             # [Senior Fix] Standard CCXT Symbol for Validation
-            symbol = pair.upper().replace("IDR", "/IDR")
+            symbol = f"{pair[:-3].upper()}/IDR"
             
             if self.dry_run:
                 order = {
@@ -330,14 +396,9 @@ class ExitManager:
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
 
             order_status = order.get('status', 'closed')
-            from config import (
-                FEE_BUY_MAKER, FEE_BUY_TAKER, FEE_SELL_MAKER, FEE_SELL_TAKER,
-                MIN_NET_PROFIT_IDR, AI_MIN_HISTORY_POINTS, SELL_TAKER_OFFSET, SELL_MAKER_OFFSET
-            )
             
             # Tentukan fee jual berdasarkan strategi exit
-            is_taker = reason in ("STOP_LOSS", "HARD_STOP_LOSS")
-            fee_sell_rate = FEE_SELL_TAKER if is_taker else FEE_SELL_MAKER
+            fee_sell_rate = FEE_SELL_TAKER if is_emergency else FEE_SELL_MAKER
             
             # Entry fee selalu Maker (karena bot antri beli)
             fee_buy = amount_idr * FEE_BUY_MAKER
@@ -448,13 +509,12 @@ class ExitManager:
                     try:
                         exit_price = float(order.get('price', 0))
                         # Fallback
-                        if exit_price == 0: exit_price = float(p_data.get('entry_price', 0)) * 1.02
+                        if exit_price == 0: exit_price = float(p_data.get('entry_price', 0)) * (1 + p_data.get('target_tp_pct', TP_PCT))
                         
                         amount_crypto = float(order.get('amount', p_data.get('amount_crypto', 0)))
                         entry_price = float(p_data.get('entry_price', 0))
                         amount_idr = float(p_data.get('amount_idr', 0))
                         
-                        from config import FEE_BUY_MAKER, FEE_SELL_MAKER
                         sell_value = amount_crypto * exit_price
                         fee_sell = sell_value * FEE_SELL_MAKER
                         fee_buy = amount_idr * FEE_BUY_MAKER
@@ -551,7 +611,6 @@ class ExitManager:
                         if value_idr >= 10000:
                             log_message(f"👼 Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting into Dashboard!")
                             
-                            from config import TP_PCT, SL_PCT
                             adopt_data = {
                                 "entry_price": current_price,
                                 "amount":      coin_amount,
@@ -575,69 +634,105 @@ class ExitManager:
                 open_orders_res = self.exchange.privatePostOpenOrders()
                 if open_orders_res and str(open_orders_res.get('success')) == '1':
                     orders_dict = open_orders_res.get('return', {}).get('orders', {})
-                    for pair_key, order_list in orders_dict.items():
-                        pair = pair_key.replace('_', '')
-                        pos = open_positions.get(pair)
-                        
-                        for order in order_list:
-                            o_type = order.get('type')
-                            o_id = str(order.get('order_id'))
-                            o_price = float(order.get('price', 0))
-                            
-                            from config import TP_PCT, SL_PCT
-                            
-                            if pos is None:
-                                if o_type == 'buy':
-                                    remain_idr = float(order.get('remain_idr', 0))
-                                    amount_crypto_est = remain_idr / o_price if o_price > 0 else 0
-                                    
-                                    log_message(f"🔄 Active Order Sync: Found untracked BUY order for {pair}. Adopting as PENDING_BUY.")
-                                    adopt_data = {
-                                        "entry_price": o_price,
-                                        "amount": amount_crypto_est,
-                                        "amount_crypto": amount_crypto_est,
-                                        "amount_idr": remain_idr,
-                                        "timestamp": datetime.now().isoformat(),
-                                        "dry_run": False,
-                                        "status": "PENDING_BUY",
-                                        "entry_order_id": o_id,
-                                        "exit_order_id": None,
-                                        "target_tp_pct": TP_PCT,
-                                        "target_sl_pct": SL_PCT
-                                    }
-                                    db.upsert_position(pair, adopt_data)
-                                    send_telegram_message(f"🔄 *SYNC PENDING BUY* 🔄\nPair: `{pair}`\nPrice: Rp {o_price:,.0f}")
-                                    pos = adopt_data
-                                    open_positions[pair] = adopt_data
-                                    
-                                elif o_type == 'sell':
-                                    coin_sym = pair.replace('idr', '')
-                                    remain_coin = float(order.get(f'remain_{coin_sym}', 0))
-                                    
-                                    log_message(f"🔄 Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
-                                    adopt_data = {
-                                        "entry_price": o_price * 0.95,
-                                        "amount": remain_coin,
-                                        "amount_crypto": remain_coin,
-                                        "amount_idr": remain_coin * o_price,
-                                        "timestamp": datetime.now().isoformat(),
-                                        "dry_run": False,
-                                        "status": "EXITING",
-                                        "entry_order_id": f"ADOPT-{int(time.time())}",
-                                        "exit_order_id": o_id,
-                                        "target_tp_pct": TP_PCT,
-                                        "target_sl_pct": SL_PCT
-                                    }
-                                    db.upsert_position(pair, adopt_data)
-                                    send_telegram_message(f"🔄 *SYNC EXITING SELL* 🔄\nPair: `{pair}`\nSell Price: Rp {o_price:,.0f}")
-                                    pos = adopt_data
-                                    open_positions[pair] = adopt_data
+                    
+                    # Flatten active order IDs for quick lookup
+                    all_active_order_ids = set()
+                    if isinstance(orders_dict, dict):
+                        for pk, ol in orders_dict.items():
+                            for o in ol: all_active_order_ids.add(str(o.get('order_id')))
+
+                    # [Anti-Stuck] Detect and force-sell stagnant EXITING orders
+                    for p, pos in list(open_positions.items()):
+                        if pos.get('status') == "EXITING":
+                            oid = str(pos.get('exit_order_id', ''))
+                            if oid in all_active_order_ids:
+                                # Order still open on exchange. Check duration since position opened.
+                                pos_ts = datetime.fromisoformat(pos['timestamp'])
+                                age_sec = (datetime.now() - pos_ts).total_seconds()
+                                if age_sec > 300: # 5 minutes
+                                    log_message(f"⚠️ [Stuck Exit] {p} order {oid} is stuck for {age_sec:.0f}s. Cancelling and performing Emergency Exit...")
+                                    try:
+                                        # Format Indodax: aih_idr, Format CCXT: AIH/IDR
+                                        ccxt_symbol = p.upper().replace("IDR", "/IDR")
+                                        # Indodax cancel_order requires 'type' (buy/sell) and 'pair' (with underscore)
+                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': p.replace("idr", "_idr"), 'type': 'sell'})
+                                        # Revert to OPEN so the main monitor loop can re-process it (now as Taker due to is_emergency)
+                                        pos['status'] = "OPEN"
+                                        pos['exit_order_id'] = None
+                                        db.upsert_position(p, pos)
+                                    except Exception as ce:
+                                        log_message(f"Failed to cancel stuck order {oid}: {ce}")
                             else:
-                                if o_type == 'sell' and pos.get('status') == 'OPEN':
-                                    log_message(f"🔄 Active Order Sync: {pair} was OPEN but has active SELL order. Updating to EXITING.")
-                                    pos['status'] = 'EXITING'
-                                    pos['exit_order_id'] = o_id
-                                    db.upsert_position(pair, pos)
+                                # [Senior Fix] Order tidak ada di bursa tapi status masih EXITING.
+                                # Jika saldo masih ada, berarti order batal/gagal. Kembalikan ke OPEN agar bisa di-jual ulang.
+                                if amount_on_exchange >= (pos['amount_crypto'] * 0.8):
+                                    log_message(f"🔄 Reality Sync: {p} was EXITING but order {oid} is gone and balance remains. Resetting to OPEN.")
+                                    pos['status'] = "OPEN"
+                                    pos['exit_order_id'] = None
+                                    db.upsert_position(p, pos)
+
+                    if isinstance(orders_dict, dict):
+                        for pair_key, order_list in orders_dict.items():
+                            pair = pair_key.replace('_', '')
+                            pos = open_positions.get(pair)
+                            
+                            for order in order_list:
+                                o_type = order.get('type')
+                                o_id = str(order.get('order_id'))
+                                o_price = float(order.get('price', 0))
+                                
+                                if pos is None:
+                                    if o_type == 'buy':
+                                        remain_idr = float(order.get('remain_idr', 0))
+                                        amount_crypto_est = remain_idr / o_price if o_price > 0 else 0
+                                        
+                                        log_message(f"🔄 Active Order Sync: Found untracked BUY order for {pair}. Adopting as PENDING_BUY.")
+                                        adopt_data = {
+                                            "entry_price": o_price,
+                                            "amount": amount_crypto_est,
+                                            "amount_crypto": amount_crypto_est,
+                                            "amount_idr": remain_idr,
+                                            "timestamp": datetime.now().isoformat(),
+                                            "dry_run": False,
+                                            "status": "PENDING_BUY",
+                                            "entry_order_id": o_id,
+                                            "exit_order_id": None,
+                                            "target_tp_pct": TP_PCT,
+                                            "target_sl_pct": SL_PCT
+                                        }
+                                        db.upsert_position(pair, adopt_data)
+                                        send_telegram_message(f"🔄 *SYNC PENDING BUY* 🔄\nPair: `{pair}`\nPrice: Rp {o_price:,.0f}")
+                                        pos = adopt_data
+                                        open_positions[pair] = adopt_data
+                                        
+                                    elif o_type == 'sell':
+                                        coin_sym = pair.replace('idr', '')
+                                        remain_coin = float(order.get(f'remain_{coin_sym}', 0))
+                                        
+                                        log_message(f"🔄 Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
+                                        adopt_data = {
+                                            "entry_price": o_price * 0.95,
+                                            "amount": remain_coin,
+                                            "amount_crypto": remain_coin,
+                                            "amount_idr": remain_coin * o_price,
+                                            "timestamp": datetime.now().isoformat(),
+                                            "dry_run": False,
+                                            "status": "EXITING",
+                                            "entry_order_id": f"ADOPT-{int(time.time())}",
+                                            "exit_order_id": o_id,
+                                            "target_tp_pct": TP_PCT,
+                                            "target_sl_pct": SL_PCT
+                                        }
+                                        db.upsert_position(pair, adopt_data)
+                                        send_telegram_message(f"🔄 *SYNC EXITING SELL* 🔄\nPair: `{pair}`\nSell Price: Rp {o_price:,.0f}")
+                                        pos = adopt_data
+                                        open_positions[pair] = adopt_data
+                                else:
+                                    if o_type == 'sell' and pos.get('status') == 'OPEN':
+                                        log_message(f"🔄 Active Order Sync: {pair} was OPEN but has active SELL order. Updating to EXITING.")
+                                        pos['status'] = 'EXITING'
+                                        pos['exit_order_id'] = o_id
+                                        db.upsert_position(pair, pos)
             except Exception as e:
                 log_message(f"Failed to sync active orders: {e}")
             
@@ -658,8 +753,6 @@ class ExitManager:
         Main entry for jaring logic. Called from the main loop.
         """
         try:
-            from config import JARING_ALLOCATION_PCT, JARING_DEPTH_PCT, INITIAL_CAPITAL
-            
             # 1. Trailing: Move existing jaring up if price is too far (protect from missing pumps)
             for pair, o in list(self.jaring_orders.items()):
                 if pair in current_tickers:

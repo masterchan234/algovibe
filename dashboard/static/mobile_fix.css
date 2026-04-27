@@ -1,0 +1,138 @@
+/* 
+   AlgoVibe Mobile Fix Layer - Senior Engineer Grade
+   Zero-Conflict Architecture | Performance Optimized
+*/
+
+/* 1. GLOBAL MOBILE RESET (Applied only on small screens) */
+@media (max-width: 900px) {
+    :root {
+        --mobile-header-h: 56px;
+        --mobile-nav-h: 60px;
+        --content-height: calc(100vh - var(--mobile-header-h) - var(--mobile-nav-h));
+    }
+
+    html, body {
+        position: fixed;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+    }
+
+    .app-container {
+        padding: 0 !important;
+        height: 100vh !important;
+        display: flex !important;
+        flex-direction: column !important;
+    }
+
+    /* Top Nav Fix */
+    .top-nav {
+        height: var(--mobile-header-h) !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
+        padding: 0 15px !important;
+        border: none !important;
+        border-bottom: 1px solid var(--border) !important;
+        background: var(--bg-header) !important;
+        flex-shrink: 0 !important;
+    }
+
+    /* Main Content Area */
+    .main-layout {
+        display: block !important;
+        height: var(--content-height) !important;
+        overflow: hidden !important;
+        position: relative !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+    /* Shared Tab Content Container */
+    .left-sidebar, .center-area, .right-sidebar {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+        padding: 12px !important;
+        display: none !important; /* Controlled by Body Class */
+        padding-bottom: 30px !important;
+    }
+
+    /* TAB LOGIC - SENIOR LEVEL IMPLEMENTATION */
+    body.tab-market .left-sidebar { display: flex !important; flex-direction: column !important; }
+    body.tab-chart .center-area { display: flex !important; flex-direction: column !important; gap: 12px !important; }
+    body.tab-trades .right-sidebar { display: flex !important; flex-direction: column !important; }
+
+    /* Bottom Nav Fix */
+    .mobile-nav {
+        display: grid !important;
+        height: var(--mobile-nav-h) !important;
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        z-index: 10000 !important;
+        background: rgba(15, 16, 20, 0.95) !important;
+        backdrop-filter: blur(15px) !important;
+        border-top: 1px solid var(--border) !important;
+        padding-bottom: env(safe-area-inset-bottom) !important;
+        height: calc(var(--mobile-nav-h) + env(safe-area-inset-bottom)) !important;
+    }
+
+    #market-ticker { display: none !important; }
+
+    /* Panel & Section Fixes */
+    .panel, .sidebar-section {
+        flex-shrink: 0 !important;
+        width: 100% !important;
+        border-radius: 12px !important;
+        margin-bottom: 12px !important;
+        background: var(--bg-panel) !important;
+        border: 1px solid var(--border) !important;
+    }
+
+    #trending-list, #sector-list, .sidebar-list {
+        max-height: none !important;
+        overflow: visible !important;
+    }
+
+    .market-pulse-container {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 12px !important;
+    }
+
+    /* Input Styling */
+    #market-search {
+        background: var(--bg-panel-2) !important;
+        border: 1px solid var(--border-highlight) !important;
+        border-radius: 8px !important;
+        padding: 10px 14px !important;
+        color: white !important;
+        font-size: 14px !important;
+    }
+
+    /* Chart specific fix */
+    .chart-panel { min-height: 320px !important; }
+    #chart-canvas { height: 260px !important; }
+}
+
+/* Pull-to-Refresh UI Overlay */
+#ptr-indicator {
+    position: fixed;
+    top: -60px;
+    left: 0;
+    width: 100%;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+    background: var(--bg-base);
+    color: var(--blue);
+    pointer-events: none;
+}
