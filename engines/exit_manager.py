@@ -449,6 +449,9 @@ class ExitManager:
                         pos['amount_crypto'] = amount_on_exchange
                         db.upsert_position(pair, pos)
                         continue
+                    else:
+                        # Order belum tersentuh/fill, jadi wajar saldonya 0. Skip cek hallucination.
+                        continue
 
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:
