@@ -72,7 +72,7 @@ class ExitManager:
                         try:
                             # [Senior Fix] Standard CCXT Symbol for Validation
                             symbol_cancel = pair.upper().replace("IDR", "/IDR")
-                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr")})
+                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr"), 'side': 'buy'})
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
                             
@@ -80,7 +80,13 @@ class ExitManager:
                             print(msg.replace('*', '').replace('\n', ' | '))
                             send_telegram_message(msg)
                         except Exception as e:
+                            error_msg = str(e).lower()
                             print(f"Failed to auto-cancel {pair}: {e}")
+                            if "order not found" in error_msg or "not found" in error_msg:
+                                # Jika order tidak ada di bursa (sudah dicancel manual / filled saat WS mati), 
+                                # hapus dari DB agar tidak stuck selamanya.
+                                print(f"⚠️ {pair} order {order_id} not found on exchange. Cleaning up DB...")
+                                db.delete_position(pair)
                         
                         # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
                     continue
@@ -514,6 +520,43 @@ class ExitManager:
                     if pair in self.jaring_orders:
                         del self.jaring_orders[pair]
                         db.delete_shadow_order(pair)
+            
+            # ── [Auto-Adoption] Sync orphans from wallet to DB ──
+            for coin, coin_amount in balance['total'].items():
+                if coin == 'IDR' or coin_amount <= 0:
+                    continue
+                    
+                pair = f"{coin.lower()}idr"
+                if pair not in open_positions:
+                    try:
+                        # Gunakan REST API karena ExitManager tidak punya akses ke Market WS
+                        ticker_rest = self.exchange.fetch_ticker(pair.upper().replace("IDR", "/IDR"))
+                        current_price = float(ticker_rest['last'])
+                            
+                        value_idr = coin_amount * current_price
+                        
+                        # Adopsi hanya jika nilainya di atas Rp 10.000 (mengabaikan dust)
+                        if value_idr >= 10000:
+                            log_message(f"👼 Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting into Dashboard!")
+                            
+                            from config import TP_PCT, SL_PCT
+                            adopt_data = {
+                                "entry_price": current_price,
+                                "amount":      coin_amount,
+                                "amount_crypto": coin_amount,
+                                "amount_idr":  value_idr,
+                                "timestamp":   datetime.now().isoformat(),
+                                "dry_run":     False,
+                                "status":      "OPEN",
+                                "entry_order_id": f"ADOPT-{int(time.time())}",
+                                "exit_order_id": None,
+                                "target_tp_pct": TP_PCT,
+                                "target_sl_pct": SL_PCT
+                            }
+                            db.upsert_position(pair, adopt_data)
+                            send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
+                    except Exception as e:
+                        log_message(f"Failed to adopt orphan {pair}: {e}")
             
             log_message("Reality Check: Sync complete. No hallucinations found.")
         except Exception as e:

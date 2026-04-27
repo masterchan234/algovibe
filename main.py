@@ -551,8 +551,22 @@ class ScalperBot:
                         tickers_snapshot = self.market_ws.get_tickers()
                         ticker_data = tickers_snapshot.get(hp)
                         if ticker_data:
-                            # Masukkan data ticker ke high_speed list agar diproses di loop bawah
-                            high_speed.append(ticker_data)
+                            # [Fix] Pastikan struktur dictionary sama dengan output calculate_score()
+                            last_price = float(ticker_data.get('last', 0))
+                            high = float(ticker_data.get('high', last_price))
+                            low = float(ticker_data.get('low', last_price))
+                            volatility = ((high - low) / last_price) * 100 if last_price > 0 else 0.0
+                            
+                            p_dict = {
+                                "pair": hp,
+                                "last": last_price,
+                                "volatility": volatility,
+                                "score": 0.0,
+                                "imbalance": 1.0,
+                                "change": float(ticker_data.get('change_24h', 0)),
+                                "vol_idr": float(ticker_data.get('vol_idr', 0))
+                            }
+                            high_speed.append(p_dict)
                     except Exception as e:
                         log_message(f"⚠️ Warning: Gagal sinkronisasi tracking untuk {hp}: {e}")
 
