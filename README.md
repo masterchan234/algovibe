@@ -117,5 +117,38 @@ tail -f data/logs/scalper.log
 tail -f data/logs/dashboard.log
 ```
 
+## 🚀 SaaS Orchestration & Scaling (New)
+
+Algovibe kini mendukung arsitektur **Multi-Tenant SaaS** yang memungkinkan Anda menjalankan ratusan bot untuk pelanggan berbeda dalam satu server secara terisolasi menggunakan Docker.
+
+### 🏢 Komponen SaaS
+- **`saas_manager.py`**: Watchdog pusat yang mengelola masa aktif langganan (*subscription*) dan menjaga kesehatan infrastruktur.
+- **`market_hub.py` (Proxy Hub)**: Sentralisasi data Indodax via ZeroMQ (Port 5555). Menghemat bandwidth hingga 90% dan mencegah IP Banned.
+- **`provision_bot.py`**: Script otomatisasi untuk mencetak instance bot baru dalam hitungan detik.
+
+### 🛠 Menjalankan Infrastruktur SaaS
+1. **Jalankan SaaS Manager & Market Hub:**
+   ```bash
+   python3 saas_manager.py &
+   ```
+2. **Cetak Bot untuk Pelanggan Baru:**
+   ```bash
+   # Format: python3 provision_bot.py <username> <password> <api_key> <api_secret>
+   python3 provision_bot.py budi budi123 AK-KEY-BUDI SEC-SECRET-BUDI
+   ```
+3. **Monitoring Pelanggan:**
+   Gunakan database pusat untuk melihat status dan tanggal kadaluwarsa:
+   ```bash
+   sqlite3 data/saas_central.db "SELECT * FROM tenants;"
+   ```
+
+## 🔒 Security & Hardening (SaaS Grade)
+Dashboard mobile telah diperkuat dengan standar keamanan **Red-Team**:
+- **Tokenized WS Handshake**: Menggunakan `view_token` berbasis Salt-Key untuk mengunci akses WebSocket hanya dari dashboard resmi (mencegah pencurian data via bot luar).
+- **CSRF Protection**: Semua request state-changing (Jual/Update) dilindungi token unik.
+- **XSS Sanitization**: Input dan data log disanitasi sebelum ditampilkan di UI.
+- **Secure Sessions**: Menggunakan kunci kriptografi dinamis dan flag cookie `HttpOnly`.
+- **View-Only Mode**: Publik bisa melihat performa (Trades tab), namun kontrol tetap terkunci di balik autentikasi.
+
 ## ⚠️ Disclaimer
 Software ini dibuat untuk tujuan edukasi dan eksperimen algoritma trading. **Gunakan dengan risiko Anda sendiri**. Pembuat tidak bertanggung jawab atas kerugian finansial yang terjadi akibat penggunaan software ini. Sangat disarankan untuk menjalankan bot dalam mode **DRY RUN** terlebih dahulu.

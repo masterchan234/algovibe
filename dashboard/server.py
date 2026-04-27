@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
-from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response
+from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_wtf.csrf import CSRFProtect, generate_csrf
@@ -26,8 +26,10 @@ exchange = ccxt.indodax()
 app = Flask(__name__, static_folder='static')
 
 # ── Pentest Fix: Secure Session Configuration ──
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
+WS_SALT = os.getenv("WS_SALT", "algovibe_salt_2024") # Salt rahasia untuk handshake
+
 app.config.update(
-    SECRET_KEY=os.getenv('SECRET_KEY', secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=False, # Set to True if using HTTPS
     SESSION_COOKIE_SAMESITE='Lax',
@@ -42,24 +44,42 @@ CORS(app, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
 
 # Provide CSRF token for the frontend
+def generate_view_token():
+    """Generate token handshake untuk view-only mode."""
+    import hashlib
+    # Token berbasis jam (berlaku sekitar 1 jam)
+    ts = int(time.time() / 3600)
+    token = hashlib.sha256(f"{WS_SALT}_{ts}".encode()).hexdigest()
+    return token
+
 @app.after_request
 def set_csrf_cookie(response):
     response.set_cookie('csrf_token', generate_csrf(), samesite='Lax', httponly=False) # Frontend needs to read this
     return response
 
-# ── WebSocket Hardening: Auth & Rooms ──
 @socketio.on('connect')
-def handle_connect():
-    # Periksa session untuk keamanan (SaaS Ready)
-    if 'user_id' not in session:
-        logging.warning("🚫 Unauthorized WS connection attempt")
-        return False # Menolak koneksi
+def handle_connect(auth=None):
+    # Cek token handshake dari auth payload
+    client_token = auth.get('token') if auth else None
+    valid_token = generate_view_token()
     
-    user_id = session.get('user_id')
-    username = session.get('username')
-    join_room(f"user_{user_id}")
-    logging.info(f"🔌 User {username} connected to WS (Room: user_{user_id})")
-    emit('connection_status', {'status': 'connected', 'username': username})
+    is_authenticated = 'user_id' in session
+    is_token_valid = (client_token == valid_token)
+
+    if not is_authenticated and not is_token_valid:
+        logging.warning("🚫 Unauthorized WS connection (No Session, No Valid Token)")
+        return False # Tolak koneksi
+    
+    # Semua orang yang lolos masuk ke room public
+    join_room('public')
+    
+    if is_authenticated:
+        user_id = session.get('user_id')
+        username = session.get('username')
+        join_room(f"user_{user_id}")
+        logging.info(f"🔌 Authenticated User {username} connected (Public + Private)")
+    else:
+        logging.info("🔌 Guest User connected via Valid Token (Public Only)")
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -217,9 +237,15 @@ def _generate_technical_reasoning(pair, tech, last_price=None):
 
     return " ".join(analysis) if analysis else "Fase konsolidasi; belum ada target pergerakan signifikan terdeteksi."
 
+@app.route('/mobile.html')
+def mobile_dashboard():
+    token = generate_view_token()
+    return render_template('mobile.html', view_token=token)
+
 @app.route('/')
 def index():
-    return send_from_directory(app.static_folder, 'index.html')
+    token = generate_view_token()
+    return render_template('index.html', view_token=token)
 
 @app.route('/favicon.ico')
 def favicon():

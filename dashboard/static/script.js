@@ -4,7 +4,11 @@
 let chart, activePair = null, activeTimeframe = 'LIVE', lastStats = {}, lastPrices = {}, lastRadarData = [], _notifEnabled = false;
 let marketSearchQuery = '';
 let _logCache = new Set();
-const socket = typeof io !== 'undefined' ? io() : null;
+const socket = typeof io !== 'undefined' ? io({
+    auth: {
+        token: window.VIEW_TOKEN || ''
+    }
+}) : null;
 
 // ── Indicator Visibility State ─────────────────────────────
 const indState = { ma7: true, ma25: true, bb: true };
@@ -87,15 +91,19 @@ class AlgoChart {
         const dpr = devicePixelRatio || 1;
         // Main chart canvas
         const r = this.canvas.getBoundingClientRect();
+        // Guard: jangan resize jika canvas sedang hidden (width/height = 0)
+        if (r.width === 0 || r.height === 0) return;
         this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
         this.ctx.scale(dpr, dpr);
         this.canvas.style.width = r.width + 'px'; this.canvas.style.height = r.height + 'px';
         // Axis canvas
         if (this.axisCanvas) {
             const ra = this.axisCanvas.getBoundingClientRect();
-            this.axisCanvas.width = ra.width * dpr; this.axisCanvas.height = ra.height * dpr;
-            this.axisCtx.scale(dpr, dpr);
-            this.axisCanvas.style.width = ra.width + 'px'; this.axisCanvas.style.height = ra.height + 'px';
+            if (ra.width > 0 && ra.height > 0) {
+                this.axisCanvas.width = ra.width * dpr; this.axisCanvas.height = ra.height * dpr;
+                this.axisCtx.scale(dpr, dpr);
+                this.axisCanvas.style.width = ra.width + 'px'; this.axisCanvas.style.height = ra.height + 'px';
+            }
         }
         this.draw();
     }
@@ -151,11 +159,35 @@ class AlgoChart {
             if (activeTimeframe === 'LIVE') {
                 // Ticks dari Bot History
                 const h = await (await fetch('/api/history/' + pair)).json();
-                if (!Array.isArray(h) || !h.length) return;
-                data = h.map((v, i) => ({
-                    time: Math.floor(Date.now() / 1000) - (h.length - i) * 60,
-                    value: parseFloat(v)
-                }));
+                if (Array.isArray(h) && h.length >= 5) {
+                    data = h.map((v, i) => ({
+                        time: Math.floor(Date.now() / 1000) - (h.length - i) * 60,
+                        value: parseFloat(v)
+                    }));
+                } else {
+                    // Fallback: coin belum ada histori bot, gunakan OHLCV 1h dari exchange
+                    console.log(`[Chart] No bot history for ${pair}, falling back to 1h OHLCV`);
+                    const ohlcv = await (await fetch(`/api/ohlcv/${pair}/1h`)).json();
+                    if (!Array.isArray(ohlcv) || !ohlcv.length) {
+                        // Coba 15m sebagai last resort
+                        const ohlcv15 = await (await fetch(`/api/ohlcv/${pair}/15m`)).json();
+                        if (!Array.isArray(ohlcv15) || !ohlcv15.length) return;
+                        data = ohlcv15.map(c => ({
+                            time: c[0] / 1000,
+                            open: c[1], high: c[2], low: c[3], close: c[4], value: c[4]
+                        }));
+                    } else {
+                        data = ohlcv.map(c => ({
+                            time: c[0] / 1000,
+                            open: c[1], high: c[2], low: c[3], close: c[4], value: c[4]
+                        }));
+                    }
+                    // Tampilkan info bahwa ini data OHLCV, bukan live tick
+                    const tEl = document.getElementById('pair-trend');
+                    if (tEl && (!tEl.textContent || tEl.textContent === '—')) {
+                        tEl.textContent = '📊 Data Pasar';
+                    }
+                }
             } else {
                 // Candles dari Exchange
                 const ohlcv = await (await fetch(`/api/ohlcv/${pair}/${activeTimeframe}`)).json();
@@ -630,16 +662,30 @@ async function selectPair(pair, trend, prob) {
     }
 
     refreshWatchlist();
-    if (chart) {
-        chart.currentProb = p;
-        chart.loadData(pair);
-    }
 
-    // UX Focus: If on mobile market tab, switch to chart tab after selection
+    // UX Focus: If on mobile market tab, switch to chart tab FIRST
+    // then load data after canvas is visible (fix race condition)
     const nav = document.querySelector('.mobile-nav');
-    if (nav && document.body.classList.contains('tab-market')) {
+    const isOnMobileMarket = nav && document.body.classList.contains('tab-market');
+
+    if (isOnMobileMarket) {
         const chartBtn = document.querySelector('.mobile-nav-item[onclick*="chart"]');
         if (chartBtn) switchMobileTab('chart', chartBtn);
+        // Tunggu canvas visible + layout selesai, baru render chart
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                if (chart) {
+                    chart.currentProb = p;
+                    chart.resize && chart.resize();
+                    chart.loadData(pair);
+                }
+            }, 200);
+        });
+    } else {
+        if (chart) {
+            chart.currentProb = p;
+            chart.loadData(pair);
+        }
     }
 }
 
@@ -663,9 +709,9 @@ function switchMobileTab(tabId, el) {
     document.body.classList.remove('tab-market', 'tab-chart', 'tab-trades');
     document.body.classList.add('tab-' + tabId);
 
-    // Trigger chart resize after animation
+    // Trigger chart resize after tab is visible — longer delay for mobile repaint
     if (tabId === 'chart' && chart && chart.resize) {
-        setTimeout(() => chart.resize(), 150);
+        requestAnimationFrame(() => setTimeout(() => chart.resize(), 100));
     }
     closeAllSidebars();
 }

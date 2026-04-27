@@ -1,7 +1,9 @@
-/* Pull-to-Refresh Logic for AlgoVibe Mobile (Premium Edition) */
+/* Pull-to-Refresh Logic for AlgoVibe Mobile (Smart Edition) */
 (function() {
     let startY = 0;
+    let startX = 0;
     let isPulling = false;
+    let isScrollingContent = false;
     const threshold = 120;
     let refreshIndicator = null;
     let hasVibrated = false;
@@ -10,7 +12,7 @@
     style.textContent = `
         #ptr-indicator {
             position: fixed;
-            top: -60px;
+            top: -70px;
             left: 50%;
             transform: translateX(-50%);
             width: 45px;
@@ -24,14 +26,15 @@
             justify-content: center;
             z-index: 9999;
             box-shadow: 0 4px 15px rgba(0,0,0,0.4), 0 0 10px rgba(37, 99, 235, 0.4);
-            transition: opacity 0.2s, top 0.1s;
+            transition: top 0.15s ease-out, opacity 0.2s, background 0.2s;
             opacity: 0;
+            pointer-events: none;
         }
         #ptr-indicator svg {
             width: 24px;
             height: 24px;
             fill: white;
-            transition: transform 0.1s;
+            transition: transform 0.05s linear;
         }
         #ptr-indicator.refreshing svg {
             animation: ptr-rotate 0.8s linear infinite;
@@ -42,7 +45,7 @@
         }
     `;
     document.head.appendChild(style);
-    
+
     function createIndicator() {
         if (refreshIndicator) return;
         refreshIndicator = document.createElement('div');
@@ -55,37 +58,85 @@
         document.body.prepend(refreshIndicator);
     }
 
-    document.addEventListener('touchstart', (e) => {
-        const scrollTarget = document.documentElement;
-        if (window.scrollY <= 5) {
-            startY = e.touches[0].pageY;
-            createIndicator();
-            hasVibrated = false;
-        } else {
-            startY = 0;
+    function getPageScrollTop() {
+        // Cek main scrollable container dulu, fallback ke window
+        const container = document.querySelector('.center-area') || 
+                          document.querySelector('main') || 
+                          null;
+        if (container && container.scrollHeight > container.clientHeight) {
+            return container.scrollTop;
         }
+        return window.scrollY || document.documentElement.scrollTop;
+    }
+
+    function resetPTR() {
+        if (refreshIndicator) {
+            refreshIndicator.style.top = '-70px';
+            refreshIndicator.style.opacity = '0';
+            refreshIndicator.style.background = 'rgba(37, 99, 235, 0.9)';
+        }
+        startY = 0;
+        startX = 0;
+        isPulling = false;
+        isScrollingContent = false;
+        hasVibrated = false;
+    }
+
+    document.addEventListener('touchstart', (e) => {
+        // Reset semua state
+        isPulling = false;
+        isScrollingContent = false;
+        hasVibrated = false;
+        startY = e.touches[0].pageY;
+        startX = e.touches[0].pageX;
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
         if (startY === 0) return;
-        
-        const y = e.touches[0].pageY;
-        const pull = y - startY;
-        
-        if (pull > 0 && isPulling === false) isPulling = true;
 
-        if (pull > 0) {
-            const progress = Math.min(pull / threshold, 1);
-            refreshIndicator.style.top = `${Math.min(pull * 0.5, 80)}px`;
-            refreshIndicator.style.opacity = progress;
-            refreshIndicator.querySelector('svg').style.transform = `rotate(${pull * 2}deg)`;
-            
-            if (pull > threshold && !hasVibrated) {
+        const y = e.touches[0].pageY;
+        const x = e.touches[0].pageX;
+        const deltaY = y - startY;
+        const deltaX = x - startX;
+
+        // Jika gerakan lebih horizontal dari vertikal → bukan PTR, abort
+        if (!isPulling && !isScrollingContent) {
+            if (Math.abs(deltaX) > Math.abs(deltaY)) {
+                isScrollingContent = true;
+                return;
+            }
+        }
+
+        if (isScrollingContent) return;
+
+        // PTR hanya aktif jika:
+        // 1. Halaman benar-benar di posisi teratas (scrollTop <= 0)
+        // 2. Gerakan ke bawah (deltaY > 0)
+        const scrollTop = getPageScrollTop();
+
+        if (scrollTop > 2) {
+            // User sedang scroll konten, bukan PTR
+            isScrollingContent = true;
+            return;
+        }
+
+        if (deltaY > 5) {
+            isPulling = true;
+            createIndicator();
+
+            const progress = Math.min(deltaY / threshold, 1);
+            const topPos = Math.min(deltaY * 0.45, 80);
+
+            refreshIndicator.style.top = `${topPos}px`;
+            refreshIndicator.style.opacity = Math.min(progress, 1);
+            refreshIndicator.querySelector('svg').style.transform = `rotate(${deltaY * 2}deg)`;
+
+            if (deltaY > threshold && !hasVibrated) {
                 if (navigator.vibrate) navigator.vibrate(15);
                 hasVibrated = true;
-                refreshIndicator.style.background = '#10b981'; // Green on ready
-            } else if (pull <= threshold) {
-                hasVibrated = false;
+                refreshIndicator.style.background = '#10b981';
+            } else if (deltaY <= threshold) {
+                if (hasVibrated) hasVibrated = false;
                 refreshIndicator.style.background = 'rgba(37, 99, 235, 0.9)';
             }
         }
@@ -97,14 +148,17 @@
             if (pull > threshold) {
                 refreshIndicator.classList.add('refreshing');
                 refreshIndicator.style.top = '70px';
+                refreshIndicator.style.opacity = '1';
                 if (navigator.vibrate) navigator.vibrate([10, 30, 10]);
                 setTimeout(() => location.reload(), 600);
-            } else {
-                refreshIndicator.style.top = '-60px';
-                refreshIndicator.style.opacity = '0';
+                return; // Jangan reset, biarkan loading
             }
         }
-        startY = 0;
-        isPulling = false;
+        resetPTR();
     }, { passive: true });
+
+    document.addEventListener('touchcancel', () => {
+        resetPTR();
+    }, { passive: true });
+
 })();

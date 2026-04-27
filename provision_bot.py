@@ -5,7 +5,10 @@ import sqlite3
 import subprocess
 import secrets
 import shutil
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
+
+CENTRAL_DB = "data/saas_central.db"
 
 def print_banner():
     print("=" * 50)
@@ -91,9 +94,20 @@ def main():
     # 2. Setup Database
     setup_tenant_db(tenant_base, username, password, api_key, api_secret)
 
-    # 3. Find Port
+    # 3. Find Port & Register in Central DB
     port = find_free_port()
     print(f"[*] Assigned Port: {port}")
+    
+    # Update Central DB
+    expiry_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+    central_conn = sqlite3.connect(CENTRAL_DB)
+    c_cursor = central_conn.cursor()
+    c_cursor.execute(
+        "INSERT OR REPLACE INTO tenants (username, port, status, expiry_date) VALUES (?, ?, 'ACTIVE', ?)",
+        (username, port, expiry_date)
+    )
+    central_conn.commit()
+    central_conn.close()
 
     # 4. Generate Secret Key for this tenant
     secret_key = secrets.token_hex(32)
@@ -113,6 +127,8 @@ def main():
         "-e", f"INDODAX_API_KEY={api_key}",
         "-e", f"INDODAX_API_SECRET={api_secret}",
         "-e", f"APP_USERNAME={username}",
+        "-e", "USE_MARKET_HUB=true",
+        "-e", f"MARKET_HUB_HOST=172.17.0.1", # Default docker bridge IP to host
         "-v", f"{tenant_base}:/app/data",
         "-v", f"{os.path.abspath('models')}:/app/models:ro",
         "80.241.217.181:5000/algovibe:latest"
