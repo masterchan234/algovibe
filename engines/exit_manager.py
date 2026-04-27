@@ -295,6 +295,18 @@ class ExitManager:
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_MAKER
 
+            # --- Piggyback Strategy (Dust Sweeper) ---
+            coin = pair.replace('idr', '').upper()
+            try:
+                if not self.dry_run:
+                    balance = self.exchange.fetch_balance()
+                    real_balance = float(balance['free'].get(coin, 0))
+                    if real_balance > amount:
+                        log_message(f"🐷 Piggyback Strategy: Boosting sell amount from {amount} to {real_balance} {coin} to sweep dust!")
+                        amount = real_balance
+            except Exception as e:
+                log_message(f"Warning: Failed to fetch real balance for Piggyback on {pair}: {e}")
+
             # [Senior Fix] Standard CCXT Symbol for Validation
             symbol = pair.upper().replace("IDR", "/IDR")
             
@@ -557,6 +569,77 @@ class ExitManager:
                             send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
                     except Exception as e:
                         log_message(f"Failed to adopt orphan {pair}: {e}")
+            
+            # ── [Active Order Sync] Sync manual Open Orders to DB ──
+            try:
+                open_orders_res = self.exchange.privatePostOpenOrders()
+                if open_orders_res and str(open_orders_res.get('success')) == '1':
+                    orders_dict = open_orders_res.get('return', {}).get('orders', {})
+                    for pair_key, order_list in orders_dict.items():
+                        pair = pair_key.replace('_', '')
+                        pos = open_positions.get(pair)
+                        
+                        for order in order_list:
+                            o_type = order.get('type')
+                            o_id = str(order.get('order_id'))
+                            o_price = float(order.get('price', 0))
+                            
+                            from config import TP_PCT, SL_PCT
+                            
+                            if pos is None:
+                                if o_type == 'buy':
+                                    remain_idr = float(order.get('remain_idr', 0))
+                                    amount_crypto_est = remain_idr / o_price if o_price > 0 else 0
+                                    
+                                    log_message(f"🔄 Active Order Sync: Found untracked BUY order for {pair}. Adopting as PENDING_BUY.")
+                                    adopt_data = {
+                                        "entry_price": o_price,
+                                        "amount": amount_crypto_est,
+                                        "amount_crypto": amount_crypto_est,
+                                        "amount_idr": remain_idr,
+                                        "timestamp": datetime.now().isoformat(),
+                                        "dry_run": False,
+                                        "status": "PENDING_BUY",
+                                        "entry_order_id": o_id,
+                                        "exit_order_id": None,
+                                        "target_tp_pct": TP_PCT,
+                                        "target_sl_pct": SL_PCT
+                                    }
+                                    db.upsert_position(pair, adopt_data)
+                                    send_telegram_message(f"🔄 *SYNC PENDING BUY* 🔄\nPair: `{pair}`\nPrice: Rp {o_price:,.0f}")
+                                    pos = adopt_data
+                                    open_positions[pair] = adopt_data
+                                    
+                                elif o_type == 'sell':
+                                    coin_sym = pair.replace('idr', '')
+                                    remain_coin = float(order.get(f'remain_{coin_sym}', 0))
+                                    
+                                    log_message(f"🔄 Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
+                                    adopt_data = {
+                                        "entry_price": o_price * 0.95,
+                                        "amount": remain_coin,
+                                        "amount_crypto": remain_coin,
+                                        "amount_idr": remain_coin * o_price,
+                                        "timestamp": datetime.now().isoformat(),
+                                        "dry_run": False,
+                                        "status": "EXITING",
+                                        "entry_order_id": f"ADOPT-{int(time.time())}",
+                                        "exit_order_id": o_id,
+                                        "target_tp_pct": TP_PCT,
+                                        "target_sl_pct": SL_PCT
+                                    }
+                                    db.upsert_position(pair, adopt_data)
+                                    send_telegram_message(f"🔄 *SYNC EXITING SELL* 🔄\nPair: `{pair}`\nSell Price: Rp {o_price:,.0f}")
+                                    pos = adopt_data
+                                    open_positions[pair] = adopt_data
+                            else:
+                                if o_type == 'sell' and pos.get('status') == 'OPEN':
+                                    log_message(f"🔄 Active Order Sync: {pair} was OPEN but has active SELL order. Updating to EXITING.")
+                                    pos['status'] = 'EXITING'
+                                    pos['exit_order_id'] = o_id
+                                    db.upsert_position(pair, pos)
+            except Exception as e:
+                log_message(f"Failed to sync active orders: {e}")
             
             log_message("Reality Check: Sync complete. No hallucinations found.")
         except Exception as e:
