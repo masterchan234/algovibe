@@ -143,11 +143,40 @@
 
         .floating-trade-btn:active { transform: scale(0.9) rotate(5deg); }
 
+        /* Pulse Items (Mobile) */
+        .pulse-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            padding: 6px 8px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            border-left: 3px solid transparent;
+        }
+        .pulse-item.up { border-left-color: #00ff88; color: #00ff88; }
+        .pulse-item.down { border-left-color: #ff4d4d; color: #ff4d4d; }
+        .pulse-item span { color: #fff; font-weight: 600; }
+
+        /* Pull to Refresh Indicator */
+        .ptr-indicator {
+            height: 0;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #888;
+            transition: height 0.2s;
+        }
+        .ptr-active .ptr-indicator { height: 40px; }
+
         /* Container & Scrolling */
         .app-container {
             display: flex;
             flex-direction: column;
             height: 100vh;
+            overflow: hidden;
         }
 
         .mobile-content {
@@ -156,6 +185,23 @@
             padding: 12px;
             padding-bottom: 100px;
             -webkit-overflow-scrolling: touch;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Sticky Search */
+        .sticky-search {
+            position: sticky;
+            top: -12px; /* Offset parent padding */
+            z-index: 100;
+            margin-bottom: 15px;
+            background: rgba(15, 15, 26, 0.95);
+            backdrop-filter: blur(10px);
+            margin-left: -12px;
+            margin-right: -12px;
+            padding: 12px;
+            border-radius: 0 0 16px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
         }
 
         /* Chart TF Buttons */
@@ -167,6 +213,7 @@
             border-radius: 6px;
             font-size: 10px;
             font-weight: 700;
+            white-space: nowrap;
         }
         .chart-tf-btn.active {
             background: #2563eb;
@@ -198,17 +245,32 @@
 
             <!-- TAB 1: MARKET -->
             <div class="mobile-tab-content tab-market-content">
-                <div class="panel glass-panel" style="margin-bottom: 12px;">
-                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">🔍 Search Opportunity</div>
-                    <div class="search-wrap" style="padding: 12px;">
-                        <input type="text" id="market-search" placeholder="Search pair (e.g. BTC, ETH)..." 
-                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 12px; color: #fff; font-size: 14px; outline: none;">
+                <div class="panel glass-panel sticky-search">
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search / Momentum</div>
+                    <div class="search-wrap" style="padding: 8px 0 0 0;">
+                        <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
+                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px; color: #fff; font-size: 13px; outline: none;">
+                    </div>
+                </div>
+
+                <!-- Market Pulse (Gainers/Losers) -->
+                <div class="panel glass-panel" style="margin-bottom: 12px; padding: 12px;">
+                    <div class="section-header" style="padding: 0 0 10px 0; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 10px;">🔥 Market Pulse</div>
+                    <div class="market-pulse-container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div>
+                            <div style="font-size: 9px; color: #00ff88; font-weight: 800; margin-bottom: 8px;">GAINERS</div>
+                            <div id="gainers-list" class="pulse-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+                        </div>
+                        <div>
+                            <div style="font-size: 9px; color: #ff4d4d; font-weight: 800; margin-bottom: 8px;">LOSERS</div>
+                            <div id="losers-list" class="pulse-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+                        </div>
                     </div>
                 </div>
 
                 <div class="panel glass-panel" style="margin-bottom: 12px;">
                     <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">📡 Momentum Radar</div>
-                    <div id="trending-list" class="sidebar-list" style="max-height: none;">
+                    <div class="sidebar-list radar-list-container" style="max-height: none;">
                         <div class="empty-state">Scanning markets...</div>
                     </div>
                 </div>
@@ -216,14 +278,27 @@
 
         <!-- TAB 2: CHART (Default) -->
             <div class="mobile-tab-content tab-chart-content">
+                <!-- Sticky Search also in Chart Tab -->
+                <div class="panel glass-panel sticky-search">
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search Opportunity</div>
+                    <div class="search-wrap" style="padding: 8px 0 0 0;">
+                        <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
+                               style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px; color: #fff; font-size: 13px; outline: none;">
+                    </div>
+                    <!-- Dynamic Results for Chart Tab (Only shown when searching) -->
+                    <div class="radar-list-container" style="max-height: 250px; overflow-y: auto; margin-top: 5px; background: rgba(0,0,0,0.4); border-radius: 8px; display:none;"></div>
+                </div>
+
                 <div class="panel glass-panel chart-panel" style="margin-bottom: 12px;">
                     <div class="chart-header" style="flex-direction: column; align-items: flex-start; gap: 8px;">
                         <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
                             <h1 id="active-pair" style="font-size: 1.4rem; color: #fff;">BTC/IDR</h1>
                             <!-- Timeframe Selectors (Same as Desktop) -->
-                            <div class="chart-timeframes" style="display:flex; gap:4px; background: rgba(0,0,0,0.3); padding:2px; border-radius:6px;">
+                            <div class="chart-timeframes" style="display:flex; gap:3px; background: rgba(0,0,0,0.3); padding:2px; border-radius:6px; overflow-x: auto; max-width: 200px;">
                                 <button class="chart-tf-btn active" onclick="setChartTimeframe('LIVE')">LIVE</button>
                                 <button class="chart-tf-btn" onclick="setChartTimeframe('5m')">5M</button>
+                                <button class="chart-tf-btn" onclick="setChartTimeframe('15m')">15M</button>
+                                <button class="chart-tf-btn" onclick="setChartTimeframe('1h')">1H</button>
                                 <button class="chart-tf-btn" onclick="setChartTimeframe('24h')">24H</button>
                             </div>
                         </div>

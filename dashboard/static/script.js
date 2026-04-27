@@ -289,10 +289,8 @@ class AlgoChart {
         const tickColor = isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.12)';
         const lblColor = isLight ? '#94a3b8' : '#3a3d52';
 
-        // ── Nice-step grid lines (TradingView style) ──
-        // Hitung step yang rounded ke angka bulat sesuai magnitude range
         const niceStep = (() => {
-            const rawStep = range / 6;
+            const rawStep = range / 5;
             const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
             const norm = rawStep / mag;
             const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
@@ -300,23 +298,22 @@ class AlgoChart {
         })();
         const firstTick = Math.ceil(minV / niceStep) * niceStep;
 
-        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.font = '9px JetBrains Mono, monospace';
         ctx.textAlign = 'left';
 
         for (let v = firstTick; v <= maxV + niceStep * 0.01; v += niceStep) {
             const y = toY(v);
-            // skip jika terlalu dekat ke tepi (akan bentrok dengan H/L badge)
-            if (y < 14 || y > H - 14) continue;
+            if (y < 12 || y > H - 12) continue;
             mainCtx.beginPath();
-            mainCtx.setLineDash([3, 6]);
+            mainCtx.setLineDash([2, 4]);
             mainCtx.moveTo(0, y); mainCtx.lineTo(mW, y);
-            mainCtx.strokeStyle = dimColor; mainCtx.lineWidth = 1;
+            mainCtx.strokeStyle = dimColor; mainCtx.lineWidth = 0.5;
             mainCtx.stroke(); mainCtx.setLineDash([]);
             ctx.beginPath();
-            ctx.moveTo(0, y); ctx.lineTo(6, y);
-            ctx.strokeStyle = tickColor; ctx.lineWidth = 1; ctx.stroke();
+            ctx.moveTo(0, y); ctx.lineTo(4, y);
+            ctx.strokeStyle = tickColor; ctx.lineWidth = 0.8; ctx.stroke();
             ctx.fillStyle = lblColor;
-            ctx.fillText(this._fmtShort(v), 10, y + 3.5);
+            ctx.fillText(this._fmtShort(v), 8, y + 3);
         }
 
         // ── HIGH pin — exact maxV (green) ──
@@ -468,7 +465,7 @@ class AlgoChart {
             ctx.bezierCurveTo(cp1x, pts[i].y, cp1x, pts[i+1].y, pts[i+1].x, pts[i+1].y);
         }
         ctx.strokeStyle = lineCol;
-        ctx.lineWidth = 2.8;
+        ctx.lineWidth = 1.8;
         ctx.lineJoin = 'round';
         ctx.stroke();
         ctx.restore();
@@ -960,12 +957,8 @@ function renderWatchlist(data) {
         }
 
         // Momentum Radar (Filter Signal-Only)
-        const tList = document.getElementById('trending-list');
-        if (tList) {
-            tList.innerHTML = '';
-
-            // Senior UX Fix: Filter koin aktif (Score > 30)
-            // Namun jika user sedang mencari secara manual, tampilkan semua yang cocok tanpa filter skor.
+        const radarContainers = document.querySelectorAll('.radar-list-container');
+        if (radarContainers.length > 0) {
             const isSearching = marketSearchQuery.length > 0;
             const query = marketSearchQuery.toLowerCase();
 
@@ -979,56 +972,62 @@ function renderWatchlist(data) {
                 return (b.score || 0) - (a.score || 0);
             });
 
-            if (radar.length === 0) {
-                tList.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim); font-size:0.8rem;">Menunggu Momentum Pasar...</div>';
-            }
-
-            radar.forEach(t => {
-                const s = t.score || 0;
-                let label = '🟡 Accumulating';
-                let color = '#eccc68';
-
-                if (s > 80) { label = '🔴 Hyper-Drive'; color = '#ff4757'; }
-                else if (s > 50) { label = '🟠 Momentum'; color = '#ffa502'; }
-
-                // LOGIKA SIGNAL EXPIRY (120 Detik)
-                let sig = t.signal || 'HOLD';
-                let sigColor = 'var(--text-dim)';
-
-                // Cek kesegaran sinyal
-                const now = new Date();
-                const lastUpdate = t.updated_at ? new Date(t.updated_at + 'Z') : null; // Force UTC
-                const diffSec = lastUpdate ? (now - lastUpdate) / 1000 : 999;
-
-                if (diffSec > 120) {
-                    sig = 'WAIT';
-                    sigColor = 'var(--text-dim)';
-                } else {
-                    if (sig === 'BUY') sigColor = '#2ecc71';
-                    if (sig === 'SELL') sigColor = '#e74c3c';
+            radarContainers.forEach(container => {
+                container.innerHTML = '';
+                if (radar.length === 0) {
+                    container.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-dim); font-size:0.8rem;">${isSearching ? 'No pairs found...' : 'Waiting for Momentum...'}</div>`;
+                    return;
                 }
 
-                const chg = t.change || 0;
-                const chgClass = chg >= 0 ? 'up' : 'down';
-                const chgSign = chg >= 0 ? '+' : '';
+                // If on Chart tab and NOT searching, hide the radar list to save space
+                if (container.closest('.tab-chart-content') && !isSearching) {
+                    container.style.display = 'none';
+                    return;
+                }
+                container.style.display = 'block';
 
-                const item = document.createElement('div');
-                item.className = 'trending-item';
-                item.style.padding = '10px 12px';
-                item.style.borderBottom = '1px solid var(--border-soft)';
-                item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
+                radar.forEach(t => {
+                    const s = t.score || 0;
+                    let label = '🟡 Accumulating';
+                    let color = '#eccc68';
 
-                item.innerHTML = `
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                        <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${formatPair(t.pair)}</span>
-                        <span style="font-weight:bold; color:${sigColor}; font-size:0.8rem; border:1px solid ${sigColor}44; padding:2px 6px; border-radius:4px; min-width:45px; text-align:center;">${sig}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.75rem;">
-                        <span style="color:var(--text-dim);"><span class="${chgClass}">${chgSign}${chg.toFixed(2)}%</span> | Vol: ${fmtShortIDR(t.vol_idr || 0)}</span>
-                        <span style="color:${color}; font-weight:600;">${label}</span>
-                    </div>
-                `;
-                tList.appendChild(item);
+                    if (s > 80) { label = '🔴 Hyper-Drive'; color = '#ff4757'; }
+                    else if (s > 50) { label = '🟠 Momentum'; color = '#ffa502'; }
+
+                    let sig = t.signal || 'HOLD';
+                    let sigColor = 'var(--text-dim)';
+                    const now = new Date();
+                    const lastUpdate = t.updated_at ? new Date(t.updated_at + 'Z') : null;
+                    const diffSec = lastUpdate ? (now - lastUpdate) / 1000 : 999;
+
+                    if (diffSec > 120) { sig = 'WAIT'; sigColor = 'var(--text-dim)'; }
+                    else {
+                        if (sig === 'BUY') sigColor = '#2ecc71';
+                        if (sig === 'SELL') sigColor = '#e74c3c';
+                    }
+
+                    const chg = t.change || 0;
+                    const chgClass = chg >= 0 ? 'up' : 'down';
+                    const chgSign = chg >= 0 ? '+' : '';
+
+                    const item = document.createElement('div');
+                    item.className = 'trending-item';
+                    item.style.padding = '10px 12px';
+                    item.style.borderBottom = '1px solid var(--border-soft)';
+                    item.onclick = () => selectPair(t.pair, t.trend, t.prediction);
+
+                    item.innerHTML = `
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                            <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${formatPair(t.pair)}</span>
+                            <span style="font-weight:bold; color:${sigColor}; font-size:0.8rem; border:1px solid ${sigColor}44; padding:2px 6px; border-radius:4px; min-width:45px; text-align:center;">${sig}</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.75rem;">
+                            <span style="color:var(--text-dim);"><span class="${chgClass}">${chgSign}${chg.toFixed(2)}%</span> | Vol: ${fmtShortIDR(t.vol_idr || 0)}</span>
+                            <span style="color:${color}; font-weight:600;">${label}</span>
+                        </div>
+                    `;
+                    container.appendChild(item);
+                });
             });
         }
     } catch (e) { console.warn('renderWatchlist error', e); }
@@ -1367,24 +1366,31 @@ window.addEventListener('DOMContentLoaded', () => {
     const chartBtn = document.querySelector('.mobile-nav-item[onclick*="chart"]');
     if (chartBtn) chartBtn.classList.add('active');
 
-    // Senior Search Implementation
-    const searchInput = document.getElementById('market-search');
-    if (searchInput) {
-        searchInput.addEventListener('input', (e) => {
-            marketSearchQuery = e.target.value.trim();
+    // Senior Search Implementation (Unified for Market & Chart tabs)
+    const searchInputs = document.querySelectorAll('.market-search-input');
+    searchInputs.forEach(input => {
+        input.addEventListener('input', (e) => {
+            const val = e.target.value.trim();
+            marketSearchQuery = val;
+            
+            // Sync all search inputs
+            searchInputs.forEach(si => { if(si !== e.target) si.value = val; });
+            
             refreshWatchlist();
         });
-        // UI Polish: Neon purple glow on focus
-        searchInput.addEventListener('focus', () => {
-            searchInput.style.borderColor = 'var(--purple)';
-            searchInput.style.boxShadow = '0 0 8px rgba(168, 85, 247, 0.2)';
-        });
-        searchInput.addEventListener('blur', () => {
-            searchInput.style.borderColor = 'var(--border)';
-            searchInput.style.boxShadow = 'none';
-        });
-    }
 
+        // UI Polish: Neon purple glow on focus
+        input.addEventListener('focus', () => {
+            input.style.borderColor = 'var(--purple)';
+            input.style.boxShadow = '0 0 8px rgba(168, 85, 247, 0.2)';
+        });
+        input.addEventListener('blur', () => {
+            input.style.borderColor = 'var(--border)';
+            input.style.boxShadow = 'none';
+        });
+    });
+
+    initPTR();
     setTimeout(async () => {
         try {
             const d = await (await fetch('/api/radar')).json();
@@ -1392,6 +1398,51 @@ window.addEventListener('DOMContentLoaded', () => {
         } catch (e) { }
     }, 1500);
 });
+
+function initPTR() {
+    const scrollArea = document.getElementById('mobile-scroll-area');
+    const ptrWrap = document.getElementById('ptr-wrap');
+    if (!scrollArea || !ptrWrap) return;
+
+    let startY = 0;
+    let isPulling = false;
+
+    scrollArea.addEventListener('touchstart', e => {
+        if (scrollArea.scrollTop <= 0) {
+            startY = e.touches[0].pageY;
+            isPulling = true;
+        }
+    }, { passive: true });
+
+    scrollArea.addEventListener('touchmove', e => {
+        if (!isPulling) return;
+        const y = e.touches[0].pageY;
+        const diff = y - startY;
+        if (diff > 0 && scrollArea.scrollTop <= 0) {
+            ptrWrap.style.height = Math.min(diff * 0.5, 50) + 'px';
+            ptrWrap.style.opacity = '1';
+            if (diff > 60) ptrWrap.innerHTML = '⚡ <b>SINKRONISASI...</b>';
+            else ptrWrap.innerHTML = '🔽 TARIK UNTUK REFRESH';
+        } else {
+            isPulling = false;
+            ptrWrap.style.height = '0px';
+        }
+    }, { passive: true });
+
+    scrollArea.addEventListener('touchend', e => {
+        if (!isPulling) return;
+        isPulling = false;
+        const h = parseInt(ptrWrap.style.height);
+        if (h >= 45) {
+            ptrWrap.innerHTML = '🚀 <b>MEMUAT DATA...</b>';
+            if (window.navigator && window.navigator.vibrate) window.navigator.vibrate(20);
+            setTimeout(() => location.reload(), 300);
+        } else {
+            ptrWrap.style.height = '0px';
+            ptrWrap.style.opacity = '0';
+        }
+    }, { passive: true });
+}
 
 function renderMarketTrades(data) {
     const tsEl = document.getElementById('trades-last-update');
