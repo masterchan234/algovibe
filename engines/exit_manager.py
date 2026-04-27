@@ -330,47 +330,47 @@ class ExitManager:
             gross_pnl = (price - entry_price) * amount
             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
             
-            if order_status in ['closed', 'canceled', 'done', 'fill']:
+            if order_status in ['closed', 'canceled', 'done', 'fill'] or self.dry_run:
                 db.delete_position(pair)
+                
+                pnl_idr = net_pnl_idr
+                pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                
+                # Use provided position_data for timestamp, fallback to now
+                timestamp_str = position_data.get('timestamp') if position_data else datetime.now().isoformat()
+                entry_time = datetime.fromisoformat(timestamp_str)
+                duration_sec = (datetime.now() - entry_time).total_seconds()
+                
+                try:
+                    db.insert_trade_history(
+                        pair=pair,
+                        entry_price=entry_price,
+                        exit_price=price,
+                        amount_crypto=amount,
+                        amount_idr=amount_idr,
+                        pnl_idr=pnl_idr,
+                        pnl_pct=pnl_pct,
+                        reason=reason,
+                        duration_seconds=int(duration_sec),
+                        dry_run=self.dry_run
+                    )
+                    
+                    # Update Consecutive Losses state
+                    current_cl = int(db.get_state("consecutive_losses", 0))
+                    if pnl_idr > 0:
+                        db.save_state("consecutive_losses", 0)
+                    else:
+                        db.save_state("consecutive_losses", current_cl + 1)
+
+                    # ── Project Evolution: Learning Loop ─────────────────────────────
+                    db.update_trade_outcome(pair, pnl_idr)
+                    if self.oracle:
+                        self.oracle.learn_from_trade(pair, pnl_idr)
+
+                except Exception as db_err:
+                    print(f"Failed to save trade history/state for {pair}: {db_err}")
             else:
                 db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
-            
-            pnl_idr = net_pnl_idr
-            pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
-            
-            # Use provided position_data for timestamp, fallback to now
-            timestamp_str = position_data.get('timestamp') if position_data else datetime.now().isoformat()
-            entry_time = datetime.fromisoformat(timestamp_str)
-            duration_sec = (datetime.now() - entry_time).total_seconds()
-            
-            try:
-                db.insert_trade_history(
-                    pair=pair,
-                    entry_price=entry_price,
-                    exit_price=price,
-                    amount_crypto=amount,
-                    amount_idr=amount_idr,
-                    pnl_idr=pnl_idr,
-                    pnl_pct=pnl_pct,
-                    reason=reason,
-                    duration_seconds=int(duration_sec),
-                    dry_run=self.dry_run
-                )
-                
-                # Update Consecutive Losses state
-                current_cl = int(db.get_state("consecutive_losses", 0))
-                if pnl_idr > 0:
-                    db.save_state("consecutive_losses", 0)
-                else:
-                    db.save_state("consecutive_losses", current_cl + 1)
-
-                # ── Project Evolution: Learning Loop ─────────────────────────────
-                db.update_trade_outcome(pair, pnl_idr)
-                if self.oracle:
-                    self.oracle.learn_from_trade(pair, pnl_idr)
-
-            except Exception as db_err:
-                print(f"Failed to save trade history/state for {pair}: {db_err}")
             
             return order.get('id')
         except Exception as e:
@@ -420,6 +420,53 @@ class ExitManager:
                     log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
                     db.update_position_status(p_pair, "OPEN")
                     send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nStatus: `OPEN`")
+                    return
+
+            # 3. Cek apakah ini Sell Order (Take Profit/Stop Loss) yang terisi
+            for p_pair, p_data in positions.items():
+                if p_data.get('exit_order_id') == order_id and p_data.get('status') == "EXITING":
+                    log_message(f"💰 SELL FILLED! {p_pair} order {order_id} is now CLOSED.")
+                    
+                    try:
+                        exit_price = float(order.get('price', 0))
+                        # Fallback
+                        if exit_price == 0: exit_price = float(p_data.get('entry_price', 0)) * 1.02
+                        
+                        amount_crypto = float(order.get('amount', p_data.get('amount_crypto', 0)))
+                        entry_price = float(p_data.get('entry_price', 0))
+                        amount_idr = float(p_data.get('amount_idr', 0))
+                        
+                        from config import FEE_BUY_MAKER, FEE_SELL_MAKER
+                        sell_value = amount_crypto * exit_price
+                        fee_sell = sell_value * FEE_SELL_MAKER
+                        fee_buy = amount_idr * FEE_BUY_MAKER
+                        
+                        gross_pnl = (exit_price - entry_price) * amount_crypto
+                        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                        pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                        
+                        reason = "TAKE_PROFIT" if net_pnl_idr > 0 else "STOP_LOSS"
+                        
+                        timestamp_str = p_data.get('timestamp') or datetime.now().isoformat()
+                        duration_sec = (datetime.now() - datetime.fromisoformat(timestamp_str)).total_seconds()
+                        
+                        db.insert_trade_history(
+                            pair=p_pair, entry_price=entry_price, exit_price=exit_price,
+                            amount_crypto=amount_crypto, amount_idr=amount_idr,
+                            pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
+                            duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run')
+                        )
+                        
+                        current_cl = int(db.get_state("consecutive_losses", 0))
+                        db.save_state("consecutive_losses", 0 if net_pnl_idr > 0 else current_cl + 1)
+                        
+                        db.update_trade_outcome(p_pair, net_pnl_idr)
+                        if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_idr)
+                        
+                        db.delete_position(p_pair)
+                        send_telegram_message(f"💰 *EXIT FILLED* 💰\nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_idr:,.2f}")
+                    except Exception as ex:
+                        log_message(f"Error calculating final PnL for {p_pair}: {ex}")
                     return
             
         except Exception as e:
