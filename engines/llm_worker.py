@@ -38,7 +38,7 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
             model_path=model_path,
             backend=litert_lm.Backend.CPU,
             cache_dir=cache_dir,
-            max_num_tokens=LLM_MAX_TOKENS,
+            max_num_tokens=2048,
         )
         log_message("🧠 LLM Worker: Gemma-4-E2B Engine initialized (cache reused).")
     except Exception as e:

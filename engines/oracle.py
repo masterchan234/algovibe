@@ -43,7 +43,205 @@ class Oracle:
         # veto cache: {pair: {verdict, confidence, reason, ts}}
         # Diisi saat LLM structured result masuk; dibaca oleh check_llm_veto()
         self._veto_cache: dict = {}
-        
+
+    # ── Rich Market Context Builder ────────────────────────────────────────────
+
+    def _build_rich_market_context(self, pair: str, prices: list, tech: dict, conn) -> dict:
+        """
+        Membangun konteks pasar lengkap (9 tier) untuk disuguhkan ke LLM.
+        Mengembalikan dict ctx berisi semua data terformat siap pakai di prompt.
+        """
+        pair = pair.lower()
+        ctx = {}
+
+        try:
+            last_price = float(prices[-1]) if prices else 0.0
+            ws_trades_raw = self.market_ws.get_trades(pair) or []
+            ws_ticker = self.market_ws.get_tickers().get(pair, {})
+
+            # ── Tier 1a: VWAP ──────────────────────────────────────────────
+            vwap = 0.0
+            if len(ws_trades_raw) >= 3:
+                try:
+                    total_pv = sum(float(t[4]) * abs(float(t[6])) for t in ws_trades_raw if len(t) > 6)
+                    total_v  = sum(abs(float(t[6])) for t in ws_trades_raw if len(t) > 6)
+                    vwap = total_pv / total_v if total_v > 0 else 0.0
+                except Exception:
+                    vwap = 0.0
+            vwap_signal = "N/A"
+            if vwap > 0 and last_price > 0:
+                diff_pct = (last_price - vwap) / vwap * 100
+                if diff_pct > 0.5:
+                    vwap_signal = f"ABOVE VWAP +{diff_pct:.2f}% (bullish intraday)"
+                elif diff_pct < -0.5:
+                    vwap_signal = f"BELOW VWAP {diff_pct:.2f}% (bearish intraday)"
+                else:
+                    vwap_signal = f"AT VWAP {diff_pct:+.2f}% (neutral)"
+            ctx['vwap_signal'] = vwap_signal
+
+            # ── Tier 1b: Trade Flow Imbalance (50 trades) + Whale Prints ───
+            buy_count = sell_count = 0
+            large_trades = []
+            for t in ws_trades_raw[:50]:
+                try:
+                    side    = str(t[3]).lower() if len(t) > 3 else ''
+                    vol_idr = float(t[5]) if len(t) > 5 else 0
+                    if side == 'buy':
+                        buy_count += 1
+                    elif side == 'sell':
+                        sell_count += 1
+                    if vol_idr > 50_000_000:
+                        large_trades.append(f"{side.upper()} Rp{vol_idr/1e6:.1f}jt")
+                except Exception:
+                    continue
+            total_flow = buy_count + sell_count
+            flow_pct = round(buy_count / total_flow * 100, 1) if total_flow > 0 else 50.0
+            flow_label = "STRONG BUY FLOW" if flow_pct >= 65 else ("STRONG SELL FLOW" if flow_pct <= 35 else "BALANCED FLOW")
+            ctx['trade_flow'] = f"{flow_pct}% buy ({buy_count}/{total_flow} trades) — {flow_label}"
+            ctx['whale_prints'] = ", ".join(large_trades[-3:]) if large_trades else "None detected"
+
+            # ── Tier 1c: Price Position in 24h Range ───────────────────────
+            high_24h = float(ws_ticker.get('high', 0) or 0)
+            low_24h  = float(ws_ticker.get('low',  0) or 0)
+            if high_24h > low_24h and last_price > 0:
+                pos_pct = round((last_price - low_24h) / (high_24h - low_24h) * 100, 1)
+                if pos_pct >= 80:
+                    pos_label = "NEAR 24H HIGH — overbought zone"
+                elif pos_pct <= 20:
+                    pos_label = "NEAR 24H LOW — value zone"
+                else:
+                    pos_label = "MID RANGE"
+                ctx['range_position'] = f"{pos_pct}% of 24h range ({pos_label})"
+            else:
+                ctx['range_position'] = "N/A"
+
+            # ── Tier 2a: Per-Pair Win/Loss History ─────────────────────────
+            try:
+                recent_pair_trades = conn.execute(
+                    "SELECT pnl_idr FROM trade_history WHERE pair = ? "
+                    "AND reason != 'BACKTEST' ORDER BY id DESC LIMIT 5",
+                    (pair,)
+                ).fetchall()
+                if recent_pair_trades:
+                    wins   = sum(1 for r in recent_pair_trades if float(r['pnl_idr'] or 0) > 0)
+                    losses = len(recent_pair_trades) - wins
+                    streak = " ".join("W" if float(r['pnl_idr'] or 0) > 0 else "L"
+                                      for r in recent_pair_trades)
+                    ctx['pair_history'] = f"Last {len(recent_pair_trades)} trades: [{streak}] ({wins}W/{losses}L)"
+                else:
+                    ctx['pair_history'] = "No prior trades on this pair"
+            except Exception:
+                ctx['pair_history'] = "N/A"
+
+            # ── Tier 2b: Volume Anomaly Score ──────────────────────────────
+            trade_count = len(ws_trades_raw)
+            activity_ratio = trade_count / 20.0  # 20 trades/min = baseline normal
+            if activity_ratio > 3:
+                vol_anomaly = f"VERY HIGH activity ({trade_count} recent trades, {activity_ratio:.1f}x normal)"
+            elif activity_ratio > 1.5:
+                vol_anomaly = f"ABOVE NORMAL activity ({trade_count} recent trades, {activity_ratio:.1f}x)"
+            elif activity_ratio < 0.5:
+                vol_anomaly = f"LOW activity ({trade_count} recent trades, thin market)"
+            else:
+                vol_anomaly = f"Normal activity ({trade_count} recent trades)"
+            ctx['volume_anomaly'] = vol_anomaly
+
+            # ── Tier 2c: Price Momentum (5m, 15m, 1h) ──────────────────────
+            try:
+                ticker_row = conn.execute(
+                    "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = ?",
+                    (pair,)
+                ).fetchone()
+                if ticker_row:
+                    ctx['momentum'] = (
+                        f"5m={float(ticker_row['ch_5m'] or 0):+.2f}% | "
+                        f"15m={float(ticker_row['ch_15m'] or 0):+.2f}% | "
+                        f"1h={float(ticker_row['ch_1h'] or 0):+.2f}%"
+                    )
+                else:
+                    ctx['momentum'] = "N/A"
+            except Exception:
+                ctx['momentum'] = "N/A"
+
+            # ── Tier 2d: Sector + Market Regime ────────────────────────────
+            try:
+                from config import SECTOR_MAP
+                sector = SECTOR_MAP.get(pair, "Unknown")
+                s_val  = db.get_latest_sector_sentiment(sector) if sector != "Unknown" else 0
+                s_lbl  = "Positive" if s_val > 0.5 else ("Negative" if s_val < -0.5 else "Neutral")
+                ctx['sector'] = f"{sector} ({s_lbl}, avg {s_val:+.2f}%)"
+            except Exception:
+                ctx['sector'] = "Unknown"
+            regime = db.get_state("market_regime") or "UNKNOWN"
+            fear_greed = db.get_state("market_sentiment_index") or "50"
+            ctx['market_regime'] = f"{regime} | Fear/Greed: {fear_greed}/100"
+
+            # ── Tier 3a: Time of Day Session ───────────────────────────────
+            hour = datetime.now().hour
+            if 1 <= hour < 8:
+                session = "Asia Session (Indodax peak liquidity)"
+            elif 8 <= hour < 16:
+                session = "Europe Session (mixed liquidity)"
+            elif 16 <= hour < 23:
+                session = "US Session (global volatility peak)"
+            else:
+                session = "Off-Hours (thin liquidity, wider spreads)"
+            ctx['session'] = f"{hour:02d}:xx — {session}"
+
+            # ── Tier 3b: LLM Lessons Memory (max 3 terbaru) ────────────────
+            if self._lessons:
+                ctx['lessons'] = " | ".join(self._lessons[-3:])
+            else:
+                ctx['lessons'] = "No lessons accumulated yet"
+
+        except Exception as e:
+            logger.warning(f"[Oracle] _build_rich_market_context error for {pair}: {e}")
+
+        return ctx
+
+    def _format_rich_prompt(self, pair: str, last_price: float, tech: dict,
+                             ob_ctx: dict, ctx: dict, task_type: str) -> str:
+        """
+        Merakit prompt akhir dari semua konteks yang telah dikumpulkan.
+        ob_ctx: {'imbalance': float, 'buy_pressure': float, 'bid_depth': float,
+                 'ask_depth': float, 'best_bid': float, 'best_ask': float, 'spread_pct': float,
+                 'trade_summary': str}
+        """
+        return (
+            f"=== QUANTITATIVE SCALPING ANALYSIS: {pair.upper()} ===\n"
+            f"Price: Rp{last_price:,.2f} | VWAP: {ctx.get('vwap_signal', 'N/A')}\n"
+            f"Momentum: {ctx.get('momentum', 'N/A')}\n"
+            f"24h Range Position: {ctx.get('range_position', 'N/A')}\n"
+            f"\n[TECHNICAL INDICATORS]\n"
+            f"RSI={tech.get('rsi','N/A')} | Volatility={tech.get('volatility','N/A')}% | "
+            f"Signal={tech.get('signal', tech.get('verdict','N/A'))} | "
+            f"BuyPressure(OB)={ob_ctx.get('buy_pressure', 50):.1f}%\n"
+            f"\n[ORDER BOOK MICROSTRUCTURE]\n"
+            f"Bid/Ask Imbalance={ob_ctx.get('imbalance', 1.0):.2f}x (>1=bullish) | "
+            f"Spread={ob_ctx.get('spread_pct', 0):.3f}%\n"
+            f"Bid Depth=Rp{ob_ctx.get('bid_depth', 0):,.0f} | "
+            f"Ask Depth=Rp{ob_ctx.get('ask_depth', 0):,.0f}\n"
+            f"Best Bid=Rp{ob_ctx.get('best_bid', 0):,.2f} | "
+            f"Best Ask=Rp{ob_ctx.get('best_ask', 0):,.2f}\n"
+            f"\n[MARKET ACTIVITY & FLOW]\n"
+            f"Trade Flow (50 trades): {ctx.get('trade_flow', 'N/A')}\n"
+            f"Whale Prints: {ctx.get('whale_prints', 'None')}\n"
+            f"Volume Anomaly: {ctx.get('volume_anomaly', 'N/A')}\n"
+            f"Recent Trades: {ob_ctx.get('trade_summary', 'N/A')}\n"
+            f"\n[MARKET CONTEXT]\n"
+            f"Market Regime: {ctx.get('market_regime', 'N/A')}\n"
+            f"Sector: {ctx.get('sector', 'N/A')}\n"
+            f"Session: {ctx.get('session', 'N/A')}\n"
+            f"\n[BOT MEMORY & HISTORY]\n"
+            f"This Pair History: {ctx.get('pair_history', 'N/A')}\n"
+            f"Recent Lessons: {ctx.get('lessons', 'None')}\n"
+            f"\n[TASK]\n"
+            f"{'Confirm or reject this BUY signal.' if task_type == 'auto' else 'Provide a sharp tactical analysis.'} "
+            f"Using ALL data above — technicals, orderbook microstructure, flow, regime, and bot memory.\n"
+            f"Output: Verdict (BUY/HOLD/AVOID) + 1 concise sentence reasoning + "
+            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes)."
+        )
+
     def auto_queue_buy_candidates(self, ranked_signals):
         """
         Setiap 60 detik, ambil top-5 koin dengan sinyal BUY terkuat dan
@@ -86,7 +284,7 @@ class Oracle:
                 tech   = get_technical_summary(prices)
                 sig    = derive_trade_signal(tech)
 
-                # Ambil data Order Book dari DB
+                # Order Book dari DB
                 depth_rows = conn.execute(
                     "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
                 ).fetchall()
@@ -94,39 +292,31 @@ class Oracle:
                 asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
                 total_bid = sum(v for _, v in bids)
                 total_ask = sum(v for _, v in asks)
-                total_ob = total_bid + total_ask
-                buy_pressure = round((total_bid / total_ob * 100), 1) if total_ob > 0 else 50.0
-                imbalance_ratio = round(total_bid / total_ask, 2) if total_ask > 0 else 1.0
+                total_ob  = total_bid + total_ask
+                best_bid  = max((p for p, _ in bids), default=0)
+                best_ask  = min((p for p, _ in asks), default=0)
+                spread_pct = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
+                ob_ctx = {
+                    'buy_pressure': round(total_bid / total_ob * 100, 1) if total_ob > 0 else 50.0,
+                    'imbalance':    round(total_bid / total_ask, 2) if total_ask > 0 else 1.0,
+                    'bid_depth':    total_bid,
+                    'ask_depth':    total_ask,
+                    'best_bid':     best_bid,
+                    'best_ask':     best_ask,
+                    'spread_pct':   spread_pct,
+                    'trade_summary': 'see Market Activity section',
+                }
 
-                # Ambil market trades terbaru dari WS
-                ws_trades_raw = self.market_ws.get_trades(pair) if hasattr(self.market_ws, 'get_trades') else []
-                trade_flow = "No data"
-                if ws_trades_raw:
-                    flow_lines = []
-                    for t in ws_trades_raw[:5]:
-                        try:
-                            side = t[3] if len(t) > 3 else '?'
-                            price = float(t[4]) if len(t) > 4 else 0
-                            flow_lines.append(f"{side.upper()}@{price:,.0f}")
-                        except Exception:
-                            continue
-                    trade_flow = ", ".join(flow_lines)
+                # Bangun rich context (9 tier)
+                tech['signal'] = sig['verdict']
+                tech['reason'] = sig.get('reason', '')
+                ctx = self._build_rich_market_context(pair, prices, tech, conn)
 
-                last_price = prices[-1] if prices else 0
-                prompt = (
-                    f"Context: Elite Quantitative Scalper. AUTO-SCAN. Pair: {pair.upper()}. Price: Rp {last_price:,.2f}.\n"
-                    f"Technical: RSI={tech['rsi']}, Volatility={tech['volatility']}%, Signal={sig['verdict']} ({sig['confidence']}%). Reason: {sig['reason']}.\n"
-                    f"Order Book: Imbalance={imbalance_ratio}x, BuyPressure={buy_pressure}%, "
-                    f"BidDepth=Rp{total_bid:,.0f}, AskDepth=Rp{total_ask:,.0f}.\n"
-                    f"Market Flow (Last 5): {trade_flow}.\n"
-                    "Task: Using ALL data above — technicals, orderbook depth, and real trade flow — "
-                    "confirm or reject this BUY signal with tactical precision. "
-                    "Output: BUY/HOLD/AVOID verdict + 1 sentence reasoning (mention orderbook signals if relevant) + Profit Target + Stop Loss (Rp) + ETA (minutes)."
-                )
-                task_id = f"ANALYSIS:{pair}"
-                self.llm_worker.query_structured(task_id, prompt)
+                last_price = float(prices[-1]) if prices else 0
+                prompt = self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type='auto')
+                self.llm_worker.query_structured(f"ANALYSIS:{pair}", prompt)
                 self.pump_cooldowns[pair] = now
-                logger.info(f"[AutoQueue] LLM structured queued for {pair} (BUY {sig['confidence']}%)")
+                logger.info(f"[AutoQueue] LLM rich-context queued for {pair} (BUY {sig.get('confidence',0)}%)")
         finally:
             conn.close()
 
@@ -134,7 +324,8 @@ class Oracle:
         """Called periodically to fetch async LLM insights."""
         # 1. Check for manual analysis requests from DB (triggered by Dashboard)
         on_demand_pair = db.get_state("trigger_analysis_pair")
-        if on_demand_pair:
+        # Guard: hanya proses jika pair valid (bukan None, string kosong, atau literal "None")
+        if on_demand_pair and isinstance(on_demand_pair, str) and on_demand_pair.strip().lower() not in ('', 'none'):
             db.save_state("trigger_analysis_pair", None)
             try:
                 import sqlite3
@@ -143,58 +334,62 @@ class Oracle:
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 try:
-                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (on_demand_pair,)).fetchone()
+                    row = conn.execute(
+                        "SELECT history_json FROM ticker_history WHERE pair = ?",
+                        (on_demand_pair,)
+                    ).fetchone()
                     prices = json.loads(row['history_json']) if (row and row['history_json']) else []
                     tech = get_technical_summary(prices)
 
-                    depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (on_demand_pair,)).fetchall()
-                    bids  = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 1]
-                    asks  = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 0]
+                    depth = conn.execute(
+                        "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?",
+                        (on_demand_pair,)
+                    ).fetchall()
+                    bids = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 1]
+                    asks = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 0]
                     total_bid_vol = sum(v for _, v in bids)
                     total_ask_vol = sum(v for _, v in asks)
-                    total_vol = total_bid_vol + total_ask_vol
-                    tech['buy_pressure'] = round((total_bid_vol / total_vol * 100), 1) if total_vol > 0 else 50.0
-                    
-                    # Imbalance ratio & best prices
-                    imbalance_ratio = round(total_bid_vol / total_ask_vol, 2) if total_ask_vol > 0 else 1.0
-                    best_bid = max((p for p, _ in bids), default=0)
-                    best_ask = min((p for p, _ in asks), default=0)
-                    spread_pct = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
+                    total_vol     = total_bid_vol + total_ask_vol
+                    best_bid      = max((p for p, _ in bids), default=0)
+                    best_ask      = min((p for p, _ in asks), default=0)
+                    spread_pct    = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
+
+                    ws_trades_snap = self.market_ws.get_trades(on_demand_pair) or []
+                    t_lines = []
+                    for t in ws_trades_snap[:5]:
+                        try:
+                            side  = str(t[3]).upper() if len(t) > 3 else '?'
+                            price = float(t[4]) if len(t) > 4 else 0
+                            vol   = float(t[6]) if len(t) > 6 else 0
+                            t_lines.append(f"{side}@Rp{price:,.0f}({vol:.4f})")
+                        except Exception:
+                            continue
+                    trade_summary = " | ".join(t_lines) if t_lines else "N/A"
+
+                    ob_ctx = {
+                        'buy_pressure': round(total_bid_vol / total_vol * 100, 1) if total_vol > 0 else 50.0,
+                        'imbalance':    round(total_bid_vol / total_ask_vol, 2) if total_ask_vol > 0 else 1.0,
+                        'bid_depth':    total_bid_vol,
+                        'ask_depth':    total_ask_vol,
+                        'best_bid':     best_bid,
+                        'best_ask':     best_ask,
+                        'spread_pct':   spread_pct,
+                        'trade_summary': trade_summary,
+                    }
+
+                    # Bangun rich context (9 tier) — conn masih terbuka untuk query DB
+                    ctx = self._build_rich_market_context(on_demand_pair, prices, tech, conn)
                 finally:
                     conn.close()
 
-                # Ambil market trades terbaru dari WS (via injected market_ws)
-                ws_trades = self.market_ws.get_trades(on_demand_pair)
-                trade_summary = "Tidak ada data trade terbaru."
-                if ws_trades:
-                    recent = ws_trades[:5]
-                    lines = []
-                    for t in recent:
-                        try:
-                            side = t[3] if len(t) > 3 else '?'
-                            price = float(t[4]) if len(t) > 4 else 0
-                            vol = float(t[6]) if len(t) > 6 else 0
-                            lines.append(f"{side.upper()} @ Rp{price:,.0f} ({vol:.4f})")
-                        except Exception:
-                            continue
-                    trade_summary = " | ".join(lines) if lines else "Tidak ada."
-
-                last_price = prices[-1] if prices else 0
-                prompt = (
-                    f"Context: Elite Quantitative Scalper. Pair: {on_demand_pair.upper()}. Price: Rp {last_price:,.2f}.\n"
-                    f"Technical: RSI={tech['rsi']}, Volatility={tech['volatility']}%, Signal={tech['signal']}, BuyPressure={tech['buy_pressure']}%.\n"
-                    f"Order Book: Bid/Ask Imbalance={imbalance_ratio}x (>1 = bullish pressure). "
-                    f"Best Bid=Rp{best_bid:,.2f}, Best Ask=Rp{best_ask:,.2f}, Spread={spread_pct}%. "
-                    f"Bid Depth=Rp{total_bid_vol:,.0f}, Ask Depth=Rp{total_ask_vol:,.0f}.\n"
-                    f"Market Activity (Last 5 Trades): {trade_summary}\n"
-                    "Task: Based on ALL the data above (technicals, orderbook depth, and recent trade flow), "
-                    "provide a sharp tactical analysis. "
-                    "Output: Verdict (BUY/HOLD/AVOID). 1 Sentence Reasoning incorporating orderbook signals. "
-                    "Targets: 1 Profit Target, 1 Stop Loss (Rp), and 1 Estimated Time Horizon (e.g. 5-15m)."
+                last_price = float(prices[-1]) if prices else 0
+                prompt = self._format_rich_prompt(
+                    on_demand_pair, last_price, tech, ob_ctx, ctx, task_type='ondemand'
                 )
                 self.llm_worker.query_structured(f"ANALYSIS:{on_demand_pair}", prompt)
-            except Exception:
-                pass
+                logger.info(f"[Oracle] Rich-context on-demand analysis queued for {on_demand_pair}")
+            except Exception as e:
+                logger.warning(f"[Oracle] process_llm_insights on-demand error: {e}")
 
         # 2. Poll ALL results from the worker and filter by prefix
         self.llm_worker.check_results()
