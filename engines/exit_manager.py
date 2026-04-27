@@ -239,7 +239,7 @@ class ExitManager:
                     pos_ts = datetime.fromisoformat(data['timestamp'])
                     pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
                     # Syarat 3: Stagnancy Exit (Hold > 20m & Profit sudah cover fee) -> Free up capital
-                    is_stagnant_profit = pos_age_min > 20 and net_pnl_idr > 100
+                    is_stagnant_profit = pos_age_min > 20 and net_pnl_idr > 500
     
                     if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
                         reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
@@ -662,14 +662,6 @@ class ExitManager:
                                         db.upsert_position(p, pos)
                                     except Exception as ce:
                                         log_message(f"Failed to cancel stuck order {oid}: {ce}")
-                            else:
-                                # [Senior Fix] Order tidak ada di bursa tapi status masih EXITING.
-                                # Jika saldo masih ada, berarti order batal/gagal. Kembalikan ke OPEN agar bisa di-jual ulang.
-                                if amount_on_exchange >= (pos['amount_crypto'] * 0.8):
-                                    log_message(f"🔄 Reality Sync: {p} was EXITING but order {oid} is gone and balance remains. Resetting to OPEN.")
-                                    pos['status'] = "OPEN"
-                                    pos['exit_order_id'] = None
-                                    db.upsert_position(p, pos)
 
                     if isinstance(orders_dict, dict):
                         for pair_key, order_list in orders_dict.items():
