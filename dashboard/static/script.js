@@ -645,6 +645,18 @@ async function selectPair(pair, trend, prob) {
 function switchMobileTab(tabId, el) {
     if (!el) return;
     
+    // Auth Check: Lock Trades tab if not logged in
+    if (tabId === 'trades' && !isLoggedIn) {
+        // Switch to auth placeholder instead
+        document.body.className = `tab-auth`;
+        document.querySelectorAll('.mobile-tab-content').forEach(c => c.style.display = 'none');
+        document.querySelector('.tab-auth-content').style.display = 'block';
+        
+        document.querySelectorAll('.mobile-nav-item').forEach(i => i.classList.remove('active'));
+        el.classList.add('active');
+        return;
+    }
+
     // Haptic Feedback for Premium Feel
     if (window.navigator && window.navigator.vibrate) {
         window.navigator.vibrate(8);
@@ -1344,6 +1356,51 @@ function closeAllSidebars() {
 }
 
 // ── Initialization ───────────────────────────────────────────
+let isLoggedIn = false;
+
+async function checkSession() {
+    try {
+        const d = await (await fetch('/api/check-auth')).json();
+        isLoggedIn = d.authenticated;
+    } catch (e) { isLoggedIn = false; }
+}
+
+function showLoginModal() {
+    document.getElementById('login-overlay').style.display = 'flex';
+}
+
+async function handleLogin() {
+    const user = document.getElementById('login-user').value;
+    const pass = document.getElementById('login-pass').value;
+    const err = document.getElementById('login-error');
+    
+    try {
+        const resp = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user, password: pass })
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            isLoggedIn = true;
+            document.getElementById('login-overlay').style.display = 'none';
+            // If we were on auth tab, switch to trades
+            const tradeBtn = document.querySelector('.mobile-nav-item[onclick*="trades"]');
+            if (tradeBtn && document.body.classList.contains('tab-auth')) {
+                switchMobileTab('trades', tradeBtn);
+            }
+            if (window.navigator && window.navigator.vibrate) window.navigator.vibrate([10, 50, 10]);
+        } else {
+            err.textContent = data.message;
+            err.style.display = 'block';
+        }
+    } catch (e) {
+        err.textContent = "Server connection failed.";
+        err.style.display = 'block';
+    }
+}
+
 function initSystem() {
     chart = new AlgoChart('custom-chart', 'chart-tooltip');
     if (socket) {
@@ -1358,7 +1415,8 @@ function initSystem() {
     }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+    await checkSession();
     initSystem();
 
     // Default Mobile State

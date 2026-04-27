@@ -9,9 +9,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for
 from flask_cors import CORS
 from flask_socketio import SocketIO
+from functools import wraps
 from engines.database import db
 from engines.ws_market import MarketDataWS
 from engines.technicals import get_technical_summary, derive_trade_signal
@@ -21,8 +22,26 @@ import ccxt
 exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static')
+app.secret_key = os.getenv('SECRET_KEY', 'algovibe-super-secret-key-123')
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# ── Authentication Middleware ──
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({"error": "Unauthorized", "login_required": True}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ── Default User Initialization ──
+try:
+    if not db.get_user('admin'):
+        db.create_user('admin', 'admin123', os.getenv('INDODAX_API_KEY', ''), os.getenv('INDODAX_API_SECRET', ''))
+        logging.info("✅ Default user 'admin' created (Pass: admin123). PLEASE CHANGE THIS!")
+except Exception as e:
+    logging.error(f"Error initializing default user: {e}")
 
 from config import DB_PATH, DRY_RUN
 
@@ -154,7 +173,33 @@ def favicon():
     return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/x-icon')
 
 
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    
+    user = db.verify_user(username, password)
+    if user:
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        return jsonify({"success": True, "user": {"username": user['username'], "role": user['role']}})
+    
+    return jsonify({"success": False, "message": "Invalid username or password"}), 401
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"success": True})
+
+@app.route('/api/check-auth')
+def check_auth():
+    if 'user_id' in session:
+        return jsonify({"authenticated": True, "username": session.get('username')})
+    return jsonify({"authenticated": False})
+
 @app.route('/api/stats')
+@login_required
 def get_stats():
     conn = get_db_connection()
     try:
@@ -313,7 +358,8 @@ def trigger_analysis(pair):
     return jsonify({"status": "requested", "pair": pair})
 
 @app.route('/api/exit/<pair>', methods=['POST'])
-def trigger_exit(pair):
+@login_required
+def manual_exit(pair):
     """Force an emergency exit for a specific pair via dashboard."""
     db.save_state("trigger_exit_pair", pair.lower())
     return jsonify({"status": "exit_requested", "pair": pair})
@@ -406,6 +452,11 @@ def get_recent_trades_api():
 
 # Redundant function block removed. See implementation around line 787.
 
+
+@app.route('/api/trades')
+@login_required
+def get_trades():
+    return jsonify(_build_trades_payload())
 
 @app.route('/api/radar')
 def get_radar_data():

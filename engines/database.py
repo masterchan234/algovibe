@@ -3,6 +3,7 @@ import os
 import logging
 from contextlib import contextmanager
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from config import DB_PATH
 from .migrations import run_migrations
@@ -140,6 +141,19 @@ class Database:
                 CREATE TABLE IF NOT EXISTS blacklist (
                     pair TEXT PRIMARY KEY,
                     reason TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Tabel untuk Autentikasi Pengguna (SaaS Ready)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE,
+                    password_hash TEXT,
+                    api_key TEXT,
+                    api_secret TEXT,
+                    role TEXT DEFAULT 'USER',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -685,6 +699,36 @@ class Database:
         except Exception as e:
             logging.error(f"[DB] Failed to prune old data: {e}")
             return 0
+
+    # ── METODE AUTENTIKASI ──
+
+    def create_user(self, username, password, api_key='', api_secret=''):
+        """Membuat user baru dengan password yang sudah di-hash."""
+        pw_hash = generate_password_hash(password)
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, api_key, api_secret) VALUES (?, ?, ?, ?)",
+                    (username, pw_hash, api_key, api_secret)
+                )
+            return True
+        except Exception as e:
+            logging.error(f"[DB] Error creating user: {e}")
+            return False
+
+    def get_user(self, username):
+        """Ambil data user berdasarkan username."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def verify_user(self, username, password):
+        """Verifikasi username dan password."""
+        user = self.get_user(username)
+        if user and check_password_hash(user['password_hash'], password):
+            return user
+        return None
 
 # Instantiate a global db object for ease of use
 db = Database()
