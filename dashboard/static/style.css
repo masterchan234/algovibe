@@ -1834,13 +1834,14 @@ tr:hover td { background: var(--bg-hover); }
 /* ── Collapsible Logic ── */
 .sidebar-section {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    overflow: hidden;
+    /* Remove default overflow:hidden to allow expansion */
 }
 
 .sidebar-section.collapsed {
     flex: 0 0 auto;
     height: 40px;
     min-height: 40px;
+    overflow: hidden; /* Only hide overflow when collapsed */
 }
 
 .sidebar-section.collapsed .sidebar-list, 

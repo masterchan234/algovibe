@@ -96,10 +96,10 @@
                         <span class="section-title">🔍 Market Radar</span>
                         <span id="watchlist-count" class="badge badge-dim">0</span>
                     </div>
-                    <div class="search-wrap" style="padding: 0 10px 10px 10px; position: relative; display: flex; align-items: center;">
+                    <div class="search-wrap" style="padding: 10px; position: relative; display: flex; align-items: center;">
                         <input type="text" class="market-search-input" id="market-search" placeholder="Cari koin (misal: BTC, PEPE)..." 
-                               style="width: 100%; background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 6px 25px 6px 10px; color: var(--text-primary); font-size: 11px; outline: none; transition: border-color 0.3s;">
-                        <button class="search-clear-btn" style="position: absolute; right: 15px; background: none; border: none; color: var(--text-muted); font-size: 14px; padding: 0; display: none; cursor: pointer;">×</button>
+                               style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-highlight); border-radius: 4px; padding: 8px 30px 8px 12px; color: var(--text-primary); font-size: 11px; outline: none; transition: border-color 0.3s;">
+                        <button class="search-clear-btn" style="position: absolute; right: 20px; background: none; border: none; color: var(--text-muted); font-size: 14px; padding: 0; display: none; cursor: pointer;">×</button>
                     </div>
                     <!-- Pencarian sekarang terintegrasi langsung ke Momentum Radar di bawah -->
                 </div>
@@ -124,7 +124,7 @@
                             style="font-size: 8px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.1em;">REAL-TIME</span>
                     </div>
                     <div class="market-pulse-container"
-                        style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-height: 250px; overflow-y: auto;">
                         <div class="pulse-col">
                             <div class="pulse-label"
                                 style="font-size: 8px; color: var(--green); font-weight: 700; margin-bottom: 4px; letter-spacing: 0.1em;">
