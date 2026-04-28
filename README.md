@@ -1,154 +1,189 @@
 # Algovibe 🌊🤖
 
-**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang diciptakan sepenuhnya melalui proses **"Vibe Coding"**—sebuah metode pengembangan di mana developer berkolaborasi secara *end-to-end* dengan AI Agent untuk merancang, merangkai, dan men-*deploy* kode secara natural melalui instruksi bahasa manusia.
+**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang diciptakan melalui proses **"Vibe Coding"**. Bot ini menggabungkan kecepatan eksekusi algoritma kuantitatif dengan kecerdasan kualitatif dari **AI Agent** (Gemma-4-E2B) untuk navigasi market yang presisi.
 
-Bot ini dibangun menggunakan arsitektur *multiprocessing* Python untuk memastikan kecepatan dan efisiensi saat memproses ratusan *trading pair* secara bersamaan untuk mencari momentum ("vibe") market yang paling tepat.
+---
 
 ## 🎯 Fitur Utama
 
-- **Autonomous Background Execution:** Dirancang untuk berjalan stabil 24/7 menggunakan *Systemd Service* (`indodax-scalper.service`).
-- **Parallel Ranking Engine:** Melakukan *scoring* pada semua market Indodax secara paralel berdasarkan *Volatility*, *Volume*, *Spread*, dan *Orderbook Imbalance*.
-- **SQLite Persistence (High Concurrency):** Menggunakan SQLite dengan mode **WAL (Write-Ahead Logging)** untuk menyimpan histori harga, posisi terbuka, dan log transaksi dengan performa tinggi tanpa perlu RAM Disk.
-- **AI-Powered Analysis:** Terintegrasi dengan **LiteRT-LM (Gemma-4-E2B)** untuk melakukan analisis sentimen dan narasi teknikal secara otomatis di background.
-- **Indodax Tax Compliant (PMK 68/2022):** Perhitungan PnL yang sudah disesuaikan dengan aturan pajak Indonesia terbaru (PPh 0.1%, PPN 0.11%, dan Maker Fee 0.1%).
-- **Interactive Dashboard:** Dashboard berbasis Flask & SocketIO untuk monitoring realtime, visualisasi radar market, dan eksekusi manual.
-- **Dry Run Mode:** Mendukung mode simulasi untuk menguji strategi tanpa menggunakan uang asli.
+- **Autonomous AI Reasoning:** Terintegrasi dengan **LiteRT-LM** untuk analisis mikro-struktur pasar dan narasi teknikal otomatis.
+- **Market Regime Detection:** Oracle sentral yang mendeteksi fase market (Bullish, Bearish, Choppy) dan menyesuaikan strategi secara dinamis.
+- **High-Concurrency Engine:** Arsitektur *multiprocessing* Python dengan SQLite WAL mode untuk performa tinggi tanpa jeda.
+- **Indodax Tax Compliant:** Kalkulasi PnL akurat yang sudah termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
+- **Interactive Dashboard:** Monitoring realtime via Flask & SocketIO dengan visualisasi radar market dan eksekusi manual.
+- **Dry Run Mode:** Simulasi trading tanpa risiko finansial untuk validasi strategi.
 
-## ⚙️ Arsitektur Mesin (*Engines*)
+---
 
-Proyek ini menggunakan pola arsitektur *modular engines*:
-- `database.py`: Layer persistensi SQLite untuk semua data stateful.
-- `ws_market.py` & `ws_private.py`: Handler WebSocket untuk data pasar dan update order pribadi.
-- `oracle.py`: Mesin kecerdasan sentral yang mendeteksi *Market Regime* (Bullish/Bearish) dan mengatur bobot strategi secara dinamis.
-- `llm_worker.py`: Integrasi model LiteRT-LM untuk reasoning kualitatif.
-- `exit_manager.py`: Memantau TP/SL dan melakukan eksekusi *SELL* otomatis.
-- `predictor.py`: Logika prediksi harga berbasis data historis.
-- `technicals.py`: Indikator teknikal (RSI, MA, dll) untuk konfirmasi sinyal.
+## 🔄 Workflow Arsitektur (End-to-End)
 
-## 📋 Persyaratan Sistem
+```mermaid
+sequenceDiagram
+    participant ID as Indodax WebSocket
+    participant WS as Market Engine (ws_market)
+    participant MN as Main Orchestrator (main.py)
+    participant OR as Oracle (oracle.py)
+    participant LLM as AI Worker (llm_worker)
+    participant EX as Exit Manager
+    participant DB as SQLite (WAL Mode)
 
-- OS Linux (Ubuntu/Debian disarankan)
-- Python 3.12+
-- RAM: Minimal 4GB (disarankan 8GB untuk menjalankan LLM Worker dengan lancar)
-- Disk Space: ~3GB (untuk Model LLM)
+    Note over ID, WS: Real-time Data Ingestion
+    ID->>WS: Stream Ticker & Orderbook
+    WS->>MN: Push Real-time Buffer
 
-## 🚀 Instalasi & Konfigurasi (Native OS)
+    Note over MN, OR: Signal Analysis & Veto
+    MN->>OR: Build Rich Market Context
+    OR->>MN: Market Regime & Adaptive Weights
+    MN->>MN: Technical Scoring (EMA, RSI, Imbalance)
+    MN->>LLM: Request Structured Verdict (k-NN Match)
+    LLM-->>MN: AI Verdict (BUY/HOLD/AVOID) + Reason
 
-1. **Clone & Setup Venv:**
+    Note over MN, DB: Trade Execution
+    MN->>ID: Place Order (Maker/Taker)
+    ID-->>MN: Order Success Update
+    MN->>DB: Upsert Position (OPEN)
+
+    Note over EX, DB: Exit Management
+    loop 24/7 Monitoring
+        WS->>EX: Price Updates
+        EX->>EX: Check ATR-Target / Trailing Stop
+        EX->>ID: Place SELL Order (TP/SL)
+        ID-->>EX: Order Execution Update
+        EX->>DB: Update Position (CLOSED)
+    end
+
+    Note over OR, LLM: Self-Learning Loop
+    EX->>OR: Send Trade Outcome (PnL)
+    OR->>LLM: Post-Mortem Analysis Prompt
+    LLM-->>OR: Lessons Learned
+    OR->>DB: Save Lesson to Database
+    OR->>LLM: Update Consciousness Context
+```
+
+---
+
+## 🧠 Cara Kerja (Oracle & AI)
+
+AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunakan sistem **"Tiered Contextual Reasoning"**:
+
+1.  **Oracle Contextualizer**: Mengumpulkan data dari 9 tier (VWAP, Orderbook Imbalance, Whale Prints, Momentum, dll) menjadi narasi yang kaya konteks.
+2.  **AI Veto Power**: LLM melakukan penalaran pada prompt yang dikirim Oracle. AI dapat membatalkan (*veto*) sinyal teknikal jika mendeteksi anomali atau risiko tinggi.
+3.  **Self-Learning Loop**: Setiap trade (Profit/Loss) dianalisis ulang melalui proses *Post-Mortem*. Hasilnya di-inject kembali ke memori jangka pendek bot ("Consciousness") setiap 30 menit.
+
+---
+
+## ⚙️ Arsitektur Proyek
+
+- `main.py`: Orkestrator utama dan lifecycle bot.
+- `engines/oracle.py`: Mesin kecerdasan sentral (Regime & Context).
+- `engines/llm_worker.py`: Background worker untuk inferensi LiteRT-LM.
+- `engines/ws_market.py` & `ws_private.py`: Handler WebSocket untuk data pasar dan update order.
+- `engines/exit_manager.py`: Manajemen posisi terbuka dan eksekusi TP/SL.
+- `engines/database.py`: Layer persistensi data stateful (SQLite WAL).
+- `engines/technicals.py`: Indikator teknikal (RSI, EMA, Volatility).
+- `engines/predictor.py`: Logika prediksi harga berbasis k-NN.
+
+---
+
+## 🚀 Instalasi Cepat
+
+1. **Setup Venv & Dependencies:**
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-2. **Setup Environment:**
+2. **Environment Configuration:**
    Buat file `.env` di root direktori:
    ```env
-   INDODAX_API_KEY="your_api_key_here"
-   INDODAX_API_SECRET="your_secret_key_here"
-   TELEGRAM_BOT_TOKEN="optional"
-   TELEGRAM_CHAT_ID="optional"
+   INDODAX_API_KEY="your_api_key"
+   INDODAX_API_SECRET="your_secret_key"
    ```
 
-3. **Konfigurasi Strategi:**
-   Sesuaikan parameter manajemen risiko (TP/SL, Max Trades, dll) di file `config.py`.
+3. **Risk Management:**
+   Atur target TP/SL dan batasan capital di `config.py`.
 
-## 🛠 Menjalankan Bot (sebagai Service)
+---
 
-Gunakan **Systemd User Service** agar bot berjalan otomatis tanpa perlu akses root.
+## 🤖 Integrasi LiteRT-LM (AI Engine)
 
-### 1. Membuat File Service
-Buat direktori jika belum ada: `mkdir -p ~/.config/systemd/user/`
+AlgoVibe menggunakan **LiteRT-LM** (sebelumnya TensorFlow Lite) untuk menjalankan model bahasa besar secara lokal di CPU tanpa memerlukan GPU eksternal atau API pihak ketiga.
 
-**Bot Utama (`~/.config/systemd/user/indodax-scalper.service`):**
+### Spek Model & Optimasi
+- **Model**: Gemma-4-E2B (Gemma-2B tuned untuk efisiensi eksekusi).
+- **Format**: `.litertlm` (optimized flatbuffers).
+- **Akselerasi**: Menggunakan **XNNPACK** CPU acceleration dengan *model caching* (~750MB) untuk memastikan *latency* inferensi tetap rendah di lingkungan server.
+
+### Arsitektur AI Worker
+Untuk menjaga stabilitas eksekusi trading, AI berjalan di **Background Process** terpisah:
+1.  **Asynchronous Queuing**: Main bot mengirim tugas ke `llm_worker` melalui `multiprocessing.Queue`. Ini memastikan pergerakan harga *real-time* tidak pernah terhambat oleh proses "berpikir" AI.
+2.  **Function Calling (Structured Output)**: Bot tidak menggunakan parsing teks biasa yang rawan error. LLM menggunakan fitur *function calling* untuk memanggil fungsi `submit_verdict()`, menghasilkan output JSON yang valid secara konsisten.
+3.  **Context Injection**: Setiap kali AI dipanggil, Oracle menyuntikkan data pasar terbaru, *lessons learned* dari trade sebelumnya, dan *market regime* saat ini ke dalam memori jangka pendek AI.
+
+---
+
+## 🎭 Kecerdasan Oracle: Market Regimes
+
+Oracle adalah "pusat kesadaran" AlgoVibe yang memastikan bot tidak hanya sekadar *blind-trading*. Oracle mendeteksi kondisi pasar global dan mengubah perilaku bot secara dinamis melalui **Adaptive Configuration**.
+
+| Regime | Deskripsi | Perilaku Bot | Alokasi Modal |
+| :--- | :--- | :--- | :--- |
+| **BULLISH** | Harga didominasi tren naik, volume tinggi. | **Agresif**: Ambang batas AI diturunkan, lebih banyak sinyal diloloskan. | **1.5x (Aggressive)** |
+| **BEARISH** | Harga didominasi tren turun, risiko tinggi. | **Defensif**: Filter AI diperketat, hanya koin volume besar yang diambil. | **0.6x (Conservative)** |
+| **RANGING** | Harga bergerak menyamping dalam range tertentu. | **Mean Reversion**: Fokus pada *imbalance* orderbook dan *pullback* EMA. | **1.2x (Optimized)** |
+| **CHOPPY** | Pergerakan tidak menentu (sideways tajam). | **Selective**: Menunggu momentum yang benar-benar valid, *cooldown* diperpanjang. | **0.9x (Cautious)** |
+| **CRASH** | Penurunan tajam yang tidak terkendali. | **Emergency Stop**: Bot berhenti trading secara otomatis untuk menjaga modal. | **0.0x (OFF)** |
+
+### Penyesuaian Bobot Dinamis
+Oracle secara otomatis mengubah bobot strategi (`weights`) berdasarkan rezim:
+- **Imbalance Weight**: Ditingkatkan saat pasar *Bearish* karena mikrostruktur *orderbook* lebih jujur daripada tren harga.
+- **Sentiment Weight**: Ditingkatkan saat pasar *Bullish* untuk mengejar koin-koin narasi/sektor yang sedang *hot*.
+- **Veto Confidence**: AI menjadi lebih sensitif untuk membatalkan trade saat kondisi pasar tidak menentu (*Choppy*).
+
+---
+
+## ⚖️ Logika Pengambilan Keputusan
+
+AlgoVibe menggunakan sistem hibrida antara matematika kuantitatif dan penalaran kualitatif AI untuk menentukan kapan harus masuk dan keluar market.
+
+### 🟢 Strategi BUY (Entry)
+1.  **Smart Scan**: Bot mengurutkan ratusan koin berdasarkan *Volatility-Adjusted Momentum*. Hanya koin "hidup" yang masuk ke radar.
+2.  **Technical Filter**: Menggunakan kombinasi EMA Cross (EMA-20 > EMA-50) dan strategi **Pullback Entry** (beli saat harga retrace ke support EMA).
+3.  **Microstructure Check**: Mengecek *Orderbook Imbalance*. Bot hanya masuk jika ada dominasi "tembok beli" (bid) yang kuat.
+4.  **AI Pattern Matching (k-NN)**: Bot membandingkan pola harga saat ini dengan ribuan transaksi historis di database. Jika pola tersebut memiliki *win rate* rendah di masa lalu, AI akan melakukan **Veto**.
+5.  **Execution Intelligence**: Bot secara otomatis memilih antara **Maker Order** (antri di EMA-9 untuk hemat fee) atau **Taker Order** (langsung hajar market jika momentum sangat kuat).
+
+### 🔴 Strategi SELL (Exit)
+1.  **ATR-Based Take Profit**: Target profit tidak statis, melainkan dihitung berdasarkan volatilitas ATR (*Average True Range*). Target dinamis antara 2% hingga 12%.
+2.  **Trailing Stop Loss**: Mengunci profit secara otomatis saat harga naik. Bot akan terus "mengikuti" harga ke atas dan hanya menjual jika harga berbalik turun sebesar jarak tertentu.
+3.  **Protective Stop Loss**: Batas rugi maksimal (biasanya 3.5% - 6%) untuk mencegah kerugian besar saat terjadi *flash crash*.
+4.  **Oracle Emergency Exit**: AI Oracle dapat memerintahkan bot untuk menjual posisi lebih awal jika mendeteksi perubahan rezim market menjadi **Bearish** atau **Crash** secara mendadak.
+
+---
+
+## 🛠 Deployment (Systemd)
+
+Jalankan bot sebagai service agar tetap aktif 24/7 di background.
+
+**Bot Engine (`indodax-scalper.service`):**
 ```ini
-[Unit]
-Description=Indodax Scalper Autonomous Agent
-After=network.target
-
 [Service]
-Type=simple
-WorkingDirectory=/home/chan/projects/algovibe
-ExecStart=/home/chan/projects/algovibe/venv/bin/python /home/chan/projects/algovibe/main.py
+WorkingDirectory=/root/algovibe
+ExecStart=/root/algovibe/venv/bin/python /root/algovibe/main.py
 Restart=always
-RestartSec=10
-Environment="PYTHONUNBUFFERED=1"
-StandardOutput=append:/home/chan/projects/algovibe/data/logs/scalper.log
-StandardError=append:/home/chan/projects/algovibe/data/logs/scalper.log
-
-[Install]
-WantedBy=default.target
 ```
 
-**Dashboard (`~/.config/systemd/user/indodax-dashboard.service`):**
+**Dashboard (`indodax-dashboard.service`):**
 ```ini
-[Unit]
-Description=AlgoVibe Dashboard Server
-After=network.target indodax-scalper.service
-BindsTo=indodax-scalper.service
-
 [Service]
-Type=simple
-WorkingDirectory=/home/chan/projects/algovibe
-ExecStart=/home/chan/projects/algovibe/venv/bin/python /home/chan/projects/algovibe/dashboard/server.py
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/home/chan/projects/algovibe/data/logs/dashboard.log
-StandardError=append:/home/chan/projects/algovibe/data/logs/dashboard.log
-
-[Install]
-WantedBy=default.target
+WorkingDirectory=/root/algovibe
+ExecStart=/root/algovibe/venv/bin/python /root/algovibe/dashboard/server.py
+Restart=always
 ```
 
-### 2. Mengaktifkan Service
-```bash
-systemctl --user daemon-reload
-systemctl --user enable indodax-scalper.service indodax-dashboard.service
-systemctl --user start indodax-scalper.service indodax-dashboard.service
-```
-
-## 📊 Monitoring & Log
-```bash
-# Cek status
-systemctl --user status indodax-scalper.service indodax-dashboard.service
-
-# Pantau log realtime
-tail -f data/logs/scalper.log
-tail -f data/logs/dashboard.log
-```
-
-## 🚀 SaaS Orchestration & Scaling (New)
-
-Algovibe kini mendukung arsitektur **Multi-Tenant SaaS** yang memungkinkan Anda menjalankan ratusan bot untuk pelanggan berbeda dalam satu server secara terisolasi menggunakan Docker.
-
-### 🏢 Komponen SaaS
-- **`saas_manager.py`**: Watchdog pusat yang mengelola masa aktif langganan (*subscription*) dan menjaga kesehatan infrastruktur.
-- **`market_hub.py` (Proxy Hub)**: Sentralisasi data Indodax via ZeroMQ (Port 5555). Menghemat bandwidth hingga 90% dan mencegah IP Banned.
-- **`provision_bot.py`**: Script otomatisasi untuk mencetak instance bot baru dalam hitungan detik.
-
-### 🛠 Menjalankan Infrastruktur SaaS
-1. **Jalankan SaaS Manager & Market Hub:**
-   ```bash
-   python3 saas_manager.py &
-   ```
-2. **Cetak Bot untuk Pelanggan Baru:**
-   ```bash
-   # Format: python3 provision_bot.py <username> <password> <api_key> <api_secret>
-   python3 provision_bot.py budi budi123 AK-KEY-BUDI SEC-SECRET-BUDI
-   ```
-3. **Monitoring Pelanggan:**
-   Gunakan database pusat untuk melihat status dan tanggal kadaluwarsa:
-   ```bash
-   sqlite3 data/saas_central.db "SELECT * FROM tenants;"
-   ```
-
-## 🔒 Security & Hardening (SaaS Grade)
-Dashboard mobile telah diperkuat dengan standar keamanan **Red-Team**:
-- **Tokenized WS Handshake**: Menggunakan `view_token` berbasis Salt-Key untuk mengunci akses WebSocket hanya dari dashboard resmi (mencegah pencurian data via bot luar).
-- **CSRF Protection**: Semua request state-changing (Jual/Update) dilindungi token unik.
-- **XSS Sanitization**: Input dan data log disanitasi sebelum ditampilkan di UI.
-- **Secure Sessions**: Menggunakan kunci kriptografi dinamis dan flag cookie `HttpOnly`.
-- **View-Only Mode**: Publik bisa melihat performa (Trades tab), namun kontrol tetap terkunci di balik autentikasi.
+---
 
 ## ⚠️ Disclaimer
-Software ini dibuat untuk tujuan edukasi dan eksperimen algoritma trading. **Gunakan dengan risiko Anda sendiri**. Pembuat tidak bertanggung jawab atas kerugian finansial yang terjadi akibat penggunaan software ini. Sangat disarankan untuk menjalankan bot dalam mode **DRY RUN** terlebih dahulu.
+
+Software ini dibuat untuk tujuan edukasi dan eksperimen. **Gunakan dengan risiko Anda sendiri.** Pembuat tidak bertanggung jawab atas kerugian finansial. Selalu gunakan **DRY RUN** sebelum masuk ke live market.
