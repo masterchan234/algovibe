@@ -1286,7 +1286,7 @@ function renderTradeHistory(data) {
                     <td>${dnaHtml}</td>
                     <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
                     <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
-                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
+                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)} / <span title="Estimasi waktu mencapai target" style="cursor:help;color:var(--cyan)">ETA ${t.eta_minutes || 15}m</span></span></td>
                     <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             } else {
                 const durStr = formatDuration(t.duration || 0);

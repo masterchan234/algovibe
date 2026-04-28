@@ -879,7 +879,7 @@ def _build_trades_payload():
     try:
         positions = conn.execute("""
             SELECT p.pair, p.entry_price, p.amount_crypto, p.amount_idr, p.timestamp as created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
+                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi, a.eta_minutes
             FROM positions p
             LEFT JOIN trade_analytics a ON p.pair = a.pair 
                  AND abs(strftime('%s', p.timestamp) - strftime('%s', a.entry_timestamp)) < 60
@@ -892,7 +892,7 @@ def _build_trades_payload():
         trades = conn.execute("""
             SELECT t.pair, t.reason, t.pnl_idr, t.pnl_pct, t.entry_price, t.exit_price, 
                    t.amount_idr, t.amount_crypto, t.duration_seconds, t.created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
+                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi, a.eta_minutes
             FROM trade_history t
             LEFT JOIN trade_analytics a ON t.pair = a.pair 
                  AND abs(t.pnl_idr - a.pnl_idr) < 10
@@ -954,7 +954,8 @@ def _build_trades_payload():
                 "ai_prob":     float(p['ai_prob'] or 0) if p['ai_prob'] else None,
                 "whale_boost": float(p['whale_boost'] or 0) if p['whale_boost'] else None,
                 "dna_vol":     float(p['dna_vol'] or 0) if p['dna_vol'] else None,
-                "dna_rsi":     float(p['dna_rsi'] or 0) if p['dna_rsi'] else None
+                "dna_rsi":     float(p['dna_rsi'] or 0) if p['dna_rsi'] else None,
+                "eta_minutes": int(p['eta_minutes'] or 15) if p['eta_minutes'] else None
             })
 
         # Trade history (sudah ditutup)
@@ -974,7 +975,8 @@ def _build_trades_payload():
                 "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
                 "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
                 "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
-                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None
+                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None,
+                "eta_minutes": int(t['eta_minutes'] or 15) if t['eta_minutes'] else None
             })
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)

@@ -188,9 +188,15 @@ class Database:
                 sector_sentiment REAL,
                 imbalance REAL,
                 volatility REAL,
+                eta_minutes INTEGER DEFAULT 15,
                 pnl_idr REAL,
                 status TEXT DEFAULT 'OPEN'
             )''')
+            
+            # Migration: Tambahkan kolom eta_minutes jika belum ada
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15")
+            except: pass
 
             # 9. Dynamic Weights (Project Evolution)
             cursor.execute('''CREATE TABLE IF NOT EXISTS dynamic_weights (
@@ -541,11 +547,11 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute(
                     """INSERT INTO trade_analytics 
-                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
                      dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'],
-                     dna_data.get('rsi'), dna_data.get('ema_dist'))
+                     dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15))
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")

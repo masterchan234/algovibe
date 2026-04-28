@@ -443,6 +443,34 @@ class Oracle:
 
                 # ── Sentiment (hanya pair spesifik, Fix BUG #4) ──────────
                 self._update_llm_sentiment(t_res, pair_name)
+                
+                # ── Update ETA with Math Calibration ───────────────────
+                if is_structured:
+                    # Ambil harga terakhir dari DB untuk kalibrasi math ETA
+                    try:
+                        row = db.get_ticker_history(pair_name, limit=1)
+                        if row:
+                            history = json.loads(row[0]['history_json'])
+                            current_price = history[-1]
+                            target_tp = current_price * (1 + (structured.get('take_profit_pct', 2.0)/100))
+                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, history)
+                            
+                            # Calibrate: Rata-rata AI vs Math (Bobot 60% Math, 40% AI)
+                            ai_eta = structured.get('eta_minutes', 15)
+                            calibrated_eta = int((math_eta * 0.6) + (ai_eta * 0.4))
+                            
+                            # Update structured result dengan hasil kalibrasi
+                            structured['eta_minutes'] = calibrated_eta
+                            
+                            # Update veto cache & DB
+                            if pair_name in self._veto_cache:
+                                self._veto_cache[pair_name]['eta_minutes'] = calibrated_eta
+                            
+                            # Log calibration
+                            logger.info(f"[Oracle] ETA Calibrated for {pair_name}: AI={ai_eta}m, Math={math_eta}m -> Final={calibrated_eta}m")
+                    except Exception as e:
+                        logger.warning(f"[Oracle] ETA Calibration error for {pair_name}: {e}")
+
                 self.llm_worker.results.pop(task_id)
             elif t_type == "POST_MORTEM":
                 log_message(f"🤖 [LiteRT Insight] Post-Mortem: {t_res}")
@@ -1028,6 +1056,37 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] Learning Error: {e}")
 
+    def _calculate_math_eta(self, pair, target_price, current_price, prices):
+        """
+        Estimasi waktu (menit) untuk mencapai target harga berdasarkan volatilitas ATR 1m.
+        Formula: Jarak Harga / (Rata-rata pergerakan harga per menit).
+        """
+        try:
+            if not prices or len(prices) < 5:
+                return 15 # Default
+            
+            # Hitung 'Price Velocity' (V) - rata-rata absolut perubahan harga per menit
+            # Gunakan window 30 menit terakhir jika ada
+            window = prices[-30:] if len(prices) >= 30 else prices
+            deltas = [abs(window[i] - window[i-1]) for i in range(1, len(window))]
+            
+            if not deltas: return 15
+            
+            velocity = sum(deltas) / len(deltas)
+            
+            if velocity <= 0:
+                # Jika harga stagnan, gunakan volatilitas historis (0.05% per menit sebagai proxy)
+                velocity = current_price * 0.0005
+                
+            distance = abs(target_price - current_price)
+            eta = distance / velocity
+            
+            # Cap ETA antara 2 menit hingga 6 jam (360 menit)
+            return max(2, min(360, int(eta)))
+        except Exception as e:
+            logger.warning(f"[Oracle] Math ETA Error for {pair}: {e}")
+            return 15
+
     def find_winning_pattern(self, pair: str, current_dna: dict) -> dict:
         """
         K-Nearest Neighbors Pattern Matcher & LLM Strategy Generator.
@@ -1105,7 +1164,7 @@ class Oracle:
             f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
             "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "
             "If history shows continued dumping, return AVOID. Fees (0.51%) are already factored in. "
-            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02)."
+            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02), eta_minutes (int, default 15)."
         )
         task_id = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
