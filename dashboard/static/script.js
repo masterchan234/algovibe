@@ -1263,16 +1263,24 @@ function renderTradeHistory(data) {
             const tr = document.createElement('tr');
             tr.style.cursor = 'pointer';
             tr.onclick = () => selectPair(t.pair);
+            tr.className = t.status === 'OPEN' ? 'status-open' : 'status-closed';
 
-            let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
-            if (t.ai_prob && t.ai_prob > 0.7) dnaHtml += `<span title="High AI Prob" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
-            if (t.whale_boost && t.whale_boost > 0) dnaHtml += `<span title="Whale Activity" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
+            let dnaHtml = '<div style="display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; min-height:30px;">';
+            if (t.ai_prob && t.ai_prob > 0.4) {
+                const aiColor = t.ai_prob > 0.7 ? 'var(--purple)' : 'var(--blue)';
+                dnaHtml += `<span title="AI Probability: ${Math.round(t.ai_prob*100)}%" style="font-size:14px; filter:drop-shadow(0 0 3px ${aiColor}); cursor:help;">🧠</span>`;
+            }
+            if (t.whale_boost && t.whale_boost > 1.0) {
+                dnaHtml += `<span title="Whale Boost: ${t.whale_boost.toFixed(2)}x" style="font-size:14px; filter:drop-shadow(0 0 3px var(--yellow)); cursor:help;">🐋</span>`;
+            }
+            if (!t.ai_prob && !t.whale_boost) {
+                dnaHtml += `<span style="font-size:10px; color:var(--text-dim); opacity:0.3;">—</span>`;
+            }
             dnaHtml += '</div>';
 
             if (t.status === 'OPEN') {
                 const s = Math.floor((Date.now() - new Date(t.created_at).getTime()) / 1000);
                 const durStr = formatDuration(s);
-                tr.style.background = 'rgba(245, 158, 11, 0.04)';
                 tr.innerHTML = `
                     <td><span style="font-weight:600">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
@@ -1283,13 +1291,20 @@ function renderTradeHistory(data) {
             } else {
                 const durStr = formatDuration(t.duration || 0);
                 const reason = t.reason || 'AI';
-                const rIcon = reason.includes('TP') ? '🎯' : (reason.includes('SL') ? '🛑' : '🤖');
+                let rIcon = '🤖';
+                let rColor = 'var(--text-secondary)';
+                
+                if (reason.includes('TP')) { rIcon = '🎯'; rColor = 'var(--green)'; }
+                else if (reason.includes('SL')) { rIcon = '🛑'; rColor = 'var(--red)'; }
+                else if (reason.includes('TRAIL')) { rIcon = '📈'; rColor = 'var(--green)'; }
+                else if (reason.includes('MANUAL')) { rIcon = '👤'; rColor = 'var(--yellow)'; }
+                else if (reason.includes('ORACLE')) { rIcon = '🔮'; rColor = 'var(--purple)'; }
                 tr.innerHTML = `
                     <td><span style="font-weight:600;color:var(--text-secondary)">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
                     <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
                     <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
-                    <td><span style="font-weight:600;font-size:10px">${rIcon} ${escapeHTML(reason)}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
+                    <td><span style="font-weight:600;font-size:10px;color:${rColor}">${rIcon} ${escapeHTML(reason)}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
                     <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             }
             tbody.appendChild(tr);

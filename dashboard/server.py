@@ -890,11 +890,15 @@ def _build_trades_payload():
         dr_val = 1 if DRY_RUN else 0
         
         trades = conn.execute("""
-            SELECT pair, reason, pnl_idr, pnl_pct, entry_price, exit_price, 
-                   amount_idr, amount_crypto, duration_seconds, created_at
-            FROM trade_history
-            WHERE reason != 'BACKTEST' AND dry_run = ?
-            ORDER BY created_at DESC LIMIT 100
+            SELECT t.pair, t.reason, t.pnl_idr, t.pnl_pct, t.entry_price, t.exit_price, 
+                   t.amount_idr, t.amount_crypto, t.duration_seconds, t.created_at,
+                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
+            FROM trade_history t
+            LEFT JOIN trade_analytics a ON t.pair = a.pair 
+                 AND abs(t.pnl_idr - a.pnl_idr) < 10
+                 AND a.status = 'CLOSED'
+            WHERE t.reason != 'BACKTEST' AND t.dry_run = ?
+            ORDER BY t.created_at DESC LIMIT 100
         """, (dr_val,)).fetchall()
 
         results = []
@@ -967,10 +971,10 @@ def _build_trades_payload():
                 "duration":    int(t['duration_seconds'] or 0),
                 "created_at":  str(t['created_at']),
                 "status":      'CLOSED',
-                "ai_prob":     None,
-                "whale_boost": None,
-                "dna_vol":     None,
-                "dna_rsi":     None
+                "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
+                "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
+                "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
+                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None
             })
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
