@@ -1130,6 +1130,29 @@ function renderSectors(sectors) {
 let currentLedgerTab = 'OPEN';
 let lastTradeData = [];
 
+function switchLedgerTab(tab) {
+    currentLedgerTab = tab;
+    
+    // Update button states
+    const btnOpen = document.getElementById('tab-open');
+    const btnClosed = document.getElementById('tab-closed');
+    
+    if (btnOpen && btnClosed) {
+        if (tab === 'OPEN') {
+            btnOpen.classList.add('active');
+            btnClosed.classList.remove('active');
+        } else {
+            btnOpen.classList.remove('active');
+            btnClosed.classList.add('active');
+        }
+    }
+    
+    // Re-render history with last data
+    if (lastTradeData.length > 0) {
+        renderTradeHistory(lastTradeData);
+    }
+}
+
 async function forceExit(pair) {
     if (!isLoggedIn) {
         showLoginModal();
