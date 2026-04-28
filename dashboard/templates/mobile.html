@@ -8,8 +8,10 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link rel="stylesheet" href="static/style.css">
+    <script>
+        window.VIEW_TOKEN = "{{ view_token }}";
+    </script>
     <style>
         /* Premium Mobile Experience Styles */
         body {
@@ -243,6 +245,29 @@
             color: white;
             border-color: #3b82f6;
         }
+        /* Settings Sidebar */
+        .settings-sidebar {
+            position: fixed;
+            top: 0; right: -100%;
+            width: 85%; max-width: 320px; height: 100%;
+            background: rgba(15, 15, 25, 0.95);
+            backdrop-filter: blur(20px);
+            z-index: 2100;
+            transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            padding: 25px;
+            box-shadow: -10px 0 30px rgba(0,0,0,0.5);
+            border-left: 1px solid rgba(255,255,255,0.1);
+        }
+        .settings-sidebar.active { right: 0; }
+        .sidebar-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 2050;
+            display: none;
+            backdrop-filter: blur(3px);
+        }
+
         /* Login Modal Styles */
         .login-overlay {
             position: fixed;
@@ -303,20 +328,50 @@
         </div>
     </div>
 
-    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeAllSidebars()"></div>
+    <!-- Settings Sidebar -->
+    <div id="settings-sidebar" class="settings-sidebar">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+            <h2 style="color: #fff; font-size: 18px; margin: 0;">Settings</h2>
+            <button onclick="toggleSettings(false)" style="background: none; border: none; color: #888; font-size: 24px;">×</button>
+        </div>
+
+        <div class="panel glass-panel" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+            <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); color: #a855f7; padding: 10px;">⚙️ Bot Config</div>
+            <div style="padding: 15px;">
+                <label style="display:block; font-size:10px; color:#666; margin-bottom:5px;">INDODAX API KEY</label>
+                <input type="text" id="setting-api-key" class="login-input" style="padding: 10px; font-size: 13px; margin-bottom: 15px;">
+                
+                <label style="display:block; font-size:10px; color:#666; margin-bottom:5px;">INDODAX API SECRET</label>
+                <input type="password" id="setting-api-secret" class="login-input" style="padding: 10px; font-size: 13px; margin-bottom: 15px;">
+                
+                <button onclick="saveSettings()" class="login-btn" style="padding: 10px; font-size: 13px; background: #10b981;">Update Keys</button>
+                <div id="settings-status" style="margin-top:10px; font-size:11px; text-align:center;"></div>
+            </div>
+        </div>
+
+        <div class="panel glass-panel" style="background: rgba(255,255,255,0.02);">
+            <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); padding: 10px;">🛡️ Account</div>
+            <div style="padding: 15px;">
+                <div style="font-size: 12px; color: #888; margin-bottom: 10px;">User: <b id="display-username" style="color:#fff;">admin</b></div>
+                <button onclick="handleLogout()" style="width: 100%; background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; padding: 10px; border-radius: 10px; font-size: 12px;">Logout</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSettings(false)"></div>
 
     <div class="app-container">
         <!-- ── Top Header ── -->
         <header class="mobile-header" style="height: 60px; padding: 0 15px; display: flex; justify-content: space-between; align-items: center;">
-            <div class="logo-section">
-                <div class="logo-icon" style="width:28px; height:28px; font-size:12px; background: #2563eb;">AV</div>
-                <div id="bot-status-badge" class="bot-status-badge status-loading">
-                    <span class="status-dot"></span>
-                    <span id="bot-status-text" style="font-size: 10px; font-weight: 700;">BOT ACTIVE</span>
-                </div>
+            <div class="logo-area" style="display: flex; align-items: center; gap: 10px;">
+                <div class="logo-icon" style="width: 32px; height: 32px; font-size: 12px; background: linear-gradient(135deg, #a855f7, #2563eb);">AV</div>
+                <div class="logo-text" style="font-weight: 800; font-size: 18px; letter-spacing: -0.5px;">AlgoVibe</div>
             </div>
-            <div id="market-regime-badge" class="regime-badge" style="margin: 0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
-                <span id="market-regime-text" style="font-size: 10px; font-weight: 700;">BULLISH</span>
+            <div class="header-actions" style="display: flex; gap: 12px; align-items: center;">
+                <div id="ws-status" class="status-badge" style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; font-size: 9px; padding: 4px 8px; border-radius: 20px; font-weight: bold; display: flex; align-items: center; gap: 5px;">
+                    <span style="width: 6px; height: 6px; background: #ef4444; border-radius: 50%;"></span> OFFLINE
+                </div>
+                <button onclick="toggleSettings(true)" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 8px; border-radius: 10px; cursor: pointer;">⚙️</button>
             </div>
         </header>
 
@@ -325,7 +380,7 @@
             <!-- TAB 1: MARKET -->
             <div class="mobile-tab-content tab-market-content">
                 <div class="panel glass-panel sticky-search">
-                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search / Momentum</div>
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Market Radar</div>
                     <div class="search-wrap" style="padding: 8px 0 0 0; position: relative; display: flex; align-items: center;">
                         <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
                                style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 35px 10px 10px; color: #fff; font-size: 13px; outline: none;">
@@ -358,7 +413,7 @@
 
                 <div class="panel glass-panel" style="margin-bottom: 12px;">
                     <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">📡 Momentum Radar</div>
-                    <div class="sidebar-list radar-list-container" style="max-height: none;">
+                    <div class="sidebar-list radar-list-container" style="max-height: 400px;">
                         <div class="empty-state">Scanning markets...</div>
                     </div>
                 </div>
@@ -368,7 +423,7 @@
             <div class="mobile-tab-content tab-chart-content">
                 <!-- Sticky Search also in Chart Tab -->
                 <div class="panel glass-panel sticky-search">
-                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Search Opportunity</div>
+                    <div class="section-header" style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 11px;">🔍 Market Radar</div>
                     <div class="search-wrap" style="padding: 8px 0 0 0; position: relative; display: flex; align-items: center;">
                         <input type="text" class="market-search-input" placeholder="Search pair (e.g. BTC, ETH)..." 
                                style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 35px 10px 10px; color: #fff; font-size: 13px; outline: none;">
@@ -416,7 +471,7 @@
                 <!-- Orderbook & Market Activity Section (New for Mobile Chart) -->
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
                     <div class="panel glass-panel" style="height: 250px;">
-                        <div class="panel-header" style="font-size: 10px;">📊 Orderbook</div>
+                        <div class="panel-header" style="font-size: 10px;">📊 Order Book</div>
                         <div id="ob-container" style="flex: 1; overflow: hidden; display: flex; flex-direction: column; font-size: 10px;">
                             <div class="ob-header" style="display: grid; grid-template-columns: 1fr 1fr; padding: 4px 8px; color: rgba(255,255,255,0.4); font-size: 8px;">
                                 <span>BID</span>
@@ -429,7 +484,7 @@
                         </div>
                     </div>
                     <div class="panel glass-panel" style="height: 250px;">
-                        <div class="panel-header" style="font-size: 10px;">🕒 Recent Trades</div>
+                        <div class="panel-header" style="font-size: 10px;">🕒 Market Activity</div>
                         <div class="trades-container" style="flex: 1; overflow-y: auto; padding: 4px; font-size: 9px; font-family: var(--font-mono);">
                             <div id="market-trades-list" class="market-trades-list"></div>
                         </div>
@@ -453,7 +508,7 @@
 
                 <div class="panel glass-panel" style="margin-bottom: 12px; min-height: 200px;">
                     <div class="panel-header" style="justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                        <span style="font-weight:700;">Active Positions</span>
+                        <span style="font-weight:700;">📜 Execution Ledger</span>
                         <div class="ledger-tabs" style="background: rgba(0,0,0,0.3); padding: 3px; border-radius: 8px;">
                             <button id="tab-open" class="tab-btn active" style="font-size: 10px; border-radius: 6px;" onclick="switchLedgerTab('OPEN')">OPEN <span id="open-count" class="badge">0</span></button>
                             <button id="tab-closed" class="tab-btn" style="font-size: 10px; border-radius: 6px;" onclick="switchLedgerTab('CLOSED')">CLOSED <span id="closed-count" class="badge">0</span></button>
@@ -466,19 +521,11 @@
                 </div>
 
                 <div class="panel glass-panel log-panel">
-                    <div class="panel-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">SYSTEM EVENTS</div>
+                    <div class="panel-header" style="border-bottom: 1px solid rgba(255,255,255,0.05);">⚙️ System Events</div>
                     <div class="log-container" id="ai-logs" style="max-height: 400px; font-size: 11px;">
                         <div class="log-placeholder">Waiting for events...</div>
                     </div>
                 </div>
-            </div>
-
-            <!-- TAB 4: AUTH (Conditional) -->
-            <div class="mobile-tab-content tab-auth-content" style="display:none; text-align:center; padding: 50px 20px;">
-                <div class="logo-icon" style="width:60px; height:60px; margin: 0 auto 20px; background: rgba(255,255,255,0.05); font-size: 24px; opacity: 0.5;">🔒</div>
-                <h3 style="color: #fff; margin-bottom: 10px;">Login Required</h3>
-                <p style="color: #888; font-size: 14px; margin-bottom: 20px;">Authentication is needed to manage trades.</p>
-                <button onclick="showLoginModal()" class="login-btn" style="max-width: 200px; margin: 0 auto;">Sign In</button>
             </div>
 
         </main>
@@ -508,7 +555,10 @@
     </div>
     <div id="market-ticker" style="display:none"><div id="ticker-content"></div></div>
 
-    <script src="script.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="static/pull_to_refresh.js"></script>
+    <script src="static/script.js"></script>
     <script>
         // Detection: If user rotates back to large screen, redirect to desktop
         window.addEventListener('resize', () => {
@@ -523,5 +573,4 @@
         });
     </script>
 </body>
-
 </html>

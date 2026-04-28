@@ -4,7 +4,11 @@
 let chart, activePair = null, activeTimeframe = 'LIVE', lastStats = {}, lastPrices = {}, lastRadarData = [], _notifEnabled = false;
 let marketSearchQuery = '';
 let _logCache = new Set();
-const socket = typeof io !== 'undefined' ? io() : null;
+const socket = typeof io !== 'undefined' ? io({
+    auth: {
+        token: window.VIEW_TOKEN || ''
+    }
+}) : null;
 
 // ── Indicator Visibility State ─────────────────────────────
 const indState = { ma7: true, ma25: true, bb: true };
@@ -87,15 +91,19 @@ class AlgoChart {
         const dpr = devicePixelRatio || 1;
         // Main chart canvas
         const r = this.canvas.getBoundingClientRect();
+        // Guard: jangan resize jika canvas sedang hidden (width/height = 0)
+        if (r.width === 0 || r.height === 0) return;
         this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
         this.ctx.scale(dpr, dpr);
         this.canvas.style.width = r.width + 'px'; this.canvas.style.height = r.height + 'px';
         // Axis canvas
         if (this.axisCanvas) {
             const ra = this.axisCanvas.getBoundingClientRect();
-            this.axisCanvas.width = ra.width * dpr; this.axisCanvas.height = ra.height * dpr;
-            this.axisCtx.scale(dpr, dpr);
-            this.axisCanvas.style.width = ra.width + 'px'; this.axisCanvas.style.height = ra.height + 'px';
+            if (ra.width > 0 && ra.height > 0) {
+                this.axisCanvas.width = ra.width * dpr; this.axisCanvas.height = ra.height * dpr;
+                this.axisCtx.scale(dpr, dpr);
+                this.axisCanvas.style.width = ra.width + 'px'; this.axisCanvas.style.height = ra.height + 'px';
+            }
         }
         this.draw();
     }
@@ -151,11 +159,35 @@ class AlgoChart {
             if (activeTimeframe === 'LIVE') {
                 // Ticks dari Bot History
                 const h = await (await fetch('/api/history/' + pair)).json();
-                if (!Array.isArray(h) || !h.length) return;
-                data = h.map((v, i) => ({
-                    time: Math.floor(Date.now() / 1000) - (h.length - i) * 60,
-                    value: parseFloat(v)
-                }));
+                if (Array.isArray(h) && h.length >= 5) {
+                    data = h.map((v, i) => ({
+                        time: Math.floor(Date.now() / 1000) - (h.length - i) * 60,
+                        value: parseFloat(v)
+                    }));
+                } else {
+                    // Fallback: coin belum ada histori bot, gunakan OHLCV 1h dari exchange
+                    console.log(`[Chart] No bot history for ${pair}, falling back to 1h OHLCV`);
+                    const ohlcv = await (await fetch(`/api/ohlcv/${pair}/1h`)).json();
+                    if (!Array.isArray(ohlcv) || !ohlcv.length) {
+                        // Coba 15m sebagai last resort
+                        const ohlcv15 = await (await fetch(`/api/ohlcv/${pair}/15m`)).json();
+                        if (!Array.isArray(ohlcv15) || !ohlcv15.length) return;
+                        data = ohlcv15.map(c => ({
+                            time: c[0] / 1000,
+                            open: c[1], high: c[2], low: c[3], close: c[4], value: c[4]
+                        }));
+                    } else {
+                        data = ohlcv.map(c => ({
+                            time: c[0] / 1000,
+                            open: c[1], high: c[2], low: c[3], close: c[4], value: c[4]
+                        }));
+                    }
+                    // Tampilkan info bahwa ini data OHLCV, bukan live tick
+                    const tEl = document.getElementById('pair-trend');
+                    if (tEl && (!tEl.textContent || tEl.textContent === '—')) {
+                        tEl.textContent = '📊 Data Pasar';
+                    }
+                }
             } else {
                 // Candles dari Exchange
                 const ohlcv = await (await fetch(`/api/ohlcv/${pair}/${activeTimeframe}`)).json();
@@ -626,34 +658,43 @@ async function selectPair(pair, trend, prob) {
         const valEl = document.getElementById('ai-prob-val');
         if (fill) fill.style.width = (p * 100) + '%';
         if (valEl) valEl.textContent = Math.round(p * 100) + '%';
+        if (valEl) valEl.textContent = Math.round(p * 100) + '%';
     }
 
     refreshWatchlist();
-    if (chart) {
-        chart.currentProb = p;
-        chart.loadData(pair);
-    }
 
-    // UX Focus: If on mobile market tab, switch to chart tab after selection
+    // UX Focus: If on mobile market tab, switch to chart tab FIRST
+    // then load data after canvas is visible (fix race condition)
     const nav = document.querySelector('.mobile-nav');
-    if (nav && document.body.classList.contains('tab-market')) {
+    const isOnMobileMarket = nav && document.body.classList.contains('tab-market');
+
+    if (isOnMobileMarket) {
         const chartBtn = document.querySelector('.mobile-nav-item[onclick*="chart"]');
         if (chartBtn) switchMobileTab('chart', chartBtn);
+        // Tunggu canvas visible + layout selesai, baru render chart
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                if (chart) {
+                    chart.currentProb = p;
+                    chart.resize && chart.resize();
+                    chart.loadData(pair);
+                }
+            }, 200);
+        });
+    } else {
+        if (chart) {
+            chart.currentProb = p;
+            chart.loadData(pair);
+        }
     }
 }
 
 function switchMobileTab(tabId, el) {
     if (!el) return;
     
-    // Auth Check: Lock Trades tab if not logged in
-    if (tabId === 'trades' && !isLoggedIn) {
-        // Switch to auth placeholder instead
-        document.body.className = `tab-auth`;
-        document.querySelectorAll('.mobile-tab-content').forEach(c => c.style.display = 'none');
-        document.querySelector('.tab-auth-content').style.display = 'block';
-        
-        document.querySelectorAll('.mobile-nav-item').forEach(i => i.classList.remove('active'));
-        el.classList.add('active');
+    // Auth Check removed from Tab Switching to allow View-Only
+    if (tabId === 'settings') {
+        // Handled by sidebar now
         return;
     }
 
@@ -668,9 +709,9 @@ function switchMobileTab(tabId, el) {
     document.body.classList.remove('tab-market', 'tab-chart', 'tab-trades');
     document.body.classList.add('tab-' + tabId);
 
-    // Trigger chart resize after animation
+    // Trigger chart resize after tab is visible — longer delay for mobile repaint
     if (tabId === 'chart' && chart && chart.resize) {
-        setTimeout(() => chart.resize(), 150);
+        requestAnimationFrame(() => setTimeout(() => chart.resize(), 100));
     }
     closeAllSidebars();
 }
@@ -1030,12 +1071,12 @@ function renderWatchlist(data) {
 
                     item.innerHTML = `
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                            <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${formatPair(t.pair)}</span>
-                            <span style="font-weight:bold; color:${sigColor}; font-size:0.8rem; border:1px solid ${sigColor}44; padding:2px 6px; border-radius:4px; min-width:45px; text-align:center;">${sig}</span>
+                            <span style="font-weight:600; color:var(--text-bright); font-size:0.9rem;">${escapeHTML(formatPair(t.pair))}</span>
+                            <span style="font-weight:bold; color:${escapeHTML(sigColor)}; font-size:0.8rem; border:1px solid ${escapeHTML(sigColor)}44; padding:2px 6px; border-radius:4px; min-width:45px; text-align:center;">${escapeHTML(sig)}</span>
                         </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.75rem;">
-                            <span style="color:var(--text-dim);"><span class="${chgClass}">${chgSign}${chg.toFixed(2)}%</span> | Vol: ${fmtShortIDR(t.vol_idr || 0)}</span>
-                            <span style="color:${color}; font-weight:600;">${label}</span>
+                            <span style="color:var(--text-dim);"><span class="${escapeHTML(chgClass)}">${escapeHTML(chgSign)}${escapeHTML(chg.toFixed(2))}%</span> | Vol: ${escapeHTML(fmtShortIDR(t.vol_idr || 0))}</span>
+                            <span style="color:${escapeHTML(color)}; font-weight:600;">${escapeHTML(label)}</span>
                         </div>
                     `;
                     container.appendChild(item);
@@ -1089,12 +1130,43 @@ function renderSectors(sectors) {
 let currentLedgerTab = 'OPEN';
 let lastTradeData = [];
 
+function switchLedgerTab(tab) {
+    currentLedgerTab = tab;
+    
+    // Update button states
+    const btnOpen = document.getElementById('tab-open');
+    const btnClosed = document.getElementById('tab-closed');
+    
+    if (btnOpen && btnClosed) {
+        if (tab === 'OPEN') {
+            btnOpen.classList.add('active');
+            btnClosed.classList.remove('active');
+        } else {
+            btnOpen.classList.remove('active');
+            btnClosed.classList.add('active');
+        }
+    }
+    
+    // Re-render history with last data
+    if (lastTradeData.length > 0) {
+        renderTradeHistory(lastTradeData);
+    }
+}
+
 async function forceExit(pair) {
+    if (!isLoggedIn) {
+        showLoginModal();
+        return;
+    }
+
     if (window.navigator && window.navigator.vibrate) window.navigator.vibrate([50, 30, 50]);
     if (!confirm(`🚨 FORCE EXIT ${pair.toUpperCase()}?\nBot akan langsung melakukan Market Sell (Hajar Kiri) secepatnya.`)) return;
     
     try {
-        const res = await fetch(`/api/exit/${pair}`, { method: 'POST' });
+        const res = await fetch(`/api/exit/${pair}`, { 
+            method: 'POST',
+            headers: { 'X-CSRFToken': getCookie('csrf_token') }
+        });
         const d = await res.json();
         if (d.status === 'exit_requested') {
             alert(`✅ Sinyal Jual Terkirim: ${pair.toUpperCase()} sedang diproses.`);
@@ -1114,104 +1186,130 @@ function renderTradeHistory(data) {
     
     if (!tbody && !cardsContainer) return;
 
-    // Hitung stats untuk badge
     const openTrades = data.filter(t => t.status === 'OPEN');
     const closedTrades = data.filter(t => t.status === 'CLOSED');
 
     if (openCnt) openCnt.textContent = openTrades.length;
     if (closedCnt) closedCnt.textContent = closedTrades.length;
 
-    if (tbody) tbody.innerHTML = '';
-    if (cardsContainer) cardsContainer.innerHTML = '';
-
-    // Filter data berdasarkan tab aktif
     const displayData = currentLedgerTab === 'OPEN' ? openTrades : closedTrades;
 
-    displayData.slice(0, 50).forEach(t => {
-        const time = t.created_at
-            ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
-            : '--:--';
-        
-        const pair = formatPair(t.pair);
-        const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
-        const pnlIdr = fmtIDR(t.pnl_idr, true);
-        const pnlPct = t.pnl_pct !== undefined ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '';
-
-        if (isMobilePage && cardsContainer) {
-            // RENDER CARDS FOR MOBILE
-            const card = document.createElement('div');
-            card.className = 'trade-card';
+    if (isMobilePage && cardsContainer) {
+        // ── MOBILE: CARD VIEW (Smart Update) ──
+        const activeIds = new Set();
+        displayData.slice(0, 50).forEach(t => {
+            const tid = t.id || t.pair;
+            const cardId = `trade-card-${tid}`;
+            activeIds.add(cardId);
             
+            let card = document.getElementById(cardId);
+            const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
+            const pnlPct = t.pnl_pct !== undefined ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '';
             const is_open = t.status === 'OPEN';
-            const durStr = t.status === 'OPEN' 
+            const durStr = is_open 
                 ? (t.created_at ? formatDuration(Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : '--')
                 : formatDuration(t.duration || 0);
 
-            card.innerHTML = `
+            const cardHTML = `
                 <div class="card-header">
-                    <span class="card-pair">${pair}</span>
-                    <span class="card-pnl ${pnlCls}">${pnlPct}</span>
+                    <span class="card-pair">${escapeHTML(formatPair(t.pair))}</span>
+                    <span class="card-pnl ${pnlCls}">${escapeHTML(pnlPct)}</span>
                 </div>
                 <div class="card-body">
-                    <div>Entry: <b>${formatNumber(t.entry_price)}</b></div>
-                    <div>Live: <b class="${pnlCls}">${formatNumber(t.exit_price || t.last_price)}</b></div>
-                    <div>Value: <b>${fmtShortIDR(t.amount_idr)}</b></div>
-                    <div>Time: <b>${durStr}</b></div>
+                    <div>Entry: <b>${escapeHTML(formatNumber(t.entry_price))}</b></div>
+                    <div>Live: <b class="${pnlCls}">${escapeHTML(formatNumber(t.exit_price || t.last_price))}</b></div>
+                    <div>Value: <b>${escapeHTML(fmtShortIDR(t.amount_idr))}</b></div>
+                    <div>Time: <b>${escapeHTML(durStr)}</b></div>
                 </div>
                 ${is_open ? `
                 <div class="card-footer">
-                    <button class="btn-exit" onclick="forceExit('${t.pair}')">🚨 Emergency Exit</button>
-                    <button class="btn-view" onclick="selectPair('${t.pair}')">📈</button>
+                    <button class="btn-exit" onclick="forceExit('${escapeHTML(t.pair)}')">🚨 Emergency Exit</button>
+                    <button class="btn-view" onclick="selectPair('${escapeHTML(t.pair)}')">📈</button>
                 </div>
                 ` : `
-                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${t.reason || 'AI'}</div>
+                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${escapeHTML(t.reason || 'AI')}</div>
                 `}
             `;
-            cardsContainer.appendChild(card);
-        } else if (tbody) {
-            // RENDER TABLE ROWS FOR DESKTOP
-            const tr = document.createElement('tr');
-            
-            // DNA Rendering
-            let dnaHtml = '<div style="display:flex; flex-direction:column; gap:3px; align-items:center;">';
-            if (t.ai_prob && t.ai_prob > 0.7) dnaHtml += `<span title="High AI Prob: ${Math.round(t.ai_prob * 100)}%" style="font-size:12px; filter:drop-shadow(0 0 2px var(--blue))">🧠</span>`;
-            if (t.whale_boost && t.whale_boost > 0) dnaHtml += `<span title="Whale Activity Detected" style="font-size:12px; filter:drop-shadow(0 0 2px var(--yellow))">🐋</span>`;
-            if (!t.ai_prob && !t.whale_boost) dnaHtml += `<span style="font-size:10px; opacity:0.2">--</span>`;
-            dnaHtml += '</div>';
 
-            const volCrypto = formatCrypto(t.amount_coin);
-            const volIDR = fmtIDR(t.amount_idr);
+            if (!card) {
+                card = document.createElement('div');
+                card.id = cardId;
+                card.className = 'trade-card';
+                card.innerHTML = cardHTML;
+                cardsContainer.appendChild(card);
+            } else {
+                const hash = `${t.last_price}-${t.pnl_pct}-${t.status}`;
+                if (card.getAttribute('data-hash') !== hash) {
+                    card.innerHTML = cardHTML;
+                    card.setAttribute('data-hash', hash);
+                }
+            }
+        });
+
+        Array.from(cardsContainer.children).forEach(child => {
+            if (!activeIds.has(child.id)) child.remove();
+        });
+
+    } else if (tbody) {
+        // ── DESKTOP: TABLE VIEW (Standard Clear - Desktop less prone to noticeable flicker) ──
+        tbody.innerHTML = '';
+        displayData.slice(0, 50).forEach(t => {
+            const time = t.created_at ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--';
+            const pair = formatPair(t.pair);
+            const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
+            const pnlIdr = fmtIDR(t.pnl_idr, true);
             const pnlText = ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)`;
-
+            
+            const tr = document.createElement('tr');
             tr.style.cursor = 'pointer';
             tr.onclick = () => selectPair(t.pair);
+            tr.className = t.status === 'OPEN' ? 'status-open' : 'status-closed';
+
+            let dnaHtml = '<div style="display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; min-height:30px;">';
+            if (t.ai_prob && t.ai_prob > 0.4) {
+                const aiColor = t.ai_prob > 0.7 ? 'var(--purple)' : 'var(--blue)';
+                dnaHtml += `<span title="AI Probability: ${Math.round(t.ai_prob*100)}%" style="font-size:14px; filter:drop-shadow(0 0 3px ${aiColor}); cursor:help;">🧠</span>`;
+            }
+            if (t.whale_boost && t.whale_boost > 1.0) {
+                dnaHtml += `<span title="Whale Boost: ${t.whale_boost.toFixed(2)}x" style="font-size:14px; filter:drop-shadow(0 0 3px var(--yellow)); cursor:help;">🐋</span>`;
+            }
+            if (!t.ai_prob && !t.whale_boost) {
+                dnaHtml += `<span style="font-size:10px; color:var(--text-dim); opacity:0.3;">—</span>`;
+            }
+            dnaHtml += '</div>';
 
             if (t.status === 'OPEN') {
                 const s = Math.floor((Date.now() - new Date(t.created_at).getTime()) / 1000);
                 const durStr = formatDuration(s);
-                tr.style.background = 'rgba(245, 158, 11, 0.04)';
                 tr.innerHTML = `
-                    <td><span style="font-weight:600">${time}</span></td>
+                    <td><span style="font-weight:600">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
-                    <td><b>${pair}</b><br><span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span></td>
-                    <td><b>${volCrypto}</b><br><span class="muted" style="font-size:9px">${volIDR}</span></td>
-                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${durStr}</span></td>
-                    <td><b class="${pnlCls}">${pnlIdr}</b><br><span class="${pnlCls}" style="font-size:9px">${pnlText}</span></td>`;
+                    <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
+                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
+                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
+                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             } else {
                 const durStr = formatDuration(t.duration || 0);
-                let reason = t.reason || 'AI';
-                let rIcon = reason.includes('TP') ? '🎯' : (reason.includes('SL') ? '🛑' : '🤖');
+                const reason = t.reason || 'AI';
+                let rIcon = '🤖';
+                let rColor = 'var(--text-secondary)';
+                
+                if (reason.includes('TP')) { rIcon = '🎯'; rColor = 'var(--green)'; }
+                else if (reason.includes('SL')) { rIcon = '🛑'; rColor = 'var(--red)'; }
+                else if (reason.includes('TRAIL')) { rIcon = '📈'; rColor = 'var(--green)'; }
+                else if (reason.includes('MANUAL')) { rIcon = '👤'; rColor = 'var(--yellow)'; }
+                else if (reason.includes('ORACLE')) { rIcon = '🔮'; rColor = 'var(--purple)'; }
                 tr.innerHTML = `
-                    <td><span style="font-weight:600;color:var(--text-secondary)">${time}</span></td>
+                    <td><span style="font-weight:600;color:var(--text-secondary)">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
-                    <td><b>${pair}</b><br><span class="muted" style="font-size:9px">Beli: ${fmtIDR(t.entry_price)}</span></td>
-                    <td><b>${volCrypto}</b><br><span class="muted" style="font-size:9px">${volIDR}</span></td>
-                    <td><span style="font-weight:600;font-size:10px">${rIcon} ${reason}</span><br><span class="muted" style="font-size:9px">⏳ ${durStr}</span></td>
-                    <td><b class="${pnlCls}">${pnlIdr}</b><br><span class="${pnlCls}" style="font-size:9px">${pnlText}</span></td>`;
+                    <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
+                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
+                    <td><span style="font-weight:600;font-size:10px;color:${rColor}">${rIcon} ${escapeHTML(reason)}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
+                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             }
             tbody.appendChild(tr);
-        }
-    });
+        });
+    }
 }
 
 function formatDuration(s) {
@@ -1240,7 +1338,7 @@ function renderLogs(data) {
     newItems.forEach(log => {
         const entry = document.createElement('div');
         const level = (log.level || 'INFO').toUpperCase();
-        entry.className = `log-entry level-${level.toLowerCase()}`;
+        entry.className = `log-entry level-${escapeHTML(level.toLowerCase())}`;
 
         const timeStr = new Date(log.created_at).toLocaleTimeString('id-ID', {
             hour: '2-digit', minute: '2-digit', second: '2-digit'
@@ -1257,9 +1355,9 @@ function renderLogs(data) {
 
         entry.innerHTML = `
             <div class="log-header">
-                <span class="log-time">${timeStr}</span>
+                <span class="log-time">${escapeHTML(timeStr)}</span>
                 <span class="log-icon">${icon}</span>
-                <span class="log-side">${log.side}</span>
+                <span class="log-side">${escapeHTML(log.side)}</span>
                 <span class="log-pair">${formatPair(log.pair)}</span>
             </div>
             <div class="log-msg">${log.price}</div>
@@ -1369,6 +1467,23 @@ function showLoginModal() {
     document.getElementById('login-overlay').style.display = 'flex';
 }
 
+// ── Pentest Fix: Security Utilities ──
+function escapeHTML(str) {
+    if (!str) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function getCookie(name) {
+    let value = "; " + document.cookie;
+    let parts = value.split("; " + name + "=");
+    if (parts.length === 2) return parts.pop().split(";").shift();
+}
+
 async function handleLogin() {
     const user = document.getElementById('login-user').value;
     const pass = document.getElementById('login-pass').value;
@@ -1377,7 +1492,10 @@ async function handleLogin() {
     try {
         const resp = await fetch('/api/login', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrf_token')
+            },
             body: JSON.stringify({ username: user, password: pass })
         });
         const data = await resp.json();
@@ -1385,6 +1503,9 @@ async function handleLogin() {
         if (data.success) {
             isLoggedIn = true;
             document.getElementById('login-overlay').style.display = 'none';
+            if (document.getElementById('display-username')) {
+                document.getElementById('display-username').textContent = data.user.username;
+            }
             // If we were on auth tab, switch to trades
             const tradeBtn = document.querySelector('.mobile-nav-item[onclick*="trades"]');
             if (tradeBtn && document.body.classList.contains('tab-auth')) {
@@ -1401,10 +1522,109 @@ async function handleLogin() {
     }
 }
 
+async function handleLogout() {
+    try {
+        await fetch('/api/logout', { 
+            method: 'POST',
+            headers: { 'X-CSRFToken': getCookie('csrf_token') }
+        });
+        isLoggedIn = false;
+        location.reload(); 
+    } catch (e) {}
+}
+
+function toggleSettings(show) {
+    const sidebar = document.getElementById('settings-sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    if (!sidebar || !overlay) return;
+
+    if (show) {
+        if (!isLoggedIn) {
+            showLoginModal();
+            return;
+        }
+        fetchSettings();
+        sidebar.classList.add('active');
+        overlay.style.display = 'block';
+    } else {
+        sidebar.classList.remove('active');
+        overlay.style.display = 'none';
+    }
+    
+    if (window.navigator && window.navigator.vibrate) window.navigator.vibrate(5);
+}
+
+async function fetchSettings() {
+    try {
+        const d = await (await fetch('/api/user/settings')).json();
+        document.getElementById('setting-api-key').value = d.api_key || '';
+        document.getElementById('setting-api-secret').placeholder = d.has_secret ? '••••••••••••' : 'Enter API Secret';
+    } catch (e) {}
+}
+
+async function saveSettings() {
+    const key = document.getElementById('setting-api-key').value;
+    const sec = document.getElementById('setting-api-secret').value;
+    const status = document.getElementById('settings-status');
+    
+    status.textContent = "Saving...";
+    status.style.color = "#888";
+    
+    try {
+        const resp = await fetch('/api/user/settings', {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrf_token')
+            },
+            body: JSON.stringify({ api_key: key, api_secret: sec })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            status.textContent = "✅ " + data.message;
+            status.style.color = "#10b981";
+            if (window.navigator && window.navigator.vibrate) window.navigator.vibrate(20);
+        } else {
+            status.textContent = "❌ " + data.message;
+            status.style.color = "#ef4444";
+        }
+    } catch (e) {
+        status.textContent = "❌ Connection failed";
+        status.style.color = "#ef4444";
+    }
+}
+
 function initSystem() {
     chart = new AlgoChart('custom-chart', 'chart-tooltip');
     if (socket) {
-        socket.on('connect', () => console.log('✅ Dashboard Socket Connected!'));
+        socket.on('connect', () => {
+            console.log("✅ WebSocket Connected");
+            const status = document.getElementById('ws-status');
+            if (status) {
+                status.style.background = "rgba(16, 185, 129, 0.1)";
+                status.style.borderColor = "#10b981";
+                status.style.color = "#10b981";
+                status.innerHTML = '<span style="width: 6px; height: 6px; background: #10b981; border-radius: 50%; box-shadow: 0 0 5px #10b981;"></span> LIVE';
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log("❌ WebSocket Disconnected");
+            const status = document.getElementById('ws-status');
+            if (status) {
+                status.style.background = "rgba(239, 68, 68, 0.1)";
+                status.style.borderColor = "#ef4444";
+                status.style.color = "#ef4444";
+                status.innerHTML = '<span style="width: 6px; height: 6px; background: #ef4444; border-radius: 50%;"></span> OFFLINE';
+            }
+        });
+
+        socket.on('connect_error', (err) => {
+            console.error("❌ WS Connect Error:", err);
+            // If unauthorized, could show login
+            if (err.message === "xhr poll error") { /* ignored silent fail */ }
+        });
+
         socket.on('stats_update', renderStats);
         socket.on('radar_update', renderWatchlist);
         socket.on('orderbook_update', renderOrderBook);

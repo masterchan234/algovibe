@@ -1029,17 +1029,47 @@ th {
 }
 
 td {
-    padding: 8px 12px;
+    padding: 10px 12px;
     font-size: 0.78rem;
     font-family: var(--font-mono);
     border-bottom: 1px solid var(--border-soft);
+    vertical-align: middle;
 }
 
-tr:hover td { background: var(--bg-hover); }
+tr {
+    transition: background 0.2s ease;
+}
+
+tr:hover {
+    background: var(--bg-hover) !important;
+}
+
+tr:hover td {
+    background: transparent;
+}
 
 .col-pair { font-weight: 600; color: var(--text-primary); }
 .col-time { color: var(--text-muted); font-size: 0.7rem; }
 .col-open { color: var(--blue); font-weight: 600; }
+
+/* Status specific row highlights */
+tr.status-open {
+    background: rgba(245, 158, 11, 0.03);
+}
+
+tr.status-closed {
+    background: transparent;
+}
+
+/* Tooltip style fallback for title attribute (handled by browser but we can hint at it) */
+[title] {
+    text-decoration: underline dotted var(--text-dim);
+    text-underline-offset: 3px;
+}
+
+[title]:hover {
+    color: var(--text-primary);
+}
 
 /* ══════════════════════════════════════════════════════════════
    RIGHT SIDEBAR
@@ -1834,13 +1864,14 @@ tr:hover td { background: var(--bg-hover); }
 /* ── Collapsible Logic ── */
 .sidebar-section {
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    overflow: hidden;
+    /* Remove default overflow:hidden to allow expansion */
 }
 
 .sidebar-section.collapsed {
     flex: 0 0 auto;
     height: 40px;
     min-height: 40px;
+    overflow: hidden; /* Only hide overflow when collapsed */
 }
 
 .sidebar-section.collapsed .sidebar-list, 

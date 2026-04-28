@@ -331,7 +331,7 @@ class ScalperBot:
             try:
                 self.oracle.process_llm_insights()
             except Exception as e:
-                pass
+                log_message(f"Error in _insight_loop: {e}")
             time.sleep(2)
 
     # Dashboard dijalankan oleh indodax-dashboard.service (systemd terpisah)
@@ -761,7 +761,9 @@ class ScalperBot:
                             else:
                                 final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
                         except Exception as e:
-                            log_message(f"⚠️ ATR Calculation failed: {e}")
+                            # Fallback gracefully to K-NN targets if ccxt cannot fetch OHLCV (e.g. delisted or bad symbol)
+                            if "does not have market symbol" not in str(e):
+                                log_message(f"⚠️ ATR Calculation fallback: {e}")
                             final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
 
                         # [Senior Tuning] Execution Intelligence

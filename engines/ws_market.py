@@ -17,6 +17,8 @@ import time
 import logging
 import threading
 import websocket   # websocket-client
+import zmq
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,11 @@ class MarketDataWS:
         self._ws_ref = None                  # ref ke ws instance untuk subscribe dinamis
         self._ob_done = False                # True setelah OB subscribe pertama selesai
         self._pending_subs: dict = {}        # {req_id: channel_name} untuk ACK tracking
+        
+        # SaaS Hub Config
+        self._use_hub = os.getenv("USE_MARKET_HUB", "false").lower() == "true"
+        self._hub_host = os.getenv("MARKET_HUB_HOST", "127.0.0.1")
+        self._hub_port = int(os.getenv("MARKET_HUB_PORT", "5555"))
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -128,6 +135,50 @@ class MarketDataWS:
 
     def _run(self):
         """Loop utama dengan auto-reconnect."""
+        if self._use_hub:
+            self._run_subscriber()
+        else:
+            self._run_direct()
+
+    def _run_subscriber(self):
+        """Mode SaaS Subscriber: Ambil data dari Market Hub lokal via ZMQ."""
+        logger.info(f"[MarketWS] Starting in SUBSCRIBER mode (Hub: {self._hub_host}:{self._hub_port})")
+        context = zmq.Context()
+        subscriber = context.socket(zmq.SUB)
+        subscriber.connect(f"tcp://{self._hub_host}:{self._hub_port}")
+        subscriber.setsockopt_string(zmq.SUBSCRIBE, "tickers")
+        subscriber.setsockopt_string(zmq.SUBSCRIBE, "heartbeat")
+        
+        # Set socket timeout agar loop bisa berhenti saat self._running = False
+        subscriber.RCVTIMEO = 2000 
+
+        while self._running:
+            try:
+                topic_data = subscriber.recv_string()
+                topic, payload_json = topic_data.split(' ', 1)
+                payload = json.loads(payload_json)
+                
+                if topic == "tickers":
+                    with self._lock:
+                        self._tickers.update(payload["data"])
+                        if not self._connected.is_set():
+                            self._connected.set()
+                        self._last_msg_time = time.time()
+                
+                elif topic == "heartbeat":
+                    self._last_msg_time = time.time()
+                    
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(f"[MarketWS] Subscriber error: {e}")
+                time.sleep(2)
+
+        subscriber.close()
+        context.term()
+
+    def _run_direct(self):
+        """Mode Standalone: Konek langsung ke Indodax WS."""
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(

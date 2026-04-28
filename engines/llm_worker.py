@@ -38,7 +38,7 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
             model_path=model_path,
             backend=litert_lm.Backend.CPU,
             cache_dir=cache_dir,
-            max_num_tokens=LLM_MAX_TOKENS,
+            max_num_tokens=2048,
         )
         log_message("🧠 LLM Worker: Gemma-4-E2B Engine initialized (cache reused).")
     except Exception as e:
@@ -143,10 +143,12 @@ def _run_structured_inference(engine, sampler, context_messages: list, prompt: s
             take_profit_pct: TP dalam % dari harga entry (default 2.0%)
         """
         nonlocal verdict_result
+        clean_verdict = str(verdict).replace('<|"|>', '').replace('<', '').replace('>', '').replace('"', '').replace('|', '').strip().upper()
+        clean_reason = str(reason).replace('<|"|>', '').replace('<', '').replace('>', '').replace('|', '').strip()
         verdict_result = {
-            "verdict":         verdict.upper(),
+            "verdict":         clean_verdict,
             "confidence":      max(0, min(100, int(confidence))),
-            "reason":          str(reason),
+            "reason":          clean_reason,
             "stop_loss_pct":   abs(float(stop_loss_pct)),
             "take_profit_pct": abs(float(take_profit_pct)),
         }
@@ -159,13 +161,27 @@ def _run_structured_inference(engine, sampler, context_messages: list, prompt: s
             automatic_tool_calling=True,
             sampler_config=sampler,
         ) as conv:
-            conv.send_message(prompt)
+            # Harus di-iterasi sampai habis agar C++ engine tidak deadlock
+            response_text = ""
+            for chunk in conv.send_message(prompt):
+                if isinstance(chunk, dict):
+                    content = chunk.get("content", [])
+                    if content and isinstance(content, list):
+                        response_text += content[0].get("text", "")
+                elif isinstance(chunk, str):
+                    response_text += chunk
 
         if verdict_result:
             return json.dumps(verdict_result)
         else:
-            logger.warning(f"[LLMWorker] Structured ({task_type}): tool not called, fallback text.")
-            return _run_text_inference(engine, sampler, context_messages, prompt)
+            logger.warning(f"[LLMWorker] Structured ({task_type}): tool not called, fallback to plain text.")
+            return json.dumps({
+                "verdict": "HOLD",
+                "confidence": 0,
+                "reason": f"Tool not called. AI says: {response_text.strip()}",
+                "stop_loss_pct": 1.2,
+                "take_profit_pct": 2.0
+            })
 
     except Exception as e:
         logger.error(f"[LLMWorker] Structured inference error ({task_type}): {e}")
