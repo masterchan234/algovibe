@@ -239,12 +239,15 @@ class Database:
             
             # Ubah boolean jadi integer untuk SQLite
             dry_run = 1 if data.get('dry_run') else 0
+            trailing_sl_price = data.get('trailing_sl_price')
+            highest_price = data.get('highest_price')
             
             cursor.execute('''
                 INSERT INTO positions (
                     pair, entry_price, amount_crypto, amount_idr, status, 
-                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct, reason_backup
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct,
+                    trailing_sl_price, highest_price, reason_backup
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0.0), COALESCE(?, 0.0), ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -256,6 +259,8 @@ class Database:
                     dry_run=excluded.dry_run,
                     target_tp_pct=excluded.target_tp_pct,
                     target_sl_pct=excluded.target_sl_pct,
+                    trailing_sl_price=COALESCE(excluded.trailing_sl_price, positions.trailing_sl_price),
+                    highest_price=COALESCE(excluded.highest_price, positions.highest_price),
                     reason_backup=excluded.reason_backup
             ''', (
                 pair,
@@ -269,6 +274,8 @@ class Database:
                 dry_run,
                 data.get('target_tp_pct'),
                 data.get('target_sl_pct'),
+                trailing_sl_price,
+                highest_price,
                 data.get('reason_backup')
             ))
 

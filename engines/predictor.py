@@ -59,7 +59,8 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
         sum_xy = sum(i * smoothed_history[i] for i in range(n))
         sum_x2 = sum(i * i for i in range(n))
         
-        denominator = (n * sum_x2 - sum_x * sum_y) if (n * sum_x2 - sum_x * sum_y) != 0 else 1
+        # [Fix] OLS denominator yang benar: n*Σx² - (Σx)² — bukan n*Σx² - Σx*Σy
+        denominator = (n * sum_x2 - sum_x**2) if (n * sum_x2 - sum_x**2) != 0 else 1
         slope = (n * sum_xy - sum_x * sum_y) / denominator
         slope_pct = (slope / smoothed_current) * 100
         

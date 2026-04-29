@@ -1194,15 +1194,68 @@ async function triggerMassSync() {
             headers: { 'X-CSRFToken': getCookie('csrf_token') }
         });
         const d = await resp.json();
-        alert(d.message);
+        if (!d.success) {
+            alert('❌ ' + (d.message || 'Gagal memulai sync'));
+            return;
+        }
+
+        // Poll status sampai sync selesai (max 3 menit)
+        const maxWait = 180000;
+        const pollInterval = 2000;
+        const startTime = Date.now();
+
+        const poll = async () => {
+            try {
+                const sr = await fetch('/api/trades/sync/status');
+                const s = await sr.json();
+
+                if (s.is_running) {
+                    // Masih jalan, update label
+                    btn.innerHTML = `⌛ SYNCING... (${s.new_trades} baru)`;
+                } else {
+                    // Selesai
+                    if (s.new_trades > 0) {
+                        btn.innerHTML = `✅ ${s.new_trades} Trade Baru!`;
+                        btn.style.background = 'var(--green)';
+                        // Refresh ledger data sekali lagi
+                        const trades = await (await fetch('/api/trades')).json();
+                        renderTradeHistory(trades);
+                    } else {
+                        btn.innerHTML = '✅ Sync Selesai (Tidak ada transaksi baru)';
+                    }
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = oldHtml;
+                        btn.style.opacity = '1';
+                        btn.style.background = '';
+                    }, 4000);
+                    return; // Stop polling
+                }
+
+                if (Date.now() - startTime < maxWait) {
+                    setTimeout(poll, pollInterval);
+                } else {
+                    // Timeout
+                    btn.innerHTML = '⚠️ Sync Timeout';
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = oldHtml;
+                        btn.style.opacity = '1';
+                    }, 3000);
+                }
+            } catch (e) {
+                console.error('Sync poll error:', e);
+            }
+        };
+
+        // Mulai polling setelah 2 detik (beri waktu bot baca flag dari DB)
+        setTimeout(poll, 2000);
+
     } catch (e) {
         alert('❌ Gagal sinkronisasi: ' + e.message);
-    } finally {
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.innerHTML = oldHtml;
-            btn.style.opacity = '1';
-        }, 5000);
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        btn.style.opacity = '1';
     }
 }
 
@@ -1228,7 +1281,8 @@ function renderTradeHistory(data) {
         // ── MOBILE: CARD VIEW (Smart Update) ──
         const activeIds = new Set();
         displayData.slice(0, 50).forEach(t => {
-            const tid = t.id || t.pair || t.trade_id;
+            // [Fix] Gunakan id DB untuk CLOSED (integer unik), pair untuk OPEN (hanya 1 per pair)
+            const tid = t.status === 'CLOSED' ? `closed_${t.id}` : (t.id || t.pair);
             const cardId = `trade-card-${tid}`;
             activeIds.add(cardId);
             
@@ -1317,12 +1371,22 @@ function renderTradeHistory(data) {
             if (t.status === 'OPEN') {
                 const s = Math.floor((Date.now() - new Date(t.created_at).getTime()) / 1000);
                 const durStr = formatDuration(s);
+                // [Fix] Tampilkan label status detail (OPEN / PENDING_BUY / EXITING)
+                const posStatus = t.pos_status || 'OPEN';
+                let statusLabel, statusColor;
+                if (posStatus === 'PENDING_BUY') {
+                    statusLabel = '⏳ PENDING BUY'; statusColor = 'var(--yellow)';
+                } else if (posStatus === 'EXITING') {
+                    statusLabel = '🔄 SELL TERKIRIM'; statusColor = 'var(--cyan)';
+                } else {
+                    statusLabel = '📌 OPEN'; statusColor = 'var(--yellow)';
+                }
                 tr.innerHTML = `
                     <td><span style="font-weight:600">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
                     <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
                     <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
-                    <td><span style="color:var(--yellow);font-weight:700;font-size:10px">📌 OPEN</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)} / <span title="Estimasi waktu mencapai target" style="cursor:help;color:var(--cyan)">ETA ${t.eta_minutes || 15}m</span></span></td>
+                    <td><span style="color:${statusColor};font-weight:700;font-size:10px">${statusLabel}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)} / <span title="Estimasi waktu mencapai target" style="cursor:help;color:var(--cyan)">ETA ${t.eta_minutes || 15}m</span></span></td>
                     <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             } else {
                 const durStr = formatDuration(t.duration || 0);

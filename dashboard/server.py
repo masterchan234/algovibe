@@ -551,8 +551,40 @@ def get_ohlcv(pair, tf):
 @login_required
 def trigger_full_sync():
     """Trigger mass trade sync via bot background process."""
+    # Simpan jumlah trade saat ini agar frontend bisa deteksi kapan sync selesai
+    conn = get_db_connection()
+    try:
+        count_row = conn.execute("SELECT COUNT(*) as cnt FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+        db.save_state("sync_pre_count", str(count_row['cnt'] if count_row else 0))
+    except Exception:
+        pass
+    finally:
+        conn.close()
     db.save_state("trigger_sync_all", "1")
-    return jsonify({"success": True, "message": "Mass sync requested. This may take a few minutes."})
+    return jsonify({"success": True, "message": "Sync dimulai. Ledger akan otomatis terupdate setelah sync selesai."})
+
+@app.route('/api/trades/sync/status')
+def get_sync_status():
+    """Cek apakah sync sudah selesai dengan membandingkan jumlah trade."""
+    try:
+        conn = get_db_connection()
+        try:
+            count_row = conn.execute("SELECT COUNT(*) as cnt FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+            current_count = int(count_row['cnt'] if count_row else 0)
+        finally:
+            conn.close()
+        pre_count = int(db.get_state("sync_pre_count") or 0)
+        is_running = db.get_state("trigger_sync_all") == "1"
+        new_trades = max(0, current_count - pre_count)
+        return jsonify({
+            "is_running": is_running,
+            "pre_count": pre_count,
+            "current_count": current_count,
+            "new_trades": new_trades,
+            "done": not is_running and current_count > 0
+        })
+    except Exception as e:
+        return jsonify({"is_running": False, "new_trades": 0, "done": True})
 
 @app.route('/api/trades')
 def get_trades():
@@ -888,7 +920,7 @@ def _build_trades_payload():
         from config import DRY_RUN
         dr_val = 1 if DRY_RUN else 0
 
-        # 1. Fetch Positions (OPEN)
+        # 1. Fetch Positions (OPEN / PENDING_BUY / EXITING)
         positions = conn.execute("SELECT * FROM positions").fetchall()
         ws_tickers = mws.get_tickers()
 
@@ -899,6 +931,7 @@ def _build_trades_payload():
                 if int(p['dry_run'] or 0) != dr_val:
                     continue
 
+                pos_status = str(p['status'] or 'OPEN')
                 entry_price = float(p['entry_price'] or 0)
                 amount_crypto = float(p['amount_crypto'] or 0)
                 
@@ -918,33 +951,47 @@ def _build_trades_payload():
                 pnl_idr = (last_price - entry_price) * amount_crypto
                 pnl_pct = ((last_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
 
+                # Beri label reason yang jelas berdasarkan status nyata posisi
+                if pos_status == 'PENDING_BUY':
+                    display_reason = "MENUNGGU FILL"
+                elif pos_status == 'EXITING':
+                    display_reason = "SELL ORDER TERKIRIM"
+                else:
+                    display_reason = "OPEN POSITION"
+
                 results.append({
-                    "pair": pair,
-                    "reason": "OPEN POSITION",
-                    "pnl_idr": round(pnl_idr, 0),
-                    "pnl_pct": round(pnl_pct, 2),
+                    "id":          f"pos_{pair}",
+                    "pair":        pair,
+                    "reason":      display_reason,
+                    "pnl_idr":     round(pnl_idr, 0),
+                    "pnl_pct":     round(pnl_pct, 2),
                     "entry_price": entry_price,
-                    "exit_price": last_price,
-                    "amount_idr": float(p['amount_idr'] or 0),
+                    "exit_price":  last_price,
+                    "amount_idr":  float(p['amount_idr'] or 0),
                     "amount_coin": amount_crypto,
-                    "duration": 0,
-                    "created_at": str(p['timestamp'] or ''),
-                    "status": "OPEN",
-                    "is_manual": 0
+                    "duration":    0,
+                    "created_at":  str(p['timestamp'] or ''),
+                    "status":      "OPEN",  # Semua posisi aktif masuk tab OPEN
+                    "pos_status":  pos_status,  # Status detail untuk UI
+                    "is_manual":   0
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
 
         # 2. Fetch Trade History (CLOSED)
+        # [Fix] Tampilkan MANUAL_SYNC (is_manual=1) selalu, tanpa filter dry_run
+        # karena ini adalah transaksi nyata dari akun exchange.
+        # Untuk trade reguler, filter sesuai mode DRY_RUN.
         trades = conn.execute("""
             SELECT * FROM trade_history 
-            WHERE dry_run = ? AND reason != 'BACKTEST'
-            ORDER BY created_at DESC LIMIT 100
+            WHERE (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'
+            ORDER BY created_at DESC LIMIT 200
         """, (dr_val,)).fetchall()
 
         for t in trades:
             try:
                 results.append({
+                    "id":          int(t['id'] or 0),  # [Fix] Sertakan id DB untuk deduplication di mobile
                     "pair":        t['pair'] or 'UNKNOWN',
                     "reason":      t['reason'] or 'EXIT',
                     "pnl_idr":     float(t['pnl_idr'] or 0),

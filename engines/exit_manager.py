@@ -1,7 +1,10 @@
 import json
 import os
 import time
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from config import (
     TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
@@ -280,9 +283,6 @@ class ExitManager:
                         continue
                 except Exception as e:
                     log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
-                    if order_id:
-                        positions[pair]["status"] = "EXITING"
-                        positions[pair]["exit_order_id"] = order_id
                     continue
     
                 # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
@@ -337,7 +337,7 @@ class ExitManager:
                 elif current_price <= active_sl_price:
                     # Deteksi tipe exit proteksi
                     is_trailing_hit = active_sl_price > break_even_price
-                    is_be_hit = active_sl_price == break_even_price
+                    is_be_hit = abs(active_sl_price - break_even_price) < 1.0  # toleransi Rp 1 untuk float comparison
                     
                     if is_be_hit:
                         reason_str = "BREAK-EVEN SL"
@@ -375,12 +375,20 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT")
-            
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT")
+            # TP exits (RAPID_TP_*, STAGNANT_EXIT, TAKE_PROFIT) menggunakan taker market sell
+            # TAPI offset harus kecil agar tidak memotong profit yang sudah diraih
+            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT")
+
             if is_emergency:
-                # Gunakan SELL_TAKER_OFFSET (5%) untuk memaksa market sell instan
+                # Gunakan SELL_TAKER_OFFSET (5%) hanya untuk SL darurat agar pasti terisi
                 exit_price = price * (1 - SELL_TAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_TAKER
+            elif is_tp_exit:
+                # TP exits: jual sedikit di ATAS market agar order Maker terisi saat ada buyer
+                # Offset kecil 0.05% sudah cukup untuk memastikan fill
+                exit_price = price * (1 + SELL_MAKER_OFFSET)
+                fee_sell_rate = FEE_SELL_MAKER
             else:
                 # Maker mode untuk Take Profit standar
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
@@ -412,7 +420,8 @@ class ExitManager:
                 print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
                 params = {
-                    'post_only': True if reason == "TAKE_PROFIT" else False,
+                    # Non-emergency exits dijaga tetap maker (post-only) untuk hemat fee.
+                    'post_only': not is_emergency,
                     'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
                 }
                 order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
@@ -623,138 +632,163 @@ class ExitManager:
         except Exception as e:
             print(f"Error handling order update: {e}")
 
-    def _fetch_v2_trades(self, pair):
-        """Fetch trades using new Indodax Trade API v2 for accurate reconciliation."""
+    def _fetch_v2_trades(self, pair, startTime=None, endTime=None):
+        """Precision manual fetch for Indodax v2 (Strict parameter ordering)."""
         try:
-            import hmac
-            import hashlib
-            import requests
+            import hmac, hashlib, requests, urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
             api_key = self.exchange.apiKey
             api_secret = self.exchange.secret
             if not api_key or not api_secret: return []
 
-            # Indodax v2 uses symbols like 'btcidr' (no slash)
             symbol = pair.lower().replace("/", "")
             timestamp = int(time.time() * 1000)
             
-            # [Senior Audit] Standard v2 parameters - Increased limit to 1000 for full sync
-            params = {
-                "symbol": symbol,
-                "limit": 1000,
-                "timestamp": timestamp,
-                "recvWindow": 60000 
-            }
+            # [Senior Audit] Strict ordering as per v2 documentation example
+            params = [
+                ("symbol", symbol),
+                ("limit", 1000)
+            ]
+            if startTime: params.append(("startTime", int(startTime)))
+            if endTime: params.append(("endTime", int(endTime)))
+            params.extend([
+                ("timestamp", timestamp),
+                ("recvWindow", 60000)
+            ])
             
-            # Sign the query string
-            query_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+            query_str = "&".join([f"{k}={v}" for k, v in params])
             sign = hmac.new(api_secret.encode(), query_str.encode(), hashlib.sha512).hexdigest()
             
             headers = {
                 "X-APIKEY": api_key,
                 "Sign": sign,
                 "Content-Type": "application/json",
-                "Accept": "application/json"
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             
             url = f"https://tapi.indodax.com/api/v2/myTrades?{query_str}"
-            resp = requests.get(url, headers=headers, timeout=10)
-            data = resp.json()
+            resp = requests.get(url, headers=headers, timeout=15, verify=True)
             
-            if data.get("code") or data.get("error"):
-                logger.error(f"V2 History Error for {pair}: {data.get('error')}")
+            if resp.status_code != 200:
+                if resp.status_code == 403:
+                    logger.error(f"⚠️ 403 Forbidden for {pair}: Possible API Key restriction or IP block.")
+                    # log first 500 chars to see if there's a specific message
+                    logger.error(f"Response snippet: {resp.text[:500]}")
                 return []
                 
-            return data.get("data", [])
+            data = resp.json()
+            if data.get("code") or data.get("error"):
+                if data.get("code") != 1110:
+                    logger.error(f"V2 API Error for {pair}: {data.get('code')} - {data.get('error')}")
+                return []
+            
+            return data.get('data', [])
         except Exception as e:
-            logger.error(f"V2 History Exception for {pair}: {e}")
+            logger.error(f"V2 Manual Fetch Error for {pair}: {e}")
             return []
 
     def sync_all_history(self):
         """
-        [Senior Audit] Sinkronisasi Masif seluruh riwayat akun Indodax (Manual + Bot).
-        Iterasi seluruh pair aktif dan rekonstruksi PnL untuk transaksi manual.
+        [Senior Quant Audit] Full Account Deep Sync.
+        Iterates through all pairs and performs windowed history fetching (7-day chunks)
+        to overcome Indodax API limitations.
         """
-        log_message("🔄 Starting Mass Account Sync (Trade History v2)...")
+        log_message("🔄 Starting Deep Account Sync (30-Day History)...")
         try:
-            log_message("🔄 Starting Full-Account Mass Sync via Indodax TAPI v2...")
             markets = self.exchange.fetch_markets()
             idr_pairs = [m['id'] for m in markets if m['quoteId'] == 'idr' and m['active']]
             total_pairs = len(idr_pairs)
             total_new_trades = 0
             
+            # [Fix] Gunakan tanggal dinamis: 30 hari ke belakang
+            start_dt = datetime.now() - timedelta(days=30)
+            START_TARGET_MS = int(start_dt.timestamp() * 1000)
+            NOW_MS = int(time.time() * 1000)
+            
+            log_message(f"🔄 Range: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} to Now")
+            
             for idx, pair_id in enumerate(idr_pairs):
-                # Rate limit protection & CPU safety
-                time.sleep(0.5)
+                # Rate limit protection
+                time.sleep(0.2)
                 
                 if idx % 10 == 0:
                     log_message(f"🔄 Sync Progress: {idx}/{total_pairs} pairs scanned...")
                 
-                trades = self._fetch_v2_trades(pair_id)
-                if not trades: continue
+                # Hanya satu request karena rentang < 7 hari
+                trades = self._fetch_v2_trades(pair_id, startTime=START_TARGET_MS, endTime=NOW_MS)
                 
-                # Sortir trades tertua dulu agar rekonstruksi PnL (Buy -> Sell) benar
+                if not trades: continue
+
+                # Urutkan Ascending
                 trades.sort(key=lambda x: x.get('time', 0))
                 
-                # Cache untuk estimasi entry price (Last Buy)
                 last_buy_price = 0
                 last_buy_qty = 0
                 
                 for t in trades:
-                    trade_id = str(t.get('tradeId'))
-                    is_buyer = t.get('isBuyer', False)
-                    price = float(t.get('price', 0))
-                    qty = float(t.get('qty', 0))
-                    commission = float(t.get('commission', 0))
-                    
-                    if is_buyer:
-                        last_buy_price = price
-                        last_buy_qty = qty
-                        continue # Kita simpan untuk PnL saat SELL nanti
-                    
-                    # Jika ini SELL, coba hitung PnL
-                    exit_price = price
-                    entry_price = last_buy_price if last_buy_price > 0 else exit_price
-                    amount_crypto = qty
-                    amount_idr = amount_crypto * entry_price
-                    
-                    # Fee v2 commission (SELL) + Estimasi fee BUY (0.11%)
-                    fee_sell = commission
-                    fee_buy = amount_idr * 0.0011 
-                    
-                    gross_pnl = (exit_price - entry_price) * amount_crypto
-                    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-                    pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
-                    
-                    # Format timestamp v2 (ms) ke SQLite format
-                    raw_time = t.get('time', 0)
-                    dt_obj = datetime.fromtimestamp(raw_time / 1000.0)
-                    created_at_str = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # Cek apakah trade ini sudah ada di DB (lewat trade_id)
-                    # insert_trade_history menggunakan INSERT OR IGNORE
-                    db.insert_trade_history(
-                        pair=pair_id, 
-                        entry_price=entry_price, 
-                        exit_price=exit_price,
-                        amount_crypto=amount_crypto, 
-                        amount_idr=amount_idr,
-                        pnl_idr=net_pnl_idr, 
-                        pnl_pct=pnl_pct, 
-                        reason="MANUAL_SYNC",
-                        exec_type="MAKER" if t.get('isMaker') else "TAKER",
-                        duration_seconds=3600, # Mock duration
-                        dry_run=False,
-                        trade_id=trade_id,
-                        is_manual=1,
-                        created_at=created_at_str
-                    )
-                    total_new_trades += 1
-            
-            log_message(f"✅ Full Sync Complete: Processed {total_new_trades} potential SELL records.")
+                    try:
+                        trade_id = str(t.get('tradeId'))
+                        price = float(t.get('price', 0))
+                        qty = float(t.get('qty', 0))
+                        is_buyer = t.get('isBuyer')
+                        
+                        if is_buyer:
+                            last_buy_price = price
+                            last_buy_qty = qty
+                            continue 
+                        
+                        # Jika ini SELL, hitung estimasi PnL
+                        exit_price = price
+                        entry_price = last_buy_price if last_buy_price > 0 else exit_price
+                        
+                        amount_crypto = qty
+                        amount_idr = amount_crypto * entry_price
+                        
+                        # Fee Estimation (0.11%)
+                        fee_buy = amount_idr * 0.0011 
+                        fee_sell = (qty * exit_price) * 0.0011 
+                        
+                        gross_pnl = (exit_price - entry_price) * amount_crypto
+                        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                        pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                        
+                        # Format timestamp
+                        raw_time = t.get('time', 0)
+                        dt_obj = datetime.fromtimestamp(raw_time / 1000.0)
+                        created_at_str = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        db.insert_trade_history(
+                            pair=pair_id, 
+                            entry_price=entry_price, 
+                            exit_price=exit_price,
+                            amount_crypto=amount_crypto, 
+                            amount_idr=amount_idr,
+                            pnl_idr=net_pnl_idr, 
+                            pnl_pct=pnl_pct, 
+                            reason="MANUAL_SYNC",
+                            exec_type="MAKER" if t.get('isMaker') else "TAKER",
+                            duration_seconds=3600, 
+                            dry_run=False,
+                            trade_id=trade_id,
+                            is_manual=1,
+                            created_at=created_at_str
+                        )
+                        total_new_trades += 1
+                        if total_new_trades % 5 == 0:
+                            log_message(f"✅ Found {total_new_trades} trades so far...")
+                    except Exception as e:
+                        logger.error(f"Error inserting sync trade: {e}")
+                        continue
+
+            log_message(f"✅ Deep Sync Complete! Added {total_new_trades} historical trades since 26/04.")
+            db.save_state("trigger_sync_all", "0")
             return True
+
         except Exception as e:
-            log_message(f"❌ Mass Sync Failed: {e}")
+            log_message(f"❌ Deep Sync Failed: {e}")
+            db.save_state("trigger_sync_all", "0")
             return False
 
     def reconcile_with_exchange(self):
@@ -801,8 +835,22 @@ class ExitManager:
                     found_fill = False
                     
                     for t in trades_v2:
-                        # Cocokkan dengan exit_order_id jika ada, atau trade terbaru jika status EXITING
-                        if str(t.get('orderId')) == str(pos.get('exit_order_id')) or pos.get('status') == 'EXITING':
+                        # [Fix] Hanya cocokkan berdasarkan exit_order_id yang spesifik
+                        # Jangan gunakan `or status == 'EXITING'` karena itu terlalu longgar
+                        # dan bisa salah menggunakan BUY trade untuk menutup posisi SELL
+                        order_id_match = pos.get('exit_order_id') and str(t.get('orderId')) == str(pos.get('exit_order_id'))
+                        # Fallback: jika EXITING dan ada trade SELL setelah timestamp entry posisi
+                        entry_ts_ms = 0
+                        try:
+                            from datetime import datetime as _dt
+                            entry_ts_ms = int(_dt.fromisoformat(str(pos['timestamp'])).timestamp() * 1000)
+                        except Exception:
+                            pass
+                        trade_is_sell = not t.get('isBuyer', True)
+                        trade_after_entry = int(t.get('time', 0)) > entry_ts_ms
+                        exiting_sell_match = (pos.get('status') == 'EXITING' and trade_is_sell and trade_after_entry)
+
+                        if order_id_match or exiting_sell_match:
                             log_message(f"✅ Recovered missing trade for {pair} from v2 history! Recording PnL...")
                             
                             # Rekonstruksi data trade untuk DB

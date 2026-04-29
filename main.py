@@ -1,7 +1,8 @@
 import os
 import time
+import math
 import numpy as np
-
+import threading
 import collections
 from datetime import datetime
 from collections import defaultdict, deque
@@ -600,7 +601,8 @@ class ScalperBot:
                 ai_boost = self.oracle.get_sentiment_boost(pair)
                 
                 # Get Prediction Probability (using quantitative math + LLM qualitative opinion)
-                tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if trend == "UP" else 0.0
+                # [Fix] Hitung juga untuk SIDEWAYS jika ada pullback signal — jangan buang peluang mean reversion
+                tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if (trend == "UP" or breakout) else 0.0
                 
                 # Calculate Multi-Timeframe Changes (Short-term)
                 ch_5m = 0.0; ch_15m = 0.0; ch_1h = 0.0
@@ -688,7 +690,25 @@ class ScalperBot:
                 # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
                 has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
                 ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
-                
+
+                # [Fix Win Rate] Gate 1: AI harus siap (warmup selesai & prob >= threshold)
+                # Jika tq_prob negatif, berarti masih warming up — skip
+                if tq_prob < 0:
+                    log_message(f"WARMUP: {pair} belum cukup data untuk prediksi AI.")
+                    continue
+                if not ai_ready and not has_strong_imb:
+                    # Tidak ada sinyal AI yang kuat dan tidak ada dominasi bid yang nyata
+                    log_message(
+                        f"SKIP [{pair}]: AI prob {tq_prob*100:.0f}% < threshold {adaptive_cfg['ai_threshold']*100:.0f}% "
+                        f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
+                    )
+                    continue
+
+                # [Fix Win Rate] Gate 2: Harus ada pullback ATAU trend UP agar tidak beli di pucuk
+                if not breakout and trend != "UP":
+                    log_message(f"SKIP [{pair}]: Tidak ada pullback & trend bukan UP (trend={trend})")
+                    continue
+
                 # RE-CHECK PERSISTENT STATE BEFORE TRADE
                 self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
                 if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
@@ -735,15 +755,42 @@ class ScalperBot:
                 elif imbalance_ratio > 1.3: scalper_boost = 8.0 # Moderate Bid Dominance
                 
                 current_vol = p['volatility']
-                dynamic_threshold = 55.0
-                if current_vol > 2.0: dynamic_threshold = 68.0
-                elif current_vol < 0.6: dynamic_threshold = 50.0
-                
-                # Hitung Total Confidence: K-NN Pattern + Order Book Pressure
-                total_confidence = knn_decision['confidence'] + scalper_boost
+                dynamic_threshold = 57.0
+                if current_vol > 2.0:
+                    dynamic_threshold = 68.0
+                elif current_vol < 0.6:
+                    dynamic_threshold = 54.0
+
+                # [Win-Rate Guard] Sideways + breakout tetap valid, tapi perlu confidence lebih tinggi
+                if trend != "UP":
+                    dynamic_threshold += 4.0
+
+                # [Win-Rate Guard] Hormati sinyal AVOID jika suatu saat k-NN mengaktifkan veto lagi
+                if knn_decision.get('verdict') == "AVOID":
+                    log_message(f"🚫 [K-NN Avoid] {pair}: pola historis buruk, skip.")
+                    continue
+
+                base_confidence = float(knn_decision.get('confidence', 0.0))
+                min_base_conf = 45.0 if current_vol <= 2.0 else 50.0
+
+                # [Profit Guard] Orderbook boost hanya penguat, bukan pengganti kualitas sinyal inti.
+                # Batasi kontribusi boost agar trade tidak lolos hanya karena imbalance sesaat.
+                boost_credit = min(scalper_boost, 6.0)
+                total_confidence = base_confidence + boost_credit
+
+                # [Win-Rate Guard] Larang entry dengan kualitas dasar terlalu rendah.
+                if base_confidence < min_base_conf:
+                    log_message(
+                        f"SKIP [{pair}]: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}% "
+                        f"(vol={current_vol:.2f}%, boost_raw={scalper_boost:.1f}%)"
+                    )
+                    continue
 
                 if total_confidence >= dynamic_threshold:
-                    log_message(f"🚀 [Scalper Boost] {pair}: Confidence {knn_decision['confidence']:.1f}% + Boost {scalper_boost:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold})")
+                    log_message(
+                        f"🚀 [Scalper Boost] {pair}: Base {base_confidence:.1f}% + BoostCredit {boost_credit:.1f}% "
+                        f"(Raw {scalper_boost:.1f}%) = {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
+                    )
                     
                     if self.daily_trades < MAX_TRADES_PER_DAY:
                         # [Backtest Insight] Dynamic ATR-based TP/SL 
@@ -763,18 +810,20 @@ class ScalperBot:
                                 # [Fee-Aware & Rebound Logic]
                                 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
                                 round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
-                                # [Anti-Panic Sell] Gunakan ATR 2.5x untuk ruang napas lebih luas
-                                base_sl_pct = (atr_val * 2.5) / p['last']
+                                # Gunakan ATR 1.5x untuk SL yang lebih ketat (tidak terlalu longgar)
+                                base_sl_pct = (atr_val * 1.5) / p['last']
                                 
-                                # Jika RSI sangat rendah (< 35), berikan ruang SL lebih lebar (+25%)
-                                rebound_multiplier = 1.25 if rsi_val < 35 else 1.0
+                                # Jika RSI sangat rendah (< 35), berikan ruang SL lebih lebar (+20%)
+                                rebound_multiplier = 1.20 if rsi_val < 35 else 1.0
                                 final_sl_val = base_sl_pct * rebound_multiplier
                                 
-                                # [Senior Fix] Pastikan SL minimal 3.5% agar tidak terkena Panic Sell akibat noise
-                                final_sl_val = max(0.035, final_sl_val)
+                                # [Fix R:R] Min SL 1.5% (bukan 3.5%) agar TP 3% masih bisa R:R >= 1:2
+                                final_sl_val = max(0.015, final_sl_val)
                                 
-                                final_dyn_tp = min(0.12, max(0.02, (atr_val * 4.0) / p['last']))
-                                final_dyn_sl = -min(0.06, final_sl_val) # Cap max SL 6%
+                                # TP harus minimal 2x SL untuk R:R positif
+                                raw_tp = (atr_val * 3.0) / p['last']
+                                final_dyn_tp = min(0.12, max(final_sl_val * 2.0, raw_tp))
+                                final_dyn_sl = -min(0.04, final_sl_val) # Cap max SL 4%
                                 
                                 log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}% (Rebound: {rebound_multiplier}x)")
                             else:
@@ -786,8 +835,13 @@ class ScalperBot:
                             final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
 
                         # [Senior Tuning] Execution Intelligence
-                        # Taker (Instant) jika momentum meledak, Maker (Limit) jika sinyal standar untuk hemat fee.
-                        use_taker = (total_confidence > 75.0) or (imbalance_ratio > 2.5)
+                        # Taker fee tinggi, jadi hanya dipakai saat momentum benar-benar ekstrem.
+                        use_taker = (
+                            total_confidence > 85.0
+                            and imbalance_ratio > 3.0
+                            and current_vol < 2.2
+                            and tq_prob >= (adaptive_cfg['ai_threshold'] + 0.08)
+                        )
                         mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
                         log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
 
