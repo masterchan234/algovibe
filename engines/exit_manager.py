@@ -185,9 +185,11 @@ class ExitManager:
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
                 
-                # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee))
+                # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
                 # [Senior Fix] Gunakan FEE_SELL_TAKER karena kita ingin eksekusi instan (Taker)
-                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_TAKER))
+                # Tambahkan FEE_SLIPPAGE_BUFFER untuk kompensasi spread
+                from config import FEE_SLIPPAGE_BUFFER
+                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_TAKER - FEE_SLIPPAGE_BUFFER))
                 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
@@ -419,13 +421,17 @@ class ExitManager:
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
 
             order_status = order.get('status', 'closed')
+            order_id = order.get('id')
             
             # Tentukan fee jual berdasarkan strategi exit
+            exec_type = "TAKER" if is_emergency else "MAKER"
             fee_sell_rate = FEE_SELL_TAKER if is_emergency else FEE_SELL_MAKER
             
             # Entry fee selalu Maker (karena bot antri beli)
             fee_buy = amount_idr * FEE_BUY_MAKER
             
+            # [Senior Fix] Gunakan 'price' (harga ticker) untuk estimasi value, 
+            # tapi sadari bahwa Taker akan dapet harga Bid (slightly lower).
             sell_value = amount * price
             fee_sell = sell_value * fee_sell_rate
             
@@ -453,6 +459,7 @@ class ExitManager:
                         pnl_idr=pnl_idr,
                         pnl_pct=pnl_pct,
                         reason=reason,
+                        exec_type=exec_type,
                         duration_seconds=int(duration_sec),
                         dry_run=self.dry_run
                     )
@@ -472,7 +479,15 @@ class ExitManager:
                 except Exception as db_err:
                     print(f"Failed to save trade history/state for {pair}: {db_err}")
             else:
-                db.update_position_status(pair, "EXITING", exit_order_id=order.get('id'))
+                # Simpan metadata ke position agar PrivateWS (handle_order_update) tahu reason-nya
+                # [Senior Fix] Update position status AND save the backup reason
+                db.update_position_status(pair, "EXITING", exit_order_id=order_id)
+                # Tambahkan field extra ke pos di memori/DB
+                if position_data:
+                    position_data['status'] = "EXITING"
+                    position_data['exit_order_id'] = order_id
+                    position_data['reason_backup'] = reason
+                    db.upsert_position(pair, position_data)
             
             return order.get('id')
         except Exception as e:
@@ -486,11 +501,13 @@ class ExitManager:
         Callback dari PrivateWS. Memproses order yang terisi (Filled).
         """
         try:
-            order_id = str(order.get('id', ''))
-            pair = order.get('pair', '')
-            status = order.get('status', '').lower()
+            # [Senior Fix] Support both CCXT format and Native Indodax WS format
+            order_id = str(order.get('id') or order.get('orderId') or '')
+            pair = order.get('pair') or order.get('symbol') or ''
+            status = str(order.get('status') or '').lower()
             
-            if status not in ['filled', 'closed', 'fill']: return
+            # Status 'done' di Indodax WS berarti order selesai (full fill atau cancel-done)
+            if status not in ['filled', 'closed', 'fill', 'done']: return
             
             # 1. Cek apakah ini Jaring yang terisi
             for p, jaring in list(self.jaring_orders.items()):
@@ -499,14 +516,16 @@ class ExitManager:
                     
                     # Pindahkan dari Shadow ke Positions
                     data = {
-                        "entry_price": jaring['price'],
-                        "amount":      jaring['amount'],
-                        "amount_idr":  jaring['price'] * jaring['amount'],
+                        "entry_price": float(order.get('price', jaring['price'])),
+                        "amount":      float(order.get('executedQty', jaring['amount'])),
+                        "amount_crypto": float(order.get('executedQty', jaring['amount'])),
+                        "amount_idr":  float(order.get('price', jaring['price'])) * float(order.get('executedQty', jaring['amount'])),
                         "timestamp":   datetime.now().isoformat(),
                         "dry_run":     self.dry_run,
                         "status":      "OPEN",
                         "entry_order_id": order_id,
-                        "exit_order_id": None
+                        "exit_order_id": None,
+                        "reason_backup": "LIQUIDITY_GRAB"
                     }
                     db.upsert_position(p, data)
                     db.delete_shadow_order(p)
@@ -520,8 +539,19 @@ class ExitManager:
             for p_pair, p_data in positions.items():
                 if p_data.get('entry_order_id') == order_id and p_data.get('status') == "PENDING_BUY":
                     log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
-                    db.update_position_status(p_pair, "OPEN")
-                    send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nStatus: `OPEN`")
+                    
+                    # [Senior Fix] Capture actual fill price and amount for accurate basis
+                    fill_price = float(order.get('price', p_data.get('entry_price')))
+                    fill_amount = float(order.get('executedQty', order.get('amount', p_data.get('amount_crypto'))))
+                    
+                    # Update data dengan nilai asli dari bursa
+                    p_data['status'] = "OPEN"
+                    p_data['entry_price'] = fill_price
+                    p_data['amount_crypto'] = fill_amount
+                    p_data['amount_idr'] = fill_price * fill_amount
+                    
+                    db.upsert_position(p_pair, p_data)
+                    send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
                     return
 
             # 3. Cek apakah ini Sell Order (Take Profit/Stop Loss) yang terisi
@@ -538,15 +568,34 @@ class ExitManager:
                         entry_price = float(p_data.get('entry_price', 0))
                         amount_idr = float(p_data.get('amount_idr', 0))
                         
+                        # --- [Senior Fix] Real Fee Extraction dari fillInformation ---
+                        fill_info = order.get('fillInformation', {})
+                        participant = fill_info.get('participant', 'MAKER') # Default to MAKER
+                        
+                        # Ambil fee, tax, clearing aktual jika ada (sudah dalam IDR)
+                        real_fee = float(fill_info.get('fee', 0))
+                        real_tax = float(fill_info.get('tax', 0))
+                        real_clearing = float(fill_info.get('clearing', 0))
+                        
                         sell_value = amount_crypto * exit_price
-                        fee_sell = sell_value * FEE_SELL_MAKER
+                        
+                        # Fallback jika fill_info tidak lengkap (misal legacy WS)
+                        if real_fee == 0:
+                            fee_rate = FEE_SELL_TAKER if participant == 'TAKER' else FEE_SELL_MAKER
+                            fee_sell = sell_value * fee_rate
+                        else:
+                            # Gunakan total biaya aktual
+                            fee_sell = real_fee + real_tax + real_clearing
+                        
+                        # Entry fee (selalu maker kecuali koin nyangkut/orphans yang diadopsi)
                         fee_buy = amount_idr * FEE_BUY_MAKER
                         
                         gross_pnl = (exit_price - entry_price) * amount_crypto
                         net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
                         pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
                         
-                        reason = "TAKE_PROFIT" if net_pnl_idr > 0 else "STOP_LOSS"
+                        # Reason determination
+                        reason = p_data.get('reason_backup', "TAKE_PROFIT" if net_pnl_idr > 0 else "STOP_LOSS")
                         
                         timestamp_str = p_data.get('timestamp') or datetime.now().isoformat()
                         duration_sec = (datetime.now() - datetime.fromisoformat(timestamp_str)).total_seconds()
@@ -555,6 +604,7 @@ class ExitManager:
                             pair=p_pair, entry_price=entry_price, exit_price=exit_price,
                             amount_crypto=amount_crypto, amount_idr=amount_idr,
                             pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
+                            exec_type=participant,
                             duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run')
                         )
                         
@@ -572,6 +622,140 @@ class ExitManager:
             
         except Exception as e:
             print(f"Error handling order update: {e}")
+
+    def _fetch_v2_trades(self, pair):
+        """Fetch trades using new Indodax Trade API v2 for accurate reconciliation."""
+        try:
+            import hmac
+            import hashlib
+            import requests
+            
+            api_key = self.exchange.apiKey
+            api_secret = self.exchange.secret
+            if not api_key or not api_secret: return []
+
+            # Indodax v2 uses symbols like 'btcidr' (no slash)
+            symbol = pair.lower().replace("/", "")
+            timestamp = int(time.time() * 1000)
+            
+            # [Senior Audit] Standard v2 parameters - Increased limit to 1000 for full sync
+            params = {
+                "symbol": symbol,
+                "limit": 1000,
+                "timestamp": timestamp,
+                "recvWindow": 60000 
+            }
+            
+            # Sign the query string
+            query_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+            sign = hmac.new(api_secret.encode(), query_str.encode(), hashlib.sha512).hexdigest()
+            
+            headers = {
+                "X-APIKEY": api_key,
+                "Sign": sign,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            url = f"https://tapi.indodax.com/api/v2/myTrades?{query_str}"
+            resp = requests.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            
+            if data.get("code") or data.get("error"):
+                logger.error(f"V2 History Error for {pair}: {data.get('error')}")
+                return []
+                
+            return data.get("data", [])
+        except Exception as e:
+            logger.error(f"V2 History Exception for {pair}: {e}")
+            return []
+
+    def sync_all_history(self):
+        """
+        [Senior Audit] Sinkronisasi Masif seluruh riwayat akun Indodax (Manual + Bot).
+        Iterasi seluruh pair aktif dan rekonstruksi PnL untuk transaksi manual.
+        """
+        log_message("🔄 Starting Mass Account Sync (Trade History v2)...")
+        try:
+            log_message("🔄 Starting Full-Account Mass Sync via Indodax TAPI v2...")
+            markets = self.exchange.fetch_markets()
+            idr_pairs = [m['id'] for m in markets if m['quoteId'] == 'idr' and m['active']]
+            total_pairs = len(idr_pairs)
+            total_new_trades = 0
+            
+            for idx, pair_id in enumerate(idr_pairs):
+                # Rate limit protection & CPU safety
+                time.sleep(0.5)
+                
+                if idx % 10 == 0:
+                    log_message(f"🔄 Sync Progress: {idx}/{total_pairs} pairs scanned...")
+                
+                trades = self._fetch_v2_trades(pair_id)
+                if not trades: continue
+                
+                # Sortir trades tertua dulu agar rekonstruksi PnL (Buy -> Sell) benar
+                trades.sort(key=lambda x: x.get('time', 0))
+                
+                # Cache untuk estimasi entry price (Last Buy)
+                last_buy_price = 0
+                last_buy_qty = 0
+                
+                for t in trades:
+                    trade_id = str(t.get('tradeId'))
+                    is_buyer = t.get('isBuyer', False)
+                    price = float(t.get('price', 0))
+                    qty = float(t.get('qty', 0))
+                    commission = float(t.get('commission', 0))
+                    
+                    if is_buyer:
+                        last_buy_price = price
+                        last_buy_qty = qty
+                        continue # Kita simpan untuk PnL saat SELL nanti
+                    
+                    # Jika ini SELL, coba hitung PnL
+                    exit_price = price
+                    entry_price = last_buy_price if last_buy_price > 0 else exit_price
+                    amount_crypto = qty
+                    amount_idr = amount_crypto * entry_price
+                    
+                    # Fee v2 commission (SELL) + Estimasi fee BUY (0.11%)
+                    fee_sell = commission
+                    fee_buy = amount_idr * 0.0011 
+                    
+                    gross_pnl = (exit_price - entry_price) * amount_crypto
+                    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                    pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                    
+                    # Format timestamp v2 (ms) ke SQLite format
+                    raw_time = t.get('time', 0)
+                    dt_obj = datetime.fromtimestamp(raw_time / 1000.0)
+                    created_at_str = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Cek apakah trade ini sudah ada di DB (lewat trade_id)
+                    # insert_trade_history menggunakan INSERT OR IGNORE
+                    db.insert_trade_history(
+                        pair=pair_id, 
+                        entry_price=entry_price, 
+                        exit_price=exit_price,
+                        amount_crypto=amount_crypto, 
+                        amount_idr=amount_idr,
+                        pnl_idr=net_pnl_idr, 
+                        pnl_pct=pnl_pct, 
+                        reason="MANUAL_SYNC",
+                        exec_type="MAKER" if t.get('isMaker') else "TAKER",
+                        duration_seconds=3600, # Mock duration
+                        dry_run=False,
+                        trade_id=trade_id,
+                        is_manual=1,
+                        created_at=created_at_str
+                    )
+                    total_new_trades += 1
+            
+            log_message(f"✅ Full Sync Complete: Processed {total_new_trades} potential SELL records.")
+            return True
+        except Exception as e:
+            log_message(f"❌ Mass Sync Failed: {e}")
+            return False
 
     def reconcile_with_exchange(self):
         """
@@ -610,7 +794,50 @@ class ExitManager:
                 # Gunakan amount_crypto yang konsisten dengan schema DB
                 target_amount = pos.get('amount_crypto') or pos.get('amount', 0)
                 if amount_on_exchange < (target_amount * 0.8): # Toleransi lebih longgar 20%
-                    log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Marking as GHOST.")
+                    log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Checking history v2...")
+                    
+                    # Cek apakah ini sebenarnya sudah laku (terjual saat bot offline)
+                    trades_v2 = self._fetch_v2_trades(pair)
+                    found_fill = False
+                    
+                    for t in trades_v2:
+                        # Cocokkan dengan exit_order_id jika ada, atau trade terbaru jika status EXITING
+                        if str(t.get('orderId')) == str(pos.get('exit_order_id')) or pos.get('status') == 'EXITING':
+                            log_message(f"✅ Recovered missing trade for {pair} from v2 history! Recording PnL...")
+                            
+                            # Rekonstruksi data trade untuk DB
+                            exit_price = float(t.get('price', 0))
+                            real_fee = float(t.get('commission', 0))
+                            is_maker = t.get('isMaker', False)
+                            exec_type = "MAKER" if is_maker else "TAKER"
+                            
+                            entry_price = float(pos.get('entry_price', 0))
+                            amount_crypto = float(t.get('qty', pos.get('amount_crypto', 0)))
+                            amount_idr = float(pos.get('amount_idr', 0))
+                            
+                            # Hitung PnL dengan fee aktual v2
+                            fee_buy = amount_idr * FEE_BUY_MAKER
+                            fee_sell = real_fee # v2 commission sudah mencakup segalanya
+                            
+                            gross_pnl = (exit_price - entry_price) * amount_crypto
+                            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                            pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                            
+                            db.insert_trade_history(
+                                pair=pair, entry_price=entry_price, exit_price=exit_price,
+                                amount_crypto=amount_crypto, amount_idr=amount_idr,
+                                pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, 
+                                reason=pos.get('reason_backup', 'RECONCILED'),
+                                exec_type=exec_type,
+                                duration_seconds=300, # Estimated
+                                dry_run=False
+                            )
+                            found_fill = True
+                            break
+                    
+                    if not found_fill:
+                        log_message(f"⚠️ Could not find fill for {pair} in history. Marking as pure GHOST (Deleted).")
+                    
                     db.delete_position(pair)
                     if pair in self.jaring_orders:
                         del self.jaring_orders[pair]
@@ -645,7 +872,8 @@ class ExitManager:
                                 "entry_order_id": f"ADOPT-{int(time.time())}",
                                 "exit_order_id": None,
                                 "target_tp_pct": TP_PCT,
-                                "target_sl_pct": SL_PCT
+                                "target_sl_pct": SL_PCT,
+                                "reason_backup": "ORPHAN_ADOPTION"
                             }
                             db.upsert_position(pair, adopt_data)
                             send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")

@@ -253,6 +253,7 @@
                             <div class="ledger-tabs" style="display:flex; background: rgba(0,0,0,0.2); padding: 3px; border-radius: 6px; gap: 2px;">
                                 <button id="tab-open" class="tab-btn active" onclick="switchLedgerTab('OPEN')">OPEN <span id="open-count" class="badge">0</span></button>
                                 <button id="tab-closed" class="tab-btn" onclick="switchLedgerTab('CLOSED')">CLOSED <span id="closed-count" class="badge">0</span></button>
+                                <button id="sync-history-btn" class="tab-btn sync-btn" onclick="triggerMassSync()" title="Sync Full Account History from Indodax">🔄 SYNC</button>
                             </div>
                         </div>
                         <div class="ledger-stats-bar" style="display:flex; gap:20px; font-weight:600;">
@@ -371,6 +372,19 @@
             <span class="label">Trades</span>
         </div>
     </nav>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(10, 10, 18, 0.9); backdrop-filter: blur(15px); z-index: 3000; display: none; align-items: center; justify-content: center; padding: 20px;">
+        <div class="login-box" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 40px; width: 100%; max-width: 400px; text-align: center;">
+            <div class="logo-icon" style="width:60px; height:60px; margin: 0 auto 20px; font-size: 24px; background: #2563eb; display: flex; align-items: center; justify-content: center; border-radius: 12px; color: white; font-weight: 800;">AV</div>
+            <h2 style="color: #fff; margin-bottom: 8px;">Terminal Access</h2>
+            <p style="color: #888; font-size: 14px; margin-bottom: 25px;">Enter credentials to authorize mass sync</p>
+            <input type="text" id="login-user" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 14px; color: #fff; margin-bottom: 15px; font-size: 16px; outline: none;" placeholder="Username">
+            <input type="password" id="login-pass" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 14px; color: #fff; margin-bottom: 15px; font-size: 16px; outline: none;" placeholder="Password">
+            <button onclick="handleLogin()" style="width: 100%; background: #2563eb; color: white; border: none; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 700; cursor: pointer;">Log In</button>
+            <div id="login-error" style="color: #ef4444; font-size: 12px; margin-top: 15px; display: none;"></div>
+        </div>
+    </div>
 
     <script src="static/script.js"></script>
 </body>

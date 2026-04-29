@@ -48,7 +48,8 @@ class Database:
                     target_tp_pct REAL DEFAULT 0.05,
                     target_sl_pct REAL DEFAULT -0.02,
                     trailing_sl_price REAL DEFAULT 0.0,
-                    highest_price REAL DEFAULT 0.0
+                    highest_price REAL DEFAULT 0.0,
+                    reason_backup TEXT
                 )
             ''')
             
@@ -75,6 +76,7 @@ class Database:
                     pnl_idr REAL,
                     pnl_pct REAL,
                     reason TEXT,
+                    exec_type TEXT DEFAULT 'MAKER',
                     duration_seconds INTEGER,
                     dry_run BOOLEAN,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -241,8 +243,8 @@ class Database:
             cursor.execute('''
                 INSERT INTO positions (
                     pair, entry_price, amount_crypto, amount_idr, status, 
-                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct, reason_backup
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -253,11 +255,12 @@ class Database:
                     timestamp=excluded.timestamp,
                     dry_run=excluded.dry_run,
                     target_tp_pct=excluded.target_tp_pct,
-                    target_sl_pct=excluded.target_sl_pct
+                    target_sl_pct=excluded.target_sl_pct,
+                    reason_backup=excluded.reason_backup
             ''', (
                 pair,
                 data.get('entry_price'),
-                data.get('amount_crypto') or data.get('amount', 0), # Fallback untuk backward compatibility dict lama
+                data.get('amount_crypto') or data.get('amount', 0),
                 data.get('amount_idr'),
                 data.get('status'),
                 data.get('entry_order_id'),
@@ -265,7 +268,8 @@ class Database:
                 data.get('timestamp'),
                 dry_run,
                 data.get('target_tp_pct'),
-                data.get('target_sl_pct')
+                data.get('target_sl_pct'),
+                data.get('reason_backup')
             ))
 
     def delete_position(self, pair):
@@ -283,19 +287,25 @@ class Database:
 
     # ── METODE UNTUK TRADE HISTORY ──
     
-    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run):
+    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_int = 1 if dry_run else 0
-            cursor.execute('''
-                INSERT INTO trade_history (
+            
+            sql = '''
+                INSERT OR IGNORE INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
-                    pnl_idr, pnl_pct, reason, duration_seconds, dry_run
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                pair, entry_price, exit_price, amount_crypto, amount_idr,
-                pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int
-            ))
+                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual
+                '''
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual]
+            
+            if created_at:
+                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                params.append(created_at)
+            else:
+                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            
+            cursor.execute(sql, tuple(params))
 
     def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""

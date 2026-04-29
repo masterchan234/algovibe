@@ -61,13 +61,19 @@ BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
 SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
 SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
 
-# --- Sizing ---
+# --- Deadman Switch (Safety) ---
+DEADMAN_SWITCH_ENABLED = True
+DEADMAN_INTERVAL_SEC = 30
+DEADMAN_TIMEOUT_MS = 120000 # 120 seconds
 
 # --- Indodax Pro Fee Structure (Image Reference) ---
+# [Senior Audit] Fee diupdate ke angka konservatif (Standard Taker 0.5% + Tax + CFX)
+# Jika user memiliki VIP level, bot akan otomatis menyesuaikan lewat PrivateWS fillInformation.
 FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
-FEE_BUY_TAKER  = 0.002111  # 0.2111% (0.2% Service + 0.0111% CFX)
+FEE_BUY_TAKER  = 0.005111  # 0.5111% (0.5% Service + 0.0111% CFX)
 FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
-FEE_SELL_TAKER = 0.004211  # 0.4211% (0.2% Service + 0.21% Tax + 0.0111% CFX)
+FEE_SELL_TAKER = 0.007211  # 0.7211% (0.5% Service + 0.21% Tax + 0.0111% CFX)
+FEE_SLIPPAGE_BUFFER = 0.0005 # 0.05% extra buffer for market impact
 
 # --- Predator Strategy Parameters ---
 WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"

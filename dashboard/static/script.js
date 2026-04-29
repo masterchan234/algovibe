@@ -1176,6 +1176,36 @@ async function forceExit(pair) {
     }
 }
 
+async function triggerMassSync() {
+    if (!isLoggedIn) {
+        showLoginModal();
+        return;
+    }
+
+    const btn = document.getElementById('sync-history-btn');
+    const oldHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '⌛ SYNCING...';
+    btn.style.opacity = '0.7';
+
+    try {
+        const resp = await fetch('/api/trades/sync', { 
+            method: 'POST',
+            headers: { 'X-CSRFToken': getCookie('csrf_token') }
+        });
+        const d = await resp.json();
+        alert(d.message);
+    } catch (e) {
+        alert('❌ Gagal sinkronisasi: ' + e.message);
+    } finally {
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = oldHtml;
+            btn.style.opacity = '1';
+        }, 5000);
+    }
+}
+
 function renderTradeHistory(data) {
     lastTradeData = data;
     const isMobilePage = !!document.getElementById('trade-cards-container');
@@ -1198,7 +1228,7 @@ function renderTradeHistory(data) {
         // ── MOBILE: CARD VIEW (Smart Update) ──
         const activeIds = new Set();
         displayData.slice(0, 50).forEach(t => {
-            const tid = t.id || t.pair;
+            const tid = t.id || t.pair || t.trade_id;
             const cardId = `trade-card-${tid}`;
             activeIds.add(cardId);
             
@@ -1206,18 +1236,19 @@ function renderTradeHistory(data) {
             const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
             const pnlPct = t.pnl_pct !== undefined ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '';
             const is_open = t.status === 'OPEN';
+            const is_manual = t.is_manual === 1;
             const durStr = is_open 
                 ? (t.created_at ? formatDuration(Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : '--')
                 : formatDuration(t.duration || 0);
 
             const cardHTML = `
                 <div class="card-header">
-                    <span class="card-pair">${escapeHTML(formatPair(t.pair))}</span>
+                    <span class="card-pair">${escapeHTML(formatPair(t.pair))} ${is_manual ? '<span style="font-size:8px; color:var(--yellow); background:rgba(236,204,104,0.1); padding:2px 4px; border-radius:4px; vertical-align:middle; margin-left:5px;">👤 MANUAL</span>' : ''}</span>
                     <span class="card-pnl ${pnlCls}">${escapeHTML(pnlPct)}</span>
                 </div>
                 <div class="card-body">
                     <div>Entry: <b>${escapeHTML(formatNumber(t.entry_price))}</b></div>
-                    <div>Live: <b class="${pnlCls}">${escapeHTML(formatNumber(t.exit_price || t.last_price))}</b></div>
+                    <div>Live/Exit: <b class="${pnlCls}">${escapeHTML(formatNumber(t.exit_price || t.last_price))}</b></div>
                     <div>Value: <b>${escapeHTML(fmtShortIDR(t.amount_idr))}</b></div>
                     <div>Time: <b>${escapeHTML(durStr)}</b></div>
                 </div>
@@ -1227,7 +1258,7 @@ function renderTradeHistory(data) {
                     <button class="btn-view" onclick="selectPair('${escapeHTML(t.pair)}')">📈</button>
                 </div>
                 ` : `
-                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${escapeHTML(t.reason || 'AI')}</div>
+                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${escapeHTML(is_manual ? 'MANUAL_SYNC' : (t.reason || 'AI'))}</div>
                 `}
             `;
 
@@ -1238,7 +1269,7 @@ function renderTradeHistory(data) {
                 card.innerHTML = cardHTML;
                 cardsContainer.appendChild(card);
             } else {
-                const hash = `${t.last_price}-${t.pnl_pct}-${t.status}`;
+                const hash = `${t.last_price}-${t.pnl_pct}-${t.status}-${t.is_manual}`;
                 if (card.getAttribute('data-hash') !== hash) {
                     card.innerHTML = cardHTML;
                     card.setAttribute('data-hash', hash);
@@ -1251,7 +1282,7 @@ function renderTradeHistory(data) {
         });
 
     } else if (tbody) {
-        // ── DESKTOP: TABLE VIEW (Standard Clear - Desktop less prone to noticeable flicker) ──
+        // ── DESKTOP: TABLE VIEW ──
         tbody.innerHTML = '';
         displayData.slice(0, 50).forEach(t => {
             const time = t.created_at ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--';
@@ -1259,6 +1290,7 @@ function renderTradeHistory(data) {
             const pnlCls = t.pnl_idr >= 0 ? 'up' : 'down';
             const pnlIdr = fmtIDR(t.pnl_idr, true);
             const pnlText = ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%)`;
+            const is_manual = t.is_manual === 1;
             
             const tr = document.createElement('tr');
             tr.style.cursor = 'pointer';
@@ -1266,14 +1298,18 @@ function renderTradeHistory(data) {
             tr.className = t.status === 'OPEN' ? 'status-open' : 'status-closed';
 
             let dnaHtml = '<div style="display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; min-height:30px;">';
-            if (t.ai_prob && t.ai_prob > 0.4) {
-                const aiColor = t.ai_prob > 0.7 ? 'var(--purple)' : 'var(--blue)';
-                dnaHtml += `<span title="AI Probability: ${Math.round(t.ai_prob*100)}%" style="font-size:14px; filter:drop-shadow(0 0 3px ${aiColor}); cursor:help;">🧠</span>`;
+            if (is_manual) {
+                dnaHtml += `<span title="Manual Trade" style="font-size:14px; filter:drop-shadow(0 0 3px var(--yellow)); cursor:help;">👤</span>`;
+            } else {
+                if (t.ai_prob && t.ai_prob > 0.4) {
+                    const aiColor = t.ai_prob > 0.7 ? 'var(--purple)' : 'var(--blue)';
+                    dnaHtml += `<span title="AI Probability: ${Math.round(t.ai_prob*100)}%" style="font-size:14px; filter:drop-shadow(0 0 3px ${aiColor}); cursor:help;">🧠</span>`;
+                }
+                if (t.whale_boost && t.whale_boost > 1.0) {
+                    dnaHtml += `<span title="Whale Boost: ${t.whale_boost.toFixed(2)}x" style="font-size:14px; filter:drop-shadow(0 0 3px var(--yellow)); cursor:help;">🐋</span>`;
+                }
             }
-            if (t.whale_boost && t.whale_boost > 1.0) {
-                dnaHtml += `<span title="Whale Boost: ${t.whale_boost.toFixed(2)}x" style="font-size:14px; filter:drop-shadow(0 0 3px var(--yellow)); cursor:help;">🐋</span>`;
-            }
-            if (!t.ai_prob && !t.whale_boost) {
+            if (!t.ai_prob && !t.whale_boost && !is_manual) {
                 dnaHtml += `<span style="font-size:10px; color:var(--text-dim); opacity:0.3;">—</span>`;
             }
             dnaHtml += '</div>';
@@ -1290,15 +1326,17 @@ function renderTradeHistory(data) {
                     <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             } else {
                 const durStr = formatDuration(t.duration || 0);
-                const reason = t.reason || 'AI';
+                let reason = t.reason || 'AI';
                 let rIcon = '🤖';
                 let rColor = 'var(--text-secondary)';
                 
-                if (reason.includes('TP')) { rIcon = '🎯'; rColor = 'var(--green)'; }
+                if (is_manual) { reason = 'MANUAL'; rIcon = '👤'; rColor = 'var(--yellow)'; }
+                else if (reason.includes('TP')) { rIcon = '🎯'; rColor = 'var(--green)'; }
                 else if (reason.includes('SL')) { rIcon = '🛑'; rColor = 'var(--red)'; }
                 else if (reason.includes('TRAIL')) { rIcon = '📈'; rColor = 'var(--green)'; }
                 else if (reason.includes('MANUAL')) { rIcon = '👤'; rColor = 'var(--yellow)'; }
                 else if (reason.includes('ORACLE')) { rIcon = '🔮'; rColor = 'var(--purple)'; }
+                
                 tr.innerHTML = `
                     <td><span style="font-weight:600;color:var(--text-secondary)">${escapeHTML(time)}</span></td>
                     <td>${dnaHtml}</td>
@@ -1464,7 +1502,8 @@ async function checkSession() {
 }
 
 function showLoginModal() {
-    document.getElementById('login-overlay').style.display = 'flex';
+    const el = document.getElementById('login-overlay');
+    if (el) el.style.display = 'flex';
 }
 
 // ── Pentest Fix: Security Utilities ──
@@ -1502,7 +1541,8 @@ async function handleLogin() {
         
         if (data.success) {
             isLoggedIn = true;
-            document.getElementById('login-overlay').style.display = 'none';
+            const el = document.getElementById('login-overlay');
+            if (el) el.style.display = 'none';
             if (document.getElementById('display-username')) {
                 document.getElementById('display-username').textContent = data.user.username;
             }

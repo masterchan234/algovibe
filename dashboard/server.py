@@ -547,12 +547,12 @@ def get_ohlcv(pair, tf):
         print(f"Error fetching OHLCV: {e}")
         return jsonify([])
 
-@app.route('/api/trades/recent')
-def get_recent_trades_api():
-    return jsonify(_build_trades_payload())
-
-# Redundant function block removed. See implementation around line 787.
-
+@app.route('/api/trades/sync', methods=['POST'])
+@login_required
+def trigger_full_sync():
+    """Trigger mass trade sync via bot background process."""
+    db.save_state("trigger_sync_all", "1")
+    return jsonify({"success": True, "message": "Mass sync requested. This may take a few minutes."})
 
 @app.route('/api/trades')
 def get_trades():
@@ -721,7 +721,14 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
+        from config import DRY_RUN
+        dr_val = 1 if DRY_RUN else 0
+        
         for pos in positions:
+            # [Senior Audit] Filter unrealized PnL by current mode
+            if int(pos['dry_run'] or 0) != dr_val:
+                continue
+
             pair = pos['pair']
             ep = float(pos['entry_price'] or 0)
             if ep <= 0: continue
@@ -874,114 +881,92 @@ def _build_radar_payload():
         conn.close()
 
 def _build_trades_payload():
-    """Ambil trade history + open positions dengan live PnL untuk Execution Ledger."""
+    """[Senior Audit] Robust trade payload builder with per-item safety guards."""
     conn = get_db_connection()
+    results = []
     try:
-        positions = conn.execute("""
-            SELECT p.pair, p.entry_price, p.amount_crypto, p.amount_idr, p.timestamp as created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi, a.eta_minutes
-            FROM positions p
-            LEFT JOIN trade_analytics a ON p.pair = a.pair 
-                 AND abs(strftime('%s', p.timestamp) - strftime('%s', a.entry_timestamp)) < 60
-        """).fetchall()
-
-        # Fetch recent trades (FILTER BY CURRENT MODE)
         from config import DRY_RUN
         dr_val = 1 if DRY_RUN else 0
-        
+
+        # 1. Fetch Positions (OPEN)
+        positions = conn.execute("SELECT * FROM positions").fetchall()
+        ws_tickers = mws.get_tickers()
+
+        for p in positions:
+            try:
+                pair = p['pair']
+                # Filter by dry_run if needed, but usually we show all active in current mode
+                if int(p['dry_run'] or 0) != dr_val:
+                    continue
+
+                entry_price = float(p['entry_price'] or 0)
+                amount_crypto = float(p['amount_crypto'] or 0)
+                
+                # Live Price Fallback (WS > DB > Entry)
+                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
+                
+                if last_price <= 0:
+                    try:
+                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                        if row and row['history_json']:
+                            history = json.loads(row['history_json'])
+                            if history: last_price = float(history[-1])
+                    except: pass
+
+                if last_price <= 0: last_price = entry_price
+
+                pnl_idr = (last_price - entry_price) * amount_crypto
+                pnl_pct = ((last_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+                results.append({
+                    "pair": pair,
+                    "reason": "OPEN POSITION",
+                    "pnl_idr": round(pnl_idr, 0),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "entry_price": entry_price,
+                    "exit_price": last_price,
+                    "amount_idr": float(p['amount_idr'] or 0),
+                    "amount_coin": amount_crypto,
+                    "duration": 0,
+                    "created_at": str(p['timestamp'] or ''),
+                    "status": "OPEN",
+                    "is_manual": 0
+                })
+            except Exception as e:
+                print(f"Error processing position {p.get('pair')}: {e}")
+
+        # 2. Fetch Trade History (CLOSED)
         trades = conn.execute("""
-            SELECT t.pair, t.reason, t.pnl_idr, t.pnl_pct, t.entry_price, t.exit_price, 
-                   t.amount_idr, t.amount_crypto, t.duration_seconds, t.created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi, a.eta_minutes
-            FROM trade_history t
-            LEFT JOIN trade_analytics a ON t.pair = a.pair 
-                 AND abs(t.pnl_idr - a.pnl_idr) < 10
-                 AND a.status = 'CLOSED'
-            WHERE t.reason != 'BACKTEST' AND t.dry_run = ?
-            ORDER BY t.created_at DESC LIMIT 100
+            SELECT * FROM trade_history 
+            WHERE dry_run = ? AND reason != 'BACKTEST'
+            ORDER BY created_at DESC LIMIT 100
         """, (dr_val,)).fetchall()
 
-        results = []
-
-        # Ambil buffer harga realtime untuk Ledger (Prioritas: Trade Stream > Summary)
-        ws_tickers = mws.get_tickers()
-        
-        # Posisi terbuka — hitung live unrealized PnL dari harga terakhir
-        for p in positions:
-            pair = p['pair']
-            entry_price  = float(p['entry_price'] or 0)
-            amount_crypto = float(p['amount_crypto'] or 0)
-            
-            # 1. Prioritaskan harga dari Trade Stream (Execution Live)
-            ws_trades = mws.get_trades(pair)
-            last_price = 0
-            if ws_trades:
-                try: last_price = float(ws_trades[0][4])
-                except: pass
-            
-            # 2. Fallback ke Summary Stream
-            if last_price <= 0:
-                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
-            
-            # 3. Fallback ke database history jika WS belum sinkron
-            if last_price <= 0:
-                try:
-                    row = conn.execute(
-                        "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
-                    ).fetchone()
-                    if row and row['history_json']:
-                        history = json.loads(row['history_json'])
-                        if history: last_price = float(history[-1])
-                except Exception: pass
-
-            if last_price <= 0: last_price = entry_price # Final fallback
-            
-            pnl_idr      = (last_price - entry_price) * amount_crypto
-            pnl_pct      = ((last_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-
-            results.append({
-                "pair":        p['pair'] or 'UNKNOWN',
-                "reason":      'OPEN POSITION',
-                "pnl_idr":     round(pnl_idr, 0),
-                "pnl_pct":     round(pnl_pct, 3),
-                "entry_price": entry_price,
-                "exit_price":  last_price, # Gunakan exit_price agar selaras dengan script.js
-                "amount_idr":  float(p['amount_idr'] or 0),
-                "amount_coin": amount_crypto, # Rename ke amount_coin
-                "duration":    0, # Computed on frontend
-                "created_at":  str(p['created_at'] or ''),
-                "status":      'OPEN',
-                "ai_prob":     float(p['ai_prob'] or 0) if p['ai_prob'] else None,
-                "whale_boost": float(p['whale_boost'] or 0) if p['whale_boost'] else None,
-                "dna_vol":     float(p['dna_vol'] or 0) if p['dna_vol'] else None,
-                "dna_rsi":     float(p['dna_rsi'] or 0) if p['dna_rsi'] else None,
-                "eta_minutes": int(p['eta_minutes'] or 15) if p['eta_minutes'] else None
-            })
-
-        # Trade history (sudah ditutup)
         for t in trades:
-            results.append({
-                "pair":        t['pair'] or 'UNKNOWN',
-                "reason":      t['reason'] or 'EXIT',
-                "pnl_idr":     float(t['pnl_idr'] or 0),
-                "pnl_pct":     float(t['pnl_pct'] or 0),
-                "entry_price": float(t['entry_price'] or 0),
-                "exit_price":  float(t['exit_price'] or 0),
-                "amount_idr":  float(t['amount_idr'] or 0),
-                "amount_coin": float(t['amount_crypto'] or 0),
-                "duration":    int(t['duration_seconds'] or 0),
-                "created_at":  str(t['created_at']),
-                "status":      'CLOSED',
-                "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
-                "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
-                "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
-                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None,
-                "eta_minutes": int(t['eta_minutes'] or 15) if t['eta_minutes'] else None
-            })
+            try:
+                results.append({
+                    "pair":        t['pair'] or 'UNKNOWN',
+                    "reason":      t['reason'] or 'EXIT',
+                    "pnl_idr":     float(t['pnl_idr'] or 0),
+                    "pnl_pct":     float(t['pnl_pct'] or 0),
+                    "entry_price": float(t['entry_price'] or 0),
+                    "exit_price":  float(t['exit_price'] or 0),
+                    "amount_idr":  float(t['amount_idr'] or 0),
+                    "amount_coin": float(t['amount_crypto'] or 0),
+                    "duration":    int(t['duration_seconds'] or 0),
+                    "created_at":  str(t['created_at']),
+                    "status":      'CLOSED',
+                    "is_manual":   int(t['is_manual'] or 0)
+                })
+            except Exception as e:
+                print(f"Error processing trade {t.get('id')}: {e}")
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
         return results[:100]
-    except Exception:
+    except Exception as e:
+        print(f"CRITICAL: _build_trades_payload failure: {e}")
+        import traceback
+        traceback.print_exc()
         return []
     finally:
         conn.close()

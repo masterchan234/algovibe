@@ -70,6 +70,14 @@ class ScalperBot:
             on_order_update = self.exit_manager.handle_order_update
         )
         
+        # Deadman Switch — Safety heartbeat
+        from engines.deadman import DeadmanSwitch
+        self.deadman = DeadmanSwitch(
+            api_key    = os.getenv('INDODAX_API_KEY', ''),
+            api_secret = os.getenv('INDODAX_API_SECRET', '')
+        )
+        self.deadman.start()
+
         log_message("Oracle Engine initialized. Consciousness level: FULL.")
 
         # ── Restore LLM Lessons dari DB (survive restart) ──
@@ -130,7 +138,11 @@ class ScalperBot:
             if not idr_pairs:
                 log_message("✅ All market data is already warm. Skipping full backfill.")
                 db.save_state("backfill_status", "COMPLETED")
+                # Update deadman with all known IDR pairs
+                self.deadman.set_pairs(full_idr_list)
                 return
+
+            self.deadman.set_pairs(full_idr_list)
 
             def fetch_one(symbol):
                 try:
@@ -285,10 +297,10 @@ class ScalperBot:
                 send_telegram_message(msg)
                 
                 params = {
-                    'post_only': True,
+                    'post_only': False if taker else True,
                     'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
                 } 
-                # Gunakan Limit Buy di EMA-9
+                # Gunakan Limit Buy (Taker if price is last, Maker if EMA)
                 order = self.exchange.create_limit_buy_order(symbol, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
@@ -315,7 +327,8 @@ class ScalperBot:
                 "entry_order_id": order.get('id') if not DRY_RUN else None,
                 "exit_order_id": None,
                 "target_tp_pct": final_tp,
-                "target_sl_pct": final_sl
+                "target_sl_pct": final_sl,
+                "reason_backup": trend
             }
 
             db.upsert_position(pair, data)
@@ -372,6 +385,12 @@ class ScalperBot:
             # [Anti-Hallucination] Reality Check every 30 minutes
             if int(time.time()) % 1800 < 10:
                 self.exit_manager.reconcile_with_exchange()
+
+            # [Manual Sync] Mass Account Sync Trigger
+            if db.get_state("trigger_sync_all") == "1":
+                db.save_state("trigger_sync_all", "0")
+                log_message("📡 MANUAL SYNC: Starting background Mass Account Sync...")
+                threading.Thread(target=self.exit_manager.sync_all_history, daemon=True).start()
 
             # [LiteRT-LM] Consciousness Update every 30 minutes
             self.oracle.update_consciousness(regime=regime)
