@@ -14,6 +14,7 @@ from config import (
     INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS
 )
 from engines.database import db
+from engines.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
@@ -31,6 +32,15 @@ class ExitManager:
     def save_positions(self, positions, modified_pairs):
         for pair in modified_pairs:
             db.upsert_position(pair, positions[pair])
+
+    def _set_pair_cooldown(self, pair, minutes=20, reason="LOSS"):
+        """Set cooldown per pair setelah trade loss agar tidak re-entry di market chop."""
+        try:
+            cooldown_until = time.time() + (minutes * 60)
+            db.save_state(f"pair_cooldown_until_{pair}", str(cooldown_until))
+            log_message(f"⏸️ [PAIR COOLDOWN] {pair}: {minutes}m ({reason})")
+        except Exception as e:
+            log_message(f"⚠️ Failed set cooldown {pair}: {e}")
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         positions = self.get_open_positions()
@@ -123,18 +133,142 @@ class ExitManager:
             log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
         for pair, data in list(positions.items()):
             try:
-                # Jangan eksekusi jika sedang dalam proses jual (menunggu konfirmasi WS)
-                if data.get('status') == "EXITING":
-                    continue
-
                 # Ambil harga terakhir dari ticker terbaru
                 if pair not in current_tickers:
                     # log_message(f"Skipping {pair}: No ticker data")
+                    continue
+
+                # Jika posisi sedang EXITING, cek timeout agar profit tidak balik arah.
+                if data.get('status') == "EXITING":
+                    try:
+                        exit_requested_at = data.get('exit_requested_at') or data.get('timestamp')
+                        if isinstance(exit_requested_at, str):
+                            exit_dt = datetime.fromisoformat(exit_requested_at)
+                        else:
+                            exit_dt = datetime.now()
+                        exiting_age_sec = (datetime.now() - exit_dt).total_seconds()
+
+                        # Biarkan order bekerja normal dulu selama 2 menit.
+                        if exiting_age_sec < 120:
+                            continue
+
+                        current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
+                        entry_price = float(data.get('entry_price') or 0)
+                        amount = float(data.get('amount_crypto') or 0)
+                        if current_price <= 0 or amount <= 0:
+                            continue
+
+                        momentum_signal = 'HOLD'
+                        live_ai_prob = -1.0
+                        hist = []
+                        if price_history and pair in price_history:
+                            hist = list(price_history.get(pair, []))
+                        if not hist or hist[-1] != current_price:
+                            hist = (hist + [current_price])[-180:]
+
+                        if len(hist) >= 2:
+                            tech = get_technical_summary(hist)
+                            depth_data = db.get_market_depth(pair)
+                            if depth_data['bids'] and depth_data['asks']:
+                                total_bid = sum(b['vol'] for b in depth_data['bids'])
+                                total_ask = sum(a['vol'] for a in depth_data['asks'])
+                                total_depth = total_bid + total_ask
+                                if total_depth > 0:
+                                    tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
+                            momentum_signal = derive_trade_signal(tech).get('verdict', 'HOLD')
+
+                            if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
+                                ai_boost = self.oracle.get_sentiment_boost(pair) if self.oracle else 0.0
+                                live_ai_prob = float(get_prediction_fn(hist, current_tickers.get(pair), ai_boost))
+
+                        # Force fallback jika terlalu lama + momentum memburuk, atau sangat lama tanpa fill.
+                        is_momentum_bad = (momentum_signal == 'SELL') or (live_ai_prob >= 0 and live_ai_prob < 0.40)
+                        is_underwater = entry_price > 0 and current_price < entry_price * 0.995
+                        should_fallback = (exiting_age_sec >= 180 and (is_momentum_bad or is_underwater)) or exiting_age_sec >= 360
+
+                        if not should_fallback or self.dry_run:
+                            continue
+
+                        # Pastikan order lama benar-benar dibatalkan dulu agar tidak dobel jual.
+                        old_exit_order_id = data.get('exit_order_id')
+                        if old_exit_order_id:
+                            try:
+                                symbol_cancel = f"{pair[:-3].upper()}/IDR"
+                                self.exchange.cancel_order(
+                                    old_exit_order_id,
+                                    symbol_cancel,
+                                    params={'pair': pair.replace("idr", "_idr"), 'side': 'sell'}
+                                )
+                            except Exception as cancel_err:
+                                log_message(f"⚠️ EXITING fallback cancel skipped {pair}: {cancel_err}")
+
+                        log_message(
+                            f"⚠️ [EXIT TIMEOUT FALLBACK] {pair}: {int(exiting_age_sec)}s, "
+                            f"Sig={momentum_signal}, AI={live_ai_prob:.2f}. Switching to emergency exit."
+                        )
+
+                        new_order_id = self.execute_exit(
+                            pair,
+                            amount,
+                            current_price,
+                            "HARD_STOP_LOSS",
+                            entry_price=entry_price,
+                            amount_idr=data.get('amount_idr', 0),
+                            position_data=data
+                        )
+                        if new_order_id:
+                            positions[pair]['status'] = 'EXITING'
+                            positions[pair]['exit_order_id'] = new_order_id
+                            positions[pair]['exit_requested_at'] = datetime.now().isoformat()
+                            modified_pairs.add(pair)
+                    except Exception as e:
+                        log_message(f"⚠️ EXITING timeout check error for {pair}: {e}")
+
                     continue
                     
                 current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
                 entry_price = data.get('entry_price', 0)
                 amount = data.get('amount_crypto', 0)
+
+                # [Inline Momentum Engine] Samakan basis BUY/SELL: technical + orderbook + AI live.
+                momentum_signal = 'HOLD'
+                momentum_conf = 50
+                current_rsi = 50.0
+                live_ai_prob = -1.0
+
+                hist = []
+                if price_history and pair in price_history:
+                    hist = list(price_history.get(pair, []))
+
+                # Pastikan harga terbaru selalu masuk evaluasi momentum.
+                if not hist or hist[-1] != current_price:
+                    hist = (hist + [current_price])[-180:]
+
+                if len(hist) >= 2:
+                    try:
+                        tech = get_technical_summary(hist)
+
+                        depth_data = db.get_market_depth(pair)
+                        if depth_data['bids'] and depth_data['asks']:
+                            total_bid = sum(b['vol'] for b in depth_data['bids'])
+                            total_ask = sum(a['vol'] for a in depth_data['asks'])
+                            total_depth = total_bid + total_ask
+                            if total_depth > 0:
+                                tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
+
+                        tech_sig = derive_trade_signal(tech)
+                        momentum_signal = tech_sig.get('verdict', 'HOLD')
+                        momentum_conf = int(tech_sig.get('confidence', 50) or 50)
+                        current_rsi = float(tech.get('rsi', 50) or 50)
+                    except Exception as e:
+                        log_message(f"⚠️ Momentum eval error for {pair}: {e}")
+
+                    if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
+                        try:
+                            ai_boost = self.oracle.get_sentiment_boost(pair) if self.oracle else 0.0
+                            live_ai_prob = float(get_prediction_fn(hist, current_tickers.get(pair), ai_boost))
+                        except Exception as e:
+                            log_message(f"⚠️ AI live-prob eval error for {pair}: {e}")
                 
                 # Diagnostic: Log status for open positions
                 # log_message(f"Monitoring {pair}: Price={current_price:,.2f}, Entry={entry_price:,.2f}, Status={data.get('status')}")
@@ -189,10 +323,12 @@ class ExitManager:
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
                 
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
-                # [Senior Fix] Gunakan FEE_SELL_TAKER karena kita ingin eksekusi instan (Taker)
-                # Tambahkan FEE_SLIPPAGE_BUFFER untuk kompensasi spread
+                # Untuk TP normal (non-emergency) kita gunakan asumsi maker agar target tidak terlalu tinggi.
                 from config import FEE_SLIPPAGE_BUFFER
-                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / (amount * (1 - FEE_SELL_TAKER - FEE_SLIPPAGE_BUFFER))
+                tp_sell_fee = FEE_SELL_MAKER
+                tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
+                denom_tp = amount * max(0.01, (1 - tp_sell_fee - tp_slippage))
+                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
                 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
@@ -250,18 +386,22 @@ class ExitManager:
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
                 try:
-                    current_rsi = data.get('rsi', 50)
-                    
                     sell_value_est = amount * current_price
                     fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_MAKER
-                    fee_sell_est = sell_value_est * FEE_SELL_TAKER
+                    # Rapid TP memakai jalur non-emergency (maker), maka estimasi fee juga maker.
+                    fee_sell_est = sell_value_est * FEE_SELL_MAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
                     # Syarat 1: Profit Bersih sudah melampaui target minimum (Jangan menunggu!)
                     is_profit_secure = net_pnl_idr >= MIN_NET_PROFIT_IDR
                     
-                    # Syarat 2: Profit sudah aman (cover fee + buffer) dan RSI mulai jenuh (>60)
-                    is_rapid_momentum_fade = net_pnl_idr > 1000 and current_rsi > 60
+                    # Syarat 2: Momentum mulai melemah berdasarkan engine yang sama dengan entry.
+                    # SELL signal dari derive_trade_signal + AI prob live rendah -> lock profit lebih cepat.
+                    is_momentum_sell = momentum_signal == 'SELL' and momentum_conf >= 58
+                    is_ai_fade = live_ai_prob >= 0 and live_ai_prob < 0.42
+                    is_rapid_momentum_fade = net_pnl_idr > 1000 and (
+                        is_momentum_sell or current_rsi > 62 or is_ai_fade
+                    )
                     
                     # Hitung umur posisi dengan aman
                     pos_ts = datetime.fromisoformat(data['timestamp'])
@@ -271,7 +411,10 @@ class ExitManager:
     
                     if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
                         reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
-                        log_msg = f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% (Age: {pos_age_min:.0f}m)"
+                        log_msg = (
+                            f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% "
+                            f"(Age: {pos_age_min:.0f}m, Sig={momentum_signal}:{momentum_conf}, RSI={current_rsi:.1f}, AI={live_ai_prob:.2f})"
+                        )
                         log_message(log_msg)
                         db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
                         
@@ -479,6 +622,7 @@ class ExitManager:
                         db.save_state("consecutive_losses", 0)
                     else:
                         db.save_state("consecutive_losses", current_cl + 1)
+                        self._set_pair_cooldown(pair, minutes=20, reason=reason)
 
                     # ── Project Evolution: Learning Loop ─────────────────────────────
                     db.update_trade_outcome(pair, pnl_idr)
@@ -495,6 +639,7 @@ class ExitManager:
                 if position_data:
                     position_data['status'] = "EXITING"
                     position_data['exit_order_id'] = order_id
+                    position_data['exit_requested_at'] = datetime.now().isoformat()
                     position_data['reason_backup'] = reason
                     db.upsert_position(pair, position_data)
             
@@ -618,7 +763,11 @@ class ExitManager:
                         )
                         
                         current_cl = int(db.get_state("consecutive_losses", 0))
-                        db.save_state("consecutive_losses", 0 if net_pnl_idr > 0 else current_cl + 1)
+                        if net_pnl_idr > 0:
+                            db.save_state("consecutive_losses", 0)
+                        else:
+                            db.save_state("consecutive_losses", current_cl + 1)
+                            self._set_pair_cooldown(p_pair, minutes=20, reason=reason)
                         
                         db.update_trade_outcome(p_pair, net_pnl_idr)
                         if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_idr)

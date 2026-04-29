@@ -886,7 +886,8 @@ def _build_radar_payload():
                 if last <= 0:
                     last = float(history[-1]) if history else 0
                 
-                prev = float(history[-1]) if history else last
+                # Gunakan titik sebelumnya agar delta harga radar benar-benar mencerminkan momentum terbaru.
+                prev = float(history[-2]) if len(history) > 1 else last
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
                 
 

@@ -1015,14 +1015,55 @@ function renderWatchlist(data) {
             const isSearching = marketSearchQuery.length > 0;
             const query = marketSearchQuery.toLowerCase();
 
+            const computeAdaptiveScoreFloor = (t) => {
+                const vol = Number(t.volatility || 0);
+                const ch5 = Math.abs(Number(t.ch_5m || 0));
+                const volIdr = Number(t.vol_idr || 0);
+
+                // Vol tinggi cenderung noisy, tapi berpotensi cepat; turunkan floor secara bertahap.
+                let floor = 34;
+                if (vol >= 2.5) floor = 20;
+                else if (vol >= 1.5) floor = 24;
+                else if (vol >= 0.8) floor = 28;
+
+                // Early momentum boost: jika 5m bergerak cepat, izinkan masuk radar lebih awal.
+                if (ch5 >= 0.45) floor -= 8;
+                else if (ch5 >= 0.25) floor -= 4;
+
+                // Likuiditas membantu validasi sinyal, bukan sekadar wick tipis.
+                if (volIdr >= 20_000_000_000) floor -= 2;
+
+                return Math.max(12, floor);
+            };
+
+            const computeRadarRank = (t) => {
+                const score = Number(t.score || 0);
+                const ch5 = Math.abs(Number(t.ch_5m || 0));
+                const ch15 = Math.abs(Number(t.ch_15m || 0));
+                const chNow = Math.abs(Number(t.change || 0));
+                const volIdr = Number(t.vol_idr || 0);
+
+                // Hybrid ranking: score historis + pulse jangka pendek + bonus likuiditas.
+                const pulse = (ch5 * 35) + (ch15 * 20) + (chNow * 8);
+                const liqBonus = Math.min(20, Math.log10(Math.max(1, volIdr)) * 2);
+                return (score * 0.65) + pulse + liqBonus;
+            };
+
             const radar = data.filter(t => {
                 if (isSearching) {
                     return t.pair.toLowerCase().includes(query);
                 }
-                return (t.score || 0) > 30;
+                const score = Number(t.score || 0);
+                const ch5 = Math.abs(Number(t.ch_5m || 0));
+                const volIdr = Number(t.vol_idr || 0);
+                const floor = computeAdaptiveScoreFloor(t);
+
+                // Lolos jika score memadai ATAU ada lonjakan 5m yang didukung volume.
+                const hasEarlyPulse = ch5 >= 0.55 && volIdr >= 500_000_000;
+                return score >= floor || hasEarlyPulse;
             }).sort((a, b) => {
                 if (isSearching) return a.pair.localeCompare(b.pair);
-                return (b.score || 0) - (a.score || 0);
+                return computeRadarRank(b) - computeRadarRank(a);
             });
 
             radarContainers.forEach(container => {

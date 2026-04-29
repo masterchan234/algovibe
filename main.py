@@ -637,6 +637,18 @@ class ScalperBot:
                 # SKIP TRADE TRIGGER JIKA SUDAH PUNYA POSISI ATAU BLACKLIST
                 if pair in open_positions or pair in self.blacklist:
                     continue
+
+                # [Risk Guard] Cooldown per pair setelah loss agar tidak revenge-entry di kondisi chop.
+                cooldown_until_raw = db.get_state(f"pair_cooldown_until_{pair}", "0")
+                try:
+                    cooldown_until = float(cooldown_until_raw or 0)
+                except Exception:
+                    cooldown_until = 0
+                now_ts = time.time()
+                if cooldown_until > now_ts:
+                    remaining_min = int(max(1, (cooldown_until - now_ts) / 60))
+                    log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
+                    continue
                 
                 # Apply Self-Learning Weights
                 features = {
