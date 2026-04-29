@@ -373,7 +373,8 @@ class ExitManager:
     
                 # --- [Defensive] Break-Even Stop Loss ---
                 # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
-                round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
+                # Entry default adalah maker (antri EMA-9), bukan taker — gunakan fee maker agar break-even akurat
+                round_trip_fee = FEE_BUY_MAKER + FEE_SELL_MAKER  # 0.4322%, bukan 1.2322% (taker)
                 break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
                 
                 if current_profit_pct >= 0.01 and active_sl_price < break_even_price:
