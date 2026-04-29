@@ -1084,11 +1084,14 @@ class ExitManager:
                         db.delete_shadow_order(pair)
             
             # ── [Auto-Adoption] Sync orphans from wallet to DB ──
+            _blacklist = set(db.get_blacklist())
             for coin, coin_amount in balance['total'].items():
                 if coin == 'IDR' or coin_amount <= 0:
                     continue
                     
                 pair = f"{coin.lower()}idr"
+                if pair in _blacklist:
+                    continue
                 if pair not in open_positions:
                     try:
                         # Gunakan REST API karena ExitManager tidak punya akses ke Market WS

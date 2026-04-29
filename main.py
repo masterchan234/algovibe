@@ -221,7 +221,11 @@ class ScalperBot:
                 if balance < MIN_BALANCE_THRESHOLD:
                     log_message(f"STOP: Balance {balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                     return False
-                amount_idr = balance * CAPITAL_PER_TRADE_PCT * multiplier
+                # Gunakan INITIAL_CAPITAL sebagai basis sizing (portfolio-based), bukan free IDR.
+                # Ini mencegah bot stuck saat sebagian besar kapital sedang di posisi terbuka.
+                # Cap di saldo bebas agar tidak melebihi kemampuan.
+                target_amount = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
+                amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
 
             if amount_idr < MIN_TRADE_IDR:
                 log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
@@ -305,12 +309,30 @@ class ScalperBot:
                 order = self.exchange.create_limit_buy_order(symbol, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
+            # Hitung RSI dan EMA-dist dari price history saat entry
+            _rsi_dna = None
+            _ema_dist_dna = None
+            try:
+                if len(prices) >= 14:
+                    _deltas = np.diff(prices[-15:])
+                    _gains = np.where(_deltas > 0, _deltas, 0)
+                    _losses = np.where(_deltas < 0, -_deltas, 0)
+                    _avg_gain = np.mean(_gains) if np.mean(_gains) > 0 else 1e-9
+                    _avg_loss = np.mean(_losses) if np.mean(_losses) > 0 else 1e-9
+                    _rsi_dna = round(100 - (100 / (1 + _avg_gain / _avg_loss)), 2)
+                if len(prices) >= 20:
+                    _ema20 = prices[-20:].mean()
+                    _ema_dist_dna = round((buy_price - _ema20) / _ema20, 6) if _ema20 > 0 else 0.0
+            except Exception:
+                pass
             dna_data = {
-                "ai_prob": tq_prob,
+                "ai_prob": tq_prob * 100,
                 "whale_boost": whale_boost,
                 "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
                 "imbalance": imbalance,
-                "volatility": volatility
+                "volatility": volatility,
+                "rsi": _rsi_dna,
+                "ema_dist": _ema_dist_dna
             }
             db.save_trade_dna(pair, dna_data)
 

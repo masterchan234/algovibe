@@ -1184,7 +1184,18 @@ class Oracle:
         # Base confidence from k-NN historical win rate
         base_confidence = win_rate_knn * 100
         
-        if is_strong_setup:
+        # [Fix] Jika K-NN history terlalu sedikit (< 10 records) atau 
+        # top_matches semua dari pasangan yang berbeda (rsi/ema_dist semua NULL),
+        # gunakan floor lebih tinggi agar tidak memblokir semua trade.
+        # Threshold 50% dipakai karena win rate historis keseluruhan sekitar 67%.
+        n_valid = sum(1 for t in top_matches if t.get('rsi') is not None or t.get('ema_dist') is not None)
+        has_quality_features = n_valid >= 3
+        
+        if not has_quality_features and not is_strong_setup:
+            # Feature-blind K-NN — tidak bisa dipercaya, pakai floor sedang
+            confidence = max(base_confidence, 52.0)
+            reason = f"K-NN Feature-Blind Fallback (floor 52%, raw={base_confidence:.0f}%)"
+        elif is_strong_setup:
             # Jika setup teknikal kuat, kita boost confidence-nya agar tidak terhalang histori buruk
             # Memberikan bot 'keberanian' untuk mencoba pattern baru yang potensial
             confidence = max(base_confidence, 65.0) 

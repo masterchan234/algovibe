@@ -600,12 +600,13 @@ class Database:
         """Menarik data DNA historis untuk Pattern Matching (k-NN)."""
         try:
             with self.get_connection() as conn:
+                # [Fix] Hapus JOIN ke trade_history — JOIN tersebut hanya menghasilkan 5 record
+                # karena kondisi abs(pnl_idr) < 10 tidak cocok untuk trade dengan nilai berbeda.
+                # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
                 query = """
-                    SELECT a.*, h.pnl_pct, h.duration_seconds 
-                    FROM trade_analytics a 
-                    JOIN trade_history h ON a.pair = h.pair AND abs(a.pnl_idr - h.pnl_idr) < 10 
-                    WHERE a.status = 'CLOSED' 
-                    ORDER BY a.entry_timestamp DESC LIMIT ?
+                    SELECT * FROM trade_analytics
+                    WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL
+                    ORDER BY entry_timestamp DESC LIMIT ?
                 """
                 cursor = conn.execute(query, (limit,))
                 return [dict(row) for row in cursor.fetchall()]

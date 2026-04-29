@@ -20,7 +20,7 @@ DB_PATH         = f"{DATA_PATH}/algotrade.db"
 # 2. TRADING RULES & SIZING
 # ==========================================
 #INITIAL_CAPITAL        = 10000000
-INITIAL_CAPITAL        = 90000
+INITIAL_CAPITAL        = 100000
 MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
@@ -33,7 +33,7 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.25    # [AGGRESSIVE] Gunakan 25% saldo per koin (Fixed for 90k Balance)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
-MIN_TRADE_IDR = 12000          # Minimum order Indodax (10k + buffer)
+MIN_TRADE_IDR = 10500          # Minimum order Indodax (10k + 500 buffer)
 
 # --- [Scalping Targets] ---
 TP_PCT = 0.04                   # Target ATR (Default)
