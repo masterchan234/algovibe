@@ -583,12 +583,10 @@ class ExitManager:
             # Entry fee selalu Maker (karena bot antri beli)
             fee_buy = amount_idr * FEE_BUY_MAKER
             
-            # [Senior Fix] Gunakan 'price' (harga ticker) untuk estimasi value, 
-            # tapi sadari bahwa Taker akan dapet harga Bid (slightly lower).
-            sell_value = amount * price
+            # Gunakan exit_price (harga limit order) bukan price (ticker mentah) untuk akurasi PnL
+            sell_value = amount * exit_price
             fee_sell = sell_value * fee_sell_rate
-            
-            gross_pnl = (price - entry_price) * amount
+            gross_pnl = (exit_price - entry_price) * amount
             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
             
             if order_status in ['closed', 'canceled', 'done', 'fill'] or self.dry_run:
@@ -606,7 +604,7 @@ class ExitManager:
                     db.insert_trade_history(
                         pair=pair,
                         entry_price=entry_price,
-                        exit_price=price,
+                        exit_price=exit_price,
                         amount_crypto=amount,
                         amount_idr=amount_idr,
                         pnl_idr=pnl_idr,
@@ -614,7 +612,8 @@ class ExitManager:
                         reason=reason,
                         exec_type=exec_type,
                         duration_seconds=int(duration_sec),
-                        dry_run=self.dry_run
+                        dry_run=self.dry_run,
+                        exit_order_id=order_id
                     )
                     
                     # Update Consecutive Losses state
@@ -1021,20 +1020,63 @@ class ExitManager:
                             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
                             pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
                             
+                            # Ambil trade_id dari WS event jika ada (untuk dedup dengan sync_all_history)
+                            ws_trade_id = str(order.get('tradeId', '') or order.get('trade_id', '') or '') or None
                             db.insert_trade_history(
-                                pair=pair, entry_price=entry_price, exit_price=exit_price,
+                                pair=p_pair, entry_price=entry_price, exit_price=exit_price,
                                 amount_crypto=amount_crypto, amount_idr=amount_idr,
-                                pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, 
-                                reason=pos.get('reason_backup', 'RECONCILED'),
-                                exec_type=exec_type,
-                                duration_seconds=300, # Estimated
-                                dry_run=False
+                                pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
+                                exec_type=participant,
+                                duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
+                                trade_id=ws_trade_id,
+                                exit_order_id=order_id
                             )
                             found_fill = True
                             break
                     
                     if not found_fill:
-                        log_message(f"⚠️ Could not find fill for {pair} in history. Marking as pure GHOST (Deleted).")
+                        log_message(f"⚠️ Could not find fill for {pair} in v2 history. Attempting CCXT order fetch...")
+                        # Coba ambil fill price aktual dari CCXT sebagai last resort
+                        _exit_oid = pos.get('exit_order_id')
+                        _entry_price = float(pos.get('entry_price', 0))
+                        _amount_crypto = float(pos.get('amount_crypto', 0))
+                        _amount_idr = float(pos.get('amount_idr', 0))
+                        _symbol = f"{pair[:-3].upper()}/IDR"
+                        _reconcile_exit_price = None
+                        _reconcile_exec_type = "MAKER"
+                        _reconcile_real_fee = 0
+                        if _exit_oid and not _exit_oid.startswith('ADOPT-'):
+                            try:
+                                ccxt_order = self.exchange.fetch_order(_exit_oid, _symbol)
+                                if ccxt_order and ccxt_order.get('status') in ['closed', 'filled', 'done']:
+                                    _reconcile_exit_price = float(ccxt_order.get('price') or ccxt_order.get('average') or 0)
+                                    _reconcile_exec_type = "TAKER" if not ccxt_order.get('postOnly') else "MAKER"
+                                    log_message(f"✅ Got fill price from CCXT for {pair}: {_reconcile_exit_price}")
+                            except Exception as ccxt_err:
+                                log_message(f"CCXT fetch_order failed for {pair}: {ccxt_err}")
+                        if not _reconcile_exit_price or _reconcile_exit_price <= 0:
+                            # Fallback: gunakan harga pasar saat ini sebagai estimasi
+                            try:
+                                ticker = self.exchange.fetch_ticker(_symbol)
+                                _reconcile_exit_price = float(ticker.get('last', _entry_price))
+                            except Exception:
+                                _reconcile_exit_price = _entry_price
+                            log_message(f"⚠️ Using estimated exit price for {pair}: {_reconcile_exit_price}")
+                        _fee_rate = FEE_SELL_TAKER if _reconcile_exec_type == "TAKER" else FEE_SELL_MAKER
+                        _gross = (_reconcile_exit_price - _entry_price) * _amount_crypto
+                        _net = _gross - (_amount_idr * FEE_BUY_MAKER) - (_amount_crypto * _reconcile_exit_price * _fee_rate)
+                        _pct = (_net / _amount_idr * 100) if _amount_idr > 0 else 0
+                        db.insert_trade_history(
+                            pair=pair, entry_price=_entry_price, exit_price=_reconcile_exit_price,
+                            amount_crypto=_amount_crypto, amount_idr=_amount_idr,
+                            pnl_idr=_net, pnl_pct=_pct,
+                            reason=pos.get('reason_backup', 'RECONCILE_GHOST'),
+                            exec_type=_reconcile_exec_type,
+                            duration_seconds=300,
+                            dry_run=False,
+                            exit_order_id=_exit_oid if _exit_oid and not _exit_oid.startswith('ADOPT-') else None
+                        )
+                        log_message(f"📝 Recorded best-effort trade for {pair} (RECONCILE_GHOST) pnl={_net:+,.0f} IDR")
                     
                     db.delete_position(pair)
                     if pair in self.jaring_orders:

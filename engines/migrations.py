@@ -24,6 +24,8 @@ MIGRATIONS = [
     ("add_reason_backup_to_positions", "ALTER TABLE positions ADD COLUMN reason_backup TEXT"),
     ("add_trade_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN trade_id TEXT UNIQUE"),
     ("add_is_manual_to_trade_history", "ALTER TABLE trade_history ADD COLUMN is_manual INTEGER DEFAULT 0"),
+    ("add_exit_order_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exit_order_id TEXT"),
+    ("add_unique_idx_exit_order_id", "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_exit_order_id ON trade_history(exit_order_id) WHERE exit_order_id IS NOT NULL"),
 ]
 
 def run_migrations(db_path):

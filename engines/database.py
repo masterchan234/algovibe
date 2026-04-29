@@ -294,7 +294,7 @@ class Database:
 
     # ── METODE UNTUK TRADE HISTORY ──
     
-    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None):
+    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_int = 1 if dry_run else 0
@@ -302,15 +302,15 @@ class Database:
             sql = '''
                 INSERT OR IGNORE INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
-                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual
+                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id
                 '''
-            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual]
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id]
             
             if created_at:
-                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 params.append(created_at)
             else:
-                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             
             cursor.execute(sql, tuple(params))
 
