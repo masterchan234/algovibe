@@ -18,7 +18,7 @@ MIN_VOL_PCT     = 0.3       # Skip koin dengan candle volatilitas < 0.3%
 MIN_VOLUME_IDR  = 10_000_000  # Min Rp 10 Juta volume 24h (filter koin zombie)
 MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin terlikuid)
 
-from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT
+from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, BLACKLIST_COINS
 CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
 
 
@@ -45,7 +45,11 @@ class AlgovibeBacktester:
 
             # Filter & urutkan berdasarkan volume IDR
             active = []
+            blacklist = set(BLACKLIST_COINS)
             for pair, ticker in tickers.items():
+                pair_id = pair.replace('/', '').lower()
+                if pair_id in blacklist:
+                    continue
                 # Hitung volume IDR = volume base * harga terakhir
                 vol_idr = (ticker.get('baseVolume') or 0) * (ticker.get('last') or 0)
                 if vol_idr >= MIN_VOLUME_IDR:
@@ -84,9 +88,12 @@ class AlgovibeBacktester:
             # Format data dari DB ke DataFrame
             # Urutan di DB biasanya DESC, kita butuh ASC untuk simulasi
             prices = [h['last'] for h in reversed(db_history)]
-            timestamps = [h['updated_at'] for h in reversed(db_history)]
+            # Generate placeholder timestamps (local data dari DB tidak punya timestamp akurat)
+            import datetime as dt
+            now = dt.datetime.now()
+            timestamps = [now - dt.timedelta(hours=len(prices)-i) for i in range(len(prices))]
             df = pd.DataFrame({
-                'timestamp': pd.to_datetime(timestamps),
+                'timestamp': timestamps,
                 'close': prices,
                 'open': prices, 'high': prices, 'low': prices, 'volume': [0]*len(prices) # Fallback
             })

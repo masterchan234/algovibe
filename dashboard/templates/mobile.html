@@ -495,15 +495,20 @@
             <!-- TAB 3: TRADES & LOGS -->
             <div class="mobile-tab-content tab-trades-content">
                 <!-- GLOBAL SUMMARY (Now inside Trades Tab only) -->
-                <div class="global-pnl-summary" style="margin-bottom: 15px; padding: 15px; border-radius: 16px; background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.1);">
+                <div class="global-pnl-summary" style="margin-bottom: 10px; padding: 15px; border-radius: 16px; background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.1);">
                     <div>
-                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Net Profit Today</div>
+                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Mode PnL</div>
                         <div id="daily-pnl" class="pnl-value" style="color: #00ff88; font-size: 20px; font-weight: 800;">Rp 0</div>
                     </div>
                     <div style="text-align: right;">
-                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Win Rate</div>
+                        <div class="pnl-label" style="font-size: 10px; opacity: 0.6; margin-bottom: 4px;">Mode Win Rate</div>
                         <div id="win-rate" class="pnl-value" style="color: #fff; font-size: 20px; font-weight: 800;">0%</div>
                     </div>
+                </div>
+                <div id="mode-split-stats" style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 12px;">
+                    <div id="stat-live" style="font-size:11px; padding:8px 10px; border-radius:10px; border:1px solid rgba(16,185,129,0.35); background:rgba(16,185,129,0.07);">LIVE: Rp 0 | 0.0%</div>
+                    <div id="stat-dry" style="font-size:11px; padding:8px 10px; border-radius:10px; border:1px solid rgba(59,130,246,0.35); background:rgba(59,130,246,0.07);">DRY RUN: Rp 0 | 0.0%</div>
+                    <div id="stat-backtest" style="font-size:11px; padding:8px 10px; border-radius:10px; border:1px solid rgba(139,92,246,0.35); background:rgba(139,92,246,0.07);">BACKTEST: Rp 0 | 0.0%</div>
                 </div>
 
                 <div class="panel glass-panel" style="margin-bottom: 12px; min-height: 200px;">

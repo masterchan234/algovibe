@@ -20,7 +20,7 @@ DB_PATH         = f"{DATA_PATH}/algotrade.db"
 # 2. TRADING RULES & SIZING
 # ==========================================
 #INITIAL_CAPITAL        = 10000000
-INITIAL_CAPITAL        = 100000
+INITIAL_CAPITAL        = 100000000
 MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
@@ -37,9 +37,9 @@ MIN_TRADE_IDR = 10500          # Minimum order Indodax (10k + 500 buffer)
 
 # --- [Scalping Targets] ---
 TP_PCT = 0.04                   # Target ATR (Default)
-SL_PCT = -0.02                  # Stop Loss (Default)
-TRAILING_STOP_ACTIVATION_PCT = 0.01  # Aktifkan trailing cepat di +1.0%
-TRAILING_STOP_DISTANCE_PCT = 0.003   # Jarak ketat 0.3%
+SL_PCT = -0.025                 # Stop Loss (diperlebar dari -2% → -2.5% agar tidak prematur)
+TRAILING_STOP_ACTIVATION_PCT = 0.015 # Aktifkan trailing setelah +1.5% (was 1.0%)
+TRAILING_STOP_DISTANCE_PCT = 0.006   # Jarak trailing 0.6% (was 0.3%, beri ruang gerak)
 
 MIN_NET_PROFIT_IDR = 2500 # Target profit bersih minimal harus terasa (Rp 2500 per 500k trade)
 PENDING_BUY_TIMEOUT_MINUTES = 3
@@ -52,7 +52,7 @@ MIN_TRACKING_VOLATILITY = 0.8  # Pantau koin yang lincah
 STRONG_IMBALANCE_RATIO  = 2.0  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.55 # Beli jika probabilitas >= 55%
+AI_CONFIDENCE_THRESHOLD = 0.60 # Beli jika probabilitas >= 60% (dinaikkan dari 55% — win rate backtest 46% < 50%)
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
@@ -98,14 +98,16 @@ SECTOR_MAP = {
 
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
-DRY_RUN = False
+DRY_RUN = True
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
 # Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.
 BLACKLIST_COINS = [
     "usdtidr", "usdcidr", "paxgidr",  # Stablecoins (No profit in scalping)
     "pxgidr", "vexidr", "dgbidr",     # Low liquidity / "Zombie" coins
-    "bfidr", "sumoidr"                # Common pump & dump traps
+    "bfidr", "sumoidr",               # Common pump & dump traps
+    # Backtest loser list (April 2026) — performa sangat buruk, sementara dihindari
+    "jellyjellyidr", "plpaidr", "clvidr", "dlcidr", "metaidr"
 ]
 
 # --- [Anti-Shitcoin] Filter Harga Rendah ---

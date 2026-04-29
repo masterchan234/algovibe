@@ -774,6 +774,35 @@ function renderStats(data) {
             wrEl.textContent = wrVal.toFixed(1) + '%';
             wrEl.className = 'value ' + (wrVal >= 50 ? 'up' : 'down');
         }
+
+        // Split stats: LIVE vs DRY RUN vs BACKTEST (informasi tambahan)
+        const statLiveEl = document.getElementById('stat-live');
+        if (statLiveEl) {
+            const v = data.live_pnl || 0;
+            const w = data.live_win_rate || 0;
+            const t = data.live_trades_count || 0;
+            const vc = v >= 0 ? '#10b981' : '#ef4444';
+            statLiveEl.innerHTML = `<span style="background:#10b981;color:#000;padding:1px 5px;border-radius:4px;font-weight:700;margin-right:5px;font-size:0.58rem;">🟢 LIVE</span><span style="color:${vc}">${fmtIDR(v, true)}</span> <span style="opacity:0.65">| ${w.toFixed(1)}% (${t})</span>`;
+        }
+
+        const statDryEl = document.getElementById('stat-dry');
+        if (statDryEl) {
+            const v = data.all_time_pnl_dry || 0;
+            const w = data.dry_win_rate || 0;
+            const t = data.dry_trades_count || 0;
+            const vc = v >= 0 ? '#60a5fa' : '#ef4444';
+            statDryEl.innerHTML = `<span style="background:#3b82f6;color:#fff;padding:1px 5px;border-radius:4px;font-weight:700;margin-right:5px;font-size:0.58rem;">🔵 DRY RUN</span><span style="color:${vc}">${fmtIDR(v, true)}</span> <span style="opacity:0.65">| ${w.toFixed(1)}% (${t})</span>`;
+        }
+
+        const statBacktestEl = document.getElementById('stat-backtest');
+        if (statBacktestEl) {
+            const v = data.backtest_pnl || 0;
+            const w = data.backtest_win_rate || 0;
+            const t = data.backtest_trades_count || 0;
+            const vc = v >= 0 ? '#a78bfa' : '#ef4444';
+            statBacktestEl.innerHTML = `<span style="background:#8b5cf6;color:#fff;padding:1px 5px;border-radius:4px;font-weight:700;margin-right:5px;font-size:0.58rem;">🧬 BACKTEST</span><span style="color:${vc}">${fmtIDR(v, true)}</span> <span style="opacity:0.65">| ${w.toFixed(1)}% (${t})</span>`;
+        }
+
         const unr = document.getElementById('unrealized-pnl');
         if (unr) {
             const uv = data.unrealized_pnl || 0;

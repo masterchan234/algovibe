@@ -323,7 +323,7 @@ def get_stats():
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
 
         win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
@@ -358,13 +358,26 @@ def get_stats():
         _last_price = tech_data.get('last_price')
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
+        from config import DRY_RUN
+
+        # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
+        active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
+        active_win_rate = dry_win_rate if DRY_RUN else win_rate
+
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "all_time_pnl_dry": float(dry_stats['total_pnl'] or 0) if dry_stats else 0,
-            "win_rate": round(win_rate, 2),
+            "daily_pnl": active_pnl,
+            "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
             "total_trades_live": live_stats['trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "live_win_rate": round(win_rate, 2),
+            "live_trades_count": live_stats['trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "backtest_win_rate": round(dna_win_rate, 2),
+            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -743,7 +756,7 @@ def _build_stats_payload():
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
 
         win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
@@ -825,8 +838,8 @@ def _build_stats_payload():
         ).fetchone()[0] or '--/-- --:--'
 
         from config import DRY_RUN
-        
-        # PnL & Win Rate Selection (Live vs Dry Run)
+
+        # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if DRY_RUN:
             active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
@@ -841,6 +854,12 @@ def _build_stats_payload():
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
             "total_trades_live": live_stats['trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "live_win_rate": round(win_rate, 2),
+            "live_trades_count": live_stats['trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "backtest_win_rate": round(dna_win_rate, 2),
+            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),

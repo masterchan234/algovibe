@@ -256,18 +256,25 @@
                                 <button id="sync-history-btn" class="tab-btn sync-btn" onclick="triggerMassSync()" title="Sync Full Account History from Indodax">🔄 SYNC</button>
                             </div>
                         </div>
-                        <div class="ledger-stats-bar" style="display:flex; gap:20px; font-weight:600;">
-                            <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                                <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">All Time PnL</span>
-                                <span id="daily-pnl" class="value" style="font-size:0.9rem; color:var(--text-bright);">Rp 0</span>
+                        <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
+                            <div class="ledger-stats-bar" style="display:flex; gap:20px; font-weight:600;">
+                                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                                    <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">All Time PnL</span>
+                                    <span id="daily-pnl" class="value" style="font-size:0.9rem; color:var(--text-bright);">Rp 0</span>
+                                </div>
+                                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                                    <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">Win Rate</span>
+                                    <span id="win-rate" class="value" style="font-size:0.9rem; color:var(--text-bright);">0.0%</span>
+                                </div>
+                                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                                    <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">Unrealized PnL</span>
+                                    <span id="unrealized-pnl" class="value" style="font-size:0.9rem; color:var(--text-bright);">Rp 0</span>
+                                </div>
                             </div>
-                            <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                                <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">Win Rate</span>
-                                <span id="win-rate" class="value" style="font-size:0.9rem; color:var(--text-bright);">0.0%</span>
-                            </div>
-                            <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                                <span style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">Unrealized PnL</span>
-                                <span id="unrealized-pnl" class="value" style="font-size:0.9rem; color:var(--text-bright);">Rp 0</span>
+                            <div id="mode-split-stats" style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
+                                <span id="stat-live" style="font-size:0.62rem; padding:3px 8px; border-radius:999px; border:1px solid rgba(16,185,129,0.35); background:rgba(16,185,129,0.07);">LIVE: Rp 0 | 0.0%</span>
+                                <span id="stat-dry" style="font-size:0.62rem; padding:3px 8px; border-radius:999px; border:1px solid rgba(59,130,246,0.35); background:rgba(59,130,246,0.07);">DRY RUN: Rp 0 | 0.0%</span>
+                                <span id="stat-backtest" style="font-size:0.62rem; padding:3px 8px; border-radius:999px; border:1px solid rgba(139,92,246,0.35); background:rgba(139,92,246,0.07);">BACKTEST: Rp 0 | 0.0%</span>
                             </div>
                         </div>
                     </div>
