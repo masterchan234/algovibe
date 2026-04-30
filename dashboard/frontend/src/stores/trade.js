@@ -72,18 +72,18 @@ export const useTradeStore = defineStore('trade', () => {
         
         if (side === 'BUY') {
           playBeep(660, 0.2)
-          notify({ title: 'NEW BUY ORDER', message: `${item.pair}: ${item.message}`, type: 'success' })
+          // notify({ title: 'NEW BUY ORDER', message: `${item.pair}: ${item.message}`, type: 'success' })
         } else if (side === 'SELL') {
           playBeep(440, 0.2)
-          notify({ title: 'NEW SELL ORDER', message: `${item.pair}: ${item.message}`, type: 'warning' })
+          // notify({ title: 'NEW SELL ORDER', message: `${item.pair}: ${item.message}`, type: 'warning' })
         } else if (msg.includes('WHALE')) {
           speak(`Whale activity detected on ${item.pair}`)
-          notify({ title: 'WHALE ALERT', message: item.message, type: 'error' })
+          // notify({ title: 'WHALE ALERT', message: item.message, type: 'error' })
         } else if (msg.includes('FAKE PUMP')) {
           speak(`Warning: Fake pump detected on ${item.pair}`)
-          notify({ title: 'FAKE PUMP WARNING', message: item.message, type: 'warning' })
+          // notify({ title: 'FAKE PUMP WARNING', message: item.message, type: 'warning' })
         } else if (side.includes('ORACLE') || side.includes('AI')) {
-          notify({ title: 'ORACLE INSIGHT', message: item.message, type: 'ai' })
+          // notify({ title: 'ORACLE INSIGHT', message: item.message, type: 'ai' })
         }
       }
     }

@@ -94,11 +94,21 @@
           v-for="pair in store.radarPairs.slice(0, 8)"
           :key="pair.pair"
           class="radar-item"
+          :class="[
+            itemClass(pair),
+            { 'active-radar': selectedPair === pair.pair }
+          ]"
           @click="onRadarClick(pair)"
         >
           <div class="radar-top">
-            <span class="radar-pair">{{ pair.pair }}</span>
-            <span class="radar-score">{{ (pair.score || 0).toFixed(1) }}</span>
+            <span class="radar-pair">
+              {{ pair.pair }}
+              <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="leader-crown">👑</span>
+            </span>
+            <span class="radar-score">{{ (pair.score || 0).toFixed(0) }}</span>
+          </div>
+          <div class="radar-meter">
+            <div class="meter-fill" :style="{ width: (pair.score || 0) + '%', background: scoreColor(pair.score) }"></div>
           </div>
           <div class="radar-bottom">
             <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
@@ -205,11 +215,25 @@ async function fetchAiInsight(pair) {
 }
 
 const regimeClass = computed(() => {
-  const r = stats.regime
-  if (r === 'BULL') return 'regime-bull'
-  if (r === 'BEAR') return 'regime-bear'
+  const r = stats.regime?.toLowerCase() || ''
+  if (r.includes('bull')) return 'regime-bull'
+  if (r.includes('bear')) return 'regime-bear'
   return 'regime-choppy'
 })
+
+function itemClass(pair) {
+  const s = pair.score || 0
+  if (s >= 80) return 'conviction-high-up'
+  if (s <= 20) return 'conviction-high-down'
+  return ''
+}
+
+function scoreColor(s) {
+  if (s >= 80) return '#3fb950'
+  if (s <= 20) return '#f85149'
+  if (s > 50) return '#58a6ff'
+  return '#8b949e'
+}
 
 const sentimentClass = computed(() => {
   const s = stats.market_sentiment_index
@@ -662,20 +686,39 @@ onUnmounted(() => {
 .radar-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   background: #161b22;
   border: 1px solid #30363d;
   border-radius: 8px;
-  padding: 8px 10px;
-  transition: all 0.2s ease;
+  padding: 10px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
+  position: relative;
+  overflow: hidden;
 }
 
-.radar-item:hover {
-  background: #21262d;
-  border-color: #58a6ff;
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(88, 166, 255, 0.1);
+.radar-item:hover, .active-radar {
+  background: #1c2128;
+  border-color: #a371f7;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(163, 113, 247, 0.15);
+}
+
+.active-radar::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, #a371f7, #7928ca);
+}
+
+/* Conviction Heatmap */
+.conviction-high-up {
+  background: linear-gradient(135deg, #161b22 0%, rgba(63, 185, 80, 0.08) 100%);
+  border-color: rgba(63, 185, 80, 0.3);
+}
+.conviction-high-down {
+  background: linear-gradient(135deg, #161b22 0%, rgba(248, 81, 73, 0.08) 100%);
+  border-color: rgba(248, 81, 73, 0.3);
 }
 
 .radar-top {
@@ -683,25 +726,39 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
 }
-.radar-pair { font-weight: 800; color: #58a6ff; font-size: 12px; }
-.radar-score { color: #8b949e; font-size: 10px; font-weight: 600; }
+.radar-pair { font-weight: 800; color: #58a6ff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+.leader-crown { font-size: 10px; filter: drop-shadow(0 0 4px gold); }
+.radar-score { color: #8b949e; font-size: 9px; font-weight: 800; }
+
+.radar-meter {
+  height: 3px;
+  background: #21262d;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 1s ease;
+}
 
 .radar-bottom {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.radar-trend { font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.radar-trend { font-size: 8.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
 .trend-up   { color: #3fb950; }
 .trend-down { color: #f85149; }
 .trend-neutral { color: #8b949e; }
 .radar-prob { 
-  color: #a371f7; 
-  font-size: 10px; 
-  font-weight: 800;
-  background: rgba(163, 113, 247, 0.1);
-  padding: 1px 4px;
-  border-radius: 3px;
+  color: #fff; 
+  font-size: 9px; 
+  font-weight: 900;
+  background: #a371f7;
+  padding: 1px 5px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(163, 113, 247, 0.3);
 }
 
 @media (max-width: 1200px) {
