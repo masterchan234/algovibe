@@ -37,12 +37,25 @@
 
     <!-- ECharts profit line -->
     <div class="chart-wrap">
+      <div class="chart-header-actions">
+        <div class="tf-selector">
+          <button :class="{ active: timeframe === 'live' }" @click="setTimeframe('live')">LIVE</button>
+          <button :class="{ active: timeframe === '1h' }" @click="setTimeframe('1h')">1H</button>
+          <button :class="{ active: timeframe === '24h' }" @click="setTimeframe('24h')">24H</button>
+        </div>
+      </div>
       <div class="chart-canvas" ref="chartContainer"></div>
-      <div v-if="store.pnlHistory.length === 0" class="chart-empty">
+      <div v-if="timeframe === 'live' && store.pnlHistory.length === 0" class="chart-empty">
         <div class="loading-dots">
           <span></span><span></span><span></span>
         </div>
         <span>Menunggu data trading pertama…</span>
+      </div>
+      <div v-if="loadingHistory" class="chart-empty">
+        <div class="loading-dots">
+          <span></span><span></span><span></span>
+        </div>
+        <span>Fetching equity history…</span>
       </div>
     </div>
 
@@ -107,6 +120,43 @@ let chart = null
 let resizeObserver = null
 let rafId = null
 
+// Timeframe state
+const timeframe = ref('live')
+const loadingHistory = ref(false)
+const historicalPnl = ref([])
+
+async function setTimeframe(tf) {
+  timeframe.value = tf
+  if (tf === 'live') {
+    scheduleUpdate()
+  } else {
+    await fetchPnlHistory()
+  }
+}
+
+async function fetchPnlHistory() {
+  const tf = timeframe.value
+  loadingHistory.value = true
+  
+  const backendUrl = import.meta.env.DEV
+    ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+    : window.location.origin
+
+  try {
+    const res = await fetch(`${backendUrl}/api/pnl-history/${tf}`)
+    if (res.ok) {
+      const data = await res.json()
+      // Data format: [{time, pnl}, ...]
+      historicalPnl.value = data
+      scheduleUpdate()
+    }
+  } catch (e) {
+    console.error('Failed to fetch PnL history:', e)
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
 // Modal state
 const showAiModal = ref(false)
 const selectedPair = ref(null)
@@ -161,15 +211,28 @@ function formatIdr(val) {
 }
 
 function buildChartOption() {
-  const history = store.pnlHistory
-  const times = history.map(h => h.time)
-  const values = history.map(h => h.pnl)
-  const lastVal = values[values.length - 1] || 0
-  const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149'
+  if (timeframe.value === 'live') {
+    const history = store.pnlHistory
+    const times = history.map(h => h.time)
+    const values = history.map(h => h.pnl)
+    const lastVal = values[values.length - 1] || 0
+    const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149'
 
+    return getCommonOption(times, values, lineColor, 'Equity (Live)')
+  } else {
+    const times = historicalPnl.value.map(d => d.time)
+    const values = historicalPnl.value.map(d => d.pnl)
+    const lastVal = values[values.length - 1] || 0
+    const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149'
+    const label = `Equity (${timeframe.value.toUpperCase()})`
+    return getCommonOption(times, values, lineColor, label)
+  }
+}
+
+function getCommonOption(times, values, lineColor, label) {
   return {
     backgroundColor: 'transparent',
-    grid: { top: 20, right: 30, bottom: 30, left: 70 },
+    grid: { top: 40, right: 30, bottom: 30, left: 70 },
     tooltip: {
       trigger: 'axis',
       backgroundColor: '#1c2128',
@@ -180,6 +243,7 @@ function buildChartOption() {
         const n = Number(p.value)
         const prefix = n >= 0 ? '+' : ''
         return `<div style="font-size:10px;color:#8b949e">${p.axisValue}</div>
+                <div style="font-size:10px;color:#8b949e">${label}</div>
                 <div style="font-weight:700;color:${lineColor}">${prefix}Rp ${n.toLocaleString('id-ID')}</div>`
       },
     },
@@ -195,6 +259,7 @@ function buildChartOption() {
     },
     yAxis: {
       type: 'value',
+      scale: true,
       axisLine: { show: false },
       splitLine: { lineStyle: { color: '#21262d', type: 'dashed' } },
       axisLabel: {
@@ -209,6 +274,7 @@ function buildChartOption() {
     },
     series: [
       {
+        name: label,
         type: 'line',
         data: values,
         smooth: true,
@@ -217,17 +283,21 @@ function buildChartOption() {
         showSymbol: false,
         lineStyle: { color: lineColor, width: 2.5, shadowBlur: 10, shadowColor: lineColor + '66' },
         areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: lineColor + '44' },
-            { offset: 1, color: lineColor + '00' },
-          ]),
+          color: {
+            type: 'linear',
+            x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: lineColor + '44' },
+              { offset: 1, color: lineColor + '00' }
+            ]
+          }
         },
-        markLine: {
+        markLine: timeframe.value === 'live' ? {
           silent: true,
           symbol: 'none',
           lineStyle: { color: '#30363d', type: 'solid', width: 1 },
           data: [{ yAxis: 0 }],
-        },
+        } : null,
       },
     ],
   }
@@ -367,6 +437,46 @@ onUnmounted(() => {
   position: relative;
   background: radial-gradient(circle at 50% 50%, rgba(88, 166, 255, 0.03) 0%, transparent 70%);
 }
+
+.chart-header-actions {
+  position: absolute;
+  top: 10px;
+  right: 15px;
+  z-index: 10;
+}
+
+.tf-selector {
+  display: flex;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.tf-selector button {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-transform: uppercase;
+}
+
+.tf-selector button:hover {
+  color: #e6edf3;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tf-selector button.active {
+  background: #30363d;
+  color: #58a6ff;
+}
+
 .chart-canvas {
   position: absolute;
   inset: 0;

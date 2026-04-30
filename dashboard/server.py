@@ -470,6 +470,58 @@ def get_positions():
     finally:
         conn.close()
 
+@app.route('/api/pnl-history/<tf>')
+def get_pnl_history_api(tf):
+    """
+    Menyusun histori ekuitas (PnL kumulatif) dari database trade_history.
+    """
+    conn = get_db_connection()
+    try:
+        from config import DRY_RUN
+        dr_val = 1 if DRY_RUN else 0
+        
+        tf_map = {
+            '1h': '-1 hours',
+            '24h': '-24 hours',
+            '7d': '-7 days'
+        }
+        interval = tf_map.get(tf, '-24 hours')
+        
+        base_row = conn.execute(
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'",
+            (interval, dr_val)
+        ).fetchone()
+        current_pnl = float(base_row['total'] or 0.0)
+        
+        trades = conn.execute(
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            (interval, dr_val)
+        ).fetchall()
+        
+        results = []
+        results.append({
+            "time": "Start",
+            "pnl": round(current_pnl, 0)
+        })
+        
+        for t in trades:
+            current_pnl += float(t['pnl_idr'] or 0.0)
+            ts = t['created_at']
+            try:
+                dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                time_str = dt.strftime("%M:%S") if tf == '1h' else dt.strftime("%H:%M")
+            except:
+                time_str = ts
+            results.append({"time": time_str, "pnl": round(current_pnl, 0)})
+        return jsonify(results)
+    except Exception as e:
+        import traceback
+        print(f"PNL HISTORY ERROR: {e}")
+        traceback.print_exc()
+        return jsonify([])
+    finally:
+        conn.close()
+
 @app.route('/api/debug/positions-summary')
 def get_positions_summary():
     """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
@@ -904,7 +956,7 @@ def _build_stats_payload():
         if updated_at:
             try:
                 # SQLite CURRENT_TIMESTAMP is UTC
-                dt = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
                 if (datetime.utcnow() - dt).total_seconds() < 180:
                     is_stale = False
             except: pass
