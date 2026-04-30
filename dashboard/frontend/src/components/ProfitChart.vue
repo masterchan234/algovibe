@@ -39,34 +39,53 @@
     <div class="chart-wrap">
       <div class="chart-canvas" ref="chartContainer"></div>
       <div v-if="store.pnlHistory.length === 0" class="chart-empty">
+        <div class="loading-dots">
+          <span></span><span></span><span></span>
+        </div>
         <span>Menunggu data trading pertama…</span>
       </div>
     </div>
 
     <!-- LLM Insight -->
     <div class="llm-insight" v-if="stats.latest_llm_insight">
-      <span class="ai-badge">AI</span>
-      {{ stats.latest_llm_insight }}
+      <div class="ai-header">
+        <span class="ai-badge">AI ORACLE</span>
+        <span class="ai-time" v-if="stats.regime_leader">Target: {{ stats.regime_leader }}</span>
+      </div>
+      <div class="ai-content">{{ stats.latest_llm_insight }}</div>
     </div>
 
     <!-- Top Radar -->
     <div class="radar-section">
-      <div class="section-label">Top Radar</div>
+      <div class="section-label">Signal Radar</div>
       <div class="radar-list">
         <div
           v-for="pair in store.radarPairs.slice(0, 8)"
           :key="pair.pair"
           class="radar-item"
+          @click="onRadarClick(pair)"
         >
-          <span class="radar-pair">{{ pair.pair }}</span>
-          <span class="radar-score">{{ (pair.score || 0).toFixed(2) }}</span>
-          <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
-          <span class="radar-prob" v-if="pair.prediction_prob != null">
-            AI:{{ (pair.prediction_prob * 100).toFixed(0) }}%
-          </span>
+          <div class="radar-top">
+            <span class="radar-pair">{{ pair.pair }}</span>
+            <span class="radar-score">{{ (pair.score || 0).toFixed(1) }}</span>
+          </div>
+          <div class="radar-bottom">
+            <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
+            <span class="radar-prob" v-if="pair.prediction != null">
+              {{ (pair.prediction * 100).toFixed(0) }}%
+            </span>
+          </div>
         </div>
       </div>
     </div>
+
+    <AiAnalysisModal
+      v-if="showAiModal"
+      :show="showAiModal"
+      :pair="selectedPair"
+      :onClose="closeAiModal"
+      :fetchInsight="fetchAiInsight"
+    />
   </div>
 </template>
 
@@ -75,14 +94,11 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
 import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
-import {
-  GridComponent,
-  TooltipComponent,
-  TitleComponent,
-} from 'echarts/components'
+import { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import AiAnalysisModal from './AiAnalysisModal.vue'
 
-echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, CanvasRenderer])
+echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
 
 const store = useTradeStore()
 const stats = store.stats
@@ -90,6 +106,28 @@ const chartContainer = ref(null)
 let chart = null
 let resizeObserver = null
 let rafId = null
+
+// Modal state
+const showAiModal = ref(false)
+const selectedPair = ref(null)
+
+function onRadarClick(pair) {
+  selectedPair.value = pair
+  showAiModal.value = true
+}
+
+function closeAiModal() {
+  showAiModal.value = false
+  selectedPair.value = null
+}
+
+async function fetchAiInsight(pair) {
+  if (pair && pair.insight) return pair.insight
+  if (stats.regime_leader && pair && pair.pair && pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()) {
+    return stats.latest_llm_insight || 'Tidak ada insight AI.'
+  }
+  return 'Menganalisa data market terbaru untuk ' + pair.pair + '...'
+}
 
 const regimeClass = computed(() => {
   const r = stats.regime
@@ -131,7 +169,7 @@ function buildChartOption() {
 
   return {
     backgroundColor: 'transparent',
-    grid: { top: 20, right: 20, bottom: 30, left: 70 },
+    grid: { top: 20, right: 30, bottom: 30, left: 70 },
     tooltip: {
       trigger: 'axis',
       backgroundColor: '#1c2128',
@@ -141,7 +179,8 @@ function buildChartOption() {
         const p = params[0]
         const n = Number(p.value)
         const prefix = n >= 0 ? '+' : ''
-        return `${p.axisValue}<br/>Equity: <b>${prefix}Rp ${n.toLocaleString('id-ID')}</b>`
+        return `<div style="font-size:10px;color:#8b949e">${p.axisValue}</div>
+                <div style="font-weight:700;color:${lineColor}">${prefix}Rp ${n.toLocaleString('id-ID')}</div>`
       },
     },
     xAxis: {
@@ -156,8 +195,8 @@ function buildChartOption() {
     },
     yAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: '#30363d' } },
-      splitLine: { lineStyle: { color: '#21262d' } },
+      axisLine: { show: false },
+      splitLine: { lineStyle: { color: '#21262d', type: 'dashed' } },
       axisLabel: {
         color: '#8b949e',
         fontSize: 10,
@@ -173,18 +212,20 @@ function buildChartOption() {
         type: 'line',
         data: values,
         smooth: true,
-        symbol: 'none',
-        lineStyle: { color: lineColor, width: 2 },
+        symbol: 'circle',
+        symbolSize: 4,
+        showSymbol: false,
+        lineStyle: { color: lineColor, width: 2.5, shadowBlur: 10, shadowColor: lineColor + '66' },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: lineColor + '33' },
+            { offset: 0, color: lineColor + '44' },
             { offset: 1, color: lineColor + '00' },
           ]),
         },
         markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: { color: '#8b949e', type: 'dashed', width: 1 },
+          lineStyle: { color: '#30363d', type: 'solid', width: 1 },
           data: [{ yAxis: 0 }],
         },
       },
@@ -238,85 +279,93 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   background: #161b22;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
+  border: 1px solid #30363d;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
 /* KPI Bar */
 .kpi-bar {
   display: flex;
   gap: 0;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid #30363d;
   background: #0d1117;
   flex-shrink: 0;
 }
 
 .kpi-item {
   flex: 1;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-right: 1px solid #21262d;
 }
 .kpi-item:last-child { border-right: none; }
 
 .kpi-label {
-  font-size: 10px;
+  font-size: 9px;
   color: #8b949e;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 3px;
+  letter-spacing: 1.2px;
+  margin-bottom: 4px;
+  font-weight: 600;
 }
 
 .kpi-value {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 800;
   color: #e6edf3;
   font-variant-numeric: tabular-nums;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
-.kpi-value.positive { color: #3fb950; }
-.kpi-value.negative { color: #f85149; }
+.kpi-value.positive { color: #3fb950; text-shadow: 0 0 10px rgba(63, 185, 80, 0.3); }
+.kpi-value.negative { color: #f85149; text-shadow: 0 0 10px rgba(248, 81, 73, 0.3); }
 
 .regime-badge {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
   display: inline-block;
+  font-weight: 700;
 }
-.regime-bull  { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
-.regime-bear  { background: rgba(248, 81, 73, 0.15); color: #f85149; }
-.regime-choppy { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+.regime-bull  { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
+.regime-bear  { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); }
+.regime-choppy { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
 
 .sentiment-bar {
   position: relative;
   background: #21262d;
-  border-radius: 3px;
-  height: 18px;
+  border-radius: 4px;
+  height: 16px;
   overflow: hidden;
-  margin-top: 2px;
+  margin-top: 4px;
+  border: 1px solid #30363d;
 }
 .sentiment-fill {
   height: 100%;
-  border-radius: 3px;
-  transition: width 0.5s ease;
+  border-radius: 2px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.sentiment-bull    { background: rgba(63, 185, 80, 0.5); }
-.sentiment-bear    { background: rgba(248, 81, 73, 0.5); }
-.sentiment-neutral { background: rgba(210, 153, 34, 0.4); }
+.sentiment-bull    { background: linear-gradient(90deg, #3fb950, #2ea043); box-shadow: 0 0 10px rgba(63, 185, 80, 0.4); }
+.sentiment-bear    { background: linear-gradient(90deg, #f85149, #da3633); box-shadow: 0 0 10px rgba(248, 81, 73, 0.4); }
+.sentiment-neutral { background: linear-gradient(90deg, #d29922, #b08800); }
 
 .sentiment-num {
   position: absolute;
-  right: 5px;
+  right: 6px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 10px;
-  font-weight: 700;
-  color: #e6edf3;
+  font-size: 9px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
 }
 
 /* Chart */
 .chart-wrap {
   flex: 1;
-  min-height: 0;
+  min-height: 200px;
   position: relative;
+  background: radial-gradient(circle at 50% 50%, rgba(88, 166, 255, 0.03) 0%, transparent 70%);
 }
 .chart-canvas {
   position: absolute;
@@ -326,70 +375,139 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   color: #8b949e;
-  font-size: 12px;
+  font-size: 13px;
   pointer-events: none;
+  gap: 12px;
+}
+
+.loading-dots {
+  display: flex;
+  gap: 4px;
+}
+.loading-dots span {
+  width: 6px;
+  height: 6px;
+  background: #58a6ff;
+  border-radius: 50%;
+  animation: dot-pulse 1.5s infinite ease-in-out;
+}
+.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
 }
 
 /* LLM Insight */
 .llm-insight {
-  padding: 8px 14px;
-  background: rgba(163, 113, 247, 0.06);
-  border-top: 1px solid rgba(163, 113, 247, 0.2);
-  font-size: 11.5px;
-  color: #c9d1d9;
-  line-height: 1.5;
+  padding: 14px 18px;
+  background: rgba(163, 113, 247, 0.04);
+  border-top: 1px solid rgba(163, 113, 247, 0.15);
   display: flex;
-  gap: 8px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
   flex-shrink: 0;
+}
+.ai-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 .ai-badge {
   font-size: 10px;
-  font-weight: 700;
-  background: rgba(163, 113, 247, 0.2);
-  color: #a371f7;
-  padding: 1px 5px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  line-height: 1.8;
+  font-weight: 800;
+  background: linear-gradient(135deg, #a371f7, #7928ca);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 1px;
+}
+.ai-time {
+  font-size: 10px;
+  color: #8b949e;
+  font-weight: 600;
+}
+.ai-content {
+  font-size: 12.5px;
+  color: #c9d1d9;
+  line-height: 1.6;
+  font-style: italic;
 }
 
 /* Radar */
-.radar-section { flex-shrink: 0; border-top: 1px solid #21262d; }
+.radar-section { 
+  flex-shrink: 0; 
+  border-top: 1px solid #30363d;
+  background: #0d1117;
+  padding-bottom: 8px;
+}
 .section-label {
-  padding: 5px 14px 3px;
+  padding: 10px 16px 6px;
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
   color: #8b949e;
 }
 
 .radar-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-  padding: 4px 10px 8px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 4px 14px 12px;
 }
 
 .radar-item {
   display: flex;
-  gap: 5px;
-  align-items: center;
-  background: #0d1117;
-  border: 1px solid #21262d;
-  border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
+  flex-direction: column;
+  gap: 4px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 8px 10px;
+  transition: all 0.2s ease;
+  cursor: pointer;
 }
 
-.radar-pair { font-weight: 600; color: #58a6ff; }
-.radar-score { color: #8b949e; }
+.radar-item:hover {
+  background: #21262d;
+  border-color: #58a6ff;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(88, 166, 255, 0.1);
+}
+
+.radar-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.radar-pair { font-weight: 800; color: #58a6ff; font-size: 12px; }
+.radar-score { color: #8b949e; font-size: 10px; font-weight: 600; }
+
+.radar-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.radar-trend { font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .trend-up   { color: #3fb950; }
 .trend-down { color: #f85149; }
 .trend-neutral { color: #8b949e; }
-.radar-prob { color: #a371f7; font-size: 10px; }
+.radar-prob { 
+  color: #a371f7; 
+  font-size: 10px; 
+  font-weight: 800;
+  background: rgba(163, 113, 247, 0.1);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+@media (max-width: 1200px) {
+  .radar-list { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
