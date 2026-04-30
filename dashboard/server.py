@@ -466,6 +466,74 @@ def get_positions():
     finally:
         conn.close()
 
+@app.route('/api/debug/positions-summary')
+def get_positions_summary():
+    """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT pair, entry_price, amount_crypto, status, dry_run FROM positions"
+        ).fetchall()
+
+        status_counts = {
+            "OPEN": 0,
+            "EXITING": 0,
+            "PENDING_BUY": 0,
+            "OTHER": 0,
+        }
+        mode_counts = {
+            "live": 0,
+            "dry_run": 0,
+        }
+        unrealized_by_status = {
+            "OPEN": 0.0,
+            "EXITING": 0.0,
+            "PENDING_BUY": 0.0,
+            "OTHER": 0.0,
+        }
+
+        for pos in rows:
+            pair = str(pos['pair'] or '').lower()
+            status = str(pos['status'] or 'OTHER').upper()
+            if status not in status_counts:
+                status = "OTHER"
+
+            status_counts[status] += 1
+            if int(pos['dry_run'] or 0) == 1:
+                mode_counts['dry_run'] += 1
+            else:
+                mode_counts['live'] += 1
+
+            entry_price = float(pos['entry_price'] or 0)
+            amount_crypto = float(pos['amount_crypto'] or 0)
+            if entry_price <= 0 or amount_crypto <= 0 or not pair:
+                continue
+
+            try:
+                row = conn.execute(
+                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                ).fetchone()
+                if row and row['history_json']:
+                    history = json.loads(row['history_json'])
+                    if history:
+                        last_price = float(history[-1])
+                        unrealized_by_status[status] += (last_price - entry_price) * amount_crypto
+            except Exception:
+                continue
+
+        return jsonify({
+            "runtime_mode": "DRY_RUN" if DRY_RUN else "LIVE",
+            "positions_total": len(rows),
+            "mode_counts": mode_counts,
+            "status_counts": status_counts,
+            "unrealized_by_status": {k: round(v, 0) for k, v in unrealized_by_status.items()},
+            "unrealized_total": round(sum(unrealized_by_status.values()), 0),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/api/analyze/<pair>')
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""

@@ -951,9 +951,22 @@ function renderStats(data) {
             }
         }
 
-        // ── Quant Audit (24h) ──
+        // ── Quant Audit (dynamic window: 24h / fallback 7d) ──
         if (data.quant_audit) {
             const qa = data.quant_audit;
+            const winHours = Number(qa.window_hours || 24);
+            const winLabel = winHours >= 168 ? '7d' : `${winHours}h`;
+
+            const titleEl = document.getElementById('qa-title-window');
+            if (titleEl) {
+                titleEl.textContent = `📐 Quant Audit (${winLabel})`;
+                if (qa.fallback_used) {
+                    titleEl.title = 'Fallback aktif karena sample 24h masih kosong';
+                } else {
+                    titleEl.removeAttribute('title');
+                }
+            }
+
             const sEl = document.getElementById('qa-sample');
             if (sEl) sEl.textContent = `${qa.sample_trades || 0} trades`;
 
@@ -979,7 +992,7 @@ function renderStats(data) {
             if (lrEl) {
                 const rows = qa.dominant_loss_reasons || [];
                 if (!rows.length) {
-                    lrEl.innerHTML = '<div style="opacity:.7;">Belum ada data loss 24h.</div>';
+                    lrEl.innerHTML = `<div style="opacity:.7;">Belum ada data loss ${winLabel}.</div>`;
                 } else {
                     lrEl.innerHTML = rows.map(r => {
                         const avgLoss = fmtIDR(Number(r.avg_loss_idr || 0), true);

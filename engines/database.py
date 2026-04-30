@@ -603,6 +603,8 @@ class Database:
             "expectancy_idr": 0.0,
             "avg_win_idr": 0.0,
             "avg_loss_idr": 0.0,
+            "window_hours": int(window_hours),
+            "fallback_used": False,
             "verdict_precision": {
                 "BUY": {"trades": 0, "wins": 0, "precision": 0.0},
                 "HOLD": {"trades": 0, "wins": 0, "precision": 0.0},
@@ -613,6 +615,25 @@ class Database:
 
         try:
             with self.get_connection() as conn:
+                active_window_hours = int(window_hours)
+
+                # Fallback otomatis: jika 24h masih kosong, gunakan 7 hari agar panel tetap informatif.
+                sample_row = conn.execute(
+                    """
+                    SELECT COUNT(*) as total
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    """,
+                    (f'-{active_window_hours} hours', int(dry_run))
+                ).fetchone()
+
+                sample_total = int((sample_row['total'] if sample_row else 0) or 0)
+                if sample_total == 0 and active_window_hours == 24:
+                    active_window_hours = 24 * 7
+                    report["fallback_used"] = True
+
+                report["window_hours"] = active_window_hours
+
                 # Expectancy dari trade_history
                 stats = conn.execute(
                     """
@@ -624,7 +645,7 @@ class Database:
                     FROM trade_history
                     WHERE created_at >= datetime('now', ?) AND dry_run = ?
                     """,
-                    (f'-{int(window_hours)} hours', int(dry_run))
+                    (f'-{active_window_hours} hours', int(dry_run))
                 ).fetchone()
 
                 report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
@@ -645,7 +666,7 @@ class Database:
                       AND dry_run = ?
                     GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
                     """,
-                    (f'-{int(window_hours)} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', int(dry_run))
                 ).fetchall()
 
                 for row in verdict_rows:
@@ -674,7 +695,7 @@ class Database:
                     ORDER BY cnt DESC, avg_loss ASC
                     LIMIT 5
                     """,
-                    (f'-{int(window_hours)} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', int(dry_run))
                 ).fetchall()
 
                 report['dominant_loss_reasons'] = [

@@ -49,6 +49,24 @@ class ExitManager:
             return
 
         modified_pairs = set()
+
+        def mark_exit_requested(target_pair, order_id):
+            """Sinkronkan state exit untuk DRY RUN vs LIVE agar tidak ada posisi ghost."""
+            if not order_id:
+                return
+
+            if self.dry_run:
+                # execute_exit() di dry run langsung delete+catat history,
+                # jadi jangan upsert ulang posisi pada akhir loop.
+                positions.pop(target_pair, None)
+                modified_pairs.discard(target_pair)
+                return
+
+            if target_pair in positions:
+                positions[target_pair]["status"] = "EXITING"
+                positions[target_pair]["exit_order_id"] = order_id
+                positions[target_pair]["exit_requested_at"] = datetime.now().isoformat()
+                modified_pairs.add(target_pair)
         
         # --- [MANUAL DASHBOARD EXIT] ---
         manual_exit_pair = db.get_state("trigger_exit_pair")
@@ -66,9 +84,7 @@ class ExitManager:
                         position_data=data
                     )
                     if order_id:
-                        positions[manual_exit_pair]["status"] = "EXITING"
-                        positions[manual_exit_pair]["exit_order_id"] = order_id
-                        modified_pairs.add(manual_exit_pair)
+                        mark_exit_requested(manual_exit_pair, order_id)
                         self.save_positions(positions, modified_pairs)
                         return # Exit early to process manual order
 
@@ -123,9 +139,7 @@ class ExitManager:
                         position_data=data
                     )
                     if order_id:
-                        positions[pair]["status"] = "EXITING"
-                        positions[pair]["exit_order_id"] = order_id
-                        modified_pairs.add(pair)
+                        mark_exit_requested(pair, order_id)
                 
                 self.save_positions(positions, modified_pairs)
                 return # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
@@ -217,10 +231,7 @@ class ExitManager:
                             position_data=data
                         )
                         if new_order_id:
-                            positions[pair]['status'] = 'EXITING'
-                            positions[pair]['exit_order_id'] = new_order_id
-                            positions[pair]['exit_requested_at'] = datetime.now().isoformat()
-                            modified_pairs.add(pair)
+                            mark_exit_requested(pair, new_order_id)
                     except Exception as e:
                         log_message(f"⚠️ EXITING timeout check error for {pair}: {e}")
 
@@ -422,8 +433,7 @@ class ExitManager:
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id:
-                            positions[pair]["status"] = "EXITING"
-                            positions[pair]["exit_order_id"] = order_id
+                            mark_exit_requested(pair, order_id)
                         continue
                 except Exception as e:
                     log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
@@ -449,7 +459,7 @@ class ExitManager:
                     order_id = self.execute_exit(pair, amount, current_price, "AI_VETO_EXIT",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
-                        positions[pair]["status"] = "EXITING"
+                        mark_exit_requested(pair, order_id)
                         continue
     
                 # Prepare PnL and duration strings for potential exit
@@ -474,8 +484,7 @@ class ExitManager:
                     order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
-                        positions[pair]["status"] = "EXITING"
-                        positions[pair]["exit_order_id"] = order_id
+                        mark_exit_requested(pair, order_id)
     
                 # 3. Stop Loss (Initial or Trailing)
                 elif current_price <= active_sl_price:
@@ -507,8 +516,7 @@ class ExitManager:
                     order_id = self.execute_exit(pair, amount, current_price, log_reason,
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
-                        positions[pair]["status"] = "EXITING"
-                        positions[pair]["exit_order_id"] = order_id
+                        mark_exit_requested(pair, order_id)
             except Exception as e:
                 log_message(f"🚨 Critical error in monitoring loop for {pair}: {e}")
                 import traceback
