@@ -59,13 +59,31 @@
       </div>
     </div>
 
-    <!-- LLM Insight -->
-    <div class="llm-insight" v-if="stats.latest_llm_insight">
-      <div class="ai-header">
-        <span class="ai-badge">AI ORACLE</span>
-        <span class="ai-time" v-if="stats.regime_leader">Target: {{ stats.regime_leader }}</span>
+    <!-- Intelligence Analysis Panel -->
+    <div class="intelligence-panel" v-if="selectedPairData || stats.active_reasoning">
+      <div class="intel-header">
+        <div class="intel-title">
+          <span class="intel-icon">🔮</span>
+          <span>ORACLE INTELLIGENCE: {{ selectedPairData?.pair || stats.regime_leader || 'MARKET' }}</span>
+        </div>
+        <div class="intel-meta" v-if="selectedPairData">
+          <div class="intel-chip" :class="trendClass(selectedPairData.trend)">
+            {{ selectedPairData.trend }}
+          </div>
+          <div class="intel-chip">
+            PROB: {{ (selectedPairData.prediction * 100).toFixed(1) }}%
+          </div>
+        </div>
       </div>
-      <div class="ai-content">{{ stats.latest_llm_insight }}</div>
+      <div class="intel-body">
+        <div class="intel-reasoning" v-if="stats.active_reasoning">
+          {{ stats.active_reasoning }}
+        </div>
+        <div class="intel-loading" v-else>
+          <div class="intel-dots"><span></span><span></span><span></span></div>
+          Decrypting neural vectors...
+        </div>
+      </div>
     </div>
 
     <!-- Top Radar -->
@@ -157,13 +175,20 @@ async function fetchPnlHistory() {
   }
 }
 
-// Modal state
-const showAiModal = ref(false)
+// Selection & Modal state
 const selectedPair = ref(null)
+const selectedPairData = ref(null)
+const showAiModal = ref(false)
 
 function onRadarClick(pair) {
-  selectedPair.value = pair
-  showAiModal.value = true
+  selectedPair.value = pair.pair
+  selectedPairData.value = pair
+  
+  // Update CURRENT_WATCH_PAIR in backend
+  store.socket.emit('watch_pair', { pair: pair.pair })
+  
+  // Optional: Scroll to intelligence panel
+  document.querySelector('.intelligence-panel')?.scrollIntoView({ behavior: 'smooth' })
 }
 
 function closeAiModal() {
@@ -513,40 +538,102 @@ onUnmounted(() => {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* LLM Insight */
-.llm-insight {
-  padding: 14px 18px;
+/* Intelligence Panel */
+.intelligence-panel {
+  padding: 16px 20px;
   background: rgba(163, 113, 247, 0.04);
   border-top: 1px solid rgba(163, 113, 247, 0.15);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
   flex-shrink: 0;
 }
-.ai-header {
+
+.intel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.ai-badge {
+
+.intel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 800;
+  font-size: 12px;
+  color: #a371f7;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.intel-icon { font-size: 16px; }
+
+.intel-meta {
+  display: flex;
+  gap: 8px;
+}
+
+.intel-chip {
+  padding: 3px 10px;
+  border-radius: 6px;
   font-size: 10px;
   font-weight: 800;
-  background: linear-gradient(135deg, #a371f7, #7928ca);
-  color: #fff;
-  padding: 2px 8px;
-  border-radius: 4px;
-  letter-spacing: 1px;
-}
-.ai-time {
-  font-size: 10px;
+  background: #161b22;
+  border: 1px solid #30363d;
   color: #8b949e;
-  font-weight: 600;
 }
-.ai-content {
-  font-size: 12.5px;
-  color: #c9d1d9;
+
+.intel-chip.bullish, .intel-chip.up { 
+  background: rgba(63, 185, 80, 0.1); 
+  color: #3fb950; 
+  border-color: rgba(63, 185, 80, 0.3);
+}
+.intel-chip.bearish, .intel-chip.down { 
+  background: rgba(248, 81, 73, 0.1); 
+  color: #f85149; 
+  border-color: rgba(248, 81, 73, 0.3);
+}
+
+.intel-body {
+  border-left: 2px solid rgba(163, 113, 247, 0.3);
+  padding-left: 14px;
+}
+
+.intel-reasoning {
+  color: #e6edf3;
+  font-size: 13.5px;
   line-height: 1.6;
+  font-family: 'Inter', sans-serif;
+}
+
+.intel-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #8b949e;
+  font-size: 12px;
   font-style: italic;
+}
+
+.intel-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.intel-dots span {
+  width: 4px;
+  height: 4px;
+  background: #a371f7;
+  border-radius: 50%;
+  animation: intel-pulse 1.4s infinite ease-in-out;
+}
+
+.intel-dots span:nth-child(2) { animation-delay: 0.2s; }
+.intel-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes intel-pulse {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
 }
 
 /* Radar */

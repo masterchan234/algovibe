@@ -10,6 +10,7 @@ export const useTradeStore = defineStore('trade', () => {
   
   // Connection state
   const connected = ref(false)
+  const socket = ref(null)
 
   // Stats
   const stats = reactive({
@@ -22,6 +23,7 @@ export const useTradeStore = defineStore('trade', () => {
     regime_leader: '',
     market_sentiment_index: 50,
     latest_llm_insight: '',
+    active_reasoning: '',
   })
 
   // Open positions (trades)
@@ -125,7 +127,7 @@ export const useTradeStore = defineStore('trade', () => {
       viewToken = null
     }
 
-    const socket = io(backendUrl, {
+    const s = io(backendUrl, {
       path: '/socket.io',
       auth: viewToken ? { token: viewToken } : {},
       transports: ['websocket', 'polling'],
@@ -134,11 +136,13 @@ export const useTradeStore = defineStore('trade', () => {
       reconnectionDelayMax: 5000,
       timeout: 10000,
     })
+    
+    socket.value = s
 
-    socket.on('connect', () => { connected.value = true })
-    socket.on('disconnect', () => { connected.value = false })
+    s.on('connect', () => { connected.value = true })
+    s.on('disconnect', () => { connected.value = false })
 
-    socket.on('stats_update', (data) => {
+    s.on('stats_update', (data) => {
       Object.assign(stats, {
         daily_pnl: data.daily_pnl ?? 0,
         all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
@@ -149,23 +153,24 @@ export const useTradeStore = defineStore('trade', () => {
         regime_leader: data.regime_leader ?? '',
         market_sentiment_index: data.market_sentiment_index ?? 50,
         latest_llm_insight: data.latest_llm_insight ?? '',
+        active_reasoning: data.active_reasoning ?? '',
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })
 
-    socket.on('trades_update', (data) => {
+    s.on('trades_update', (data) => {
       if (Array.isArray(data)) {
         positions.value = data
       }
     })
 
-    socket.on('logs_update', (data) => {
+    s.on('logs_update', (data) => {
       if (Array.isArray(data)) {
         _addFeedItems(data)
       }
     })
 
-    socket.on('market_trades_update', (payload) => {
+    s.on('market_trades_update', (payload) => {
       const pair = (payload?.pair || 'MARKET').toUpperCase()
       const trades = Array.isArray(payload?.trades) ? payload.trades : []
       if (!trades.length) return
@@ -194,13 +199,13 @@ export const useTradeStore = defineStore('trade', () => {
       _addFeedItems(mapped)
     })
 
-    socket.on('radar_update', (data) => {
+    s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
         radarPairs.value = data.slice(0, 20)
       }
     })
 
-    return socket
+    return s
   }
 
   return {
@@ -211,5 +216,6 @@ export const useTradeStore = defineStore('trade', () => {
     pnlHistory,
     radarPairs,
     connect,
+    socket,
   }
 })
