@@ -2,8 +2,8 @@ import time
 import json
 import logging
 from datetime import datetime, timedelta
-from engines.database import db
-from engines.llm_worker import LLMWorker
+from app.infrastructure.database import db
+from app.infrastructure.llm_worker import LLMWorker
 from utils.logger import log_message
 
 logger = logging.getLogger(__name__)
@@ -255,7 +255,7 @@ class Oracle:
             return  # cooldown 60 detik
         self.last_buy_signal_queue = now
 
-        from engines.technicals import get_technical_summary, derive_trade_signal
+        from app.domain.technicals import get_technical_summary, derive_trade_signal
         import sqlite3
         from config import DB_PATH
 
@@ -332,7 +332,7 @@ class Oracle:
             try:
                 import sqlite3
                 from config import DB_PATH
-                from engines.technicals import get_technical_summary
+                from app.domain.technicals import get_technical_summary
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 try:

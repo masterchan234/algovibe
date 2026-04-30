@@ -15,9 +15,9 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from functools import wraps
 import secrets
-from engines.database import db
-from engines.ws_market import MarketDataWS
-from engines.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.database import db
+from app.infrastructure.ws_market import MarketDataWS
+from app.domain.technicals import get_technical_summary, derive_trade_signal
 import ccxt
 
 # Exchange instance untuk public data (OHLCV)

@@ -13,8 +13,8 @@ from config import (
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS
 )
-from engines.database import db
-from engines.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.database import db
+from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:

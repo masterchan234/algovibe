@@ -74,14 +74,14 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
 
 ## ⚙️ Arsitektur Proyek
 
-- `main.py`: Orkestrator utama dan lifecycle bot.
-- `engines/oracle.py`: Mesin kecerdasan sentral (Regime & Context).
-- `engines/llm_worker.py`: Background worker untuk inferensi LiteRT-LM.
-- `engines/ws_market.py` & `ws_private.py`: Handler WebSocket untuk data pasar dan update order.
-- `engines/exit_manager.py`: Manajemen posisi terbuka dan eksekusi TP/SL.
-- `engines/database.py`: Layer persistensi data stateful (SQLite WAL).
-- `engines/technicals.py`: Indikator teknikal (RSI, EMA, Volatility).
-- `engines/predictor.py`: Logika prediksi harga berbasis k-NN.
+- `main.py`: Entry point tipis (composition root launcher).
+- `app/bootstrap.py`: Wiring dependency dan bootstrap runtime.
+- `app/application/scalper_bot.py`: Application service/orchestration use case bot.
+- `app/application/use_cases/`: Use-case terpisah (market cycle, pair pipeline, trade execution) agar orchestration modular.
+- `app/domain/`: Layer domain untuk entity/value object/rules (bertahap dipindahkan).
+- `app/infrastructure/`: Adapter infrastruktur (exchange, database, ws).
+- `app/interfaces/`: Interface layer (CLI/API/dashboard integration).
+- `engines/`: Modul legacy yang masih dipakai runtime dan akan dimigrasi bertahap.
 
 ---
 

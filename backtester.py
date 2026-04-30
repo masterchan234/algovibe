@@ -10,7 +10,7 @@ import os
 # Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from engines.database import db
+from app.infrastructure.database import db
 
 TIMEFRAME       = '15m'
 SINCE_DAYS      = 60
@@ -276,7 +276,7 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print("🧠 [BRAIN RESET] Menghapus DNA lama dari database...")
     try:
-        from engines.database import db
+        from app.infrastructure.database import db
         # Hapus analytics dan history agar bot mulai dengan 'Slate' yang bersih
         with db.get_connection() as conn:
             conn.execute("DELETE FROM trade_analytics")

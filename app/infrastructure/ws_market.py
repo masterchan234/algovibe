@@ -320,7 +320,7 @@ class MarketDataWS:
                 
         # ── Dynamic Subscribe for Active Watch Pair ──
         try:
-            from engines.database import db
+            from app.infrastructure.database import db
             watch_pair = db.get_state('current_watch_pair')
             if watch_pair:
                 if watch_pair not in self._ob_subscribed:
@@ -493,7 +493,7 @@ class MarketDataWS:
             t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
             
             # ── Push to DB for Dashboard ──
-            from engines.database import db
+            from app.infrastructure.database import db
             db.save_market_depth(pair, t["bids_list"], t["asks_list"])
 
     def _process_trades(self, pair: str, data: list):
