@@ -132,6 +132,7 @@ def _run_structured_inference(engine, sampler, context_messages: list, prompt: s
         reason: str,
         stop_loss_pct: float = 1.2,
         take_profit_pct: float = 2.0,
+        eta_minutes: int = 15,
     ) -> str:
         """
         Submit trading verdict setelah analisis mendalam.
@@ -141,6 +142,7 @@ def _run_structured_inference(engine, sampler, context_messages: list, prompt: s
             reason: Satu kalimat ringkas alasan keputusan
             stop_loss_pct: SL dalam % dari harga entry (default 1.2%)
             take_profit_pct: TP dalam % dari harga entry (default 2.0%)
+            eta_minutes: Estimasi waktu mencapai target dalam menit (default 15)
         """
         nonlocal verdict_result
         clean_verdict = str(verdict).replace('<|"|>', '').replace('<', '').replace('>', '').replace('"', '').replace('|', '').strip().upper()
@@ -151,6 +153,7 @@ def _run_structured_inference(engine, sampler, context_messages: list, prompt: s
             "reason":          clean_reason,
             "stop_loss_pct":   abs(float(stop_loss_pct)),
             "take_profit_pct": abs(float(take_profit_pct)),
+            "eta_minutes":     max(1, min(1440, int(eta_minutes))),
         }
         return f"Verdict recorded: {verdict}"
 
@@ -306,6 +309,7 @@ class LLMWorker:
             "reason":          "LLM tidak tersedia atau parse error",
             "stop_loss_pct":   1.2,
             "take_profit_pct": 2.0,
+            "eta_minutes":     15,
         }
         try:
             parsed = json.loads(result_str)

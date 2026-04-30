@@ -35,6 +35,7 @@ class Oracle:
         self.last_top_mover_analysis = datetime.now() - timedelta(minutes=10)
         self.pump_cooldowns = {}  # {pair: last_analysis_time}
         self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)
+        self.last_trade_verdict_request = {}  # {pair: datetime} throttling explicit trade-verdict requests
 
         # ── Consciousness & Self-Learning ──────────────────────────────────
         # lessons: rolling list of lessons dari POST_MORTEM, max 20 entri
@@ -443,6 +444,34 @@ class Oracle:
 
                 # ── Sentiment (hanya pair spesifik, Fix BUG #4) ──────────
                 self._update_llm_sentiment(t_res, pair_name)
+                
+                # ── Update ETA with Math Calibration ───────────────────
+                if is_structured:
+                    # Ambil harga terakhir dari DB untuk kalibrasi math ETA
+                    try:
+                        row = db.get_ticker_history(pair_name, limit=1)
+                        if row:
+                            history = json.loads(row[0]['history_json'])
+                            current_price = history[-1]
+                            target_tp = current_price * (1 + (structured.get('take_profit_pct', 2.0)/100))
+                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, history)
+                            
+                            # Calibrate: Rata-rata AI vs Math (Bobot 60% Math, 40% AI)
+                            ai_eta = structured.get('eta_minutes', 15)
+                            calibrated_eta = int((math_eta * 0.6) + (ai_eta * 0.4))
+                            
+                            # Update structured result dengan hasil kalibrasi
+                            structured['eta_minutes'] = calibrated_eta
+                            
+                            # Update veto cache & DB
+                            if pair_name in self._veto_cache:
+                                self._veto_cache[pair_name]['eta_minutes'] = calibrated_eta
+                            
+                            # Log calibration
+                            logger.info(f"[Oracle] ETA Calibrated for {pair_name}: AI={ai_eta}m, Math={math_eta}m -> Final={calibrated_eta}m")
+                    except Exception as e:
+                        logger.warning(f"[Oracle] ETA Calibration error for {pair_name}: {e}")
+
                 self.llm_worker.results.pop(task_id)
             elif t_type == "POST_MORTEM":
                 log_message(f"🤖 [LiteRT Insight] Post-Mortem: {t_res}")
@@ -536,6 +565,83 @@ class Oracle:
             pass
 
         return False, "No LLM verdict"
+
+    def get_pair_trade_verdict(self, pair: str, max_age_minutes: int = 15) -> dict | None:
+        """
+        Ambil verdict trading terstruktur terbaru untuk pair.
+        Mengutamakan cache in-memory, fallback ke DB, dengan TTL agar tidak pakai opini usang.
+        """
+        pair_lower = pair.lower()
+
+        # 1) Fresh in-memory verdict dari insight thread
+        cached = self._veto_cache.get(pair_lower)
+        if cached:
+            age_min = (datetime.now() - cached.get("ts", datetime.now())).total_seconds() / 60
+            if age_min <= max_age_minutes:
+                return {
+                    "verdict": cached.get("verdict", "HOLD"),
+                    "confidence": int(cached.get("confidence", 0)),
+                    "reason": cached.get("reason", ""),
+                    "source": "cache",
+                    "age_min": round(age_min, 2),
+                }
+
+        # 2) Fallback DB verdict (persist lintas restart)
+        try:
+            raw = db.get_state(f"llm_veto_{pair_lower}")
+            ts_raw = db.get_state(f"llm_veto_ts_{pair_lower}")
+            if raw and ts_raw:
+                ts = datetime.fromisoformat(ts_raw)
+                age_min = (datetime.now() - ts).total_seconds() / 60
+                if age_min <= max_age_minutes:
+                    parsed = LLMWorker.parse_structured_result(raw)
+                    return {
+                        "verdict": parsed.get("verdict", "HOLD"),
+                        "confidence": int(parsed.get("confidence", 0)),
+                        "reason": parsed.get("reason", ""),
+                        "source": "db",
+                        "age_min": round(age_min, 2),
+                    }
+        except Exception:
+            pass
+
+        return None
+
+    def request_trade_verdict(self, pair: str, history: list, tech: dict,
+                              imbalance_ratio: float, tq_prob: float) -> bool:
+        """
+        Queue explicit LLM verdict untuk keputusan entry pair tertentu.
+        Return True jika request dikirim, False jika di-throttle/invalid.
+        """
+        pair_lower = pair.lower()
+        now = datetime.now()
+
+        # Throttle request per pair agar tidak membebani worker CPU
+        last_req = self.last_trade_verdict_request.get(pair_lower)
+        if last_req and (now - last_req).total_seconds() < 90:
+            return False
+
+        if not history:
+            return False
+
+        last_price = float(history[-1])
+        rsi_val = float(tech.get("rsi", 50.0))
+        slope_val = float(tech.get("slope", 0.0))
+        vol_val = float(tech.get("volatility", 0.0))
+
+        prompt = (
+            f"PAIR={pair.upper()} | PRICE={last_price:.8f} | RSI={rsi_val:.2f} | "
+            f"SLOPE={slope_val:.6f} | VOL={vol_val:.2f}% | IMBALANCE={imbalance_ratio:.2f}x | "
+            f"AI_PROB={tq_prob*100:.1f}%\n"
+            "Tugas: putuskan entry scalping sekarang. Gunakan output fungsi submit_verdict. "
+            "Aturan ketat: AVOID jika risiko dump/fake breakout tinggi, HOLD jika edge belum jelas, "
+            "BUY hanya jika probabilitas menang jelas lebih tinggi dari rugi setelah fee. "
+            "Berikan reason singkat dan confidence realistis."
+        )
+
+        self.llm_worker.query_structured(f"ANALYSIS:{pair_lower}", prompt)
+        self.last_trade_verdict_request[pair_lower] = now
+        return True
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 
@@ -762,6 +868,59 @@ class Oracle:
         overrides["ai_threshold"] += performance_penalty
         
         return overrides
+
+    def get_entry_policy(self, regime: str, base_dynamic_threshold: float) -> dict:
+        """
+        Policy adaptif untuk gate entry berbasis regime + performa terbaru.
+        Mengembalikan threshold yang dipakai di main loop agar keputusan lebih presisi.
+        """
+        dyn = float(base_dynamic_threshold)
+
+        # Baseline gate untuk keputusan LLM
+        llm_buy_min_conf = 60.0
+        llm_hold_block_conf = 70.0
+        llm_avoid_block_conf = 60.0
+
+        # Regime-aware adjustments
+        if regime == MarketRegime.BULLISH:
+            dyn -= 2.0
+            llm_buy_min_conf = 58.0
+            llm_hold_block_conf = 74.0
+        elif regime == MarketRegime.BEARISH:
+            dyn += 6.0
+            llm_buy_min_conf = 68.0
+            llm_hold_block_conf = 62.0
+            llm_avoid_block_conf = 55.0
+        elif regime == MarketRegime.CHOPPY:
+            dyn += 4.0
+            llm_buy_min_conf = 65.0
+            llm_hold_block_conf = 66.0
+            llm_avoid_block_conf = 58.0
+        elif regime == MarketRegime.RANGING:
+            dyn += 1.0
+            llm_buy_min_conf = 62.0
+
+        # Self-tuning dari 20 trade terakhir
+        try:
+            recent = db.get_recent_trades(limit=20)
+            if recent:
+                wins = sum(1 for t in recent if float(t.get('pnl_idr') or 0) > 0)
+                wr = wins / len(recent)
+                if wr < 0.50:
+                    dyn += 3.0
+                    llm_buy_min_conf += 3.0
+                elif wr >= 0.65:
+                    dyn -= 1.5
+                    llm_buy_min_conf -= 1.0
+        except Exception:
+            pass
+
+        return {
+            "dynamic_threshold": max(50.0, min(85.0, dyn)),
+            "llm_buy_min_conf": max(50.0, min(85.0, llm_buy_min_conf)),
+            "llm_hold_block_conf": max(55.0, min(90.0, llm_hold_block_conf)),
+            "llm_avoid_block_conf": max(50.0, min(90.0, llm_avoid_block_conf)),
+        }
 
     def learn_from_history(self) -> float:
         """
@@ -1028,6 +1187,37 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] Learning Error: {e}")
 
+    def _calculate_math_eta(self, pair, target_price, current_price, prices):
+        """
+        Estimasi waktu (menit) untuk mencapai target harga berdasarkan volatilitas ATR 1m.
+        Formula: Jarak Harga / (Rata-rata pergerakan harga per menit).
+        """
+        try:
+            if not prices or len(prices) < 5:
+                return 15 # Default
+            
+            # Hitung 'Price Velocity' (V) - rata-rata absolut perubahan harga per menit
+            # Gunakan window 30 menit terakhir jika ada
+            window = prices[-30:] if len(prices) >= 30 else prices
+            deltas = [abs(window[i] - window[i-1]) for i in range(1, len(window))]
+            
+            if not deltas: return 15
+            
+            velocity = sum(deltas) / len(deltas)
+            
+            if velocity <= 0:
+                # Jika harga stagnan, gunakan volatilitas historis (0.05% per menit sebagai proxy)
+                velocity = current_price * 0.0005
+                
+            distance = abs(target_price - current_price)
+            eta = distance / velocity
+            
+            # Cap ETA antara 2 menit hingga 6 jam (360 menit)
+            return max(2, min(360, int(eta)))
+        except Exception as e:
+            logger.warning(f"[Oracle] Math ETA Error for {pair}: {e}")
+            return 15
+
     def find_winning_pattern(self, pair: str, current_dna: dict) -> dict:
         """
         K-Nearest Neighbors Pattern Matcher & LLM Strategy Generator.
@@ -1105,7 +1295,7 @@ class Oracle:
             f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
             "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "
             "If history shows continued dumping, return AVOID. Fees (0.51%) are already factored in. "
-            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02)."
+            "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02), eta_minutes (int, default 15)."
         )
         task_id = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
@@ -1125,7 +1315,18 @@ class Oracle:
         # Base confidence from k-NN historical win rate
         base_confidence = win_rate_knn * 100
         
-        if is_strong_setup:
+        # [Fix] Jika K-NN history terlalu sedikit (< 10 records) atau 
+        # top_matches semua dari pasangan yang berbeda (rsi/ema_dist semua NULL),
+        # gunakan floor lebih tinggi agar tidak memblokir semua trade.
+        # Threshold 50% dipakai karena win rate historis keseluruhan sekitar 67%.
+        n_valid = sum(1 for t in top_matches if t.get('rsi') is not None or t.get('ema_dist') is not None)
+        has_quality_features = n_valid >= 3
+        
+        if not has_quality_features and not is_strong_setup:
+            # Feature-blind K-NN — tidak bisa dipercaya, pakai floor sedang
+            confidence = max(base_confidence, 52.0)
+            reason = f"K-NN Feature-Blind Fallback (floor 52%, raw={base_confidence:.0f}%)"
+        elif is_strong_setup:
             # Jika setup teknikal kuat, kita boost confidence-nya agar tidak terhalang histori buruk
             # Memberikan bot 'keberanian' untuk mencoba pattern baru yang potensial
             confidence = max(base_confidence, 65.0) 

@@ -48,7 +48,8 @@ class Database:
                     target_tp_pct REAL DEFAULT 0.05,
                     target_sl_pct REAL DEFAULT -0.02,
                     trailing_sl_price REAL DEFAULT 0.0,
-                    highest_price REAL DEFAULT 0.0
+                    highest_price REAL DEFAULT 0.0,
+                    reason_backup TEXT
                 )
             ''')
             
@@ -75,6 +76,7 @@ class Database:
                     pnl_idr REAL,
                     pnl_pct REAL,
                     reason TEXT,
+                    exec_type TEXT DEFAULT 'MAKER',
                     duration_seconds INTEGER,
                     dry_run BOOLEAN,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -188,9 +190,31 @@ class Database:
                 sector_sentiment REAL,
                 imbalance REAL,
                 volatility REAL,
+                eta_minutes INTEGER DEFAULT 15,
+                llm_verdict TEXT DEFAULT 'HOLD',
+                llm_confidence REAL DEFAULT 0.0,
+                llm_reason TEXT DEFAULT '',
+                dry_run BOOLEAN DEFAULT 1,
                 pnl_idr REAL,
                 status TEXT DEFAULT 'OPEN'
             )''')
+            
+            # Migration: Tambahkan kolom eta_minutes jika belum ada
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_verdict TEXT DEFAULT 'HOLD'")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_confidence REAL DEFAULT 0.0")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_reason TEXT DEFAULT ''")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN dry_run BOOLEAN DEFAULT 1")
+            except: pass
 
             # 9. Dynamic Weights (Project Evolution)
             cursor.execute('''CREATE TABLE IF NOT EXISTS dynamic_weights (
@@ -231,12 +255,15 @@ class Database:
             
             # Ubah boolean jadi integer untuk SQLite
             dry_run = 1 if data.get('dry_run') else 0
+            trailing_sl_price = data.get('trailing_sl_price')
+            highest_price = data.get('highest_price')
             
             cursor.execute('''
                 INSERT INTO positions (
                     pair, entry_price, amount_crypto, amount_idr, status, 
-                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct,
+                    trailing_sl_price, highest_price, reason_backup
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0.0), COALESCE(?, 0.0), ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -247,11 +274,14 @@ class Database:
                     timestamp=excluded.timestamp,
                     dry_run=excluded.dry_run,
                     target_tp_pct=excluded.target_tp_pct,
-                    target_sl_pct=excluded.target_sl_pct
+                    target_sl_pct=excluded.target_sl_pct,
+                    trailing_sl_price=COALESCE(excluded.trailing_sl_price, positions.trailing_sl_price),
+                    highest_price=COALESCE(excluded.highest_price, positions.highest_price),
+                    reason_backup=excluded.reason_backup
             ''', (
                 pair,
                 data.get('entry_price'),
-                data.get('amount_crypto') or data.get('amount', 0), # Fallback untuk backward compatibility dict lama
+                data.get('amount_crypto') or data.get('amount', 0),
                 data.get('amount_idr'),
                 data.get('status'),
                 data.get('entry_order_id'),
@@ -259,7 +289,10 @@ class Database:
                 data.get('timestamp'),
                 dry_run,
                 data.get('target_tp_pct'),
-                data.get('target_sl_pct')
+                data.get('target_sl_pct'),
+                trailing_sl_price,
+                highest_price,
+                data.get('reason_backup')
             ))
 
     def delete_position(self, pair):
@@ -277,19 +310,25 @@ class Database:
 
     # ── METODE UNTUK TRADE HISTORY ──
     
-    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run):
+    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_int = 1 if dry_run else 0
-            cursor.execute('''
-                INSERT INTO trade_history (
+            
+            sql = '''
+                INSERT OR IGNORE INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
-                    pnl_idr, pnl_pct, reason, duration_seconds, dry_run
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                pair, entry_price, exit_price, amount_crypto, amount_idr,
-                pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int
-            ))
+                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id
+                '''
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id]
+            
+            if created_at:
+                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                params.append(created_at)
+            else:
+                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            
+            cursor.execute(sql, tuple(params))
 
     def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""
@@ -541,14 +580,137 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute(
                     """INSERT INTO trade_analytics 
-                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
                      dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'],
-                     dna_data.get('rsi'), dna_data.get('ema_dist'))
+                     dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
+                     dna_data.get('llm_verdict', 'HOLD'), dna_data.get('llm_confidence', 0.0),
+                     dna_data.get('llm_reason', ''), 1 if dna_data.get('dry_run', True) else 0)
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")
+
+    def get_quant_audit_report(self, window_hours=24, dry_run=1):
+        """
+        Laporan audit kuantitatif untuk dashboard:
+        - Precision per LLM verdict
+        - Expectancy (IDR/trade)
+        - Dominant loss reasons
+        """
+        report = {
+            "sample_trades": 0,
+            "expectancy_idr": 0.0,
+            "avg_win_idr": 0.0,
+            "avg_loss_idr": 0.0,
+            "window_hours": int(window_hours),
+            "fallback_used": False,
+            "verdict_precision": {
+                "BUY": {"trades": 0, "wins": 0, "precision": 0.0},
+                "HOLD": {"trades": 0, "wins": 0, "precision": 0.0},
+                "AVOID": {"trades": 0, "wins": 0, "precision": 0.0}
+            },
+            "dominant_loss_reasons": []
+        }
+
+        try:
+            with self.get_connection() as conn:
+                active_window_hours = int(window_hours)
+
+                # Fallback otomatis: jika 24h masih kosong, gunakan 7 hari agar panel tetap informatif.
+                sample_row = conn.execute(
+                    """
+                    SELECT COUNT(*) as total
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    """,
+                    (f'-{active_window_hours} hours', int(dry_run))
+                ).fetchone()
+
+                sample_total = int((sample_row['total'] if sample_row else 0) or 0)
+                if sample_total == 0 and active_window_hours == 24:
+                    active_window_hours = 24 * 7
+                    report["fallback_used"] = True
+
+                report["window_hours"] = active_window_hours
+
+                # Expectancy dari trade_history
+                stats = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total,
+                        AVG(pnl_idr) as expectancy,
+                        AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
+                        AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    """,
+                    (f'-{active_window_hours} hours', int(dry_run))
+                ).fetchone()
+
+                report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
+                report["expectancy_idr"] = float((stats['expectancy'] if stats else 0) or 0.0)
+                report["avg_win_idr"] = float((stats['avg_win'] if stats else 0) or 0.0)
+                report["avg_loss_idr"] = float((stats['avg_loss'] if stats else 0) or 0.0)
+
+                # Precision per verdict dari trade_analytics yang sudah CLOSED
+                verdict_rows = conn.execute(
+                    """
+                    SELECT
+                        UPPER(COALESCE(llm_verdict, 'HOLD')) as verdict,
+                        COUNT(*) as trades,
+                        SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins
+                    FROM trade_analytics
+                    WHERE status = 'CLOSED'
+                      AND entry_timestamp >= datetime('now', ?)
+                      AND dry_run = ?
+                    GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
+                    """,
+                                        (f'-{active_window_hours} hours', int(dry_run))
+                ).fetchall()
+
+                for row in verdict_rows:
+                    verdict = row['verdict'] if row['verdict'] in report['verdict_precision'] else 'HOLD'
+                    trades = int(row['trades'] or 0)
+                    wins = int(row['wins'] or 0)
+                    precision = (wins / trades * 100.0) if trades > 0 else 0.0
+                    report['verdict_precision'][verdict] = {
+                        "trades": trades,
+                        "wins": wins,
+                        "precision": round(precision, 2)
+                    }
+
+                # Alasan loss dominan
+                loss_rows = conn.execute(
+                    """
+                    SELECT
+                        reason,
+                        COUNT(*) as cnt,
+                        AVG(pnl_idr) as avg_loss
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?)
+                      AND dry_run = ?
+                      AND pnl_idr < 0
+                    GROUP BY reason
+                    ORDER BY cnt DESC, avg_loss ASC
+                    LIMIT 5
+                    """,
+                                        (f'-{active_window_hours} hours', int(dry_run))
+                ).fetchall()
+
+                report['dominant_loss_reasons'] = [
+                    {
+                        "reason": row['reason'] or 'UNKNOWN',
+                        "count": int(row['cnt'] or 0),
+                        "avg_loss_idr": float(row['avg_loss'] or 0.0)
+                    }
+                    for row in loss_rows
+                ]
+
+            return report
+        except Exception as e:
+            logging.error(f"[DB] get_quant_audit_report error: {e}")
+            return report
 
     def update_trade_outcome(self, pair, pnl_idr):
         try:
@@ -577,12 +739,13 @@ class Database:
         """Menarik data DNA historis untuk Pattern Matching (k-NN)."""
         try:
             with self.get_connection() as conn:
+                # [Fix] Hapus JOIN ke trade_history — JOIN tersebut hanya menghasilkan 5 record
+                # karena kondisi abs(pnl_idr) < 10 tidak cocok untuk trade dengan nilai berbeda.
+                # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
                 query = """
-                    SELECT a.*, h.pnl_pct, h.duration_seconds 
-                    FROM trade_analytics a 
-                    JOIN trade_history h ON a.pair = h.pair AND abs(a.pnl_idr - h.pnl_idr) < 10 
-                    WHERE a.status = 'CLOSED' 
-                    ORDER BY a.entry_timestamp DESC LIMIT ?
+                    SELECT * FROM trade_analytics
+                    WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL
+                    ORDER BY entry_timestamp DESC LIMIT ?
                 """
                 cursor = conn.execute(query, (limit,))
                 return [dict(row) for row in cursor.fetchall()]

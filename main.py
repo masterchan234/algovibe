@@ -1,7 +1,8 @@
 import os
 import time
+import math
 import numpy as np
-
+import threading
 import collections
 from datetime import datetime
 from collections import defaultdict, deque
@@ -70,6 +71,14 @@ class ScalperBot:
             on_order_update = self.exit_manager.handle_order_update
         )
         
+        # Deadman Switch — Safety heartbeat
+        from engines.deadman import DeadmanSwitch
+        self.deadman = DeadmanSwitch(
+            api_key    = os.getenv('INDODAX_API_KEY', ''),
+            api_secret = os.getenv('INDODAX_API_SECRET', '')
+        )
+        self.deadman.start()
+
         log_message("Oracle Engine initialized. Consciousness level: FULL.")
 
         # ── Restore LLM Lessons dari DB (survive restart) ──
@@ -130,7 +139,11 @@ class ScalperBot:
             if not idr_pairs:
                 log_message("✅ All market data is already warm. Skipping full backfill.")
                 db.save_state("backfill_status", "COMPLETED")
+                # Update deadman with all known IDR pairs
+                self.deadman.set_pairs(full_idr_list)
                 return
+
+            self.deadman.set_pairs(full_idr_list)
 
             def fetch_one(symbol):
                 try:
@@ -192,7 +205,7 @@ class ScalperBot:
         
         return "UP" if is_uptrend else "SIDEWAYS", is_pullback, history
 
-    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None, taker=False):
+    def execute_trade(self, pair, price, trend="N/A", tq_prob=0.0, whale_boost=1.0, sector_boost=1.0, imbalance=1.0, volatility=0.0, dynamic_tp=None, dynamic_sl=None, taker=False, llm_verdict="HOLD", llm_confidence=0.0, llm_reason=""):
         try:
             # ── Oracle Sizing Multiplier ─────────────────────────────────────
             multiplier = self.oracle.get_sizing_multiplier()
@@ -208,7 +221,11 @@ class ScalperBot:
                 if balance < MIN_BALANCE_THRESHOLD:
                     log_message(f"STOP: Balance {balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                     return False
-                amount_idr = balance * CAPITAL_PER_TRADE_PCT * multiplier
+                # Gunakan INITIAL_CAPITAL sebagai basis sizing (portfolio-based), bukan free IDR.
+                # Ini mencegah bot stuck saat sebagian besar kapital sedang di posisi terbuka.
+                # Cap di saldo bebas agar tidak melebihi kemampuan.
+                target_amount = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
+                amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
 
             if amount_idr < MIN_TRADE_IDR:
                 log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
@@ -285,19 +302,41 @@ class ScalperBot:
                 send_telegram_message(msg)
                 
                 params = {
-                    'post_only': True,
+                    'post_only': False if taker else True,
                     'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
                 } 
-                # Gunakan Limit Buy di EMA-9
+                # Gunakan Limit Buy (Taker if price is last, Maker if EMA)
                 order = self.exchange.create_limit_buy_order(symbol, amount_crypto, buy_price, params)
 
             # ── Project Evolution: Save DNA for Learning ──
+            # Hitung RSI dan EMA-dist dari price history saat entry
+            _rsi_dna = None
+            _ema_dist_dna = None
+            try:
+                if len(prices) >= 14:
+                    _deltas = np.diff(prices[-15:])
+                    _gains = np.where(_deltas > 0, _deltas, 0)
+                    _losses = np.where(_deltas < 0, -_deltas, 0)
+                    _avg_gain = np.mean(_gains) if np.mean(_gains) > 0 else 1e-9
+                    _avg_loss = np.mean(_losses) if np.mean(_losses) > 0 else 1e-9
+                    _rsi_dna = round(100 - (100 / (1 + _avg_gain / _avg_loss)), 2)
+                if len(prices) >= 20:
+                    _ema20 = prices[-20:].mean()
+                    _ema_dist_dna = round((buy_price - _ema20) / _ema20, 6) if _ema20 > 0 else 0.0
+            except Exception:
+                pass
             dna_data = {
-                "ai_prob": tq_prob,
+                "ai_prob": tq_prob * 100,
                 "whale_boost": whale_boost,
                 "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
                 "imbalance": imbalance,
-                "volatility": volatility
+                "volatility": volatility,
+                "rsi": _rsi_dna,
+                "ema_dist": _ema_dist_dna,
+                "llm_verdict": llm_verdict,
+                "llm_confidence": llm_confidence,
+                "llm_reason": llm_reason,
+                "dry_run": DRY_RUN
             }
             db.save_trade_dna(pair, dna_data)
 
@@ -315,7 +354,8 @@ class ScalperBot:
                 "entry_order_id": order.get('id') if not DRY_RUN else None,
                 "exit_order_id": None,
                 "target_tp_pct": final_tp,
-                "target_sl_pct": final_sl
+                "target_sl_pct": final_sl,
+                "reason_backup": trend
             }
 
             db.upsert_position(pair, data)
@@ -372,6 +412,12 @@ class ScalperBot:
             # [Anti-Hallucination] Reality Check every 30 minutes
             if int(time.time()) % 1800 < 10:
                 self.exit_manager.reconcile_with_exchange()
+
+            # [Manual Sync] Mass Account Sync Trigger
+            if db.get_state("trigger_sync_all") == "1":
+                db.save_state("trigger_sync_all", "0")
+                log_message("📡 MANUAL SYNC: Starting background Mass Account Sync...")
+                threading.Thread(target=self.exit_manager.sync_all_history, daemon=True).start()
 
             # [LiteRT-LM] Consciousness Update every 30 minutes
             self.oracle.update_consciousness(regime=regime)
@@ -571,230 +617,335 @@ class ScalperBot:
                         log_message(f"⚠️ Warning: Gagal sinkronisasi tracking untuk {hp}: {e}")
 
             for p in high_speed:
-                pair = p['pair']
+                pair = p.get('pair', 'UNKNOWN')
+                try:
+                    # [Fix] Update history ALWAYS (Penting untuk Dashboard Sync)
+                    trend, breakout, history = self.update_history_and_trend(pair, p['last'])
+                    imbalance_ratio = p.get('imbalance', 1.0)
                 
-                # [Fix] Update history ALWAYS (Penting untuk Dashboard Sync)
-                trend, breakout, history = self.update_history_and_trend(pair, p['last'])
-                imbalance_ratio = p.get('imbalance', 1.0)
+                    # Get specific AI boost for this pair (valid for 5 mins after analysis)
+                    ai_boost = self.oracle.get_sentiment_boost(pair)
                 
-                # Get specific AI boost for this pair (valid for 5 mins after analysis)
-                ai_boost = self.oracle.get_sentiment_boost(pair)
+                    # Get Prediction Probability (using quantitative math + LLM qualitative opinion)
+                    # [Fix] Hitung juga untuk SIDEWAYS jika ada pullback signal — jangan buang peluang mean reversion
+                    tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if (trend == "UP" or breakout) else 0.0
                 
-                # Get Prediction Probability (using quantitative math + LLM qualitative opinion)
-                tq_prob = get_prediction(history, tickers.get(pair), ai_boost) if trend == "UP" else 0.0
+                    # Calculate Multi-Timeframe Changes (Short-term)
+                    ch_5m = 0.0; ch_15m = 0.0; ch_1h = 0.0
+                    if len(history) >= 2:
+                        curr = float(p['last'])
+                        p_5  = float(history[-5]) if len(history) >= 5 else float(history[0])
+                        p_15 = float(history[-15]) if len(history) >= 15 else float(history[0])
+                        p_60 = float(history[-60]) if len(history) >= 60 else float(history[0])
+                        ch_5m  = ((curr - p_5) / p_5) * 100 if p_5 > 0 else 0
+                        ch_15m = ((curr - p_15) / p_15) * 100 if p_15 > 0 else 0
+                        ch_1h  = ((curr - p_60) / p_60) * 100 if p_60 > 0 else 0
+
+                    # Predator Boosts (Whale & Sector)
+                    whale_boost = self.oracle.get_whale_boost(pair)
+                    sector_boost = self.oracle.get_sector_boost(pair)
+
+                    # Combine boosts into a final Confidence Score for display
+                    boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
+                    final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
+
+                    # [Senior Engineer] Derive Real-time Signal for Dashboard
+                    tech = get_technical_summary(history)
+                    tech_sig = derive_trade_signal(tech)
+                    signal_verdict = tech_sig['verdict']
+
+                    # [Project Predator] Sync prediction & signal to DB for Dashboard
+                    db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
+                                         signal=signal_verdict,
+                                         ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
+                                         volatility=p.get('volatility', 0), score=p.get('score', 0))
+
+                    # SKIP TRADE TRIGGER JIKA SUDAH PUNYA POSISI ATAU BLACKLIST
+                    if pair in open_positions or pair in self.blacklist:
+                        continue
+
+                    # [Risk Guard] Cooldown per pair setelah loss agar tidak revenge-entry di kondisi chop.
+                    cooldown_until_raw = db.get_state(f"pair_cooldown_until_{pair}", "0")
+                    try:
+                        cooldown_until = float(cooldown_until_raw or 0)
+                    except Exception:
+                        cooldown_until = 0
+                    now_ts = time.time()
+                    if cooldown_until > now_ts:
+                        remaining_min = int(max(1, (cooldown_until - now_ts) / 60))
+                        log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
+                        continue
                 
-                # Calculate Multi-Timeframe Changes (Short-term)
-                ch_5m = 0.0; ch_15m = 0.0; ch_1h = 0.0
-                if len(history) >= 2:
-                    curr = float(p['last'])
-                    p_5  = float(history[-5]) if len(history) >= 5 else float(history[0])
-                    p_15 = float(history[-15]) if len(history) >= 15 else float(history[0])
-                    p_60 = float(history[-60]) if len(history) >= 60 else float(history[0])
-                    ch_5m  = ((curr - p_5) / p_5) * 100 if p_5 > 0 else 0
-                    ch_15m = ((curr - p_15) / p_15) * 100 if p_15 > 0 else 0
-                    ch_1h  = ((curr - p_60) / p_60) * 100 if p_60 > 0 else 0
-
-                # Predator Boosts (Whale & Sector)
-                whale_boost = self.oracle.get_whale_boost(pair)
-                sector_boost = self.oracle.get_sector_boost(pair)
-
-                # Combine boosts into a final Confidence Score for display
-                boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
-                final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
-
-                # [Senior Engineer] Derive Real-time Signal for Dashboard
-                tech = get_technical_summary(history)
-                tech_sig = derive_trade_signal(tech)
-                signal_verdict = tech_sig['verdict']
-
-                # [Project Predator] Sync prediction & signal to DB for Dashboard
-                db.save_ticker_history(pair, history, prediction_prob=final_prob, trend=trend,
-                                     signal=signal_verdict,
-                                     ch_5m=ch_5m, ch_15m=ch_15m, ch_1h=ch_1h,
-                                     volatility=p.get('volatility', 0), score=p.get('score', 0))
-
-                # SKIP TRADE TRIGGER JIKA SUDAH PUNYA POSISI ATAU BLACKLIST
-                if pair in open_positions or pair in self.blacklist:
-                    continue
+                    # Apply Self-Learning Weights
+                    features = {
+                        "ai_prob": tq_prob,
+                        "whale_boost": whale_boost - 1.0, # 0.5 becomes 0.5
+                        "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
+                        "imbalance": imbalance_ratio
+                    }
+                    final_score = self.oracle.apply_learning_to_score(p['score'], features)
                 
-                # Apply Self-Learning Weights
-                features = {
-                    "ai_prob": tq_prob,
-                    "whale_boost": whale_boost - 1.0, # 0.5 becomes 0.5
-                    "sector_sentiment": self.oracle.get_sector_sentiment_val(pair),
-                    "imbalance": imbalance_ratio
-                }
-                final_score = self.oracle.apply_learning_to_score(p['score'], features)
+                    # Diagnostic Log
+                    prob_display = f"{tq_prob*100:.0f}%" if tq_prob >= 0 else "WARMUP"
+                    boost_str = ""
+                    if whale_boost > 1.0: boost_str += " 🐳"
+                    if sector_boost > 1.0: boost_str += " 🔥"
+                    if final_score > p['score']: boost_str += " 📈"
+                    if final_score < p['score']: boost_str += " 📉"
                 
-                # Diagnostic Log
-                prob_display = f"{tq_prob*100:.0f}%" if tq_prob >= 0 else "WARMUP"
-                boost_str = ""
-                if whale_boost > 1.0: boost_str += " 🐳"
-                if sector_boost > 1.0: boost_str += " 🔥"
-                if final_score > p['score']: boost_str += " 📈"
-                if final_score < p['score']: boost_str += " 📉"
-                
-                log_message(
-                    f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
-                    f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
-                )
-
-                # ── [Fix Bug#2] Inject Order Book pressure ke sinyal teknikal ──
-                # Sebelumnya: derive_trade_signal dipanggil tanpa buy_pressure → bp=50 selalu.
-                # Sekarang: ambil data depth dari DB dan inject agar sinyal lebih akurat.
-                tech = get_technical_summary(history)
-                depth_data = db.get_market_depth(pair)
-                if depth_data['bids'] and depth_data['asks']:
-                    total_bid = sum(b['vol'] for b in depth_data['bids'])
-                    total_ask = sum(a['vol'] for a in depth_data['asks'])
-                    total_depth = total_bid + total_ask
-                    if total_depth > 0:
-                        tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-                tech_sig = derive_trade_signal(tech)
-
-                # ── [Fix Bug#2] Soft-warn SELL: hanya blok RSI overbought berat (>72) ──
-                # Sebelumnya: semua SELL di-skip → memblok zona mean reversion (RSI 55-70).
-                # Sekarang: hanya blok jika RSI benar-benar overbought, log tapi jangan exit.
-                if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
                     log_message(
-                        f"⛔ OVERBOUGHT BLOCK [{pair}]: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
-                    )
-                    continue
-                elif tech_sig['verdict'] == 'SELL':
-                    # Soft warning: catat tapi jangan skip
-                    log_message(
-                        f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN."
+                        f"Track: {p['pair']:10} | Regime: {regime:8} | Trend: {trend:9} | "
+                        f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
                     )
 
-                # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
-                has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-                ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
-                
-                # RE-CHECK PERSISTENT STATE BEFORE TRADE
-                self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
-                if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                    log_message(f"PAUSE: Hit max losses ({MAX_CONSECUTIVE_LOSSES}).")
-                    time.sleep(60)
-                    break
+                    # ── [Fix Bug#2] Inject Order Book pressure ke sinyal teknikal ──
+                    # Sebelumnya: derive_trade_signal dipanggil tanpa buy_pressure → bp=50 selalu.
+                    # Sekarang: ambil data depth dari DB dan inject agar sinyal lebih akurat.
+                    tech = get_technical_summary(history)
+                    depth_data = db.get_market_depth(pair)
+                    if depth_data['bids'] and depth_data['asks']:
+                        total_bid = sum(b['vol'] for b in depth_data['bids'])
+                        total_ask = sum(a['vol'] for a in depth_data['asks'])
+                        total_depth = total_bid + total_ask
+                        if total_depth > 0:
+                            tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
+                    tech_sig = derive_trade_signal(tech)
 
-                # ── Custom AI Pattern Matcher (k-NN + LLM) ────────────────
-                # [Deep Context Tuning] Ambil indikator teknikal untuk memperkuat prediksi
-                from engines.technicals import calculate_rsi
-                rsi_val = calculate_rsi(history)
-                
-                # Hitung EMA 20 dan jarak harga (EMA Distance)
-                if len(history) >= 20:
-                    prices = np.array(history, dtype=float)
-                    alpha = 2 / (20 + 1)
-                    ema_20 = prices[0]
-                    for price in prices[1:]:
-                        ema_20 = (price * alpha) + (ema_20 * (1 - alpha))
-                    # [Fix] Sinkronisasi rumus dengan backtester: positif = pullback di bawah EMA
-                    ema_dist = ((ema_20 - p['last']) / ema_20) * 100
-                else:
-                    ema_dist = 0.0
+                    # ── [Fix Bug#2] Soft-warn SELL: hanya blok RSI overbought berat (>72) ──
+                    # Sebelumnya: semua SELL di-skip → memblok zona mean reversion (RSI 55-70).
+                    # Sekarang: hanya blok jika RSI benar-benar overbought, log tapi jangan exit.
+                    if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
+                        log_message(
+                            f"⛔ OVERBOUGHT BLOCK [{pair}]: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
+                        )
+                        continue
+                    elif tech_sig['verdict'] == 'SELL':
+                        # Soft warning: catat tapi jangan skip
+                        log_message(
+                            f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN."
+                        )
 
-                current_dna = {
-                    "ai_prob": tq_prob,
-                    "whale_boost": whale_boost,
-                    "sector_sentiment": sector_boost,
-                    "imbalance": imbalance_ratio,
-                    "volatility": p['volatility'],
-                    "rsi": rsi_val,
-                    "ema_dist": ema_dist
-                }
-                                # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
-                knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
-                
-                # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas & EMA Distance
-                # [Backtest Insight] ema_dist > 0.1% terbukti 8.6x lebih sering WIN
-                # [Scalper's Edge] Forward-Looking Momentum
-                # Untuk scalping, Order Book Imbalance (BP) adalah indikator masa depan terkuat.
-                # Jika bid jauh lebih tebal dari ask (Buy Pressure), kita perkuat prediksinya.
-                scalper_boost = 0.0
-                if imbalance_ratio > 1.8: scalper_boost = 15.0 # Strong Bid Dominance
-                elif imbalance_ratio > 1.3: scalper_boost = 8.0 # Moderate Bid Dominance
-                
-                current_vol = p['volatility']
-                dynamic_threshold = 55.0
-                if current_vol > 2.0: dynamic_threshold = 68.0
-                elif current_vol < 0.6: dynamic_threshold = 50.0
-                
-                # Hitung Total Confidence: K-NN Pattern + Order Book Pressure
-                total_confidence = knn_decision['confidence'] + scalper_boost
+                    # Signal Trigger: Trend UP + Breakout + AI Probability >= Threshold
+                    has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
+                    ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
 
-                if total_confidence >= dynamic_threshold:
-                    log_message(f"🚀 [Scalper Boost] {pair}: Confidence {knn_decision['confidence']:.1f}% + Boost {scalper_boost:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold})")
+                    # [Fix Win Rate] Gate 1: AI harus siap (warmup selesai & prob >= threshold)
+                    # Jika tq_prob negatif, berarti masih warming up — skip
+                    if tq_prob < 0:
+                        log_message(f"WARMUP: {pair} belum cukup data untuk prediksi AI.")
+                        continue
+                    if not ai_ready and not has_strong_imb:
+                        # Tidak ada sinyal AI yang kuat dan tidak ada dominasi bid yang nyata
+                        log_message(
+                            f"SKIP [{pair}]: AI prob {tq_prob*100:.0f}% < threshold {adaptive_cfg['ai_threshold']*100:.0f}% "
+                            f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
+                        )
+                        continue
+
+                    # [Fix Win Rate] Gate 2: Harus ada pullback ATAU trend UP agar tidak beli di pucuk
+                    if not breakout and trend != "UP":
+                        log_message(f"SKIP [{pair}]: Tidak ada pullback & trend bukan UP (trend={trend})")
+                        continue
+
+                    # [LLM-Driven Decision] Wajib ada verdict AI terbaru sebelum lanjut eksekusi.
+                    llm_verdict = self.oracle.get_pair_trade_verdict(pair, max_age_minutes=15)
+                    if not llm_verdict:
+                        queued = self.oracle.request_trade_verdict(
+                            pair=pair,
+                            history=history,
+                            tech=tech,
+                            imbalance_ratio=imbalance_ratio,
+                            tq_prob=tq_prob,
+                        )
+                        if queued:
+                            log_message(f"⏳ LLM verdict queued [{pair}] — menunggu keputusan AI sebelum entry.")
+                        continue
+
+                    llm_v = llm_verdict.get('verdict', 'HOLD')
+                    llm_c = float(llm_verdict.get('confidence', 0))
+                    llm_r = llm_verdict.get('reason', '')
+
+                    # Inisialisasi threshold dasar sebelum dipakai oleh policy adaptif.
+                    current_vol = p['volatility']
+                    dynamic_threshold = 57.0
+                    if current_vol > 2.0:
+                        dynamic_threshold = 68.0
+                    elif current_vol < 0.6:
+                        dynamic_threshold = 54.0
+                    if trend != "UP":
+                        dynamic_threshold += 4.0
+
+                    entry_policy = self.oracle.get_entry_policy(regime, dynamic_threshold)
+                    dynamic_threshold = entry_policy['dynamic_threshold']
+
+                    if llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
+                        log_message(f"🚫 LLM BLOCK [{pair}] {llm_c:.0f}%: {llm_r}")
+                        continue
+                    if llm_v == 'HOLD' and llm_c >= entry_policy['llm_hold_block_conf']:
+                        log_message(f"🕒 LLM HOLD [{pair}] {llm_c:.0f}%: {llm_r}")
+                        continue
+
+                    llm_bonus = 0.0
+                    if llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
+                        # Bonus dibatasi agar LLM memperkuat, bukan mengganti kualitas sinyal kuant.
+                        llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
+
+                    # RE-CHECK PERSISTENT STATE BEFORE TRADE
+                    self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
+                    if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                        log_message(f"PAUSE: Hit max losses ({MAX_CONSECUTIVE_LOSSES}).")
+                        time.sleep(60)
+                        break
+
+                    # ── Custom AI Pattern Matcher (k-NN + LLM) ────────────────
+                    # [Deep Context Tuning] Ambil indikator teknikal untuk memperkuat prediksi
+                    from engines.technicals import calculate_rsi
+                    rsi_val = calculate_rsi(history)
+                
+                    # Hitung EMA 20 dan jarak harga (EMA Distance)
+                    if len(history) >= 20:
+                        prices = np.array(history, dtype=float)
+                        alpha = 2 / (20 + 1)
+                        ema_20 = prices[0]
+                        for price in prices[1:]:
+                            ema_20 = (price * alpha) + (ema_20 * (1 - alpha))
+                        # [Fix] Sinkronisasi rumus dengan backtester: positif = pullback di bawah EMA
+                        ema_dist = ((ema_20 - p['last']) / ema_20) * 100
+                    else:
+                        ema_dist = 0.0
+
+                    current_dna = {
+                        "ai_prob": tq_prob,
+                        "whale_boost": whale_boost,
+                        "sector_sentiment": sector_boost,
+                        "imbalance": imbalance_ratio,
+                        "volatility": p['volatility'],
+                        "rsi": rsi_val,
+                        "ema_dist": ema_dist
+                    }
+                                    # Biarkan AI/K-NN menentukan apakah ini pola kemenangan
+                    knn_decision = self.oracle.find_winning_pattern(pair, current_dna)
+                
+                    # [Tuning] Dynamic Confidence Threshold berbasis Volatilitas & EMA Distance
+                    # [Backtest Insight] ema_dist > 0.1% terbukti 8.6x lebih sering WIN
+                    # [Scalper's Edge] Forward-Looking Momentum
+                    # Untuk scalping, Order Book Imbalance (BP) adalah indikator masa depan terkuat.
+                    # Jika bid jauh lebih tebal dari ask (Buy Pressure), kita perkuat prediksinya.
+                    scalper_boost = 0.0
+                    if imbalance_ratio > 1.8: scalper_boost = 15.0 # Strong Bid Dominance
+                    elif imbalance_ratio > 1.3: scalper_boost = 8.0 # Moderate Bid Dominance
+                
+                    # dynamic_threshold sudah diset lewat policy adaptif (regime + performa).
+                    current_vol = p['volatility']
+
+                    # [Win-Rate Guard] Hormati sinyal AVOID jika suatu saat k-NN mengaktifkan veto lagi
+                    if knn_decision.get('verdict') == "AVOID":
+                        log_message(f"🚫 [K-NN Avoid] {pair}: pola historis buruk, skip.")
+                        continue
+
+                    base_confidence = float(knn_decision.get('confidence', 0.0))
+                    min_base_conf = 45.0 if current_vol <= 2.0 else 50.0
+
+                    # [Profit Guard] Orderbook boost hanya penguat, bukan pengganti kualitas sinyal inti.
+                    # Batasi kontribusi boost agar trade tidak lolos hanya karena imbalance sesaat.
+                    boost_credit = min(scalper_boost, 6.0)
+                    total_confidence = base_confidence + boost_credit + llm_bonus
+
+                    # [Win-Rate Guard] Larang entry dengan kualitas dasar terlalu rendah.
+                    if base_confidence < min_base_conf:
+                        log_message(
+                            f"SKIP [{pair}]: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}% "
+                            f"(vol={current_vol:.2f}%, boost_raw={scalper_boost:.1f}%)"
+                        )
+                        continue
+
+                    if total_confidence >= dynamic_threshold:
+                        log_message(
+                            f"🚀 [Scalper Boost] {pair}: Base {base_confidence:.1f}% + BoostCredit {boost_credit:.1f}% "
+                            f"+ LLM {llm_bonus:.1f}% ({llm_v} {llm_c:.0f}%) = {total_confidence:.1f}% "
+                            f"(Thresh: {dynamic_threshold:.1f}%)"
+                        )
                     
-                    if self.daily_trades < MAX_TRADES_PER_DAY:
-                        # [Backtest Insight] Dynamic ATR-based TP/SL 
-                        # Menghitung volatilitas aktual sebelum entry untuk target presisi
-                        from engines.technicals import calculate_atr
-                        try:
-                            # [Senior Fix] Standard CCXT Symbol for Validation
-                            symbol_atr = pair.upper().replace("IDR", "/IDR")
-                            # Ambil data OHLCV 1m terbaru (limit 20 candle)
-                            ohlcv_atr = self.exchange.fetch_ohlcv(symbol_atr, timeframe='1m', limit=20)
-                            if ohlcv_atr:
-                                highs = [c[2] for c in ohlcv_atr]
-                                lows = [c[3] for c in ohlcv_atr]
-                                closes = [c[4] for c in ohlcv_atr]
-                                atr_val = calculate_atr(highs, lows, closes)
+                        if self.daily_trades < MAX_TRADES_PER_DAY:
+                            # [Backtest Insight] Dynamic ATR-based TP/SL 
+                            # Menghitung volatilitas aktual sebelum entry untuk target presisi
+                            from engines.technicals import calculate_atr
+                            try:
+                                # [Senior Fix] Standard CCXT Symbol for Validation
+                                symbol_atr = pair.upper().replace("IDR", "/IDR")
+                                # Ambil data OHLCV 1m terbaru (limit 20 candle)
+                                ohlcv_atr = self.exchange.fetch_ohlcv(symbol_atr, timeframe='1m', limit=20)
+                                if ohlcv_atr:
+                                    highs = [c[2] for c in ohlcv_atr]
+                                    lows = [c[3] for c in ohlcv_atr]
+                                    closes = [c[4] for c in ohlcv_atr]
+                                    atr_val = calculate_atr(highs, lows, closes)
                                 
-                                # [Fee-Aware & Rebound Logic]
-                                from config import FEE_BUY_TAKER, FEE_SELL_TAKER
-                                round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
-                                # [Anti-Panic Sell] Gunakan ATR 2.5x untuk ruang napas lebih luas
-                                base_sl_pct = (atr_val * 2.5) / p['last']
+                                    # [Fee-Aware & Rebound Logic]
+                                    from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+                                    round_trip_fee = FEE_BUY_TAKER + FEE_SELL_TAKER
+                                    # Gunakan ATR 1.5x untuk SL yang lebih ketat (tidak terlalu longgar)
+                                    base_sl_pct = (atr_val * 1.5) / p['last']
                                 
-                                # Jika RSI sangat rendah (< 35), berikan ruang SL lebih lebar (+25%)
-                                rebound_multiplier = 1.25 if rsi_val < 35 else 1.0
-                                final_sl_val = base_sl_pct * rebound_multiplier
+                                    # Jika RSI sangat rendah (< 35), berikan ruang SL lebih lebar (+20%)
+                                    rebound_multiplier = 1.20 if rsi_val < 35 else 1.0
+                                    final_sl_val = base_sl_pct * rebound_multiplier
                                 
-                                # [Senior Fix] Pastikan SL minimal 3.5% agar tidak terkena Panic Sell akibat noise
-                                final_sl_val = max(0.035, final_sl_val)
+                                    # [Fix R:R] Min SL 1.5% (bukan 3.5%) agar TP 3% masih bisa R:R >= 1:2
+                                    final_sl_val = max(0.015, final_sl_val)
                                 
-                                final_dyn_tp = min(0.12, max(0.02, (atr_val * 4.0) / p['last']))
-                                final_dyn_sl = -min(0.06, final_sl_val) # Cap max SL 6%
+                                    # TP harus minimal 2x SL untuk R:R positif
+                                    raw_tp = (atr_val * 3.0) / p['last']
+                                    final_dyn_tp = min(0.12, max(final_sl_val * 2.0, raw_tp))
+                                    final_dyn_sl = -min(0.04, final_sl_val) # Cap max SL 4%
                                 
-                                log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}% (Rebound: {rebound_multiplier}x)")
-                            else:
+                                    log_message(f"🎯 [ATR Target] {pair}: TP {final_dyn_tp*100:.1f}%, SL {final_dyn_sl*100:.1f}% (Rebound: {rebound_multiplier}x)")
+                                else:
+                                    final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
+                            except Exception as e:
+                                # Fallback gracefully to K-NN targets if ccxt cannot fetch OHLCV (e.g. delisted or bad symbol)
+                                if "does not have market symbol" not in str(e):
+                                    log_message(f"⚠️ ATR Calculation fallback: {e}")
                                 final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
-                        except Exception as e:
-                            # Fallback gracefully to K-NN targets if ccxt cannot fetch OHLCV (e.g. delisted or bad symbol)
-                            if "does not have market symbol" not in str(e):
-                                log_message(f"⚠️ ATR Calculation fallback: {e}")
-                            final_dyn_tp, final_dyn_sl = knn_decision['target_tp'], knn_decision['target_sl']
 
-                        # [Senior Tuning] Execution Intelligence
-                        # Taker (Instant) jika momentum meledak, Maker (Limit) jika sinyal standar untuk hemat fee.
-                        use_taker = (total_confidence > 75.0) or (imbalance_ratio > 2.5)
-                        mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
-                        log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
+                            # [Senior Tuning] Execution Intelligence
+                            # Taker fee tinggi, jadi hanya dipakai saat momentum benar-benar ekstrem.
+                            use_taker = (
+                                total_confidence > 85.0
+                                and imbalance_ratio > 3.0
+                                and current_vol < 2.2
+                                and tq_prob >= (adaptive_cfg['ai_threshold'] + 0.08)
+                            )
+                            mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
+                            log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
 
-                        try:
-                            if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
-                                                 whale_boost=whale_boost, sector_boost=sector_boost,
-                                                 imbalance=imbalance_ratio, volatility=p['volatility'],
-                                                 dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
-                                                 taker=use_taker):
-                                self.daily_trades += 1
-                                db.save_state("daily_trades", self.daily_trades)
-                        except Exception as e:
-                            err_msg = str(e).lower()
-                            if "toomanyrequests" in err_msg:
-                                log_message("🛑 [Rate Limit] Terlalu banyak permintaan! Hibernasi 60 detik agar IP kembali bersih...")
-                                time.sleep(60)
-                            else:
-                                log_message(f"⚠️ Trade Error: {e}")
+                            try:
+                                if self.execute_trade(pair, p['last'], trend=trend, tq_prob=tq_prob, 
+                                                     whale_boost=whale_boost, sector_boost=sector_boost,
+                                                     imbalance=imbalance_ratio, volatility=p['volatility'],
+                                                     dynamic_tp=final_dyn_tp, dynamic_sl=final_dyn_sl,
+                                                     taker=use_taker, llm_verdict=llm_v,
+                                                     llm_confidence=llm_c, llm_reason=llm_r):
+                                    self.daily_trades += 1
+                                    db.save_state("daily_trades", self.daily_trades)
+                            except Exception as e:
+                                err_msg = str(e).lower()
+                                if "toomanyrequests" in err_msg:
+                                    log_message("🛑 [Rate Limit] Terlalu banyak permintaan! Hibernasi 60 detik agar IP kembali bersih...")
+                                    time.sleep(60)
+                                else:
+                                    log_message(f"⚠️ Trade Error: {e}")
                         
-                        # [Senior Fix] Rate Limiter: Beri jeda 1 detik agar tidak kena blokir IP Indodax
-                        time.sleep(1)
-                else:
-                    # Pola kalah dominan, jangan masuk
-                    if knn_decision['verdict'] == "AVOID":
-                        log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
+                            # [Senior Fix] Rate Limiter: Beri jeda 1 detik agar tidak kena blokir IP Indodax
+                            time.sleep(1)
+                    else:
+                        # Pola kalah dominan, jangan masuk
+                        if knn_decision['verdict'] == "AVOID":
+                            log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
 
+                except Exception as e:
+                    log_message(f"⚠️ [Pair Loop Error] {pair}: {e}")
+                    continue
             time.sleep(5)
 
 def calculate_score(args):

@@ -154,6 +154,12 @@ AlgoVibe menggunakan sistem hibrida antara matematika kuantitatif dan penalaran 
 4.  **AI Pattern Matching (k-NN)**: Bot membandingkan pola harga saat ini dengan ribuan transaksi historis di database. Jika pola tersebut memiliki *win rate* rendah di masa lalu, AI akan melakukan **Veto**.
 5.  **Execution Intelligence**: Bot secara otomatis memilih antara **Maker Order** (antri di EMA-9 untuk hemat fee) atau **Taker Order** (langsung hajar market jika momentum sangat kuat).
 
+### 📐 Verifikasi Kuantitatif: Estimasi Waktu (ETA)
+AlgoVibe tidak hanya menebak target harga, tetapi juga mengestimasi **kapan** target tersebut akan tercapai. Sistem menggunakan model hibrida:
+-   **Math Engine (Price Velocity)**: Bot menghitung rata-rata pergerakan harga absolut per menit ($V_{ema}$) secara *real-time*. Estimasi waktu dihitung dengan: $ETA = \text{Jarak Harga} / V_{ema}$.
+-   **AI Intuition**: LiteRT-LM memberikan estimasi waktu berdasarkan sentimen dan pola historis.
+-   **Calibration**: Sistem menggabungkan kedua angka tersebut (60% Math, 40% AI) untuk memberikan estimasi ETA yang realistis di Dashboard.
+
 ### 🔴 Strategi SELL (Exit)
 1.  **ATR-Based Take Profit**: Target profit tidak statis, melainkan dihitung berdasarkan volatilitas ATR (*Average True Range*). Target dinamis antara 2% hingga 12%.
 2.  **Trailing Stop Loss**: Mengunci profit secara otomatis saat harga naik. Bot akan terus "mengikuti" harga ke atas dan hanya menjual jika harga berbalik turun sebesar jarak tertentu.

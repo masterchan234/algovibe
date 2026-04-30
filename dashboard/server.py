@@ -323,7 +323,7 @@ def get_stats():
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
 
         win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
@@ -358,13 +358,27 @@ def get_stats():
         _last_price = tech_data.get('last_price')
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
+        from config import DRY_RUN
+
+        # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
+        active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
+        active_win_rate = dry_win_rate if DRY_RUN else win_rate
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
+
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "all_time_pnl_dry": float(dry_stats['total_pnl'] or 0) if dry_stats else 0,
-            "win_rate": round(win_rate, 2),
+            "daily_pnl": active_pnl,
+            "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
             "total_trades_live": live_stats['trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "live_win_rate": round(win_rate, 2),
+            "live_trades_count": live_stats['trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "backtest_win_rate": round(dna_win_rate, 2),
+            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -376,6 +390,7 @@ def get_stats():
             "technicals": tech_data,
             "sectors": sectors,
             "weights": db.get_all_weights(),
+            "quant_audit": quant_audit,
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',
@@ -448,6 +463,74 @@ def get_positions():
         import traceback
         print("POSITIONS ERROR:", traceback.format_exc())
         return jsonify([])
+    finally:
+        conn.close()
+
+@app.route('/api/debug/positions-summary')
+def get_positions_summary():
+    """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT pair, entry_price, amount_crypto, status, dry_run FROM positions"
+        ).fetchall()
+
+        status_counts = {
+            "OPEN": 0,
+            "EXITING": 0,
+            "PENDING_BUY": 0,
+            "OTHER": 0,
+        }
+        mode_counts = {
+            "live": 0,
+            "dry_run": 0,
+        }
+        unrealized_by_status = {
+            "OPEN": 0.0,
+            "EXITING": 0.0,
+            "PENDING_BUY": 0.0,
+            "OTHER": 0.0,
+        }
+
+        for pos in rows:
+            pair = str(pos['pair'] or '').lower()
+            status = str(pos['status'] or 'OTHER').upper()
+            if status not in status_counts:
+                status = "OTHER"
+
+            status_counts[status] += 1
+            if int(pos['dry_run'] or 0) == 1:
+                mode_counts['dry_run'] += 1
+            else:
+                mode_counts['live'] += 1
+
+            entry_price = float(pos['entry_price'] or 0)
+            amount_crypto = float(pos['amount_crypto'] or 0)
+            if entry_price <= 0 or amount_crypto <= 0 or not pair:
+                continue
+
+            try:
+                row = conn.execute(
+                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                ).fetchone()
+                if row and row['history_json']:
+                    history = json.loads(row['history_json'])
+                    if history:
+                        last_price = float(history[-1])
+                        unrealized_by_status[status] += (last_price - entry_price) * amount_crypto
+            except Exception:
+                continue
+
+        return jsonify({
+            "runtime_mode": "DRY_RUN" if DRY_RUN else "LIVE",
+            "positions_total": len(rows),
+            "mode_counts": mode_counts,
+            "status_counts": status_counts,
+            "unrealized_by_status": {k: round(v, 0) for k, v in unrealized_by_status.items()},
+            "unrealized_total": round(sum(unrealized_by_status.values()), 0),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
 
@@ -547,12 +630,44 @@ def get_ohlcv(pair, tf):
         print(f"Error fetching OHLCV: {e}")
         return jsonify([])
 
-@app.route('/api/trades/recent')
-def get_recent_trades_api():
-    return jsonify(_build_trades_payload())
+@app.route('/api/trades/sync', methods=['POST'])
+@login_required
+def trigger_full_sync():
+    """Trigger mass trade sync via bot background process."""
+    # Simpan jumlah trade saat ini agar frontend bisa deteksi kapan sync selesai
+    conn = get_db_connection()
+    try:
+        count_row = conn.execute("SELECT COUNT(*) as cnt FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+        db.save_state("sync_pre_count", str(count_row['cnt'] if count_row else 0))
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    db.save_state("trigger_sync_all", "1")
+    return jsonify({"success": True, "message": "Sync dimulai. Ledger akan otomatis terupdate setelah sync selesai."})
 
-# Redundant function block removed. See implementation around line 787.
-
+@app.route('/api/trades/sync/status')
+def get_sync_status():
+    """Cek apakah sync sudah selesai dengan membandingkan jumlah trade."""
+    try:
+        conn = get_db_connection()
+        try:
+            count_row = conn.execute("SELECT COUNT(*) as cnt FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+            current_count = int(count_row['cnt'] if count_row else 0)
+        finally:
+            conn.close()
+        pre_count = int(db.get_state("sync_pre_count") or 0)
+        is_running = db.get_state("trigger_sync_all") == "1"
+        new_trades = max(0, current_count - pre_count)
+        return jsonify({
+            "is_running": is_running,
+            "pre_count": pre_count,
+            "current_count": current_count,
+            "new_trades": new_trades,
+            "done": not is_running and current_count > 0
+        })
+    except Exception as e:
+        return jsonify({"is_running": False, "new_trades": 0, "done": True})
 
 @app.route('/api/trades')
 def get_trades():
@@ -711,7 +826,7 @@ def _build_stats_payload():
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
 
         win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
@@ -721,7 +836,14 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
+        from config import DRY_RUN
+        dr_val = 1 if DRY_RUN else 0
+        
         for pos in positions:
+            # [Senior Audit] Filter unrealized PnL by current mode
+            if int(pos['dry_run'] or 0) != dr_val:
+                continue
+
             pair = pos['pair']
             ep = float(pos['entry_price'] or 0)
             if ep <= 0: continue
@@ -786,8 +908,8 @@ def _build_stats_payload():
         ).fetchone()[0] or '--/-- --:--'
 
         from config import DRY_RUN
-        
-        # PnL & Win Rate Selection (Live vs Dry Run)
+
+        # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if DRY_RUN:
             active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
@@ -802,6 +924,12 @@ def _build_stats_payload():
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
             "total_trades_live": live_stats['trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "live_win_rate": round(win_rate, 2),
+            "live_trades_count": live_stats['trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "backtest_win_rate": round(dna_win_rate, 2),
+            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
             "active_positions": len(positions),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -847,7 +975,8 @@ def _build_radar_payload():
                 if last <= 0:
                     last = float(history[-1]) if history else 0
                 
-                prev = float(history[-1]) if history else last
+                # Gunakan titik sebelumnya agar delta harga radar benar-benar mencerminkan momentum terbaru.
+                prev = float(history[-2]) if len(history) > 1 else last
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
                 
 
@@ -874,112 +1003,107 @@ def _build_radar_payload():
         conn.close()
 
 def _build_trades_payload():
-    """Ambil trade history + open positions dengan live PnL untuk Execution Ledger."""
+    """[Senior Audit] Robust trade payload builder with per-item safety guards."""
     conn = get_db_connection()
+    results = []
     try:
-        positions = conn.execute("""
-            SELECT p.pair, p.entry_price, p.amount_crypto, p.amount_idr, p.timestamp as created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
-            FROM positions p
-            LEFT JOIN trade_analytics a ON p.pair = a.pair 
-                 AND abs(strftime('%s', p.timestamp) - strftime('%s', a.entry_timestamp)) < 60
-        """).fetchall()
-
-        # Fetch recent trades (FILTER BY CURRENT MODE)
         from config import DRY_RUN
         dr_val = 1 if DRY_RUN else 0
-        
+
+        # 1. Fetch Positions (OPEN / PENDING_BUY / EXITING)
+        positions = conn.execute("SELECT * FROM positions").fetchall()
+        ws_tickers = mws.get_tickers()
+
+        for p in positions:
+            try:
+                pair = p['pair']
+                # Filter by dry_run if needed, but usually we show all active in current mode
+                if int(p['dry_run'] or 0) != dr_val:
+                    continue
+
+                pos_status = str(p['status'] or 'OPEN')
+                entry_price = float(p['entry_price'] or 0)
+                amount_crypto = float(p['amount_crypto'] or 0)
+                
+                # Live Price Fallback (WS > DB > Entry)
+                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
+                
+                if last_price <= 0:
+                    try:
+                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                        if row and row['history_json']:
+                            history = json.loads(row['history_json'])
+                            if history: last_price = float(history[-1])
+                    except: pass
+
+                if last_price <= 0: last_price = entry_price
+
+                pnl_idr = (last_price - entry_price) * amount_crypto
+                pnl_pct = ((last_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+                # Beri label reason yang jelas berdasarkan status nyata posisi
+                if pos_status == 'PENDING_BUY':
+                    display_reason = "MENUNGGU FILL"
+                elif pos_status == 'EXITING':
+                    display_reason = "SELL ORDER TERKIRIM"
+                else:
+                    display_reason = "OPEN POSITION"
+
+                results.append({
+                    "id":          f"pos_{pair}",
+                    "pair":        pair,
+                    "reason":      display_reason,
+                    "pnl_idr":     round(pnl_idr, 0),
+                    "pnl_pct":     round(pnl_pct, 2),
+                    "entry_price": entry_price,
+                    "exit_price":  last_price,
+                    "amount_idr":  float(p['amount_idr'] or 0),
+                    "amount_coin": amount_crypto,
+                    "duration":    0,
+                    "created_at":  str(p['timestamp'] or ''),
+                    "status":      "OPEN",  # Semua posisi aktif masuk tab OPEN
+                    "pos_status":  pos_status,  # Status detail untuk UI
+                    "is_manual":   0
+                })
+            except Exception as e:
+                print(f"Error processing position {p.get('pair')}: {e}")
+
+        # 2. Fetch Trade History (CLOSED)
+        # [Fix] Tampilkan MANUAL_SYNC (is_manual=1) selalu, tanpa filter dry_run
+        # karena ini adalah transaksi nyata dari akun exchange.
+        # Untuk trade reguler, filter sesuai mode DRY_RUN.
         trades = conn.execute("""
-            SELECT t.pair, t.reason, t.pnl_idr, t.pnl_pct, t.entry_price, t.exit_price, 
-                   t.amount_idr, t.amount_crypto, t.duration_seconds, t.created_at,
-                   a.ai_prob, a.whale_boost, a.volatility as dna_vol, a.rsi as dna_rsi
-            FROM trade_history t
-            LEFT JOIN trade_analytics a ON t.pair = a.pair 
-                 AND abs(t.pnl_idr - a.pnl_idr) < 10
-                 AND a.status = 'CLOSED'
-            WHERE t.reason != 'BACKTEST' AND t.dry_run = ?
-            ORDER BY t.created_at DESC LIMIT 100
+            SELECT * FROM trade_history 
+            WHERE (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'
+            ORDER BY created_at DESC LIMIT 200
         """, (dr_val,)).fetchall()
 
-        results = []
-
-        # Ambil buffer harga realtime untuk Ledger (Prioritas: Trade Stream > Summary)
-        ws_tickers = mws.get_tickers()
-        
-        # Posisi terbuka — hitung live unrealized PnL dari harga terakhir
-        for p in positions:
-            pair = p['pair']
-            entry_price  = float(p['entry_price'] or 0)
-            amount_crypto = float(p['amount_crypto'] or 0)
-            
-            # 1. Prioritaskan harga dari Trade Stream (Execution Live)
-            ws_trades = mws.get_trades(pair)
-            last_price = 0
-            if ws_trades:
-                try: last_price = float(ws_trades[0][4])
-                except: pass
-            
-            # 2. Fallback ke Summary Stream
-            if last_price <= 0:
-                last_price = float(ws_tickers.get(pair, {}).get('last', 0))
-            
-            # 3. Fallback ke database history jika WS belum sinkron
-            if last_price <= 0:
-                try:
-                    row = conn.execute(
-                        "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
-                    ).fetchone()
-                    if row and row['history_json']:
-                        history = json.loads(row['history_json'])
-                        if history: last_price = float(history[-1])
-                except Exception: pass
-
-            if last_price <= 0: last_price = entry_price # Final fallback
-            
-            pnl_idr      = (last_price - entry_price) * amount_crypto
-            pnl_pct      = ((last_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-
-            results.append({
-                "pair":        p['pair'] or 'UNKNOWN',
-                "reason":      'OPEN POSITION',
-                "pnl_idr":     round(pnl_idr, 0),
-                "pnl_pct":     round(pnl_pct, 3),
-                "entry_price": entry_price,
-                "exit_price":  last_price, # Gunakan exit_price agar selaras dengan script.js
-                "amount_idr":  float(p['amount_idr'] or 0),
-                "amount_coin": amount_crypto, # Rename ke amount_coin
-                "duration":    0, # Computed on frontend
-                "created_at":  str(p['created_at'] or ''),
-                "status":      'OPEN',
-                "ai_prob":     float(p['ai_prob'] or 0) if p['ai_prob'] else None,
-                "whale_boost": float(p['whale_boost'] or 0) if p['whale_boost'] else None,
-                "dna_vol":     float(p['dna_vol'] or 0) if p['dna_vol'] else None,
-                "dna_rsi":     float(p['dna_rsi'] or 0) if p['dna_rsi'] else None
-            })
-
-        # Trade history (sudah ditutup)
         for t in trades:
-            results.append({
-                "pair":        t['pair'] or 'UNKNOWN',
-                "reason":      t['reason'] or 'EXIT',
-                "pnl_idr":     float(t['pnl_idr'] or 0),
-                "pnl_pct":     float(t['pnl_pct'] or 0),
-                "entry_price": float(t['entry_price'] or 0),
-                "exit_price":  float(t['exit_price'] or 0),
-                "amount_idr":  float(t['amount_idr'] or 0),
-                "amount_coin": float(t['amount_crypto'] or 0),
-                "duration":    int(t['duration_seconds'] or 0),
-                "created_at":  str(t['created_at']),
-                "status":      'CLOSED',
-                "ai_prob":     float(t['ai_prob'] or 0) if t['ai_prob'] else None,
-                "whale_boost": float(t['whale_boost'] or 0) if t['whale_boost'] else None,
-                "dna_vol":     float(t['dna_vol'] or 0) if t['dna_vol'] else None,
-                "dna_rsi":     float(t['dna_rsi'] or 0) if t['dna_rsi'] else None
-            })
+            try:
+                results.append({
+                    "id":          int(t['id'] or 0),  # [Fix] Sertakan id DB untuk deduplication di mobile
+                    "pair":        t['pair'] or 'UNKNOWN',
+                    "reason":      t['reason'] or 'EXIT',
+                    "pnl_idr":     float(t['pnl_idr'] or 0),
+                    "pnl_pct":     float(t['pnl_pct'] or 0),
+                    "entry_price": float(t['entry_price'] or 0),
+                    "exit_price":  float(t['exit_price'] or 0),
+                    "amount_idr":  float(t['amount_idr'] or 0),
+                    "amount_coin": float(t['amount_crypto'] or 0),
+                    "duration":    int(t['duration_seconds'] or 0),
+                    "created_at":  str(t['created_at']),
+                    "status":      'CLOSED',
+                    "is_manual":   int(t['is_manual'] or 0)
+                })
+            except Exception as e:
+                print(f"Error processing trade {t.get('id')}: {e}")
 
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
         return results[:100]
-    except Exception:
+    except Exception as e:
+        print(f"CRITICAL: _build_trades_payload failure: {e}")
+        import traceback
+        traceback.print_exc()
         return []
     finally:
         conn.close()

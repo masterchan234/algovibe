@@ -20,6 +20,12 @@ MIGRATIONS = [
     ("add_momentum_to_sector_history", "ALTER TABLE sector_history ADD COLUMN momentum_score REAL DEFAULT 0.0"),
     ("add_leader_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_pair TEXT DEFAULT 'N/A'"),
     ("add_leader_ch_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_change REAL DEFAULT 0.0"),
+    ("add_exec_type_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exec_type TEXT DEFAULT 'MAKER'"),
+    ("add_reason_backup_to_positions", "ALTER TABLE positions ADD COLUMN reason_backup TEXT"),
+    ("add_trade_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN trade_id TEXT UNIQUE"),
+    ("add_is_manual_to_trade_history", "ALTER TABLE trade_history ADD COLUMN is_manual INTEGER DEFAULT 0"),
+    ("add_exit_order_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exit_order_id TEXT"),
+    ("add_unique_idx_exit_order_id", "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_exit_order_id ON trade_history(exit_order_id) WHERE exit_order_id IS NOT NULL"),
 ]
 
 def run_migrations(db_path):
