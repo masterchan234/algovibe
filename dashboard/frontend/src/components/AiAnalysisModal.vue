@@ -18,7 +18,10 @@
           <span>Data stream interrupted. Please retry.</span>
         </div>
         <div v-else class="content-state">
-          <div v-if="insight" class="insight-wrap">
+          <div v-show="insight" class="insight-wrap">
+            <div class="insight-label">MARKET VISUALIZATION</div>
+            <div ref="chartRef" class="modal-chart"></div>
+
             <div class="insight-label">ANALYSIS SUMMARY</div>
             <div class="insight-text">{{ insight }}</div>
             <div class="insight-meta" v-if="pair">
@@ -32,7 +35,7 @@
               </div>
             </div>
           </div>
-          <div v-else class="empty-state">
+          <div v-if="!insight" class="empty-state">
             <span class="empty-icon">📂</span>
             <span>No localized intelligence available for this sector.</span>
           </div>
@@ -46,7 +49,8 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, nextTick } from 'vue'
+import * as echarts from 'echarts'
 
 const props = defineProps({
   show: Boolean,
@@ -58,6 +62,8 @@ const props = defineProps({
 const insight = ref('')
 const loading = ref(false)
 const error = ref(false)
+const chartRef = ref(null)
+let chartInstance = null
 
 function close() {
   props.onClose && props.onClose()
@@ -69,12 +75,94 @@ async function loadInsight() {
   error.value = false
   insight.value = ''
   try {
-    insight.value = await props.fetchInsight(props.pair)
-  } catch {
+    const [insightRes, chartData] = await Promise.all([
+      props.fetchInsight(props.pair),
+      fetchChartData(props.pair.pair)
+    ])
+    insight.value = insightRes
+    loading.value = false // Deactivate loading state so content-state renders
+    console.log('[Modal] State switched, waiting for DOM...', !!chartRef.value)
+    await nextTick()
+    console.log('[Modal] DOM ready, chartRef:', !!chartRef.value, 'data length:', chartData?.length)
+    initChart(chartData)
+  } catch (err) {
+    console.error('Modal Load Error:', err)
     error.value = true
-  } finally {
     loading.value = false
   }
+}
+
+async function fetchChartData(pair) {
+  const backendUrl = import.meta.env.DEV
+    ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+    : window.location.origin
+  const res = await fetch(`${backendUrl}/api/ohlcv/${pair.toLowerCase().replace('/', '')}/1h`)
+  if (res.ok) return await res.json()
+  return []
+}
+
+function initChart(data) {
+  if (!chartRef.value || !data || !data.length) {
+    console.warn('No chart data or ref available');
+    return
+  }
+  
+  if (!chartInstance) {
+    chartInstance = echarts.init(chartRef.value)
+  }
+
+  // CCXT Format: [timestamp, open, high, low, close, volume]
+  const times = data.map(item => {
+    const d = new Date(item[0])
+    return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+  })
+  const prices = data.map(item => item[4])
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      show: true,
+      trigger: 'axis',
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      textStyle: { color: '#e6edf3', fontSize: 10 },
+      formatter: '{b}: Rp {c}'
+    },
+    grid: { left: '2%', right: '2%', top: '10%', bottom: '10%', containLabel: false },
+    xAxis: {
+      show: false,
+      type: 'category',
+      data: times
+    },
+    yAxis: {
+      show: false,
+      type: 'value',
+      scale: true
+    },
+    series: [{
+      type: 'line',
+      smooth: true,
+      showSymbol: false,
+      data: prices,
+      lineStyle: { width: 2, color: '#a371f7' },
+      areaStyle: {
+        color: {
+          type: 'linear',
+          x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [
+            { offset: 0, color: 'rgba(163, 113, 247, 0.3)' },
+            { offset: 1, color: 'rgba(163, 113, 247, 0)' }
+          ]
+        }
+      }
+    }]
+  }
+  chartInstance.setOption(option)
+  
+  // Resize to container
+  setTimeout(() => {
+    chartInstance.resize()
+  }, 100)
 }
 
 watch(() => props.show, (newVal) => {
@@ -103,7 +191,7 @@ onMounted(() => {
   background: #161b22;
   border-radius: 12px;
   width: 100%;
-  max-width: 500px;
+  max-width: 600px;
   box-shadow: 0 0 40px rgba(163, 113, 247, 0.15), 0 20px 50px rgba(0, 0, 0, 0.6);
   border: 1px solid #30363d;
   overflow: hidden;
@@ -204,9 +292,18 @@ onMounted(() => {
 
 .insight-text {
   color: #e6edf3;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.6;
   font-family: 'Inter', sans-serif;
+  max-height: 150px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.modal-chart {
+  width: 100%;
+  height: 120px;
+  margin-bottom: 8px;
 }
 
 .insight-meta {

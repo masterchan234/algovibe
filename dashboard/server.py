@@ -188,6 +188,27 @@ def _get_pair_technicals(pair):
     finally:
         conn.close()
 
+def _generate_equity_reasoning(pnl, unrealized, win_rate, trades):
+    """Memberikan analisis performa portofolio/ekuitas secara kualitatif."""
+    total_equity = pnl + unrealized
+    status = "PROFITABLE" if total_equity >= 0 else "UNDER PRESSURE"
+    
+    analysis = f"Performa akun saat ini dalam kondisi {status}. "
+    if unrealized < 0 and abs(unrealized) > 100000:
+        analysis += "Drawdown pada posisi terbuka terdeteksi. AI merekomendasikan pengetatan risk-management. "
+    
+    if win_rate > 60:
+        analysis += f"Akurasi trading optimal ({win_rate}%). Sistem mempertahankan keunggulan statistik yang kuat. "
+    elif win_rate < 40 and trades > 5:
+        analysis += f"Win rate di bawah ambang batas ({win_rate}%). AI mendeteksi anomali market, disarankan pengurangan size. "
+        
+    if total_equity > 0:
+        analysis += "Kurva ekuitas menunjukkan tren positif. Stabilitas bot terjaga dengan baik."
+    else:
+        analysis += "Prioritaskan preservasi modal. Hindari pembukaan posisi baru hingga volatilitas mereda."
+        
+    return analysis
+
 def _generate_technical_reasoning(pair, tech, last_price=None):
     """Buat narasi nalar kuantitatif. last_price diteruskan agar tidak ada query DB ulang."""
     rsi   = tech.get('rsi', 50)
@@ -593,9 +614,28 @@ def get_positions_summary():
 @app.route('/api/analyze/<pair>')
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""
-    # Gunakan key yang sama dengan yang dimonitor oracle.py
     db.save_state("trigger_analysis_pair", pair.lower())
     return jsonify({"status": "requested", "pair": pair})
+
+@app.route('/api/reasoning/<pair>')
+def get_pair_reasoning(pair):
+    """Ambil nalar AI/LLM terbaru untuk koin tertentu."""
+    p = pair.lower().strip()
+    reasoning = db.get_state(f"llm_reasoning_{p}")
+    if not reasoning:
+        # Fallback ke technical reasoning jika LLM belum ada
+        conn = get_db_connection()
+        try:
+            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (p,)).fetchone()
+            prices = json.loads(row['history_json']) if row and row['history_json'] else []
+            from app.domain.technicals import get_technical_summary
+            tech = get_technical_summary(prices)
+            reasoning = _generate_technical_reasoning(p, tech)
+        except:
+            reasoning = "Data intelijen sedang dikalkulasi..."
+        finally:
+            conn.close()
+    return jsonify({"pair": p, "reasoning": reasoning})
 
 @app.route('/api/exit/<pair>', methods=['POST'])
 @login_required
@@ -978,6 +1018,8 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
+        equity_reasoning = _generate_equity_reasoning(active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'])
+
         return {
             "daily_trades": perf['total_trades'],
             "daily_pnl": active_pnl,
@@ -999,6 +1041,7 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "active_reasoning": combined_reasoning,
+            "equity_reasoning": equity_reasoning,
             "technicals": tech_data,
             "sectors": db.get_all_latest_sector_sentiment(),
             "weights": db.get_all_weights(),
@@ -1006,7 +1049,6 @@ def _build_stats_payload():
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": history_since,
             "new_listings": db.get_new_listings(),
-            # Bot liveness — digunakan untuk memperbarui badge "CONNECTING" di UI
             "bot_running": True
         }
     finally:

@@ -59,29 +59,22 @@
       </div>
     </div>
 
-    <!-- Intelligence Analysis Panel -->
-    <div class="intelligence-panel" v-if="selectedPairData || stats.active_reasoning">
+    <!-- Equity Intelligence Analysis Panel -->
+    <div class="intelligence-panel" v-if="stats.equity_reasoning">
       <div class="intel-header">
         <div class="intel-title">
-          <span class="intel-icon">🔮</span>
-          <span>ORACLE INTELLIGENCE: {{ selectedPairData?.pair || stats.regime_leader || 'MARKET' }}</span>
+          <span class="intel-icon">📈</span>
+          <span>EQUITY PERFORMANCE ORACLE</span>
         </div>
-        <div class="intel-meta" v-if="selectedPairData">
-          <div class="intel-chip" :class="trendClass(selectedPairData.trend)">
-            {{ selectedPairData.trend }}
-          </div>
-          <div class="intel-chip">
-            PROB: {{ (selectedPairData.prediction * 100).toFixed(1) }}%
+        <div class="intel-meta">
+          <div class="intel-chip" :class="stats.daily_pnl >= 0 ? 'bullish' : 'bearish'">
+            {{ stats.daily_pnl >= 0 ? 'WINNING SESSION' : 'RECOVERY MODE' }}
           </div>
         </div>
       </div>
       <div class="intel-body">
-        <div class="intel-reasoning" v-if="stats.active_reasoning">
-          {{ stats.active_reasoning }}
-        </div>
-        <div class="intel-loading" v-else>
-          <div class="intel-dots"><span></span><span></span><span></span></div>
-          Decrypting neural vectors...
+        <div class="intel-reasoning">
+          {{ stats.equity_reasoning }}
         </div>
       </div>
     </div>
@@ -191,14 +184,12 @@ const selectedPairData = ref(null)
 const showAiModal = ref(false)
 
 function onRadarClick(pair) {
-  selectedPair.value = pair.pair
+  selectedPair.value = pair
   selectedPairData.value = pair
+  showAiModal.value = true
   
-  // Update CURRENT_WATCH_PAIR in backend
+  // Optional: Emit watch_pair so backend prepares reasoning for the modal if needed
   store.socket.emit('watch_pair', { pair: pair.pair })
-  
-  // Optional: Scroll to intelligence panel
-  document.querySelector('.intelligence-panel')?.scrollIntoView({ behavior: 'smooth' })
 }
 
 function closeAiModal() {
@@ -207,11 +198,26 @@ function closeAiModal() {
 }
 
 async function fetchAiInsight(pair) {
-  if (pair && pair.insight) return pair.insight
-  if (stats.regime_leader && pair && pair.pair && pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()) {
-    return stats.latest_llm_insight || 'Tidak ada insight AI.'
+  if (!pair || !pair.pair) return 'No pair selected.'
+  
+  const pairName = pair.pair.toLowerCase()
+  const backendUrl = import.meta.env.DEV
+    ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+    : window.location.origin
+
+  try {
+    // Optional: Trigger fresh analysis
+    fetch(`${backendUrl}/api/analyze/${pairName}`).catch(() => {})
+
+    const res = await fetch(`${backendUrl}/api/reasoning/${pairName}`)
+    if (res.ok) {
+      const data = await res.json()
+      return data.reasoning || 'Tidak ada nalar AI yang tersedia saat ini.'
+    }
+  } catch (e) {
+    console.error('Failed to fetch AI insight:', e)
   }
-  return 'Menganalisa data market terbaru untuk ' + pair.pair + '...'
+  return 'Gagal mengambil data intelijen Oracle.'
 }
 
 const regimeClass = computed(() => {

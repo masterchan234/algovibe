@@ -2,11 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, reactive } from 'vue'
 import { io } from 'socket.io-client'
 import { useNotifications } from '../composables/useNotifications'
-import { useAudio } from '../composables/useAudio'
 
 export const useTradeStore = defineStore('trade', () => {
   const { notify } = useNotifications()
-  const { playBeep, speak } = useAudio()
   
   // Connection state
   const connected = ref(false)
@@ -24,6 +22,7 @@ export const useTradeStore = defineStore('trade', () => {
     market_sentiment_index: 50,
     latest_llm_insight: '',
     active_reasoning: '',
+    equity_reasoning: '',
   })
 
   // Open positions (trades)
@@ -71,16 +70,12 @@ export const useTradeStore = defineStore('trade', () => {
         const msg = (item.message || '').toUpperCase()
         
         if (side === 'BUY') {
-          playBeep(660, 0.2)
           // notify({ title: 'NEW BUY ORDER', message: `${item.pair}: ${item.message}`, type: 'success' })
         } else if (side === 'SELL') {
-          playBeep(440, 0.2)
           // notify({ title: 'NEW SELL ORDER', message: `${item.pair}: ${item.message}`, type: 'warning' })
         } else if (msg.includes('WHALE')) {
-          speak(`Whale activity detected on ${item.pair}`)
           // notify({ title: 'WHALE ALERT', message: item.message, type: 'error' })
         } else if (msg.includes('FAKE PUMP')) {
-          speak(`Warning: Fake pump detected on ${item.pair}`)
           // notify({ title: 'FAKE PUMP WARNING', message: item.message, type: 'warning' })
         } else if (side.includes('ORACLE') || side.includes('AI')) {
           // notify({ title: 'ORACLE INSIGHT', message: item.message, type: 'ai' })
@@ -154,6 +149,7 @@ export const useTradeStore = defineStore('trade', () => {
         market_sentiment_index: data.market_sentiment_index ?? 50,
         latest_llm_insight: data.latest_llm_insight ?? '',
         active_reasoning: data.active_reasoning ?? '',
+        equity_reasoning: data.equity_reasoning ?? '',
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })
