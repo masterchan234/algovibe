@@ -363,6 +363,7 @@ def get_stats():
         # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
         active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
         active_win_rate = dry_win_rate if DRY_RUN else win_rate
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
 
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
@@ -389,6 +390,7 @@ def get_stats():
             "technicals": tech_data,
             "sectors": sectors,
             "weights": db.get_all_weights(),
+            "quant_audit": quant_audit,
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',

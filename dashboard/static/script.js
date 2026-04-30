@@ -950,6 +950,47 @@ function renderStats(data) {
                 } else { bb.style.display = 'none'; }
             }
         }
+
+        // ── Quant Audit (24h) ──
+        if (data.quant_audit) {
+            const qa = data.quant_audit;
+            const sEl = document.getElementById('qa-sample');
+            if (sEl) sEl.textContent = `${qa.sample_trades || 0} trades`;
+
+            const expEl = document.getElementById('qa-expectancy');
+            if (expEl) {
+                const val = Number(qa.expectancy_idr || 0);
+                expEl.textContent = fmtIDR(val, true);
+                expEl.style.color = val >= 0 ? 'var(--green)' : 'var(--red)';
+            }
+
+            const buyP = ((qa.verdict_precision || {}).BUY || {}).precision || 0;
+            const holdP = ((qa.verdict_precision || {}).HOLD || {}).precision || 0;
+            const avoidP = ((qa.verdict_precision || {}).AVOID || {}).precision || 0;
+
+            const buyEl = document.getElementById('qa-buy-precision');
+            const holdEl = document.getElementById('qa-hold-precision');
+            const avoidEl = document.getElementById('qa-avoid-precision');
+            if (buyEl) { buyEl.textContent = `${Number(buyP).toFixed(1)}%`; buyEl.style.color = buyP >= 60 ? 'var(--green)' : 'var(--yellow)'; }
+            if (holdEl) { holdEl.textContent = `${Number(holdP).toFixed(1)}%`; holdEl.style.color = holdP >= 60 ? 'var(--green)' : 'var(--yellow)'; }
+            if (avoidEl) { avoidEl.textContent = `${Number(avoidP).toFixed(1)}%`; avoidEl.style.color = avoidP >= 60 ? 'var(--green)' : 'var(--yellow)'; }
+
+            const lrEl = document.getElementById('qa-loss-reasons');
+            if (lrEl) {
+                const rows = qa.dominant_loss_reasons || [];
+                if (!rows.length) {
+                    lrEl.innerHTML = '<div style="opacity:.7;">Belum ada data loss 24h.</div>';
+                } else {
+                    lrEl.innerHTML = rows.map(r => {
+                        const avgLoss = fmtIDR(Number(r.avg_loss_idr || 0), true);
+                        return `<div style="display:flex;justify-content:space-between;gap:8px;background:rgba(255,255,255,0.02);padding:6px 8px;border-radius:8px;">
+                            <span style="color:var(--text-primary);">${r.reason} <span style="opacity:.65;">(${r.count}x)</span></span>
+                            <span style="color:var(--red);">${avgLoss}</span>
+                        </div>`;
+                    }).join('');
+                }
+            }
+        }
         lastStats = data;
     } catch (e) { console.warn('renderStats error', e); }
 }
@@ -1199,6 +1240,103 @@ function renderSectors(sectors) {
 
 let currentLedgerTab = 'OPEN';
 let lastTradeData = [];
+let currentLedgerDensity = 'DETAIL';
+let currentLedgerFilter = 'ALL';  // ALL | TP | SL | TRAIL | MANUAL
+let currentLedgerSort = 'TIME_DESC'; // TIME_DESC | TIME_ASC | PNL_DESC | PNL_ASC | DUR_DESC | DUR_ASC
+
+// ── Filter ────────────────────────────────────────────────────
+function switchLedgerFilter(reason) {
+    currentLedgerFilter = reason;
+    document.querySelectorAll('.filter-chip').forEach(btn => {
+        const active = btn.dataset.reason === reason;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    // Filter chips hanya relevan di tab CLOSED — di OPEN semua tampil
+    renderTradeHistory(lastTradeData);
+}
+
+// ── Sort ─────────────────────────────────────────────────────
+function switchLedgerSort(sort) {
+    currentLedgerSort = sort;
+    try { localStorage.setItem('ledger_sort', sort); } catch(e) {}
+    document.querySelectorAll('#ledger-sort-select').forEach(sel => { sel.value = sort; });
+    renderTradeHistory(lastTradeData);
+}
+
+function _applySort(arr) {
+    const sorted = [...arr];
+    switch (currentLedgerSort) {
+        case 'TIME_ASC':  return sorted.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        case 'PNL_DESC':  return sorted.sort((a, b) => (b.pnl_idr || 0) - (a.pnl_idr || 0));
+        case 'PNL_ASC':   return sorted.sort((a, b) => (a.pnl_idr || 0) - (b.pnl_idr || 0));
+        case 'DUR_DESC':  return sorted.sort((a, b) => (b.duration || 0) - (a.duration || 0));
+        case 'DUR_ASC':   return sorted.sort((a, b) => (a.duration || 0) - (b.duration || 0));
+        default:          return sorted.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    }
+}
+
+function _applyFilter(arr) {
+    if (currentLedgerFilter === 'ALL') return arr;
+    return arr.filter(t => {
+        const reason = (t.reason || '').toUpperCase();
+        if (currentLedgerFilter === 'TP')     return reason.includes('TP');
+        if (currentLedgerFilter === 'SL')     return reason.includes('SL');
+        if (currentLedgerFilter === 'TRAIL')  return reason.includes('TRAIL');
+        if (currentLedgerFilter === 'MANUAL') return t.is_manual === 1 || reason.includes('MANUAL');
+        return true;
+    });
+}
+
+// ── Legend visibility (hidden bila Compact) ───────────────────
+function _syncLegendVisibility() {
+    const legend = document.getElementById('ledger-legend');
+    if (!legend) return;
+    legend.style.display = currentLedgerDensity === 'COMPACT' ? 'none' : 'flex';
+}
+
+function applyLedgerDensity(mode) {
+    const normalized = mode === 'COMPACT' ? 'COMPACT' : 'DETAIL';
+    currentLedgerDensity = normalized;
+    document.body.classList.toggle('ledger-density-compact', normalized === 'COMPACT');
+
+    document.querySelectorAll('.density-btn').forEach(btn => {
+        const active = (btn.dataset.density || 'DETAIL') === normalized;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function switchLedgerDensity(mode) {
+    applyLedgerDensity(mode);
+    try {
+        localStorage.setItem('ledger_density', currentLedgerDensity);
+    } catch (e) {
+        console.warn('Failed to persist ledger density', e);
+    }
+    _syncLegendVisibility();
+    renderTradeHistory(lastTradeData);
+}
+
+function initLedgerDensity() {
+    let saved = 'DETAIL';
+    try {
+        saved = localStorage.getItem('ledger_density') || 'DETAIL';
+    } catch (e) {
+        saved = 'DETAIL';
+    }
+    applyLedgerDensity(saved);
+    _syncLegendVisibility();
+
+    // Restore saved sort
+    try {
+        const savedSort = localStorage.getItem('ledger_sort');
+        if (savedSort) {
+            currentLedgerSort = savedSort;
+            document.querySelectorAll('#ledger-sort-select').forEach(sel => { sel.value = savedSort; });
+        }
+    } catch(e) {}
+}
 
 function switchLedgerTab(tab) {
     currentLedgerTab = tab;
@@ -1211,9 +1349,13 @@ function switchLedgerTab(tab) {
         if (tab === 'OPEN') {
             btnOpen.classList.add('active');
             btnClosed.classList.remove('active');
+            btnOpen.setAttribute('aria-pressed', 'true');
+            btnClosed.setAttribute('aria-pressed', 'false');
         } else {
             btnOpen.classList.remove('active');
             btnClosed.classList.add('active');
+            btnOpen.setAttribute('aria-pressed', 'false');
+            btnClosed.setAttribute('aria-pressed', 'true');
         }
     }
     
@@ -1253,6 +1395,7 @@ async function triggerMassSync() {
     }
 
     const btn = document.getElementById('sync-history-btn');
+    if (!btn) return;
     const oldHtml = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '⌛ SYNCING...';
@@ -1330,12 +1473,15 @@ async function triggerMassSync() {
 }
 
 function renderTradeHistory(data) {
+    if (!Array.isArray(data)) data = [];
     lastTradeData = data;
     const isMobilePage = !!document.getElementById('trade-cards-container');
     const tbody = document.getElementById('trade-history-body');
     const cardsContainer = document.getElementById('trade-cards-container');
     const openCnt = document.getElementById('open-count');
     const closedCnt = document.getElementById('closed-count');
+    const ledgerViewLabel = document.getElementById('ledger-view-label');
+    const ledgerMeta = document.getElementById('ledger-meta');
     
     if (!tbody && !cardsContainer) return;
 
@@ -1345,9 +1491,27 @@ function renderTradeHistory(data) {
     if (openCnt) openCnt.textContent = openTrades.length;
     if (closedCnt) closedCnt.textContent = closedTrades.length;
 
-    const displayData = currentLedgerTab === 'OPEN' ? openTrades : closedTrades;
+    const displayData = currentLedgerTab === 'OPEN'
+        ? _applySort(openTrades)
+        : _applySort(_applyFilter(closedTrades));
+    const totalPnl = displayData.reduce((sum, t) => sum + (Number(t.pnl_idr) || 0), 0);
+    const tabLabel = currentLedgerTab === 'OPEN' ? 'OPEN' : 'CLOSED';
+    const filterLabel = (currentLedgerFilter !== 'ALL' && currentLedgerTab === 'CLOSED') ? ` · filter: ${currentLedgerFilter}` : '';
+    if (ledgerViewLabel) ledgerViewLabel.textContent = `Menampilkan: ${tabLabel}${filterLabel}`;
+    if (ledgerMeta) ledgerMeta.textContent = `${displayData.length} posisi | Total ${fmtIDR(totalPnl, true)}`;
+
+    const emptyText = currentLedgerTab === 'OPEN'
+        ? 'Tidak ada posisi OPEN saat ini.'
+        : 'Belum ada posisi CLOSED.';
 
     if (isMobilePage && cardsContainer) {
+        if (!displayData.length) {
+            cardsContainer.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+            return;
+        }
+
+        cardsContainer.innerHTML = '';
+
         // ── MOBILE: CARD VIEW (Smart Update) ──
         const activeIds = new Set();
         displayData.slice(0, 50).forEach(t => {
@@ -1361,20 +1525,28 @@ function renderTradeHistory(data) {
             const pnlPct = t.pnl_pct !== undefined ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '';
             const is_open = t.status === 'OPEN';
             const is_manual = t.is_manual === 1;
+            const reasonText = is_manual ? 'MANUAL_SYNC' : (t.reason || 'AI');
             const durStr = is_open 
                 ? (t.created_at ? formatDuration(Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : '--')
                 : formatDuration(t.duration || 0);
 
             const cardHTML = `
                 <div class="card-header">
-                    <span class="card-pair">${escapeHTML(formatPair(t.pair))} ${is_manual ? '<span style="font-size:8px; color:var(--yellow); background:rgba(236,204,104,0.1); padding:2px 4px; border-radius:4px; vertical-align:middle; margin-left:5px;">👤 MANUAL</span>' : ''}</span>
+                    <span class="card-pair">${escapeHTML(formatPair(t.pair))}</span>
                     <span class="card-pnl ${pnlCls}">${escapeHTML(pnlPct)}</span>
+                </div>
+                <div class="card-meta" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+                    <span class="trade-pill ${is_open ? 'status-open' : 'status-closed'}">${is_open ? 'OPEN' : 'CLOSED'}</span>
+                    ${is_manual ? '<span class="trade-pill manual">MANUAL</span>' : ''}
+                    <span class="trade-pill reason">${escapeHTML(reasonText)}</span>
                 </div>
                 <div class="card-body">
                     <div>Entry: <b>${escapeHTML(formatNumber(t.entry_price))}</b></div>
                     <div>Live/Exit: <b class="${pnlCls}">${escapeHTML(formatNumber(t.exit_price || t.last_price))}</b></div>
                     <div>Value: <b>${escapeHTML(fmtShortIDR(t.amount_idr))}</b></div>
                     <div>Time: <b>${escapeHTML(durStr)}</b></div>
+                    <div class="mobile-detail">PnL IDR: <b class="${pnlCls}">${escapeHTML(fmtIDR(t.pnl_idr, true))}</b></div>
+                    <div class="mobile-detail">Status: <b>${is_open ? 'Monitoring' : 'Selesai'}</b></div>
                 </div>
                 ${is_open ? `
                 <div class="card-footer">
@@ -1382,7 +1554,7 @@ function renderTradeHistory(data) {
                     <button class="btn-view" onclick="selectPair('${escapeHTML(t.pair)}')">📈</button>
                 </div>
                 ` : `
-                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Reason: ${escapeHTML(is_manual ? 'MANUAL_SYNC' : (t.reason || 'AI'))}</div>
+                <div style="font-size:10px; color:var(--text-dim); margin-top:8px;">Exit: ${escapeHTML(reasonText)}</div>
                 `}
             `;
 
@@ -1408,6 +1580,13 @@ function renderTradeHistory(data) {
     } else if (tbody) {
         // ── DESKTOP: TABLE VIEW ──
         tbody.innerHTML = '';
+        if (!displayData.length) {
+            const emptyTr = document.createElement('tr');
+            emptyTr.innerHTML = `<td colspan="6" class="empty-state">${emptyText}</td>`;
+            tbody.appendChild(emptyTr);
+            return;
+        }
+
         displayData.slice(0, 50).forEach(t => {
             const time = t.created_at ? new Date(t.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--';
             const pair = formatPair(t.pair);
@@ -1453,11 +1632,11 @@ function renderTradeHistory(data) {
                 }
                 tr.innerHTML = `
                     <td><span style="font-weight:600">${escapeHTML(time)}</span></td>
-                    <td>${dnaHtml}</td>
-                    <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
-                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
-                    <td><span style="color:${statusColor};font-weight:700;font-size:10px">${statusLabel}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)} / <span title="Estimasi waktu mencapai target" style="cursor:help;color:var(--cyan)">ETA ${t.eta_minutes || 15}m</span></span></td>
-                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
+                    <td class="ledger-col-optional">${dnaHtml}</td>
+                    <td><b>${escapeHTML(pair)}</b><br><span class="muted ledger-detail" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
+                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted ledger-detail" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
+                    <td><span style="color:${statusColor};font-weight:700;font-size:10px">${statusLabel}</span><br><span class="muted ledger-detail" style="font-size:9px">⏳ ${escapeHTML(durStr)} / <span title="Estimasi waktu mencapai target" style="cursor:help;color:var(--cyan)">ETA ${t.eta_minutes || 15}m</span></span></td>
+                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls} ledger-detail" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             } else {
                 const durStr = formatDuration(t.duration || 0);
                 let reason = t.reason || 'AI';
@@ -1473,11 +1652,11 @@ function renderTradeHistory(data) {
                 
                 tr.innerHTML = `
                     <td><span style="font-weight:600;color:var(--text-secondary)">${escapeHTML(time)}</span></td>
-                    <td>${dnaHtml}</td>
-                    <td><b>${escapeHTML(pair)}</b><br><span class="muted" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
-                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
-                    <td><span style="font-weight:600;font-size:10px;color:${rColor}">${rIcon} ${escapeHTML(reason)}</span><br><span class="muted" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
-                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls}" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
+                    <td class="ledger-col-optional">${dnaHtml}</td>
+                    <td><b>${escapeHTML(pair)}</b><br><span class="muted ledger-detail" style="font-size:9px">Beli: ${escapeHTML(fmtIDR(t.entry_price))}</span></td>
+                    <td><b>${escapeHTML(formatCrypto(t.amount_coin))}</b><br><span class="muted ledger-detail" style="font-size:9px">${escapeHTML(fmtIDR(t.amount_idr))}</span></td>
+                    <td><span style="font-weight:600;font-size:10px;color:${rColor}">${rIcon} ${escapeHTML(reason)}</span><br><span class="muted ledger-detail" style="font-size:9px">⏳ ${escapeHTML(durStr)}</span></td>
+                    <td><b class="${pnlCls}">${escapeHTML(pnlIdr)}</b><br><span class="${pnlCls} ledger-detail" style="font-size:9px">${escapeHTML(pnlText)}</span></td>`;
             }
             tbody.appendChild(tr);
         });
@@ -1811,6 +1990,7 @@ function initSystem() {
 
 window.addEventListener('DOMContentLoaded', async () => {
     await checkSession();
+    initLedgerDensity();
     initSystem();
 
     // Default Mobile State

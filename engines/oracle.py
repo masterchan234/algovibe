@@ -35,6 +35,7 @@ class Oracle:
         self.last_top_mover_analysis = datetime.now() - timedelta(minutes=10)
         self.pump_cooldowns = {}  # {pair: last_analysis_time}
         self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)
+        self.last_trade_verdict_request = {}  # {pair: datetime} throttling explicit trade-verdict requests
 
         # ── Consciousness & Self-Learning ──────────────────────────────────
         # lessons: rolling list of lessons dari POST_MORTEM, max 20 entri
@@ -565,6 +566,83 @@ class Oracle:
 
         return False, "No LLM verdict"
 
+    def get_pair_trade_verdict(self, pair: str, max_age_minutes: int = 15) -> dict | None:
+        """
+        Ambil verdict trading terstruktur terbaru untuk pair.
+        Mengutamakan cache in-memory, fallback ke DB, dengan TTL agar tidak pakai opini usang.
+        """
+        pair_lower = pair.lower()
+
+        # 1) Fresh in-memory verdict dari insight thread
+        cached = self._veto_cache.get(pair_lower)
+        if cached:
+            age_min = (datetime.now() - cached.get("ts", datetime.now())).total_seconds() / 60
+            if age_min <= max_age_minutes:
+                return {
+                    "verdict": cached.get("verdict", "HOLD"),
+                    "confidence": int(cached.get("confidence", 0)),
+                    "reason": cached.get("reason", ""),
+                    "source": "cache",
+                    "age_min": round(age_min, 2),
+                }
+
+        # 2) Fallback DB verdict (persist lintas restart)
+        try:
+            raw = db.get_state(f"llm_veto_{pair_lower}")
+            ts_raw = db.get_state(f"llm_veto_ts_{pair_lower}")
+            if raw and ts_raw:
+                ts = datetime.fromisoformat(ts_raw)
+                age_min = (datetime.now() - ts).total_seconds() / 60
+                if age_min <= max_age_minutes:
+                    parsed = LLMWorker.parse_structured_result(raw)
+                    return {
+                        "verdict": parsed.get("verdict", "HOLD"),
+                        "confidence": int(parsed.get("confidence", 0)),
+                        "reason": parsed.get("reason", ""),
+                        "source": "db",
+                        "age_min": round(age_min, 2),
+                    }
+        except Exception:
+            pass
+
+        return None
+
+    def request_trade_verdict(self, pair: str, history: list, tech: dict,
+                              imbalance_ratio: float, tq_prob: float) -> bool:
+        """
+        Queue explicit LLM verdict untuk keputusan entry pair tertentu.
+        Return True jika request dikirim, False jika di-throttle/invalid.
+        """
+        pair_lower = pair.lower()
+        now = datetime.now()
+
+        # Throttle request per pair agar tidak membebani worker CPU
+        last_req = self.last_trade_verdict_request.get(pair_lower)
+        if last_req and (now - last_req).total_seconds() < 90:
+            return False
+
+        if not history:
+            return False
+
+        last_price = float(history[-1])
+        rsi_val = float(tech.get("rsi", 50.0))
+        slope_val = float(tech.get("slope", 0.0))
+        vol_val = float(tech.get("volatility", 0.0))
+
+        prompt = (
+            f"PAIR={pair.upper()} | PRICE={last_price:.8f} | RSI={rsi_val:.2f} | "
+            f"SLOPE={slope_val:.6f} | VOL={vol_val:.2f}% | IMBALANCE={imbalance_ratio:.2f}x | "
+            f"AI_PROB={tq_prob*100:.1f}%\n"
+            "Tugas: putuskan entry scalping sekarang. Gunakan output fungsi submit_verdict. "
+            "Aturan ketat: AVOID jika risiko dump/fake breakout tinggi, HOLD jika edge belum jelas, "
+            "BUY hanya jika probabilitas menang jelas lebih tinggi dari rugi setelah fee. "
+            "Berikan reason singkat dan confidence realistis."
+        )
+
+        self.llm_worker.query_structured(f"ANALYSIS:{pair_lower}", prompt)
+        self.last_trade_verdict_request[pair_lower] = now
+        return True
+
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 
     def update_consciousness(self, regime: str = None, recent_stats: dict = None):
@@ -790,6 +868,59 @@ class Oracle:
         overrides["ai_threshold"] += performance_penalty
         
         return overrides
+
+    def get_entry_policy(self, regime: str, base_dynamic_threshold: float) -> dict:
+        """
+        Policy adaptif untuk gate entry berbasis regime + performa terbaru.
+        Mengembalikan threshold yang dipakai di main loop agar keputusan lebih presisi.
+        """
+        dyn = float(base_dynamic_threshold)
+
+        # Baseline gate untuk keputusan LLM
+        llm_buy_min_conf = 60.0
+        llm_hold_block_conf = 70.0
+        llm_avoid_block_conf = 60.0
+
+        # Regime-aware adjustments
+        if regime == MarketRegime.BULLISH:
+            dyn -= 2.0
+            llm_buy_min_conf = 58.0
+            llm_hold_block_conf = 74.0
+        elif regime == MarketRegime.BEARISH:
+            dyn += 6.0
+            llm_buy_min_conf = 68.0
+            llm_hold_block_conf = 62.0
+            llm_avoid_block_conf = 55.0
+        elif regime == MarketRegime.CHOPPY:
+            dyn += 4.0
+            llm_buy_min_conf = 65.0
+            llm_hold_block_conf = 66.0
+            llm_avoid_block_conf = 58.0
+        elif regime == MarketRegime.RANGING:
+            dyn += 1.0
+            llm_buy_min_conf = 62.0
+
+        # Self-tuning dari 20 trade terakhir
+        try:
+            recent = db.get_recent_trades(limit=20)
+            if recent:
+                wins = sum(1 for t in recent if float(t.get('pnl_idr') or 0) > 0)
+                wr = wins / len(recent)
+                if wr < 0.50:
+                    dyn += 3.0
+                    llm_buy_min_conf += 3.0
+                elif wr >= 0.65:
+                    dyn -= 1.5
+                    llm_buy_min_conf -= 1.0
+        except Exception:
+            pass
+
+        return {
+            "dynamic_threshold": max(50.0, min(85.0, dyn)),
+            "llm_buy_min_conf": max(50.0, min(85.0, llm_buy_min_conf)),
+            "llm_hold_block_conf": max(55.0, min(90.0, llm_hold_block_conf)),
+            "llm_avoid_block_conf": max(50.0, min(90.0, llm_avoid_block_conf)),
+        }
 
     def learn_from_history(self) -> float:
         """

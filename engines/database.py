@@ -191,6 +191,10 @@ class Database:
                 imbalance REAL,
                 volatility REAL,
                 eta_minutes INTEGER DEFAULT 15,
+                llm_verdict TEXT DEFAULT 'HOLD',
+                llm_confidence REAL DEFAULT 0.0,
+                llm_reason TEXT DEFAULT '',
+                dry_run BOOLEAN DEFAULT 1,
                 pnl_idr REAL,
                 status TEXT DEFAULT 'OPEN'
             )''')
@@ -198,6 +202,18 @@ class Database:
             # Migration: Tambahkan kolom eta_minutes jika belum ada
             try:
                 cursor.execute("ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_verdict TEXT DEFAULT 'HOLD'")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_confidence REAL DEFAULT 0.0")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_reason TEXT DEFAULT ''")
+            except: pass
+            try:
+                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN dry_run BOOLEAN DEFAULT 1")
             except: pass
 
             # 9. Dynamic Weights (Project Evolution)
@@ -564,14 +580,116 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute(
                     """INSERT INTO trade_analytics 
-                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
                      dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'],
-                     dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15))
+                     dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
+                     dna_data.get('llm_verdict', 'HOLD'), dna_data.get('llm_confidence', 0.0),
+                     dna_data.get('llm_reason', ''), 1 if dna_data.get('dry_run', True) else 0)
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")
+
+    def get_quant_audit_report(self, window_hours=24, dry_run=1):
+        """
+        Laporan audit kuantitatif untuk dashboard:
+        - Precision per LLM verdict
+        - Expectancy (IDR/trade)
+        - Dominant loss reasons
+        """
+        report = {
+            "sample_trades": 0,
+            "expectancy_idr": 0.0,
+            "avg_win_idr": 0.0,
+            "avg_loss_idr": 0.0,
+            "verdict_precision": {
+                "BUY": {"trades": 0, "wins": 0, "precision": 0.0},
+                "HOLD": {"trades": 0, "wins": 0, "precision": 0.0},
+                "AVOID": {"trades": 0, "wins": 0, "precision": 0.0}
+            },
+            "dominant_loss_reasons": []
+        }
+
+        try:
+            with self.get_connection() as conn:
+                # Expectancy dari trade_history
+                stats = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total,
+                        AVG(pnl_idr) as expectancy,
+                        AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
+                        AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    """,
+                    (f'-{int(window_hours)} hours', int(dry_run))
+                ).fetchone()
+
+                report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
+                report["expectancy_idr"] = float((stats['expectancy'] if stats else 0) or 0.0)
+                report["avg_win_idr"] = float((stats['avg_win'] if stats else 0) or 0.0)
+                report["avg_loss_idr"] = float((stats['avg_loss'] if stats else 0) or 0.0)
+
+                # Precision per verdict dari trade_analytics yang sudah CLOSED
+                verdict_rows = conn.execute(
+                    """
+                    SELECT
+                        UPPER(COALESCE(llm_verdict, 'HOLD')) as verdict,
+                        COUNT(*) as trades,
+                        SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins
+                    FROM trade_analytics
+                    WHERE status = 'CLOSED'
+                      AND entry_timestamp >= datetime('now', ?)
+                      AND dry_run = ?
+                    GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
+                    """,
+                    (f'-{int(window_hours)} hours', int(dry_run))
+                ).fetchall()
+
+                for row in verdict_rows:
+                    verdict = row['verdict'] if row['verdict'] in report['verdict_precision'] else 'HOLD'
+                    trades = int(row['trades'] or 0)
+                    wins = int(row['wins'] or 0)
+                    precision = (wins / trades * 100.0) if trades > 0 else 0.0
+                    report['verdict_precision'][verdict] = {
+                        "trades": trades,
+                        "wins": wins,
+                        "precision": round(precision, 2)
+                    }
+
+                # Alasan loss dominan
+                loss_rows = conn.execute(
+                    """
+                    SELECT
+                        reason,
+                        COUNT(*) as cnt,
+                        AVG(pnl_idr) as avg_loss
+                    FROM trade_history
+                    WHERE created_at >= datetime('now', ?)
+                      AND dry_run = ?
+                      AND pnl_idr < 0
+                    GROUP BY reason
+                    ORDER BY cnt DESC, avg_loss ASC
+                    LIMIT 5
+                    """,
+                    (f'-{int(window_hours)} hours', int(dry_run))
+                ).fetchall()
+
+                report['dominant_loss_reasons'] = [
+                    {
+                        "reason": row['reason'] or 'UNKNOWN',
+                        "count": int(row['cnt'] or 0),
+                        "avg_loss_idr": float(row['avg_loss'] or 0.0)
+                    }
+                    for row in loss_rows
+                ]
+
+            return report
+        except Exception as e:
+            logging.error(f"[DB] get_quant_audit_report error: {e}")
+            return report
 
     def update_trade_outcome(self, pair, pnl_idr):
         try:
