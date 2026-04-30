@@ -26,7 +26,7 @@
     <div class="events-list">
       <transition-group name="feed-slide" tag="div">
         <div
-          v-for="item in store.activityFeed"
+          v-for="item in visibleFeed"
           :key="item.id"
           class="feed-item"
           :class="itemClass(item)"
@@ -42,9 +42,17 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useTradeStore } from '../stores/trade'
 
 const store = useTradeStore()
+
+const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
+
+const visibleFeed = computed(() => {
+  if (openPairSet.value.size === 0) return []
+  return store.activityFeed.filter(item => openPairSet.value.has((item.pair || '').toLowerCase()))
+})
 
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
