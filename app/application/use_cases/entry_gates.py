@@ -20,6 +20,7 @@ import numpy as np
 from config import (
     MAX_CONSECUTIVE_LOSSES,
     STRONG_IMBALANCE_RATIO,
+    DRY_RUN_LOOSE_GATES,
 )
 from app.infrastructure.database import db
 from app.domain.technicals import calculate_rsi, derive_trade_signal, get_technical_summary
@@ -111,7 +112,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-    if not ai_ready and not has_strong_imb:
+    if not DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
         log_message(
             f"SKIP [{pair}]: AI prob {tq_prob * 100:.0f}% < threshold "
             f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
@@ -120,23 +121,27 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     # ── 6. Trend / breakout requirement ───────────────────────────────────
-    if not breakout and trend != "UP":
+    if not DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
         log_message(f"SKIP [{pair}]: Tidak ada pullback & trend bukan UP (trend={trend})")
         return None
 
     # ── 7. LLM verdict — queue if missing, block until ready ──────────────
     llm_verdict = bot.oracle.get_pair_trade_verdict(pair, max_age_minutes=15)
     if not llm_verdict:
-        queued = bot.oracle.request_trade_verdict(
-            pair=pair,
-            history=history,
-            tech=tech,
-            imbalance_ratio=imbalance_ratio,
-            tq_prob=tq_prob,
-        )
-        if queued:
-            log_message(f"⏳ LLM verdict queued [{pair}] — menunggu keputusan AI sebelum entry.")
-        return None
+        if DRY_RUN_LOOSE_GATES:
+            # Saat testing, pakai default BUY agar tidak stuck menunggu LLM
+            llm_verdict = {"verdict": "BUY", "confidence": 60, "reason": "DRY_RUN_LOOSE"}
+        else:
+            queued = bot.oracle.request_trade_verdict(
+                pair=pair,
+                history=history,
+                tech=tech,
+                imbalance_ratio=imbalance_ratio,
+                tq_prob=tq_prob,
+            )
+            if queued:
+                log_message(f"⏳ LLM verdict queued [{pair}] — menunggu keputusan AI sebelum entry.")
+            return None
 
     llm_v = llm_verdict.get('verdict', 'HOLD')
     llm_c = float(llm_verdict.get('confidence', 0))
@@ -210,6 +215,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
     min_base_conf = 45.0 if current_vol <= 2.0 else 50.0
+    if DRY_RUN_LOOSE_GATES:
+        min_base_conf = 0.0  # bypass K-NN floor saat testing
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit + llm_bonus
 
@@ -221,7 +228,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     # ── 12. Confidence threshold ──────────────────────────────────────────
-    if total_confidence < dynamic_threshold:
+    effective_threshold = 0.0 if DRY_RUN_LOOSE_GATES else dynamic_threshold
+    if total_confidence < effective_threshold:
         if knn_decision['verdict'] == "AVOID":
             log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
         return None

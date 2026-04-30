@@ -328,7 +328,30 @@ class Database:
             else:
                 sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             
-            cursor.execute(sql, tuple(params))
+            try:
+                cursor.execute(sql, tuple(params))
+            except Exception as e:
+                # Fallback untuk DB lama yang belum punya kolom trade_id/is_manual/exit_order_id.
+                if "no column named trade_id" in str(e).lower():
+                    legacy_sql = '''
+                        INSERT OR IGNORE INTO trade_history (
+                            pair, entry_price, exit_price, amount_crypto, amount_idr,
+                            pnl_idr, pnl_pct, reason, duration_seconds, dry_run
+                    '''
+                    legacy_params = [
+                        pair, entry_price, exit_price, amount_crypto, amount_idr,
+                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int,
+                    ]
+
+                    if created_at:
+                        legacy_sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        legacy_params.append(created_at)
+                    else:
+                        legacy_sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+                    cursor.execute(legacy_sql, tuple(legacy_params))
+                else:
+                    raise
 
     def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""

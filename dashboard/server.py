@@ -244,8 +244,7 @@ def mobile_dashboard():
 
 @app.route('/')
 def index():
-    token = generate_view_token()
-    return render_template('index.html', view_token=token)
+    return send_from_directory(os.path.join(app.static_folder, 'dist'), 'index.html')
 
 @app.route('/favicon.ico')
 def favicon():
@@ -278,6 +277,11 @@ def check_auth():
     if 'user_id' in session:
         return jsonify({"authenticated": True, "username": session.get('username')})
     return jsonify({"authenticated": False})
+
+@app.route('/api/view-token')
+def get_view_token():
+    """Expose short-lived token for guest Socket.IO handshake."""
+    return jsonify({"token": generate_view_token()})
 
 @app.route('/api/user/settings', methods=['GET', 'POST'])
 @login_required
@@ -793,7 +797,12 @@ def get_logs():
 
 @app.route('/<path:path>')
 def static_proxy(path):
-    return send_from_directory(app.static_folder, path)
+    dist_dir = os.path.join(app.static_folder, 'dist')
+    full = os.path.join(dist_dir, path)
+    if os.path.exists(full):
+        return send_from_directory(dist_dir, path)
+    # Fallback: serve Vue SPA index.html for client-side routing
+    return send_from_directory(dist_dir, 'index.html')
 
 @socketio.on('watch_pair')
 def handle_watch_pair(data):

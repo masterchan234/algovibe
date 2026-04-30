@@ -156,6 +156,15 @@ def execute_trade(
 
         db.log_order(pair, "BUY", buy_price, amount_crypto, order.get('status'), order)
 
+        # Catat ke system_events agar muncul di Activity Feed dashboard
+        mode_label = "DRY RUN BUY" if DRY_RUN else "LIVE BUY"
+        db.log_system_event(
+            pair,
+            "BUY",
+            f"{mode_label} | Prob:{tq_prob*100:.1f}% | Rp {buy_price:,.0f} | TP:{final_tp*100:.1f}% SL:{final_sl*100:.1f}%",
+            'INFO'
+        )
+
         data = {
             "entry_price": buy_price,
             "amount": amount_crypto,
