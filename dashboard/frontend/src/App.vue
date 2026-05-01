@@ -9,7 +9,7 @@
         </div>
       </div>
       
-      <div class="header-center">
+      <div class="header-center hide-mobile">
         <div class="stat-bubble" v-if="store.stats.regime">
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>
@@ -30,6 +30,19 @@
         </div>
       </div>
     </header>
+    
+    <!-- Neural Pull-to-Refresh Indicator -->
+    <div 
+      class="pull-to-refresh" 
+      :style="{ height: pullDistance + 'px', opacity: pullDistance / threshold }"
+      :class="{ 'is-refreshing': isRefreshing }"
+    >
+      <div class="ptr-spinner">
+        <div class="spinner-core"></div>
+        <div class="spinner-ring"></div>
+      </div>
+      <span class="ptr-label">{{ isRefreshing ? 'RECALIBRATING...' : 'PULL TO REFRESH ORACLE' }}</span>
+    </div>
 
     <NotificationCenter />
 
@@ -147,11 +160,63 @@ function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
 }
 
+// Pull-to-Refresh Logic
+const pullDistance = ref(0)
+const isRefreshing = ref(false)
+const threshold = 70
+let startY = 0
+
+function handleTouchStart(e) {
+  if (document.documentElement.scrollTop <= 0) {
+    startY = e.touches[0].pageY
+  }
+}
+
+function handleTouchMove(e) {
+  if (isRefreshing.value || document.documentElement.scrollTop > 0) return
+  const currentY = e.touches[0].pageY
+  const dist = currentY - startY
+  if (dist > 0) {
+    pullDistance.value = Math.min(dist * 0.5, threshold + 20)
+    // Prevent default scroll when pulling down
+    if (dist > 10) e.stopPropagation()
+  }
+}
+
+function handleTouchEnd() {
+  if (isRefreshing.value) return
+  if (pullDistance.value >= threshold) {
+    triggerRefresh()
+  } else {
+    pullDistance.value = 0
+  }
+}
+
+async function triggerRefresh() {
+  isRefreshing.value = true
+  pullDistance.value = threshold
+  
+  try {
+    // Force re-fetch stats and AI report
+    store.socket.emit('get_stats')
+    // Simulate short network delay for UX satisfaction
+    await new Promise(r => setTimeout(r, 1200))
+  } finally {
+    isRefreshing.value = false
+    pullDistance.value = 0
+  }
+}
+
 onMounted(() => {
   store.connect()
   setInterval(() => {
     now.value = Date.now()
   }, 1000)
+  
+  // Mobile Touch listeners
+  window.addEventListener('touchstart', handleTouchStart, { passive: true })
+  window.addEventListener('touchmove', handleTouchMove, { passive: false })
+  window.addEventListener('touchend', handleTouchEnd, { passive: true })
 })
 </script>
 
@@ -366,6 +431,61 @@ body {
   50% { opacity: 0.3; }
 }
 
+/* Pull to Refresh UI */
+.pull-to-refresh {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(163, 113, 247, 0.05);
+  transition: height 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  position: relative;
+}
+
+.pull-to-refresh.is-refreshing {
+  height: 70px !important;
+}
+
+.ptr-spinner {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+
+.spinner-core {
+  position: absolute;
+  inset: 6px;
+  background: var(--accent-purple);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-purple);
+}
+
+.spinner-ring {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(163, 113, 247, 0.2);
+  border-top-color: var(--accent-purple);
+  border-radius: 50%;
+}
+
+.is-refreshing .spinner-ring {
+  animation: ptr-rotate 0.8s linear infinite;
+}
+
+.ptr-label {
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--accent-purple);
+  letter-spacing: 1px;
+}
+
+@keyframes ptr-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: 400px 1fr;
@@ -520,10 +640,55 @@ body {
 }
 
 @media (max-width: 1000px) {
-  .main-grid {
-    grid-template-columns: 1fr;
+  .app {
+    height: auto;
     overflow-y: auto;
   }
-  .left-panel { height: 500px; }
+  
+  .app-header {
+    padding: 0 16px;
+    height: 50px;
+  }
+
+  .main-title { font-size: 16px; }
+  .sub-title { display: none; }
+  
+  .hide-mobile { display: none; }
+  
+  .main-grid {
+    grid-template-columns: 1fr;
+    padding: 8px;
+    gap: 8px;
+    height: auto;
+    overflow: visible;
+  }
+  
+  .left-panel {
+    order: 2;
+    height: 500px;
+  }
+  
+  .right-panel {
+    order: 1;
+    min-height: 400px;
+  }
+
+  .app-footer {
+    height: auto;
+    flex-direction: column;
+    padding: 8px;
+    gap: 10px;
+  }
+  
+  .footer-center {
+    width: 100%;
+    margin: 0;
+    order: 3;
+  }
+  
+  .footer-left { order: 1; }
+  .footer-right { order: 2; font-size: 8px; opacity: 0.5; }
+  
+  .ticker-item { margin-right: 16px; }
 }
 </style>

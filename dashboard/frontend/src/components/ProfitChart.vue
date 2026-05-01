@@ -1019,7 +1019,44 @@ onUnmounted(() => {
   box-shadow: 0 2px 6px rgba(163, 113, 247, 0.3);
 }
 
-@media (max-width: 1200px) {
-  .radar-list { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 1000px) {
+  .kpi-bar {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .kpi-item {
+    padding: 10px;
+    border-right: 1px solid #21262d;
+    border-bottom: 1px solid #21262d;
+  }
+  .kpi-item:nth-child(2n) { border-right: none; }
+  
+  .intelligence-panel {
+    padding: 12px 16px;
+  }
+  
+  .chart-wrap-integrated {
+    height: 200px;
+    min-height: 200px;
+  }
+
+  .heatmap-tile {
+    flex: 0 0 calc(20% - 3px); /* 5 columns on mobile */
+    min-width: 50px;
+    height: 36px;
+  }
+  
+  .tile-label { font-size: 8px; }
+
+  .radar-list {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    padding: 4px 10px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .radar-list { grid-template-columns: 1fr; }
+  .heatmap-tile { flex: 0 0 calc(25% - 3px); } /* 4 columns for very small */
 }
 </style>
