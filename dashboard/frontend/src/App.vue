@@ -14,12 +14,6 @@
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>
         </div>
-        <div class="stat-bubble hide-mobile">
-          <span class="bubble-label">AI Intelligence</span>
-          <span class="bubble-value highlight" style="font-size: 10px; font-weight: 600; color: var(--accent-purple);">
-            MEMANTAU PEMILIHAN KOIN BIJAK...
-          </span>
-        </div>
         <div class="stat-bubble">
           <span class="bubble-label">Uptime</span>
           <span class="bubble-value">{{ uptimeStr }}</span>
