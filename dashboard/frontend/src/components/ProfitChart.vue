@@ -35,50 +35,45 @@
       </div>
     </div>
 
-    <!-- ECharts profit line -->
-    <div class="chart-wrap">
-      <div class="chart-header-actions">
-        <div class="tf-selector">
-          <button :class="{ active: timeframe === 'live' }" @click="setTimeframe('live')">LIVE</button>
-          <button :class="{ active: timeframe === '1h' }" @click="setTimeframe('1h')">1H</button>
-          <button :class="{ active: timeframe === '24h' }" @click="setTimeframe('24h')">24H</button>
-        </div>
-      </div>
-      <div class="chart-canvas" ref="chartContainer"></div>
-      <div v-if="timeframe === 'live' && store.pnlHistory.length === 0" class="chart-empty">
-        <div class="loading-dots">
-          <span></span><span></span><span></span>
-        </div>
-        <span>Menunggu data trading pertama…</span>
-      </div>
-      <div v-if="loadingHistory" class="chart-empty">
-        <div class="loading-dots">
-          <span></span><span></span><span></span>
-        </div>
-        <span>Fetching equity history…</span>
-      </div>
-    </div>
-
-    <!-- Equity Intelligence Analysis Panel -->
-    <div class="intelligence-panel" v-if="stats.equity_reasoning">
+    <!-- UNIFIED EQUITY PERFORMANCE ORACLE -->
+    <div class="intelligence-panel">
       <div class="intel-header">
         <div class="intel-title">
-          <span class="intel-icon">📈</span>
+          <span class="intel-icon">📊</span>
           <span>EQUITY PERFORMANCE ORACLE</span>
         </div>
         <div class="intel-meta">
+          <div class="tf-selector">
+            <button :class="{ active: timeframe === 'live' }" @click="setTimeframe('live')">LIVE</button>
+            <button :class="{ active: timeframe === '1h' }" @click="setTimeframe('1h')">1H</button>
+            <button :class="{ active: timeframe === '24h' }" @click="setTimeframe('24h')">24H</button>
+          </div>
           <div class="intel-chip" :class="stats.daily_pnl >= 0 ? 'bullish' : 'bearish'">
             {{ stats.daily_pnl >= 0 ? 'WINNING SESSION' : 'RECOVERY MODE' }}
           </div>
         </div>
       </div>
+
       <div class="intel-body">
-        <div class="intel-reasoning report-style">
+        <!-- Visual Equity Curve -->
+        <div class="chart-wrap-integrated">
+          <div class="chart-canvas-small" ref="chartContainer"></div>
+          <div v-if="timeframe === 'live' && store.pnlHistory.length === 0" class="chart-empty-small">
+            <div class="loading-dots"><span></span><span></span><span></span></div>
+            <span>Waiting for data…</span>
+          </div>
+        </div>
+
+        <!-- Executive Report Text -->
+        <div class="intel-reasoning report-style" v-if="stats.equity_reasoning">
           {{ stats.equity_reasoning }}
         </div>
+        
         <div class="report-meta">
           LAST AUDIT: {{ currentTime }}
         </div>
+
+        <!-- Pulse Metrics Grid -->
         <div class="intel-pulse-grid" v-if="stats.alpha_contributor || stats.best_trade">
           <div class="pulse-card">
             <span class="p-label">THE ALPHA</span>
@@ -91,6 +86,24 @@
           <div class="pulse-card">
             <span class="p-label">INTENSITY</span>
             <span class="p-value">{{ stats.intensity }} <small>TX/HR</small></span>
+          </div>
+        </div>
+
+        <!-- Equity Attribution Heatmap (Replacing Table) -->
+        <div class="asset-heatmap" v-if="stats.asset_contributions && stats.asset_contributions.length > 0">
+          <div class="heatmap-header">EQUITY ATTRIBUTION HEATMAP</div>
+          <div class="heatmap-grid">
+            <div 
+              v-for="asset in stats.asset_contributions" 
+              :key="asset.pair" 
+              class="heatmap-tile"
+              :style="tileStyle(asset.pnl)"
+              v-tooltip="`${asset.trades} Trades | ${formatIdr(asset.pnl)}`"
+              @click="onRadarClick(asset)"
+            >
+              <span class="tile-label">{{ formatPair(asset.pair) }}</span>
+              <span class="tile-pnl">{{ asset.pnl > 0 ? '+' : '' }}{{ (asset.pnl / 1000).toFixed(0) }}k</span>
+            </div>
           </div>
         </div>
       </div>
@@ -157,6 +170,21 @@ const store = useTradeStore()
 const stats = computed(() => store.stats)
 const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
 
+const tileStyle = (pnl) => {
+  if (pnl === 0) return { background: '#161b22', color: '#8b949e' }
+  const isPos = pnl > 0
+  const absP = Math.abs(pnl)
+  // Scale opacity between 0.1 and 0.8 based on PnL (cap at 1M for max intensity)
+  const opacity = Math.min(0.8, 0.1 + (absP / 1000000) * 0.7)
+  const color = isPos ? `rgba(63, 185, 80, ${opacity})` : `rgba(248, 81, 73, ${opacity})`
+  const borderColor = isPos ? `rgba(63, 185, 80, 0.3)` : `rgba(248, 81, 73, 0.3)`
+  return {
+    background: color,
+    border: `1px solid ${borderColor}`,
+    color: opacity > 0.4 ? '#fff' : '#e6edf3'
+  }
+}
+
 onMounted(() => {
   setInterval(() => {
     currentTime.value = new Date().toLocaleTimeString('id-ID')
@@ -209,13 +237,19 @@ const selectedPair = ref(null)
 const selectedPairData = ref(null)
 const showAiModal = ref(false)
 
-function onRadarClick(pair) {
-  selectedPair.value = pair
-  selectedPairData.value = pair
+function onRadarClick(pairObj) {
+  // Enrich data if coming from heatmap (which only has {pair: '...'})
+  let fullData = pairObj
+  if (store.radarPairs && store.radarPairs.length > 0) {
+    const match = store.radarPairs.find(p => p.pair === pairObj.pair)
+    if (match) fullData = { ...match, ...pairObj }
+  }
+  
+  selectedPair.value = fullData
+  selectedPairData.value = fullData
   showAiModal.value = true
   
-  // Optional: Emit watch_pair so backend prepares reasoning for the modal if needed
-  store.socket.emit('watch_pair', { pair: pair.pair })
+  store.socket.emit('watch_pair', { pair: fullData.pair })
 }
 
 function closeAiModal() {
@@ -516,12 +550,43 @@ onUnmounted(() => {
   text-shadow: 0 1px 2px rgba(0,0,0,0.5);
 }
 
-/* Chart */
-.chart-wrap {
+/* Intelligence Panel (Unified Oracle) */
+.intelligence-panel {
   flex: 1;
-  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: rgba(163, 113, 247, 0.02);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chart-wrap-integrated {
+  height: 240px;
+  min-height: 240px;
   position: relative;
-  background: radial-gradient(circle at 50% 50%, rgba(88, 166, 255, 0.03) 0%, transparent 70%);
+  margin: 12px 0 20px;
+  background: #0d1117;
+  border-radius: 12px;
+  border: 1px solid rgba(48, 54, 61, 0.8);
+  box-shadow: inset 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.chart-canvas-small {
+  position: absolute;
+  inset: 0;
+}
+
+.chart-empty-small {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #484f58;
+  font-size: 11px;
 }
 
 .chart-header-actions {
@@ -563,10 +628,6 @@ onUnmounted(() => {
   color: #58a6ff;
 }
 
-.chart-canvas {
-  position: absolute;
-  inset: 0;
-}
 .chart-empty {
   position: absolute;
   inset: 0;
@@ -599,21 +660,11 @@ onUnmounted(() => {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* Intelligence Panel */
-.intelligence-panel {
-  padding: 16px 20px;
-  background: rgba(163, 113, 247, 0.04);
-  border-top: 1px solid rgba(163, 113, 247, 0.15);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
 .intel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 4px;
 }
 
 .intel-title {
@@ -760,6 +811,69 @@ onUnmounted(() => {
 .p-value small {
   font-size: 9px;
   opacity: 0.6;
+}
+
+/* Equity Attribution Heatmap */
+.asset-heatmap {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.heatmap-header {
+  font-size: 9px;
+  font-weight: 800;
+  color: #484f58;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+}
+
+.heatmap-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.heatmap-grid::-webkit-scrollbar { width: 3px; }
+.heatmap-grid::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+
+.heatmap-tile {
+  flex: 0 0 calc(6.66% - 3px);
+  min-width: 32px;
+  height: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  padding: 1px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: crosshair;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+
+.heatmap-tile:hover {
+  transform: scale(1.3) translateY(-2px);
+  filter: brightness(1.5);
+  z-index: 50;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  border-color: #fff;
+}
+
+.tile-label {
+  font-size: 7px;
+  font-weight: 900;
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.tile-pnl {
+  display: none; /* Hide to keep it clean, info is in tooltip */
 }
 
 .intel-loading {

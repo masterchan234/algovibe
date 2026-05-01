@@ -24,14 +24,30 @@
 
             <div class="insight-label">ANALYSIS SUMMARY</div>
             <div class="insight-text">{{ insight }}</div>
+
+            <!-- Session Performance Bridge -->
+            <div class="insight-label" v-if="pair?.pnl != null">SESSION PERFORMANCE AUDIT</div>
+            <div class="session-perf-row" v-if="pair?.pnl != null">
+              <div class="perf-metric">
+                <span class="pm-label">CONTRIBUTION</span>
+                <span class="pm-value" :class="pair.pnl >= 0 ? 'up' : 'down'">
+                  {{ pair.pnl >= 0 ? '+' : '' }}{{ formatIdr(pair.pnl) }}
+                </span>
+              </div>
+              <div class="perf-metric">
+                <span class="pm-label">EXECUTION</span>
+                <span class="pm-value">{{ pair.trades || 0 }} <small>TRADES</small></span>
+              </div>
+            </div>
+
             <div class="insight-meta" v-if="pair">
               <div class="meta-item">
                 <span class="m-label">PROBABILITY</span>
-                <span class="m-value">{{ (pair.prediction * 100).toFixed(1) }}%</span>
+                <span class="m-value">{{ ((pair.prediction || 0) * 100).toFixed(1) }}%</span>
               </div>
               <div class="meta-item">
                 <span class="m-label">TREND</span>
-                <span class="m-value" :class="pair.trend?.toLowerCase()">{{ pair.trend }}</span>
+                <span class="m-value" :class="pair.trend?.toLowerCase()">{{ pair.trend || 'NEUTRAL' }}</span>
               </div>
             </div>
           </div>
@@ -173,6 +189,15 @@ function initChart(data) {
 watch(() => props.show, (newVal) => {
   if (newVal) loadInsight()
 })
+
+function formatIdr(val) {
+  const n = Number(val) || 0
+  const abs = Math.abs(n)
+  const prefix = n >= 0 ? '+' : '-'
+  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+  if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
+  return `${prefix}Rp ${abs.toFixed(0)}`
+}
 
 onMounted(() => {
   if (props.show) loadInsight()
@@ -339,6 +364,35 @@ onMounted(() => {
 
 .m-value.up, .m-value.bullish { color: #3fb950; }
 .m-value.down, .m-value.bearish { color: #f85149; }
+
+/* Session Performance Style */
+.session-perf-row {
+  display: flex;
+  gap: 30px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(48, 54, 61, 0.5);
+}
+.perf-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pm-label {
+  font-size: 8px;
+  font-weight: 800;
+  color: #8b949e;
+  letter-spacing: 1px;
+}
+.pm-value {
+  font-size: 14px;
+  font-weight: 800;
+  font-family: 'JetBrains Mono', monospace;
+}
+.pm-value.up { color: #3fb950; }
+.pm-value.down { color: #f85149; }
+.pm-value small { font-size: 9px; color: #8b949e; }
 
 .ai-modal-footer {
   padding: 16px 20px;

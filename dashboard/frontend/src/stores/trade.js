@@ -28,6 +28,7 @@ export const useTradeStore = defineStore('trade', () => {
     alpha_contributor: '',
     best_trade: 0,
     intensity: 0,
+    asset_contributions: [],
   })
 
   // Open positions (trades)
@@ -160,6 +161,7 @@ export const useTradeStore = defineStore('trade', () => {
         alpha_contributor: data.alpha_contributor ?? '',
         best_trade: data.best_trade ?? 0,
         intensity: data.intensity ?? 0,
+        asset_contributions: data.asset_contributions ?? [],
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

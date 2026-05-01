@@ -1066,12 +1066,27 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
-        # Cari Top Pair & Best Trade Today
+        # Cari Top Pair, Best Trade & Asset Contributions
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
             "WHERE created_at > date('now') AND reason != 'BACKTEST' "
             "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
         ).fetchone()
+        
+        contribution_rows = conn.execute(
+            "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "GROUP BY pair ORDER BY total_pnl DESC"
+        ).fetchall()
+        
+        asset_contributions = []
+        for row in contribution_rows:
+            asset_contributions.append({
+                "pair": row['pair'],
+                "pnl": float(row['total_pnl'] or 0),
+                "trades": row['tx_count']
+            })
+
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
             "WHERE created_at > date('now') AND reason != 'BACKTEST'"
@@ -1164,6 +1179,7 @@ def _build_stats_payload():
             "active_reasoning": combined_reasoning,
             "equity_reasoning": final_equity_report,
             "equity_action_plan": equity_action_plan,
+            "asset_contributions": asset_contributions,
             "technicals": tech_data,
             "sectors": db.get_all_latest_sector_sentiment(),
             "weights": db.get_all_weights(),
