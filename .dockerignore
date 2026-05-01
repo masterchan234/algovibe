@@ -25,5 +25,9 @@ patch_*.py
 
 # Secrets — jangan pernah masuk image
 .env
-models/
+
+# Models
+models/*.xnnpack_cache*
+
+# Data
 data/

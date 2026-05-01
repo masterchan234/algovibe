@@ -9,7 +9,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./models:/app/models
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]
