@@ -220,7 +220,17 @@ class LLMWorker:
 
         # [Fix BUG #3] Path dari config, absolutized dengan BASE_PATH
         self.model_path = os.path.join(BASE_PATH, MODEL_PATH)
-        self.cache_dir  = os.path.dirname(self.model_path)  # reuse .xnnpack_cache
+        # Path cache: gunakan subfolder 'cache' di dalam folder model jika tidak ditentukan
+        # Ini penting agar kita bisa mount folder cache saja sebagai writeable di filesystem read-only.
+        base_dir = os.path.dirname(self.model_path)
+        self.cache_dir = os.path.join(base_dir, "cache")
+        
+        # Pastikan folder cache ada
+        if not os.path.exists(self.cache_dir):
+            try:
+                os.makedirs(self.cache_dir, exist_ok=True)
+            except Exception:
+                pass # Akan gagal jika filesystem read-only, tapi Docker tmpfs harusnya sudah menyiapkannya
 
         if os.path.exists(self.model_path):
             self.worker_process = mp.Process(

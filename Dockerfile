@@ -36,11 +36,18 @@ COPY . .
 # This ensures we always have the latest UI inside the image
 COPY --from=frontend-builder /app/dashboard/static/dist /app/dashboard/static/dist
 
-# Ensure runtime directories exist
-RUN mkdir -p /app/data/logs /app/models
+# Ensure runtime directories exist with correct permissions
+RUN mkdir -p /app/data/logs /app/models/cache
 
 # Startup script permissions
 RUN chmod +x /app/start.sh
+
+# Security: Create non-root user
+RUN useradd -m -u 1000 algovibe && \
+    chown -R algovibe:algovibe /app
+
+# Switch to non-root user
+USER algovibe
 
 # Dashboard port
 EXPOSE 8080
