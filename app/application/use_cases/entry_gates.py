@@ -126,11 +126,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     # ── 7. LLM verdict — queue if missing, block until ready ──────────────
+    # [Scalp Optimization] Jika AI prob cukup tinggi (>40%), bypass LLM untuk entry instan.
+    is_fast_track = tq_prob >= 0.40
+    
     llm_verdict = bot.oracle.get_pair_trade_verdict(pair, max_age_minutes=15)
     if not llm_verdict:
-        if DRY_RUN_LOOSE_GATES:
-            # Saat testing, pakai default BUY agar tidak stuck menunggu LLM
-            llm_verdict = {"verdict": "BUY", "confidence": 60, "reason": "DRY_RUN_LOOSE"}
+        if DRY_RUN_LOOSE_GATES or is_fast_track:
+            # Pakai default BUY agar tidak stuck
+            llm_verdict = {"verdict": "BUY", "confidence": 60, "reason": "FAST_TRACK_SCALP" if is_fast_track else "DRY_RUN_LOOSE"}
         else:
             queued = bot.oracle.request_trade_verdict(
                 pair=pair,
@@ -149,11 +152,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 8. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
-    dynamic_threshold = 57.0
+    dynamic_threshold = 50.0 # [SCALP] Lowered from 57.0
     if current_vol > 2.0:
-        dynamic_threshold = 68.0
+        dynamic_threshold = 60.0 # [SCALP] Lowered from 68.0
     elif current_vol < 0.6:
-        dynamic_threshold = 54.0
+        dynamic_threshold = 45.0 # [SCALP] Lowered from 54.0
     if trend != "UP":
         dynamic_threshold += 4.0
 
@@ -214,7 +217,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    min_base_conf = 45.0 if current_vol <= 2.0 else 50.0
+    min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 # [SCALP] Lowered from 45/50
     if DRY_RUN_LOOSE_GATES:
         min_base_conf = 0.0  # bypass K-NN floor saat testing
     boost_credit = min(scalper_boost, 6.0)
@@ -232,6 +235,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if total_confidence < effective_threshold:
         if knn_decision['verdict'] == "AVOID":
             log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
+        else:
+            log_message(
+                f"SKIP [{pair}]: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}% "
+                f"(Base={base_confidence:.1f}, Boost={boost_credit:.1f}, LLM={llm_bonus:.1f})"
+            )
         return None
 
     log_message(

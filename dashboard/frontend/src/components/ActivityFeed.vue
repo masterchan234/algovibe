@@ -27,6 +27,10 @@
 
     <!-- Active Positions Widget -->
     <div class="positions-section" v-if="store.positions.length > 0">
+      <div class="ai-vision-notice">
+        <span class="pulse-icon">🔮</span>
+        melihat bagaimana AI Anda memilih koin-koin potensial secara lebih bijak
+      </div>
       <div class="section-label">Active Positions ({{ store.positions.length }})</div>
       <div class="positions-list">
         <div
@@ -150,6 +154,22 @@ function formatIdr(val) {
   overflow: hidden;
   border: 1px solid #30363d;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+.ai-vision-notice {
+  background: linear-gradient(135deg, rgba(163, 113, 247, 0.1) 0%, rgba(88, 166, 255, 0.05) 100%);
+  border-bottom: 1px solid rgba(163, 113, 247, 0.2);
+  padding: 10px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-purple);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.4;
+}
+.pulse-icon {
+  font-size: 16px;
+  animation: ptr-rotate 4s linear infinite;
 }
 
 .feed-header {

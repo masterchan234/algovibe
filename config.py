@@ -33,13 +33,14 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.25    # [AGGRESSIVE] Gunakan 25% saldo per koin (Fixed for 90k Balance)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
-MIN_TRADE_IDR = 10500          # Minimum order Indodax (10k + 500 buffer)
+MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
 # --- [Scalping Targets] ---
-TP_PCT = 0.04                   # Target ATR (Default)
-SL_PCT = -0.025                 # Stop Loss (diperlebar dari -2% → -2.5% agar tidak prematur)
-TRAILING_STOP_ACTIVATION_PCT = 0.015 # Aktifkan trailing setelah +1.5% (was 1.0%)
-TRAILING_STOP_DISTANCE_PCT = 0.006   # Jarak trailing 0.6% (was 0.3%, beri ruang gerak)
+TP_PCT = 0.012                  # [SCALP] Target 1.2% untuk rotasi cepat
+SL_PCT = -0.015                 # [SCALP] Stop Loss -1.5%
+TRAILING_STOP_ACTIVATION_PCT = 0.012 # Aktifkan trailing setelah +1.2%
+TRAILING_STOP_DISTANCE_PCT = 0.005   # Jarak trailing 0.5%
+MAX_HOLD_MINUTES = 15           # [SCALP] Rotasi cepat, jangan jadi bagholder
 
 MIN_NET_PROFIT_IDR = 500  # [DRY RUN TEST] Dilonggarkan dari 2500 → 500
 PENDING_BUY_TIMEOUT_MINUTES = 3
@@ -49,17 +50,17 @@ PENDING_BUY_MAX_SPREAD_PCT = 0.002
 MAX_ALLOWED_SPREAD_PCT = 0.010 # [DRY RUN TEST] Dilonggarkan dari 0.005 → 0.010
 MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
-STRONG_IMBALANCE_RATIO  = 2.0  
+STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.45 # [DRY RUN TEST] Dilonggarkan dari 0.60 → 0.45
+AI_CONFIDENCE_THRESHOLD = 0.25 # [PRO SCALP] Lebih responsif terhadap momentum mikro
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
-SELL_MAKER_OFFSET = 0.0005 # Antri jual 0.05% di atas market (TP)
-SELL_TAKER_OFFSET = 0.0500 # Jual 5% di bawah market (Instant Sell / SL)
+SELL_MAKER_OFFSET = 0.0002 # Antri jual 0.02% di atas market (TP)
+SELL_TAKER_OFFSET = 0.0080 # [CRITICAL FIX] Jual 0.8% di bawah market (was 5.0%!)
 
 # --- Deadman Switch (Safety) ---
 DEADMAN_SWITCH_ENABLED = True
@@ -98,11 +99,11 @@ SECTOR_MAP = {
 
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
-DRY_RUN = True
+DRY_RUN =   True
 
 # Longgarkan semua gate entry saat DRY_RUN untuk testing dashboard.
 # Set ke False sebelum live trading!
-DRY_RUN_LOOSE_GATES = True
+DRY_RUN_LOOSE_GATES = False
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
 # Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.

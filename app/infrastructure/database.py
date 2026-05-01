@@ -262,8 +262,8 @@ class Database:
                 INSERT INTO positions (
                     pair, entry_price, amount_crypto, amount_idr, status, 
                     entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct,
-                    trailing_sl_price, highest_price, reason_backup
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0.0), COALESCE(?, 0.0), ?)
+                    trailing_sl_price, highest_price, reason_backup, ai_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0.0), COALESCE(?, 0.0), ?, ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -277,7 +277,8 @@ class Database:
                     target_sl_pct=excluded.target_sl_pct,
                     trailing_sl_price=COALESCE(excluded.trailing_sl_price, positions.trailing_sl_price),
                     highest_price=COALESCE(excluded.highest_price, positions.highest_price),
-                    reason_backup=excluded.reason_backup
+                    reason_backup=excluded.reason_backup,
+                    ai_confidence=COALESCE(excluded.ai_confidence, positions.ai_confidence)
             ''', (
                 pair,
                 data.get('entry_price'),
@@ -292,7 +293,8 @@ class Database:
                 data.get('target_sl_pct'),
                 trailing_sl_price,
                 highest_price,
-                data.get('reason_backup')
+                data.get('reason_backup'),
+                data.get('ai_confidence', 0.0)
             ))
 
     def delete_position(self, pair):
@@ -310,7 +312,7 @@ class Database:
 
     # ── METODE UNTUK TRADE HISTORY ──
     
-    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None):
+    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_int = 1 if dry_run else 0
@@ -318,9 +320,9 @@ class Database:
             sql = '''
                 INSERT OR IGNORE INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
-                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id
+                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id, ai_confidence
                 '''
-            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id]
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id, ai_confidence]
             
             if created_at:
                 sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -382,7 +384,7 @@ class Database:
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
 
-    def get_daily_stats(self, date_str=None):
+    def get_daily_stats(self, date_str=None, dry_run=0):
         """Mengambil rekap performa untuk 24 jam terakhir. Default = last 24h."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -404,7 +406,7 @@ class Database:
                 FROM trade_history
                 WHERE {date_filter} AND dry_run = ?
             '''
-            cursor.execute(query, (0 if not date_str else 1,)) # Default to Live for daily report
+            cursor.execute(query, (int(dry_run),))
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}

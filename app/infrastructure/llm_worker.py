@@ -220,7 +220,17 @@ class LLMWorker:
 
         # [Fix BUG #3] Path dari config, absolutized dengan BASE_PATH
         self.model_path = os.path.join(BASE_PATH, MODEL_PATH)
-        self.cache_dir  = os.path.dirname(self.model_path)  # reuse .xnnpack_cache
+        # Path cache: gunakan subfolder 'cache' di dalam folder model jika tidak ditentukan
+        # Ini penting agar kita bisa mount folder cache saja sebagai writeable di filesystem read-only.
+        base_dir = os.path.dirname(self.model_path)
+        self.cache_dir = os.path.join(base_dir, "cache")
+        
+        # Pastikan folder cache ada
+        if not os.path.exists(self.cache_dir):
+            try:
+                os.makedirs(self.cache_dir, exist_ok=True)
+            except Exception:
+                pass # Akan gagal jika filesystem read-only, tapi Docker tmpfs harusnya sudah menyiapkannya
 
         if os.path.exists(self.model_path):
             self.worker_process = mp.Process(
@@ -272,16 +282,53 @@ class LLMWorker:
         self.req_queue.put((None, _CONSCIOUSNESS_SIGNAL, context_str, "context"))
 
     def check_results(self):
-        """Poll response queue dan simpan ke self.results."""
+        """Poll response queue dan simpan ke self.results. Monitor kesehatan proses."""
         if not self.is_active:
             return
+
+        # ── Health Check: Restart jika mati (ZOMBIE RECOVERY) ──
+        if self.worker_process and not self.worker_process.is_alive():
+            logger.warning("🧠 [LLMWorker] Process is dead! Attempting recovery...")
+            # Reap zombie
+            self.worker_process.join(timeout=1)
+            
+            # Jika mati berkali-kali, mungkin cache korup. Coba hapus cache.
+            if hasattr(self, '_crash_count'):
+                self._crash_count += 1
+            else:
+                self._crash_count = 1
+                
+            if self._crash_count >= 2:
+                logger.error(f"🧠 [LLMWorker] Repeated crashes ({self._crash_count}). Clearing XNNPACK cache...")
+                try:
+                    for f in os.listdir(self.cache_dir):
+                        if ".xnnpack_cache" in f:
+                            os.remove(os.path.join(self.cache_dir, f))
+                            logger.info(f"🗑️ Deleted cache file: {f}")
+                except Exception as e:
+                    logger.error(f"Failed to clear cache: {e}")
+                self._crash_count = 0 # Reset after clearing
+            
+            # Restart process
+            self.worker_process = mp.Process(
+                target=_llm_process_loop,
+                args=(self.req_queue, self.res_queue, self.model_path, self.cache_dir),
+                daemon=True,
+                name="LLMWorker",
+            )
+            self.worker_process.start()
+            logger.info("🧠 [LLMWorker] Process restarted.")
+
         while not self.res_queue.empty():
-            task_id, task_type, result = self.res_queue.get_nowait()
-            self.results[task_id] = {
-                "type":   task_type,
-                "result": result,
-                "time":   datetime.now(),
-            }
+            try:
+                task_id, task_type, result = self.res_queue.get_nowait()
+                self.results[task_id] = {
+                    "type":   task_type,
+                    "result": result,
+                    "time":   datetime.now(),
+                }
+            except Exception:
+                break
 
     def get_result(self, task_id: int) -> dict | None:
         self.check_results()
@@ -301,19 +348,43 @@ class LLMWorker:
     def parse_structured_result(result_str: str) -> dict:
         """
         Parse JSON string dari query_structured().
-        Default ke HOLD/0 jika parsing gagal (safe default).
+        Handle fallback jika model output teks (e.g. "**VERDICT: BUY**").
         """
         defaults = {
             "verdict":         "HOLD",
             "confidence":      0,
-            "reason":          "LLM tidak tersedia atau parse error",
+            "reason":          "LLM output parsed from text",
             "stop_loss_pct":   1.2,
             "take_profit_pct": 2.0,
             "eta_minutes":     15,
         }
+        
+        if not result_str:
+            return defaults
+            
         try:
+            # 1. Try standard JSON parse
             parsed = json.loads(result_str)
             defaults.update(parsed)
+            defaults["reason"] = "LLM structured decision"
             return defaults
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            # 2. Heuristic fallback for plain text output
+            raw_upper = result_str.upper()
+            if "VERDICT: BUY" in raw_upper or "BUY" in raw_upper[:30]:
+                defaults["verdict"] = "BUY"
+                defaults["confidence"] = 60 # Default moderate confidence for text BUY
+                defaults["reason"] = f"Text-Fallback: {result_str[:60]}"
+            elif "VERDICT: AVOID" in raw_upper or "AVOID" in raw_upper[:30]:
+                defaults["verdict"] = "AVOID"
+                defaults["confidence"] = 70
+                defaults["reason"] = f"Text-Fallback: {result_str[:60]}"
+            elif "VERDICT: HOLD" in raw_upper or "HOLD" in raw_upper[:30]:
+                defaults["verdict"] = "HOLD"
+                defaults["confidence"] = 40
+                defaults["reason"] = f"Text-Fallback: {result_str[:60]}"
+            else:
+                logger.warning(f"[LLMWorker] JSON Parse Error: {e} | Raw: {result_str[:200]}...")
+                defaults["reason"] = f"Parse Error: {str(e)}"
+            
             return defaults

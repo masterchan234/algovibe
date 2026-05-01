@@ -11,7 +11,7 @@ from config import (
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
-    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS
+    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS, MAX_HOLD_MINUTES
 )
 from app.infrastructure.database import db
 from app.domain.technicals import get_technical_summary, derive_trade_signal
@@ -353,6 +353,12 @@ class ExitManager:
                 trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
                 
                 current_profit_pct = (current_price - entry_price) / entry_price
+                pnl_pct = current_profit_pct * 100
+                
+                # Hitung umur posisi
+                pos_ts = datetime.fromisoformat(data['timestamp'])
+                pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
+                duration_str = f"{int(pos_age_min)}m"
                 
                 if current_price > highest_price:
                     highest_price = current_price
@@ -394,6 +400,16 @@ class ExitManager:
                         positions[pair]['trailing_sl_price'] = break_even_price
                         modified_pairs.add(pair)
                         log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
+    
+                # --- [Safety] Time-Stop Exit ---
+                if pos_age_min >= MAX_HOLD_MINUTES:
+                    msg = f"⏳ *TIME-STOP EXPIRED* ({MAX_HOLD_MINUTES}m) | {pair} | PnL: {pnl_pct:+.2f}%"
+                    log_message(msg)
+                    order_id = self.execute_exit(pair, amount, current_price, "TIME_STOP_EXIT",
+                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id:
+                        mark_exit_requested(pair, order_id)
+                        continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -485,12 +501,6 @@ class ExitManager:
                         mark_exit_requested(pair, order_id)
                         continue
     
-                # Prepare PnL and duration strings for potential exit
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                entry_time = datetime.fromisoformat(data['timestamp'])
-                duration = datetime.now() - entry_time
-                duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
-
                 # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
                 if current_price >= tp_price:
                     msg = (
@@ -653,7 +663,8 @@ class ExitManager:
                         exec_type=exec_type,
                         duration_seconds=int(duration_sec),
                         dry_run=self.dry_run,
-                        exit_order_id=order_id
+                        exit_order_id=order_id,
+                        ai_confidence=position_data.get('ai_confidence', 0.0)
                     )
                     
                     # Update Consecutive Losses state
@@ -798,8 +809,8 @@ class ExitManager:
                             pair=p_pair, entry_price=entry_price, exit_price=exit_price,
                             amount_crypto=amount_crypto, amount_idr=amount_idr,
                             pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
-                            exec_type=participant,
-                            duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run')
+                            duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
+                            ai_confidence=p_data.get('ai_confidence', 0.0)
                         )
                         
                         current_cl = int(db.get_state("consecutive_losses", 0))
@@ -1069,7 +1080,8 @@ class ExitManager:
                                 exec_type=participant,
                                 duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
                                 trade_id=ws_trade_id,
-                                exit_order_id=order_id
+                                exit_order_id=order_id,
+                                ai_confidence=position_data.get('ai_confidence', 0.0)
                             )
                             found_fill = True
                             break
@@ -1274,7 +1286,7 @@ class ExitManager:
         saved = db.get_all_shadow_orders()
         for o in saved:
             self.jaring_orders[o['pair']] = o
-    def manage_shadow_jaring(self, ranked_pairs, current_tickers):
+    def manage_shadow_jaring(self, ranked_pairs, current_tickers, balance=0):
         """
         Main entry for jaring logic. Called from the main loop.
         """
@@ -1302,7 +1314,9 @@ class ExitManager:
                 for c in candidates:
                     pair = c['pair']
                     jaring_price = c['last'] * (1 + JARING_DEPTH_PCT)
-                    amount_idr = INITIAL_CAPITAL * JARING_ALLOCATION_PCT
+                    # Use provided balance if in live mode, fallback to INITIAL_CAPITAL for dry run
+                    effective_capital = balance if not self.dry_run else INITIAL_CAPITAL
+                    amount_idr = effective_capital * JARING_ALLOCATION_PCT
                     amount_crypto = amount_idr / jaring_price
                     self.place_jaring(pair, amount_crypto, jaring_price)
                     

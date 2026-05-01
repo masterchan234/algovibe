@@ -66,6 +66,17 @@ class ScalperBot:
 
         self.oracle._load_lessons_from_db()
         self.exit_manager.reconcile_with_exchange()
+
+        # Initial balance fetch for LIVE mode
+        self.cached_balance = 0
+        if not DRY_RUN:
+            try:
+                bal = self.exchange.fetch_balance()
+                self.cached_balance = bal['free'].get('IDR', 0)
+                log_message(f"💰 INITIAL BALANCE: Rp {self.cached_balance:,.0f}")
+            except Exception as e:
+                log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
+
         self._backfill_historical_data()
 
         init_msg = (

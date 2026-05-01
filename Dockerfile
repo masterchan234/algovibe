@@ -26,18 +26,28 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy everything (except what's in .dockerignore)
+# Copy model weights first (Heavy layer, cached separately)
+COPY models/ /app/models/
+
+# Copy everything else
 COPY . .
 
 # Copy built frontend assets from Stage 1
 # This ensures we always have the latest UI inside the image
 COPY --from=frontend-builder /app/dashboard/static/dist /app/dashboard/static/dist
 
-# Ensure runtime directories exist
-RUN mkdir -p /app/data/logs /app/models
+# Ensure runtime directories exist with correct permissions
+RUN mkdir -p /app/data/logs /app/models/cache
 
 # Startup script permissions
 RUN chmod +x /app/start.sh
+
+# Security: Create non-root user
+RUN useradd -m -u 1000 algovibe && \
+    chown -R algovibe:algovibe /app
+
+# Switch to non-root user
+USER algovibe
 
 # Dashboard port
 EXPOSE 8080
