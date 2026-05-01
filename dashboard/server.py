@@ -782,12 +782,16 @@ def get_bot_status():
         ).fetchone()
         last_trade_at = str(last_trade['created_at']) if last_trade else None
 
+        # LLM Stats
+        llm_stats = LLMWorker.get_instance().get_stats()
+
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(DRY_RUN),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
-            "last_trade_at": last_trade_at
+            "last_trade_at": last_trade_at,
+            "llm": llm_stats
         })
     except Exception as e:
         return jsonify({"is_running": False, "dry_run": bool(DRY_RUN), "uptime_sec": 0})

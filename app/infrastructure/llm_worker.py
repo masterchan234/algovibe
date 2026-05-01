@@ -249,6 +249,15 @@ class LLMWorker:
         self.task_counter = 0
         self.results      = {}
 
+    def get_stats(self) -> dict:
+        """Informasi kesehatan worker untuk dashboard."""
+        return {
+            "active": self.is_active,
+            "queue_size": self.req_queue.qsize() if self.is_active else 0,
+            "results_count": len(self.results),
+            "crash_count": getattr(self, '_crash_count', 0) if self.is_active else 0
+        }
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def query_async(self, task_type: str, prompt: str) -> int | None:

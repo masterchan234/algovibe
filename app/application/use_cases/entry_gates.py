@@ -38,7 +38,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         None   — pair should be skipped (continue)
         "BREAK"— consecutive-loss halt; caller should break the pair loop
     """
+    from datetime import datetime
+    
     pair = p.get('pair', 'UNKNOWN')
+
+    def save_gate_state(msg):
+        db.save_state(f"gate_skip_{pair}", msg)
+        db.save_state(f"gate_ts_{pair}", datetime.now().isoformat())
+
     trend = enriched['trend']
     breakout = enriched['breakout']
     history = enriched['history']
@@ -100,29 +107,37 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     tech_sig = derive_trade_signal(tech)
 
     if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
-        log_message(f"⛔ OVERBOUGHT BLOCK [{pair}]: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}")
+        msg = f"⛔ OVERBOUGHT BLOCK: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
     elif tech_sig['verdict'] == 'SELL':
         log_message(f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN.")
 
     # ── 5. AI probability + imbalance threshold ────────────────────────────
     if tq_prob < 0:
-        log_message(f"WARMUP: {pair} belum cukup data untuk prediksi AI.")
+        msg = "WARMUP: belum cukup data untuk prediksi AI."
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
     if not DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
-        log_message(
-            f"SKIP [{pair}]: AI prob {tq_prob * 100:.0f}% < threshold "
+        msg = (
+            f"SKIP: AI prob {tq_prob * 100:.0f}% < threshold "
             f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
             f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
         )
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     # ── 6. Trend / breakout requirement ───────────────────────────────────
     if not DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
-        log_message(f"SKIP [{pair}]: Tidak ada pullback & trend bukan UP (trend={trend})")
+        msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     # ── 7. LLM verdict — queue if missing, block until ready ──────────────
@@ -143,7 +158,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
                 tq_prob=tq_prob,
             )
             if queued:
-                log_message(f"⏳ LLM verdict queued [{pair}] — menunggu keputusan AI sebelum entry.")
+                msg = "⏳ LLM verdict queued — menunggu keputusan AI sebelum entry."
+                log_message(f"{msg} [{pair}]")
+                save_gate_state(msg)
             return None
 
     llm_v = llm_verdict.get('verdict', 'HOLD')
@@ -165,10 +182,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 9. LLM verdict policy gate ────────────────────────────────────────
     if llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
-        log_message(f"🚫 LLM BLOCK [{pair}] {llm_c:.0f}%: {llm_r}")
+        msg = f"🚫 LLM BLOCK {llm_c:.0f}%: {llm_r}"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
     if llm_v == 'HOLD' and llm_c >= entry_policy['llm_hold_block_conf']:
-        log_message(f"🕒 LLM HOLD [{pair}] {llm_c:.0f}%: {llm_r}")
+        msg = f"🕒 LLM HOLD {llm_c:.0f}%: {llm_r}"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     llm_bonus = 0.0
@@ -178,7 +199,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # ── 10. Consecutive-loss halt ─────────────────────────────────────────
     bot.consecutive_losses = int(db.get_state("consecutive_losses", 0))
     if bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-        log_message(f"PAUSE: Hit max losses ({MAX_CONSECUTIVE_LOSSES}).")
+        msg = f"PAUSE: Hit max losses ({MAX_CONSECUTIVE_LOSSES})."
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         time.sleep(60)
         return _BREAK
 
@@ -213,7 +236,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         scalper_boost = 8.0
 
     if knn_decision.get('verdict') == "AVOID":
-        log_message(f"🚫 [K-NN Avoid] {pair}: pola historis buruk, skip.")
+        msg = "🚫 [K-NN Avoid]: pola historis buruk, skip."
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
@@ -224,22 +249,21 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     total_confidence = base_confidence + boost_credit + llm_bonus
 
     if base_confidence < min_base_conf:
-        log_message(
-            f"SKIP [{pair}]: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}% "
-            f"(vol={current_vol:.2f}%, boost_raw={scalper_boost:.1f}%)"
-        )
+        msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     # ── 12. Confidence threshold ──────────────────────────────────────────
     effective_threshold = 0.0 if DRY_RUN_LOOSE_GATES else dynamic_threshold
     if total_confidence < effective_threshold:
         if knn_decision['verdict'] == "AVOID":
-            log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
+            msg = "🚫 [K-NN Avoid]: Pola identik dengan Falling Knife masa lalu. Skip."
         else:
-            log_message(
-                f"SKIP [{pair}]: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}% "
-                f"(Base={base_confidence:.1f}, Boost={boost_credit:.1f}, LLM={llm_bonus:.1f})"
-            )
+            msg = f"SKIP: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}%"
+        
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
         return None
 
     log_message(
