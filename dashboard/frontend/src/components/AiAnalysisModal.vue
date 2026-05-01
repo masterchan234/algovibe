@@ -5,6 +5,10 @@
         <div class="header-title">
           <span class="ai-icon">🔮</span>
           <span>ORACLE INTELLIGENCE: {{ formatPair(pair?.pair) }}</span>
+          <span class="live-price-badge" v-if="livePrice">
+            <span class="price-dot"></span>
+            Rp {{ livePrice.toLocaleString('id-ID') }}
+          </span>
         </div>
         <button class="close-btn" @click="close">×</button>
       </div>
@@ -18,39 +22,78 @@
           <span>Data stream interrupted. Please retry.</span>
         </div>
         <div v-else class="content-state">
-          <div v-show="insight" class="insight-wrap">
-            <div class="insight-label">MARKET VISUALIZATION</div>
-            <div ref="chartRef" class="modal-chart"></div>
-
-            <div class="insight-label">ANALYSIS SUMMARY</div>
-            <div class="insight-text">{{ insight }}</div>
-
-            <!-- Session Performance Bridge -->
-            <div class="insight-label" v-if="pair?.pnl != null">SESSION PERFORMANCE AUDIT</div>
-            <div class="session-perf-row" v-if="pair?.pnl != null">
-              <div class="perf-metric">
-                <span class="pm-label">CONTRIBUTION</span>
-                <span class="pm-value" :class="pair.pnl >= 0 ? 'up' : 'down'">
-                  {{ pair.pnl >= 0 ? '+' : '' }}{{ formatIdr(pair.pnl) }}
-                </span>
+            <!-- Market Context Bridge (Order Book & Stats) -->
+            <div class="market-context-grid" v-if="context">
+              <div class="context-section">
+                <div class="insight-label">ORDER BOOK DEPTH</div>
+                <div class="orderbook-viz">
+                  <div class="depth-bar">
+                    <div class="depth-bid" :style="{ width: bidRatio + '%' }"></div>
+                    <div class="depth-ask" :style="{ width: askRatio + '%' }"></div>
+                  </div>
+                  <div class="depth-labels">
+                    <span class="d-bid">BIDS {{ bidRatio }}%</span>
+                    <span class="d-ask">{{ askRatio }}% ASKS</span>
+                  </div>
+                </div>
               </div>
-              <div class="perf-metric">
-                <span class="pm-label">EXECUTION</span>
-                <span class="pm-value">{{ pair.trades || 0 }} <small>TRADES</small></span>
+
+              <div class="context-section">
+                <div class="insight-label">MARKET METRICS</div>
+                <div class="metrics-mini-grid">
+                  <div class="m-metric">
+                    <span class="mm-label">SPREAD</span>
+                    <span class="mm-value">{{ context.technicals?.spread?.toFixed(3) }}%</span>
+                  </div>
+                  <div class="m-metric">
+                    <span class="mm-label">VOLATILITY</span>
+                    <span class="mm-value">{{ context.technicals?.volatility?.toFixed(2) }}%</span>
+                  </div>
+                  <div class="m-metric">
+                    <span class="mm-label">24H VOL</span>
+                    <span class="mm-value">Rp {{ (context.stats?.vol_24h / 1_000_000).toFixed(1) }}M</span>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div class="insight-meta" v-if="pair">
-              <div class="meta-item">
-                <span class="m-label">PROBABILITY</span>
-                <span class="m-value">{{ ((pair.prediction || 0) * 100).toFixed(1) }}%</span>
+            <div v-show="insight" class="insight-wrap">
+              <div class="insight-label">ANALYSIS SUMMARY</div>
+              <div class="insight-text">{{ insight }}</div>
+
+              <div class="insight-label">MARKET VISUALIZATION</div>
+              <div ref="chartRef" class="modal-chart"></div>
+
+              <!-- Session Performance Bridge -->
+              <div class="insight-label" v-if="pair?.pnl != null">SESSION PERFORMANCE AUDIT</div>
+              <div class="session-perf-row" v-if="pair?.pnl != null">
+                <div class="perf-metric">
+                  <span class="pm-label">CONTRIBUTION</span>
+                  <span class="pm-value" :class="pair.pnl >= 0 ? 'up' : 'down'">
+                    {{ pair.pnl >= 0 ? '+' : '' }}{{ formatIdr(pair.pnl) }}
+                  </span>
+                </div>
+                <div class="perf-metric">
+                  <span class="pm-label">EXECUTION</span>
+                  <span class="pm-value">{{ pair.trades || 0 }} <small>TRADES</small></span>
+                </div>
               </div>
-              <div class="meta-item">
-                <span class="m-label">TREND</span>
-                <span class="m-value" :class="pair.trend?.toLowerCase()">{{ pair.trend || 'NEUTRAL' }}</span>
+
+              <div class="insight-meta" v-if="pair">
+                <div class="meta-item">
+                  <span class="m-label">PROBABILITY</span>
+                  <span class="m-value">{{ ((pair.prediction || 0) * 100).toFixed(1) }}%</span>
+                </div>
+                <div class="meta-item">
+                  <span class="m-label">TREND</span>
+                  <span class="m-value" :class="pair.trend?.toLowerCase()">{{ pair.trend || 'NEUTRAL' }}</span>
+                </div>
+                <div class="meta-item">
+                  <span class="m-label">AI VERDICT</span>
+                  <span class="m-value highlight-purple">BIJAK</span>
+                </div>
               </div>
             </div>
-          </div>
           <div v-if="!insight" class="empty-state">
             <span class="empty-icon">📂</span>
             <span>No localized intelligence available for this sector.</span>
@@ -65,8 +108,9 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { useTradeStore } from '../stores/trade'
 
 const props = defineProps({
   show: Boolean,
@@ -75,11 +119,26 @@ const props = defineProps({
   fetchInsight: Function,
 })
 
+const store = useTradeStore()
+
+const livePrice = computed(() => {
+  if (!props.pair?.pair) return null
+  const match = store.radarPairs.find(p => p.pair === props.pair.pair)
+  return match ? match.price : (context.value?.stats?.last || null)
+})
+
 const insight = ref('')
 const loading = ref(false)
 const error = ref(false)
 const chartRef = ref(null)
+const context = ref(null)
 let chartInstance = null
+
+const bidRatio = computed(() => {
+  if (!context.value?.technicals) return 50
+  return context.value.technicals.buy_pressure || 50
+})
+const askRatio = computed(() => 100 - bidRatio.value)
 
 function close() {
   props.onClose && props.onClose()
@@ -95,22 +154,35 @@ async function loadInsight() {
   loading.value = true
   error.value = false
   insight.value = ''
+  context.value = null
+  
   try {
-    const [insightRes, chartData] = await Promise.all([
+    const [insightRes, chartData, contextData] = await Promise.all([
       props.fetchInsight(props.pair),
-      fetchChartData(props.pair.pair)
+      fetchChartData(props.pair.pair),
+      fetchMarketContext(props.pair.pair)
     ])
+    
     insight.value = insightRes
-    loading.value = false // Deactivate loading state so content-state renders
-    console.log('[Modal] State switched, waiting for DOM...', !!chartRef.value)
+    context.value = contextData
+    loading.value = false
+    
     await nextTick()
-    console.log('[Modal] DOM ready, chartRef:', !!chartRef.value, 'data length:', chartData?.length)
     initChart(chartData)
   } catch (err) {
     console.error('Modal Load Error:', err)
     error.value = true
     loading.value = false
   }
+}
+
+async function fetchMarketContext(pair) {
+  const backendUrl = import.meta.env.DEV
+    ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+    : window.location.origin
+  const res = await fetch(`${backendUrl}/api/market-context/${pair.toLowerCase()}`)
+  if (res.ok) return await res.json()
+  return null
 }
 
 async function fetchChartData(pair) {
@@ -254,6 +326,35 @@ onMounted(() => {
 
 .ai-icon { font-size: 18px; }
 
+.live-price-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(63, 185, 80, 0.15);
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: #3fb950;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 800;
+  border: 1px solid rgba(63, 185, 80, 0.3);
+  margin-left: 10px;
+}
+
+.price-dot {
+  width: 6px;
+  height: 6px;
+  background: #3fb950;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #3fb950;
+  animation: price-pulse 1s infinite alternate;
+}
+
+@keyframes price-pulse {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0.5; transform: scale(1.2); }
+}
+
 .close-btn {
   background: rgba(255, 255, 255, 0.05);
   border: none;
@@ -373,6 +474,78 @@ onMounted(() => {
   padding: 12px 16px;
   border-radius: 8px;
   border: 1px solid rgba(48, 54, 61, 0.5);
+  margin-bottom: 16px;
+}
+
+/* Market Context Grid */
+.market-context-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: rgba(163, 113, 247, 0.05);
+  border-radius: 10px;
+  border: 1px solid rgba(163, 113, 247, 0.1);
+}
+
+.orderbook-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.depth-bar {
+  height: 8px;
+  display: flex;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #21262d;
+}
+
+.depth-bid { background: #3fb950; transition: width 0.5s ease; }
+.depth-ask { background: #f85149; transition: width 0.5s ease; }
+
+.depth-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.d-bid { color: #3fb950; }
+.d-ask { color: #f85149; }
+
+.metrics-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.m-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mm-label {
+  font-size: 8px;
+  color: #8b949e;
+  font-weight: 700;
+}
+
+.mm-value {
+  font-size: 11px;
+  font-weight: 800;
+  color: #e6edf3;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.highlight-purple {
+  color: #a371f7 !important;
+  text-shadow: 0 0 10px rgba(163, 113, 247, 0.5);
 }
 .perf-metric {
   display: flex;

@@ -677,6 +677,49 @@ def get_positions_summary():
     finally:
         conn.close()
 
+@app.route('/api/market-context/<pair>')
+def get_market_context(pair):
+    """
+    Menyediakan konteks pasar lengkap untuk modal ORACLE:
+    Orderbook, Technicals, dan Market Stats.
+    """
+    pair = pair.lower()
+    tech = _get_pair_technicals(pair)
+    
+    # Ambil orderbook depth dari DB
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT price, vol, is_bid FROM market_depth WHERE pair = ? ORDER BY price DESC", 
+            (pair,)
+        ).fetchall()
+        
+        bids = [{"price": r['price'], "vol": r['vol']} for r in rows if r['is_bid'] == 1]
+        asks = [{"price": r['price'], "vol": r['vol']} for r in rows if r['is_bid'] == 0]
+        
+        # Ambil 24h stats dari WS cache jika tersedia
+        ticker_data = mws.get_tickers().get(pair, {})
+        
+        return jsonify({
+            "pair": pair,
+            "technicals": tech,
+            "orderbook": {
+                "bids": bids[:10], # Top 10
+                "asks": asks[-10:] if asks else [] # Top 10 (asks are DESC, so take last 10 for best asks)
+            },
+            "stats": {
+                "vol_24h": ticker_data.get('vol_idr', 0),
+                "change_24h": ticker_data.get('change_24h', 0),
+                "high_24h": ticker_data.get('high', 0),
+                "low_24h": ticker_data.get('low', 0),
+                "last": ticker_data.get('last', tech.get('last_price', 0))
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/api/analyze/<pair>')
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""
