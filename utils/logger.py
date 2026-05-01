@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import datetime
-from engines.telegram_bot import send_telegram_message
+from app.interfaces.telegram_bot import send_telegram_message
 
 # Setup logging ke file dan konsol
 from config import LOG_FILE
@@ -33,7 +33,7 @@ def run_performance_report(log_fn=None):
     Placeholder untuk fungsi laporan performa harian.
     Dapat diisi dengan logika rekap PnL dari database.
     """
-    from engines.database import db
+    from app.infrastructure.database import db
     stats = db.get_daily_stats()
     report = (
         f"📊 *DAILY PERFORMANCE REPORT* 📊\n"

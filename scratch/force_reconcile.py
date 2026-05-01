@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 # Add project root to path
 sys.path.append(os.getcwd())
 
-from engines.database import db
-from engines.exit_manager import ExitManager
+from app.infrastructure.database import db
+from app.application.exit_manager import ExitManager
 
 def force_reconcile():
     load_dotenv()

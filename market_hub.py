@@ -15,7 +15,7 @@ import os
 
 # Tambahkan path ke engines agar bisa import MarketDataWS
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from engines.ws_market import MarketDataWS
+from app.infrastructure.ws_market import MarketDataWS
 
 # Konfigurasi Logging
 logging.basicConfig(

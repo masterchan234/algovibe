@@ -13,8 +13,8 @@ from config import (
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS
 )
-from engines.database import db
-from engines.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.database import db
+from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
@@ -404,6 +404,29 @@ class ExitManager:
                     fee_sell_est = sell_value_est * FEE_SELL_MAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
+                    # Hard rule: jika sudah net profit, selalu tutup posisi sekarang juga.
+                    if net_pnl_idr > 0:
+                        reason_tp = "FORCE_PROFIT_EXIT"
+                        log_msg = (
+                            f"⚡ [{reason_tp}] {pair}: Net profit Rp {net_pnl_idr:,.0f} "
+                            f"(+{current_profit_pct*100:.2f}%)"
+                        )
+                        log_message(log_msg)
+                        db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
+
+                        order_id = self.execute_exit(
+                            pair,
+                            amount,
+                            current_price,
+                            reason_tp,
+                            entry_price=entry_price,
+                            amount_idr=data.get('amount_idr', 0),
+                            position_data=data,
+                        )
+                        if order_id:
+                            mark_exit_requested(pair, order_id)
+                        continue
+
                     # Syarat 1: Profit Bersih sudah melampaui target minimum (Jangan menunggu!)
                     is_profit_secure = net_pnl_idr >= MIN_NET_PROFIT_IDR
                     
@@ -596,7 +619,16 @@ class ExitManager:
             fee_sell = sell_value * fee_sell_rate
             gross_pnl = (exit_price - entry_price) * amount
             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-            
+
+            # Catat ke system_events agar muncul di Activity Feed dashboard
+            pnl_label = f"+Rp {net_pnl_idr:,.0f}" if net_pnl_idr >= 0 else f"-Rp {abs(net_pnl_idr):,.0f}"
+            db.log_system_event(
+                pair,
+                "SELL",
+                f"{reason} | Rp {exit_price:,.0f} | PnL:{pnl_label}",
+                'SUCCESS' if net_pnl_idr >= 0 else 'WARN'
+            )
+
             if order_status in ['closed', 'canceled', 'done', 'fill'] or self.dry_run:
                 db.delete_position(pair)
                 

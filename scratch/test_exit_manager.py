@@ -5,12 +5,12 @@ from unittest.mock import MagicMock
 # Add project root to path
 sys.path.append(os.getcwd())
 
-# Mock engines.database.db before importing ExitManager
-import engines.database
+# Mock app.infrastructure.database.db before importing ExitManager
+import app.infrastructure.database
 mock_db = MagicMock()
-engines.database.db = mock_db
+app.infrastructure.database.db = mock_db
 
-from engines.exit_manager import ExitManager
+from app.application.exit_manager import ExitManager
 
 def test_handle_order_update():
     print("Testing handle_order_update...")

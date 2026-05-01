@@ -23,8 +23,8 @@ from config import (
     MAKER_FEE, PPH_RATE, PPN_RATE, FEE_PER_SIDE, FEE_ROUNDTRIP,
     DAILY_REPORT
 )
-from engines.telegram_bot import send_telegram_message
-from engines.database import db
+from app.interfaces.telegram_bot import send_telegram_message
+from app.infrastructure.database import db
 
 def calculate_24h_performance(reference_ts: float | None = None) -> dict:
     """

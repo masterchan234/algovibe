@@ -41,18 +41,18 @@ SL_PCT = -0.025                 # Stop Loss (diperlebar dari -2% → -2.5% agar 
 TRAILING_STOP_ACTIVATION_PCT = 0.015 # Aktifkan trailing setelah +1.5% (was 1.0%)
 TRAILING_STOP_DISTANCE_PCT = 0.006   # Jarak trailing 0.6% (was 0.3%, beri ruang gerak)
 
-MIN_NET_PROFIT_IDR = 2500 # Target profit bersih minimal harus terasa (Rp 2500 per 500k trade)
+MIN_NET_PROFIT_IDR = 500  # [DRY RUN TEST] Dilonggarkan dari 2500 → 500
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
 # --- Filter Criteria (Mean Reversion) ---
-MAX_ALLOWED_SPREAD_PCT = 0.005 # Max 0.5% spread
-MIN_TRACKING_VOLATILITY = 0.8  # Pantau koin yang lincah
+MAX_ALLOWED_SPREAD_PCT = 0.010 # [DRY RUN TEST] Dilonggarkan dari 0.005 → 0.010
+MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
 STRONG_IMBALANCE_RATIO  = 2.0  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.60 # Beli jika probabilitas >= 60% (dinaikkan dari 55% — win rate backtest 46% < 50%)
+AI_CONFIDENCE_THRESHOLD = 0.45 # [DRY RUN TEST] Dilonggarkan dari 0.60 → 0.45
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
@@ -99,6 +99,10 @@ SECTOR_MAP = {
 # Set ke False untuk eksekusi order nyata ke Indodax.
 # Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
 DRY_RUN = True
+
+# Longgarkan semua gate entry saat DRY_RUN untuk testing dashboard.
+# Set ke False sebelum live trading!
+DRY_RUN_LOOSE_GATES = True
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
 # Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.

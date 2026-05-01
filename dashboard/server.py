@@ -15,9 +15,10 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from functools import wraps
 import secrets
-from engines.database import db
-from engines.ws_market import MarketDataWS
-from engines.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.database import db
+from app.infrastructure.ws_market import MarketDataWS
+from app.domain.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 
 # Exchange instance untuk public data (OHLCV)
@@ -188,6 +189,71 @@ def _get_pair_technicals(pair):
     finally:
         conn.close()
 
+def _generate_equity_report_llm(stats):
+    """Kirim prompt ke LLM untuk membuat Executive Report yang sesungguhnya."""
+    worker = LLMWorker.get_instance()
+    if not worker.is_active:
+        return
+        
+    prompt = (
+        "Buatlah 'Executive Report' singkat tentang performa trading bot saat ini.\n"
+        f"DATA SESI:\n"
+        f"- Status PnL: {stats['pnl']:,.0f} IDR\n"
+        f"- Unrealized: {stats['unrealized']:,.0f} IDR\n"
+        f"- Win Rate: {stats['win_rate']}%\n"
+        f"- Total Trades: {stats['trades']}\n"
+        f"- Regime: {stats['regime']}\n"
+        f"- Alpha Contributor: {stats['top_pair']}\n"
+        f"- Trading Intensity: {stats['intensity']} tx/hr\n\n"
+        "Format laporan dengan section: [REPORT STATUS], [CONTEXT], [AUDIT], [STRATEGY], [NEXT ACTION]. "
+        "Pada section [NEXT ACTION], berikan satu kalimat direktif tajam apa yang harus dilakukan bot selanjutnya. "
+        "Gunakan bahasa Indonesia yang profesional."
+    )
+    worker.query_async("equity_report", prompt)
+
+def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
+    """Memberikan Executive Report performa portofolio secara terstruktur."""
+    total_equity = pnl + unrealized
+    status = "OPTIMAL" if total_equity >= 0 else "CAUTION"
+    
+    # Action Plan Logic
+    action_plan = "NEUTRAL"
+    if regime == 'BULL' and win_rate > 50:
+        action_plan = "EXPANSION: AI akan meningkatkan alokasi pada sinyal Oracle > 85%."
+    elif regime == 'BEAR' or win_rate < 40:
+        action_plan = "CONTRACTION: Membatasi posisi baru dan memperketat jaring pengaman (SL)."
+    elif regime == 'CHOPPY':
+        action_plan = "SCALPING ONLY: Eksekusi jangka pendek, hindari risiko holding semalam."
+    else:
+        action_plan = "MAINTENANCE: Menunggu konfirmasi volume untuk langkah selanjutnya."
+
+    # 1. Market Context
+    report = f"REPORT STATUS: {status}\n"
+    report += f"NEXT ACTION: {action_plan}\n\n"
+    report += f"CONTEXT: Market saat ini berada dalam rezim {regime}. "
+    if regime == 'BULL':
+        report += "Kondisi mendukung ekspansi aset. "
+    elif regime == 'BEAR':
+        report += "Volatilitas tinggi, tekanan jual mendominasi. "
+    else:
+        report += "Konsolidasi harga terdeteksi, minim tren kuat. "
+        
+    # 2. Performance Audit
+    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {win_rate}%. "
+    if top_pair:
+        report += f"Aset {top_pair.replace('idr','').upper()} menunjukkan anomali profit positif. "
+    
+    if unrealized < 0 and abs(unrealized) > 150000:
+        report += "Terdapat floating loss signifikan yang memerlukan pengawasan ketat. "
+
+    # 3. Strategy Narrative
+    if total_equity > 0:
+        report += "Strategi saat ini mempertahankan profit buffer untuk mitigasi risiko mendadak."
+    else:
+        report += "Bot berfokus pada efisiensi keluar posisi untuk meminimalkan degradasi ekuitas."
+
+    return report, action_plan
+
 def _generate_technical_reasoning(pair, tech, last_price=None):
     """Buat narasi nalar kuantitatif. last_price diteruskan agar tidak ada query DB ulang."""
     rsi   = tech.get('rsi', 50)
@@ -244,8 +310,7 @@ def mobile_dashboard():
 
 @app.route('/')
 def index():
-    token = generate_view_token()
-    return render_template('index.html', view_token=token)
+    return send_from_directory(os.path.join(app.static_folder, 'dist'), 'index.html')
 
 @app.route('/favicon.ico')
 def favicon():
@@ -278,6 +343,11 @@ def check_auth():
     if 'user_id' in session:
         return jsonify({"authenticated": True, "username": session.get('username')})
     return jsonify({"authenticated": False})
+
+@app.route('/api/view-token')
+def get_view_token():
+    """Expose short-lived token for guest Socket.IO handshake."""
+    return jsonify({"token": generate_view_token()})
 
 @app.route('/api/user/settings', methods=['GET', 'POST'])
 @login_required
@@ -389,6 +459,9 @@ def get_stats():
             "active_reasoning": combined_reasoning,
             "technicals": tech_data,
             "sectors": sectors,
+            "alpha_contributor": top_pair,
+            "best_trade": best_trade,
+            "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1),
             "weights": db.get_all_weights(),
             "quant_audit": quant_audit,
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
@@ -466,6 +539,58 @@ def get_positions():
     finally:
         conn.close()
 
+@app.route('/api/pnl-history/<tf>')
+def get_pnl_history_api(tf):
+    """
+    Menyusun histori ekuitas (PnL kumulatif) dari database trade_history.
+    """
+    conn = get_db_connection()
+    try:
+        from config import DRY_RUN
+        dr_val = 1 if DRY_RUN else 0
+        
+        tf_map = {
+            '1h': '-1 hours',
+            '24h': '-24 hours',
+            '7d': '-7 days'
+        }
+        interval = tf_map.get(tf, '-24 hours')
+        
+        base_row = conn.execute(
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'",
+            (interval, dr_val)
+        ).fetchone()
+        current_pnl = float(base_row['total'] or 0.0)
+        
+        trades = conn.execute(
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            (interval, dr_val)
+        ).fetchall()
+        
+        results = []
+        results.append({
+            "time": "Start",
+            "pnl": round(current_pnl, 0)
+        })
+        
+        for t in trades:
+            current_pnl += float(t['pnl_idr'] or 0.0)
+            ts = t['created_at']
+            try:
+                dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                time_str = dt.strftime("%M:%S") if tf == '1h' else dt.strftime("%H:%M")
+            except:
+                time_str = ts
+            results.append({"time": time_str, "pnl": round(current_pnl, 0)})
+        return jsonify(results)
+    except Exception as e:
+        import traceback
+        print(f"PNL HISTORY ERROR: {e}")
+        traceback.print_exc()
+        return jsonify([])
+    finally:
+        conn.close()
+
 @app.route('/api/debug/positions-summary')
 def get_positions_summary():
     """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
@@ -537,9 +662,28 @@ def get_positions_summary():
 @app.route('/api/analyze/<pair>')
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""
-    # Gunakan key yang sama dengan yang dimonitor oracle.py
     db.save_state("trigger_analysis_pair", pair.lower())
     return jsonify({"status": "requested", "pair": pair})
+
+@app.route('/api/reasoning/<pair>')
+def get_pair_reasoning(pair):
+    """Ambil nalar AI/LLM terbaru untuk koin tertentu."""
+    p = pair.lower().strip()
+    reasoning = db.get_state(f"llm_reasoning_{p}")
+    if not reasoning:
+        # Fallback ke technical reasoning jika LLM belum ada
+        conn = get_db_connection()
+        try:
+            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (p,)).fetchone()
+            prices = json.loads(row['history_json']) if row and row['history_json'] else []
+            from app.domain.technicals import get_technical_summary
+            tech = get_technical_summary(prices)
+            reasoning = _generate_technical_reasoning(p, tech)
+        except:
+            reasoning = "Data intelijen sedang dikalkulasi..."
+        finally:
+            conn.close()
+    return jsonify({"pair": p, "reasoning": reasoning})
 
 @app.route('/api/exit/<pair>', methods=['POST'])
 @login_required
@@ -793,7 +937,12 @@ def get_logs():
 
 @app.route('/<path:path>')
 def static_proxy(path):
-    return send_from_directory(app.static_folder, path)
+    dist_dir = os.path.join(app.static_folder, 'dist')
+    full = os.path.join(dist_dir, path)
+    if os.path.exists(full):
+        return send_from_directory(dist_dir, path)
+    # Fallback: serve Vue SPA index.html for client-side routing
+    return send_from_directory(dist_dir, 'index.html')
 
 @socketio.on('watch_pair')
 def handle_watch_pair(data):
@@ -895,7 +1044,7 @@ def _build_stats_payload():
         if updated_at:
             try:
                 # SQLite CURRENT_TIMESTAMP is UTC
-                dt = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
                 if (datetime.utcnow() - dt).total_seconds() < 180:
                     is_stale = False
             except: pass
@@ -917,7 +1066,97 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
+        # Cari Top Pair, Best Trade & Asset Contributions
+        top_pair_row = conn.execute(
+            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
+        ).fetchone()
+        
+        contribution_rows = conn.execute(
+            "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "GROUP BY pair ORDER BY total_pnl DESC"
+        ).fetchall()
+        
+        asset_contributions = []
+        for row in contribution_rows:
+            asset_contributions.append({
+                "pair": row['pair'],
+                "pnl": float(row['total_pnl'] or 0),
+                "trades": row['tx_count']
+            })
+
+        best_trade_row = conn.execute(
+            "SELECT MAX(pnl_idr) FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
+        ).fetchone()
+        
+        top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
+        best_trade = float(best_trade_row[0] or 0)
+        regime = stats_dict.get('market_regime', 'CHOPPY')
+
+        equity_reasoning, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+
+        # --- Uptime Logic ---
+        first_trade_row = conn.execute("SELECT MIN(created_at) FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+        first_trade_ts = 0
+        if first_trade_row and first_trade_row[0]:
+            try:
+                dt_str = first_trade_row[0]
+                dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                first_trade_ts = int(dt.timestamp() * 1000)
+            except: pass
+
+        # --- LLM Executive Report Integration ---
+        equity_reasoning_ai, updated_at = db.get_state_with_time("llm_equity_report")
+        
+        is_stale_report = True
+        if updated_at:
+            try:
+                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                if (datetime.utcnow() - dt).total_seconds() < 600:
+                    is_stale_report = False
+            except: pass
+            
+        if is_stale_report:
+            _generate_equity_report_llm({
+                "pnl": active_pnl, "unrealized": unrealized_pnl, "win_rate": active_win_rate,
+                "trades": perf['total_trades'], "regime": regime, "top_pair": top_pair,
+                "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1)
+            })
+            
+        latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
+        if latest_report:
+            db.set_state("llm_equity_report", latest_report)
+            equity_reasoning_ai = latest_report
+
+        equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+        
+        final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
+            
+        # Poll for any finished reports
+        latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
+        if latest_report:
+            db.set_state("llm_equity_report", latest_report)
+            equity_reasoning_ai = latest_report
+
+        # Fallback ke technical reasoning jika AI belum siap
+        equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+        
+        final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
+
         return {
+            "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
@@ -938,6 +1177,9 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "active_reasoning": combined_reasoning,
+            "equity_reasoning": final_equity_report,
+            "equity_action_plan": equity_action_plan,
+            "asset_contributions": asset_contributions,
             "technicals": tech_data,
             "sectors": db.get_all_latest_sector_sentiment(),
             "weights": db.get_all_weights(),
@@ -945,7 +1187,6 @@ def _build_stats_payload():
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": history_since,
             "new_listings": db.get_new_listings(),
-            # Bot liveness — digunakan untuk memperbarui badge "CONNECTING" di UI
             "bot_running": True
         }
     finally:
@@ -959,7 +1200,8 @@ def _build_radar_payload():
     
     try:
         rows = conn.execute(
-            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at FROM ticker_history"
+            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at "
+            "FROM ticker_history ORDER BY score DESC LIMIT 50"
         ).fetchall()
         results = []
         for row in rows:
