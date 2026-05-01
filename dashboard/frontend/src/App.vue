@@ -44,9 +44,36 @@
 
     <footer class="app-footer">
       <div class="footer-left">
-        <span class="mode-badge" :class="{ 'dry-run': isDryRun }">
-          {{ isDryRun ? 'SIMULATION MODE (DRY RUN)' : 'PRODUCTION MODE (LIVE)' }}
-        </span>
+        <div class="mode-container">
+          <span class="mode-badge" :class="{ 'dry-run': isDryRun }">
+            {{ isDryRun ? 'SIMULATION MODE (DRY RUN)' : 'PRODUCTION MODE (LIVE)' }}
+            <span class="info-icon">ⓘ</span>
+          </span>
+          
+          <!-- Technical Tooltip -->
+          <div class="mode-tooltip" v-if="isDryRun">
+            <div class="tooltip-header">SIMULATION BLUEPRINT</div>
+            <div class="tooltip-body">
+              <div class="tooltip-row">
+                <span class="t-bullet">🛡️</span>
+                <span class="t-text"><strong>Zero Capital Risk:</strong> Eksekusi bersifat virtual, saldo Indodax tidak tersentuh.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">📡</span>
+                <span class="t-text"><strong>Real Market Data:</strong> Menggunakan stream WebSocket real-time untuk akurasi harga.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">🔓</span>
+                <span class="t-text"><strong>Loose Gates:</strong> Ambang batas entry dilonggarkan untuk pengujian dashboard.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">🧠</span>
+                <span class="t-text"><strong>AI Active:</strong> Oracle tetap memberikan nalar dan strategi secara penuh.</span>
+              </div>
+            </div>
+            <div class="tooltip-footer">Set DRY_RUN=False di config.py untuk trading riil.</div>
+          </div>
+        </div>
       </div>
       <div class="footer-center">
         <div class="ticker-tape">
@@ -382,6 +409,81 @@ body {
   background: rgba(210, 153, 34, 0.15);
   color: var(--accent-yellow);
   border-color: rgba(210, 153, 34, 0.3);
+}
+
+.info-icon {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* Advanced Tooltip Styling */
+.mode-container {
+  position: relative;
+  display: inline-block;
+}
+
+.mode-tooltip {
+  position: absolute;
+  bottom: 150%;
+  left: 0;
+  width: 280px;
+  background: #1c2128;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  z-index: 1000;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.mode-container:hover .mode-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.tooltip-header {
+  font-size: 10px;
+  font-weight: 900;
+  color: var(--accent-blue);
+  letter-spacing: 1.5px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.tooltip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tooltip-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.t-bullet { font-size: 14px; }
+.t-text {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-main);
+}
+.t-text strong { color: var(--accent-purple); }
+
+.tooltip-footer {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-dim);
+  font-size: 9px;
+  font-style: italic;
+  color: var(--text-dim);
 }
 
 .footer-center {
