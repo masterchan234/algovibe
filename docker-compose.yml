@@ -1,8 +1,9 @@
 services:
   algovibe:
-    image: 80.241.217.181:5000/algovibe:latest
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
     container_name: algovibe
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - .env
     ports:
@@ -10,6 +11,12 @@ services:
     volumes:
       - ./models:/app/models
       - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     logging:
       driver: "json-file"
       options:
