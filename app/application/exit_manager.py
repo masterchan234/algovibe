@@ -663,7 +663,8 @@ class ExitManager:
                         exec_type=exec_type,
                         duration_seconds=int(duration_sec),
                         dry_run=self.dry_run,
-                        exit_order_id=order_id
+                        exit_order_id=order_id,
+                        ai_confidence=position_data.get('ai_confidence', 0.0)
                     )
                     
                     # Update Consecutive Losses state
@@ -808,8 +809,8 @@ class ExitManager:
                             pair=p_pair, entry_price=entry_price, exit_price=exit_price,
                             amount_crypto=amount_crypto, amount_idr=amount_idr,
                             pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
-                            exec_type=participant,
-                            duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run')
+                            duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
+                            ai_confidence=p_data.get('ai_confidence', 0.0)
                         )
                         
                         current_cl = int(db.get_state("consecutive_losses", 0))
@@ -1079,7 +1080,8 @@ class ExitManager:
                                 exec_type=participant,
                                 duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
                                 trade_id=ws_trade_id,
-                                exit_order_id=order_id
+                                exit_order_id=order_id,
+                                ai_confidence=position_data.get('ai_confidence', 0.0)
                             )
                             found_fill = True
                             break

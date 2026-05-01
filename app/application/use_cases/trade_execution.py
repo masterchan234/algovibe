@@ -178,6 +178,7 @@ def execute_trade(
             "target_tp_pct": final_tp,
             "target_sl_pct": final_sl,
             "reason_backup": trend,
+            "ai_confidence": tq_prob * 100,
         }
 
         db.upsert_position(pair, data)

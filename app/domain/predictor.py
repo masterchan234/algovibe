@@ -1,7 +1,29 @@
+import os
+import time
+import joblib
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from utils.logger import log_message
+
+# Global model cache
+MODEL_PATH = "models/scalper_v2.joblib"
+_model = None
+
+def _load_model():
+    global _model
+    if _model is None and os.path.exists(MODEL_PATH):
+        try:
+            # Pastikan scikit-learn tersedia di environment saat memuat
+            _model = joblib.load(MODEL_PATH)
+            log_message(f"🧠 [AI Engine] Scalper V2 Model loaded successfully.")
+        except Exception as e:
+            log_message(f"⚠️ [AI Engine] Failed to load model: {e}")
+    return _model
+
 def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: float = 0.0) -> float:
     """
-    Menghitung probabilitas eksekusi menggunakan Microstructure, Orderbook Imbalance, & Micro-Pullbacks.
-    Juga menerima `llm_boost` dari Oracle untuk memperhitungkan opini kualitatif AI.
+    Menghitung probabilitas eksekusi menggunakan Heuristic + Machine Learning (Scalper V2).
     """
     from config import AI_MIN_HISTORY_POINTS
     
@@ -10,64 +32,68 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
         return -1.0  # Warming Up
 
     try:
-        prob = 0.45  # Base Score (Increased for Scalping)
+        # --- 1. HEURISTIC BASE SCORE (Legacy Logic) ---
+        prob = 0.45 
         current_price = price_history[-1]
-
-        # --- 1. LLM Qualitative Boost ---
-        # Interaksi langsung dengan hasil pemikiran LiteRT-LM (Oracle)
         prob += llm_boost
 
-        # --- 2. Orderbook Imbalance (Filter Fake Breakout) ---
+        imbalance_val = 0.5
         if ticker_data:
             bid_depth = float(ticker_data.get("bid_depth", 0))
             ask_depth = float(ticker_data.get("ask_depth", 0))
-            total_depth = bid_depth + ask_depth
-            if total_depth > 0:
-                imbalance = bid_depth / total_depth
-                if imbalance > 0.60:
-                    prob += 0.15  # More lenient buy flow
-                elif imbalance < 0.35:
-                    prob -= 0.15  # Reduced penalty for imbalance (Scalp focus)
+            if (bid_depth + ask_depth) > 0:
+                imbalance_val = bid_depth / (bid_depth + ask_depth)
+                if imbalance_val > 0.60: prob += 0.15
+                elif imbalance_val < 0.35: prob -= 0.15
 
-        # --- 3. Noise Filtering (EMA Smoothing) ---
+        # EMA & Slope logic
         alpha = 0.2
-        smoothed_history = [price_history[0]]
-        for i in range(1, n):
-            ema = (price_history[i] * alpha) + (smoothed_history[-1] * (1 - alpha))
-            smoothed_history.append(ema)
-
-        smoothed_current = smoothed_history[-1]
-
-        # --- 4. Micro-Pullback & Peak Penalty ---
-        # Untuk scalping, breakout di puncak terkadang adalah sinyal beli terbaik.
-        recent_10 = price_history[-10:]
-        recent_max = max(recent_10)
+        ema_val = price_history[0]
+        for p in price_history:
+            ema_val = (p * alpha) + (ema_val * (1 - alpha))
         
-        if current_price >= recent_max:
-            # Scalping: Jangan terlalu takut beli di puncak jika ada momentum
-            prob -= 0.05 # Reduced penalty significantly
-        else:
-            # Harga turun sedikit dari pucuk (Ideal Pullback)
-            drop_from_max = (recent_max - current_price) / recent_max
-            if 0.0005 <= drop_from_max <= 0.005:
-                prob += 0.25 # Bonus Pullback Entry
+        ema_dist = (current_price - ema_val) / ema_val if ema_val > 0 else 0
 
-        # --- 5. Linear Regression Slope (Trend Check) ---
-        sum_x = n * (n - 1) / 2
-        sum_y = sum(smoothed_history)
-        sum_xy = sum(i * smoothed_history[i] for i in range(n))
-        sum_x2 = sum(i * i for i in range(n))
-        
-        # [Fix] OLS denominator yang benar: n*Σx² - (Σx)² — bukan n*Σx² - Σx*Σy
-        denominator = (n * sum_x2 - sum_x**2) if (n * sum_x2 - sum_x**2) != 0 else 1
-        slope = (n * sum_xy - sum_x * sum_y) / denominator
-        slope_pct = (slope / smoothed_current) * 100
-        
-        if slope_pct > 0.002:
-            prob += 0.15 # Trend masih naik
+        # --- 2. MACHINE LEARNING REFINEMENT (Scalper V2) ---
+        model = _load_model()
+        if model:
+            # Prepare features for RF Model
+            # features = ['ai_prob', 'whale_boost', 'sector_sentiment', 'imbalance', 'volatility', 'rsi', 'ema_dist', 'hour']
+            
+            # [Note] Kita butuh estimasi volatility & RSI untuk model
+            volatility = np.std(price_history[-10:]) / np.mean(price_history[-10:]) if len(price_history) >= 10 else 0
+            
+            # Simple RSI approximation
+            deltas = np.diff(price_history[-15:]) if len(price_history) >= 15 else []
+            if len(deltas) > 0:
+                gains = np.mean(deltas[deltas > 0]) if any(deltas > 0) else 0
+                losses = np.mean(-deltas[deltas < 0]) if any(deltas < 0) else 0.0001
+                rsi = 100 - (100 / (1 + gains / losses))
+            else:
+                rsi = 50
 
+            features_df = pd.DataFrame([{
+                'ai_prob': prob, # Masukkan heuristic score sebagai input
+                'whale_boost': 1.0, # Default if not provided
+                'sector_sentiment': 50.0, # Default
+                'imbalance': imbalance_val,
+                'volatility': volatility,
+                'rsi': rsi,
+                'ema_dist': ema_dist,
+                'hour': datetime.now().hour
+            }])
+
+            # Predict probability of being profitable (class 1)
+            ml_prob = model.predict_proba(features_df)[0][1]
+            
+            # Blend Heuristic (40%) + ML (60%)
+            final_prob = (prob * 0.4) + (ml_prob * 0.6)
+            return round(max(0.0, min(final_prob, 0.99)), 4)
+
+        # Fallback to pure heuristic if model not found
         prob = max(0.0, min(prob, 0.99))
         return prob
 
-    except Exception:
+    except Exception as e:
+        log_message(f"Prediction Error: {e}")
         return 0.0
