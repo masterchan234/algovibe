@@ -866,6 +866,26 @@ class Oracle:
         # Self-Tuning based on recent performance
         performance_penalty = self.learn_from_history()
         overrides["ai_threshold"] += performance_penalty
+
+        # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
+        try:
+            from config import DRY_RUN
+            stats = db.get_daily_stats(dry_run=1 if DRY_RUN else 0) # Ambil statistik 24 jam terakhir
+            daily_pnl = stats.get('total_pnl_idr', 0)
+            
+            # 1. Profit-Pause (Proteksi Cuan)
+            # Jika sudah profit > 5% dari modal harian (misal > 5jt), naikkan threshold sangat tinggi
+            if daily_pnl > 5_000_000:
+                logger.info(f"[Oracle] Equity-Shield: Profit Harian Tinggi (Rp {daily_pnl:,.0f}). Mengetatkan entry.")
+                overrides["ai_threshold"] += 0.20 # Sangat selektif
+            
+            # 2. Recovery-Mode (Balikkan Keadaan)
+            # Jika sedang merugi (red), turunkan threshold sedikit agar lebih agresif mencari peluang rebound
+            elif daily_pnl < -2_000_000:
+                logger.info(f"[Oracle] Recovery-Mode: Drawdown terdeteksi (Rp {daily_pnl:,.0f}). Melonggarkan entry.")
+                overrides["ai_threshold"] -= 0.05 # Lebih agresif
+        except Exception as e:
+            logger.error(f"[Oracle] Equity adaptation error: {e}")
         
         return overrides
 

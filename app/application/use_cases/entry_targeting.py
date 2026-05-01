@@ -57,13 +57,9 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
         final_dyn_tp = knn_decision['target_tp']
         final_dyn_sl = knn_decision['target_sl']
 
-    use_taker = (
-        total_confidence > 85.0
-        and imbalance_ratio > 3.0
-        and current_vol < 2.2
-        and tq_prob >= (adaptive_cfg['ai_threshold'] + 0.08)
-    )
-    mode_str = "🚀 TAKER (INSTANT)" if use_taker else "🎣 MAKER (LIMIT EMA-9)"
+    # [Scalp Optimization] Selalu gunakan TAKER (Market Order) untuk kecepatan eksekusi
+    use_taker = True
+    mode_str = "🚀 TAKER (INSTANT MARKET BUY)"
     log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
 
     return {

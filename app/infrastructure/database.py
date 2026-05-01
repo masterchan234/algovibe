@@ -382,7 +382,7 @@ class Database:
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
 
-    def get_daily_stats(self, date_str=None):
+    def get_daily_stats(self, date_str=None, dry_run=0):
         """Mengambil rekap performa untuk 24 jam terakhir. Default = last 24h."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -404,7 +404,7 @@ class Database:
                 FROM trade_history
                 WHERE {date_filter} AND dry_run = ?
             '''
-            cursor.execute(query, (0 if not date_str else 1,)) # Default to Live for daily report
+            cursor.execute(query, (int(dry_run),))
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
