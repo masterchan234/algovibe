@@ -625,7 +625,7 @@ class Oracle:
             # log_message(f"🕒 LLM verdict for {pair} was requested recently. Waiting...")
             return False
 
-        if not self.llm or not self.llm.is_active:
+        if not self.llm_worker or not self.llm_worker.is_active:
             log_message(f"⚠️ LLM Worker is inactive. Cannot request verdict for {pair}.")
             return False
 
