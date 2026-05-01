@@ -1,24 +1,34 @@
 #!/bin/bash
 set -e
 
-IMAGE_NAME="80.241.217.181:5000/algovibe:latest"
+# Configuration
+REGISTRY_IP=${REGISTRY_IP:-"80.241.217.181"}
+IMAGE_NAME="$REGISTRY_IP:5000/algovibe:latest"
 
+echo "🚀 Starting Algovibe Build & Deployment process..."
 echo "========================================="
-echo "Building Docker Image: $IMAGE_NAME"
+echo "Target Registry: $REGISTRY_IP"
+echo "Image Name:      $IMAGE_NAME"
 echo "========================================="
-# Build image
-docker build -t $IMAGE_NAME .
+
+# Enable BuildKit for faster, more efficient builds
+export DOCKER_BUILDKIT=1
+
+echo "📦 Step 1: Building Docker Image..."
+# Build image with progress bar
+docker build \
+  --progress=plain \
+  -t $IMAGE_NAME .
 
 echo ""
-echo "========================================="
-echo "Pushing Image to Registry..."
-echo "========================================="
-# Push image ke registry
+echo "📤 Step 2: Pushing Image to Registry..."
+# Push image to registry
 docker push $IMAGE_NAME
 
 echo ""
+echo "✅ DONE! Deployment package ready."
 echo "========================================="
-echo "DONE! Image successfully built and pushed."
+echo "To deploy on target server:"
+echo "1. Pull the new image: docker pull $IMAGE_NAME"
+echo "2. Restart container:  docker-compose up -d"
 echo "========================================="
-echo "You can now run it using:"
-echo "docker-compose up -d"

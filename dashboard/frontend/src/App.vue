@@ -9,7 +9,7 @@
         </div>
       </div>
       
-      <div class="header-center">
+      <div class="header-center hide-mobile">
         <div class="stat-bubble" v-if="store.stats.regime">
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>
@@ -30,6 +30,19 @@
         </div>
       </div>
     </header>
+    
+    <!-- Neural Pull-to-Refresh Indicator -->
+    <div 
+      class="pull-to-refresh" 
+      :style="{ height: pullDistance + 'px', opacity: pullDistance / threshold }"
+      :class="{ 'is-refreshing': isRefreshing }"
+    >
+      <div class="ptr-spinner">
+        <div class="spinner-core"></div>
+        <div class="spinner-ring"></div>
+      </div>
+      <span class="ptr-label">{{ isRefreshing ? 'RECALIBRATING...' : 'PULL TO REFRESH ORACLE' }}</span>
+    </div>
 
     <NotificationCenter />
 
@@ -44,9 +57,36 @@
 
     <footer class="app-footer">
       <div class="footer-left">
-        <span class="mode-badge" :class="{ 'dry-run': isDryRun }">
-          {{ isDryRun ? 'SIMULATION MODE (DRY RUN)' : 'PRODUCTION MODE (LIVE)' }}
-        </span>
+        <div class="mode-container">
+          <span class="mode-badge" :class="{ 'dry-run': isDryRun }">
+            {{ isDryRun ? 'SIMULATION MODE (DRY RUN)' : 'PRODUCTION MODE (LIVE)' }}
+            <span class="info-icon">ⓘ</span>
+          </span>
+          
+          <!-- Technical Tooltip -->
+          <div class="mode-tooltip" v-if="isDryRun">
+            <div class="tooltip-header">SIMULATION BLUEPRINT</div>
+            <div class="tooltip-body">
+              <div class="tooltip-row">
+                <span class="t-bullet">🛡️</span>
+                <span class="t-text"><strong>Zero Capital Risk:</strong> Eksekusi bersifat virtual, saldo Indodax tidak tersentuh.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">📡</span>
+                <span class="t-text"><strong>Real Market Data:</strong> Menggunakan stream WebSocket real-time untuk akurasi harga.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">🔓</span>
+                <span class="t-text"><strong>Loose Gates:</strong> Ambang batas entry dilonggarkan untuk pengujian dashboard.</span>
+              </div>
+              <div class="tooltip-row">
+                <span class="t-bullet">🧠</span>
+                <span class="t-text"><strong>AI Active:</strong> Oracle tetap memberikan nalar dan strategi secara penuh.</span>
+              </div>
+            </div>
+            <div class="tooltip-footer">Set DRY_RUN=False di config.py untuk trading riil.</div>
+          </div>
+        </div>
       </div>
       <div class="footer-center">
         <div class="ticker-tape">
@@ -120,11 +160,63 @@ function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
 }
 
+// Pull-to-Refresh Logic
+const pullDistance = ref(0)
+const isRefreshing = ref(false)
+const threshold = 70
+let startY = 0
+
+function handleTouchStart(e) {
+  if (document.documentElement.scrollTop <= 0) {
+    startY = e.touches[0].pageY
+  }
+}
+
+function handleTouchMove(e) {
+  if (isRefreshing.value || document.documentElement.scrollTop > 0) return
+  const currentY = e.touches[0].pageY
+  const dist = currentY - startY
+  if (dist > 0) {
+    pullDistance.value = Math.min(dist * 0.5, threshold + 20)
+    // Prevent default scroll when pulling down
+    if (dist > 10) e.stopPropagation()
+  }
+}
+
+function handleTouchEnd() {
+  if (isRefreshing.value) return
+  if (pullDistance.value >= threshold) {
+    triggerRefresh()
+  } else {
+    pullDistance.value = 0
+  }
+}
+
+async function triggerRefresh() {
+  isRefreshing.value = true
+  pullDistance.value = threshold
+  
+  try {
+    // Force re-fetch stats and AI report
+    store.socket.emit('get_stats')
+    // Simulate short network delay for UX satisfaction
+    await new Promise(r => setTimeout(r, 1200))
+  } finally {
+    isRefreshing.value = false
+    pullDistance.value = 0
+  }
+}
+
 onMounted(() => {
   store.connect()
   setInterval(() => {
     now.value = Date.now()
   }, 1000)
+  
+  // Mobile Touch listeners
+  window.addEventListener('touchstart', handleTouchStart, { passive: true })
+  window.addEventListener('touchmove', handleTouchMove, { passive: false })
+  window.addEventListener('touchend', handleTouchEnd, { passive: true })
 })
 </script>
 
@@ -339,6 +431,61 @@ body {
   50% { opacity: 0.3; }
 }
 
+/* Pull to Refresh UI */
+.pull-to-refresh {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(163, 113, 247, 0.05);
+  transition: height 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  position: relative;
+}
+
+.pull-to-refresh.is-refreshing {
+  height: 70px !important;
+}
+
+.ptr-spinner {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+
+.spinner-core {
+  position: absolute;
+  inset: 6px;
+  background: var(--accent-purple);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-purple);
+}
+
+.spinner-ring {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(163, 113, 247, 0.2);
+  border-top-color: var(--accent-purple);
+  border-radius: 50%;
+}
+
+.is-refreshing .spinner-ring {
+  animation: ptr-rotate 0.8s linear infinite;
+}
+
+.ptr-label {
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--accent-purple);
+  letter-spacing: 1px;
+}
+
+@keyframes ptr-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: 400px 1fr;
@@ -384,6 +531,81 @@ body {
   border-color: rgba(210, 153, 34, 0.3);
 }
 
+.info-icon {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* Advanced Tooltip Styling */
+.mode-container {
+  position: relative;
+  display: inline-block;
+}
+
+.mode-tooltip {
+  position: absolute;
+  bottom: 150%;
+  left: 0;
+  width: 280px;
+  background: #1c2128;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  z-index: 1000;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.mode-container:hover .mode-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.tooltip-header {
+  font-size: 10px;
+  font-weight: 900;
+  color: var(--accent-blue);
+  letter-spacing: 1.5px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.tooltip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tooltip-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.t-bullet { font-size: 14px; }
+.t-text {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-main);
+}
+.t-text strong { color: var(--accent-purple); }
+
+.tooltip-footer {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-dim);
+  font-size: 9px;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
 .footer-center {
   flex: 1;
   overflow: hidden;
@@ -397,7 +619,7 @@ body {
 
 .ticker-content {
   display: inline-block;
-  animation: ticker 40s linear infinite;
+  animation: ticker 80s linear infinite;
 }
 
 .ticker-item {
@@ -418,10 +640,55 @@ body {
 }
 
 @media (max-width: 1000px) {
-  .main-grid {
-    grid-template-columns: 1fr;
+  .app {
+    height: auto;
     overflow-y: auto;
   }
-  .left-panel { height: 500px; }
+  
+  .app-header {
+    padding: 0 16px;
+    height: 50px;
+  }
+
+  .main-title { font-size: 16px; }
+  .sub-title { display: none; }
+  
+  .hide-mobile { display: none; }
+  
+  .main-grid {
+    grid-template-columns: 1fr;
+    padding: 8px;
+    gap: 8px;
+    height: auto;
+    overflow: visible;
+  }
+  
+  .left-panel {
+    order: 2;
+    height: 500px;
+  }
+  
+  .right-panel {
+    order: 1;
+    min-height: 400px;
+  }
+
+  .app-footer {
+    height: auto;
+    flex-direction: column;
+    padding: 8px;
+    gap: 10px;
+  }
+  
+  .footer-center {
+    width: 100%;
+    margin: 0;
+    order: 3;
+  }
+  
+  .footer-left { order: 1; }
+  .footer-right { order: 2; font-size: 8px; opacity: 0.5; }
+  
+  .ticker-item { margin-right: 16px; }
 }
 </style>
