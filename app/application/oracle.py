@@ -421,14 +421,17 @@ class Oracle:
                 pair_name = t_type.split(":")[1].lower()
 
                 # ── Parse structured vs text result ──────────────────────
-                structured = LLMWorker.parse_structured_result(t_res)
-                is_structured = structured.get("confidence", 0) > 0 or structured.get("verdict") in ("BUY","AVOID","HOLD")
-
-                log_message(
-                    f"🤖 [LiteRT Insight] {label} {pair_name}: "
-                    f"{structured['verdict']} ({structured['confidence']}%) — {structured['reason']}"
-                    if is_structured else f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}"
-                )
+                is_json = isinstance(t_res, str) and t_res.strip().startswith('{')
+                structured = LLMWorker.parse_structured_result(t_res) if is_json else None
+                is_structured = structured is not None and (structured.get("confidence", 0) > 0 or structured.get("verdict") in ("BUY","AVOID","HOLD"))
+                
+                if is_structured:
+                    log_message(
+                        f"🤖 [LiteRT Insight] {label} {pair_name}: "
+                        f"{structured['verdict']} ({structured['confidence']}%) — {structured['reason']}"
+                    )
+                else:
+                    log_message(f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}")
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
 
@@ -616,12 +619,14 @@ class Oracle:
         pair_lower = pair.lower()
         now = datetime.now()
 
-        # Throttle request per pair agar tidak membebani worker CPU
+        # Batas frekuensi: jangan ganggu LLM jika sudah tanya < 2 menit lalu
         last_req = self.last_trade_verdict_request.get(pair_lower)
-        if last_req and (now - last_req).total_seconds() < 90:
+        if last_req and (now - last_req).total_seconds() < 120:
+            # log_message(f"🕒 LLM verdict for {pair} was requested recently. Waiting...")
             return False
 
-        if not history:
+        if not self.llm or not self.llm.is_active:
+            log_message(f"⚠️ LLM Worker is inactive. Cannot request verdict for {pair}.")
             return False
 
         last_price = float(history[-1])

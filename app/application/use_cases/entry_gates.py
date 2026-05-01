@@ -126,8 +126,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     # ── 7. LLM verdict — queue if missing, block until ready ──────────────
-    # [Scalp Optimization] Jika AI prob sangat tinggi (>55%), bypass LLM untuk entry instan.
-    is_fast_track = tq_prob >= 0.55
+    # [Scalp Optimization] Jika AI prob cukup tinggi (>40%), bypass LLM untuk entry instan.
+    is_fast_track = tq_prob >= 0.40
     
     llm_verdict = bot.oracle.get_pair_trade_verdict(pair, max_age_minutes=15)
     if not llm_verdict:
@@ -235,6 +235,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if total_confidence < effective_threshold:
         if knn_decision['verdict'] == "AVOID":
             log_message(f"🚫 [K-NN Avoid] {pair}: Pola identik dengan Falling Knife masa lalu. Skip.")
+        else:
+            log_message(
+                f"SKIP [{pair}]: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}% "
+                f"(Base={base_confidence:.1f}, Boost={boost_credit:.1f}, LLM={llm_bonus:.1f})"
+            )
         return None
 
     log_message(

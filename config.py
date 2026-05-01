@@ -40,7 +40,7 @@ TP_PCT = 0.012                  # [SCALP] Target 1.2% untuk rotasi cepat
 SL_PCT = -0.015                 # [SCALP] Stop Loss -1.5%
 TRAILING_STOP_ACTIVATION_PCT = 0.012 # Aktifkan trailing setelah +1.2%
 TRAILING_STOP_DISTANCE_PCT = 0.005   # Jarak trailing 0.5%
-MAX_HOLD_MINUTES = 60           # Paksa exit jika posisi stagnan > 1 jam
+MAX_HOLD_MINUTES = 15           # [SCALP] Rotasi cepat, jangan jadi bagholder
 
 MIN_NET_PROFIT_IDR = 500  # [DRY RUN TEST] Dilonggarkan dari 2500 → 500
 PENDING_BUY_TIMEOUT_MINUTES = 3
@@ -50,10 +50,10 @@ PENDING_BUY_MAX_SPREAD_PCT = 0.002
 MAX_ALLOWED_SPREAD_PCT = 0.010 # [DRY RUN TEST] Dilonggarkan dari 0.005 → 0.010
 MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
-STRONG_IMBALANCE_RATIO  = 2.0  
+STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.30 # [AGGRESSIVE SCALP] Lebih berani masuk
+AI_CONFIDENCE_THRESHOLD = 0.25 # [PRO SCALP] Lebih responsif terhadap momentum mikro
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
 
