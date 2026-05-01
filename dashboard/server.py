@@ -18,6 +18,7 @@ import secrets
 from app.infrastructure.database import db
 from app.infrastructure.ws_market import MarketDataWS
 from app.domain.technicals import get_technical_summary, derive_trade_signal
+from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 
 # Exchange instance untuk public data (OHLCV)
@@ -188,26 +189,70 @@ def _get_pair_technicals(pair):
     finally:
         conn.close()
 
-def _generate_equity_reasoning(pnl, unrealized, win_rate, trades):
-    """Memberikan analisis performa portofolio/ekuitas secara kualitatif."""
+def _generate_equity_report_llm(stats):
+    """Kirim prompt ke LLM untuk membuat Executive Report yang sesungguhnya."""
+    worker = LLMWorker.get_instance()
+    if not worker.is_active:
+        return
+        
+    prompt = (
+        "Buatlah 'Executive Report' singkat tentang performa trading bot saat ini.\n"
+        f"DATA SESI:\n"
+        f"- Status PnL: {stats['pnl']:,.0f} IDR\n"
+        f"- Unrealized: {stats['unrealized']:,.0f} IDR\n"
+        f"- Win Rate: {stats['win_rate']}%\n"
+        f"- Total Trades: {stats['trades']}\n"
+        f"- Regime: {stats['regime']}\n"
+        f"- Alpha Contributor: {stats['top_pair']}\n"
+        f"- Trading Intensity: {stats['intensity']} tx/hr\n\n"
+        "Format laporan dengan section: [REPORT STATUS], [CONTEXT], [AUDIT], [STRATEGY], [NEXT ACTION]. "
+        "Pada section [NEXT ACTION], berikan satu kalimat direktif tajam apa yang harus dilakukan bot selanjutnya. "
+        "Gunakan bahasa Indonesia yang profesional."
+    )
+    worker.query_async("equity_report", prompt)
+
+def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
+    """Memberikan Executive Report performa portofolio secara terstruktur."""
     total_equity = pnl + unrealized
-    status = "PROFITABLE" if total_equity >= 0 else "UNDER PRESSURE"
+    status = "OPTIMAL" if total_equity >= 0 else "CAUTION"
     
-    analysis = f"Performa akun saat ini dalam kondisi {status}. "
-    if unrealized < 0 and abs(unrealized) > 100000:
-        analysis += "Drawdown pada posisi terbuka terdeteksi. AI merekomendasikan pengetatan risk-management. "
-    
-    if win_rate > 60:
-        analysis += f"Akurasi trading optimal ({win_rate}%). Sistem mempertahankan keunggulan statistik yang kuat. "
-    elif win_rate < 40 and trades > 5:
-        analysis += f"Win rate di bawah ambang batas ({win_rate}%). AI mendeteksi anomali market, disarankan pengurangan size. "
-        
-    if total_equity > 0:
-        analysis += "Kurva ekuitas menunjukkan tren positif. Stabilitas bot terjaga dengan baik."
+    # Action Plan Logic
+    action_plan = "NEUTRAL"
+    if regime == 'BULL' and win_rate > 50:
+        action_plan = "EXPANSION: AI akan meningkatkan alokasi pada sinyal Oracle > 85%."
+    elif regime == 'BEAR' or win_rate < 40:
+        action_plan = "CONTRACTION: Membatasi posisi baru dan memperketat jaring pengaman (SL)."
+    elif regime == 'CHOPPY':
+        action_plan = "SCALPING ONLY: Eksekusi jangka pendek, hindari risiko holding semalam."
     else:
-        analysis += "Prioritaskan preservasi modal. Hindari pembukaan posisi baru hingga volatilitas mereda."
+        action_plan = "MAINTENANCE: Menunggu konfirmasi volume untuk langkah selanjutnya."
+
+    # 1. Market Context
+    report = f"REPORT STATUS: {status}\n"
+    report += f"NEXT ACTION: {action_plan}\n\n"
+    report += f"CONTEXT: Market saat ini berada dalam rezim {regime}. "
+    if regime == 'BULL':
+        report += "Kondisi mendukung ekspansi aset. "
+    elif regime == 'BEAR':
+        report += "Volatilitas tinggi, tekanan jual mendominasi. "
+    else:
+        report += "Konsolidasi harga terdeteksi, minim tren kuat. "
         
-    return analysis
+    # 2. Performance Audit
+    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {win_rate}%. "
+    if top_pair:
+        report += f"Aset {top_pair.replace('idr','').upper()} menunjukkan anomali profit positif. "
+    
+    if unrealized < 0 and abs(unrealized) > 150000:
+        report += "Terdapat floating loss signifikan yang memerlukan pengawasan ketat. "
+
+    # 3. Strategy Narrative
+    if total_equity > 0:
+        report += "Strategi saat ini mempertahankan profit buffer untuk mitigasi risiko mendadak."
+    else:
+        report += "Bot berfokus pada efisiensi keluar posisi untuk meminimalkan degradasi ekuitas."
+
+    return report, action_plan
 
 def _generate_technical_reasoning(pair, tech, last_price=None):
     """Buat narasi nalar kuantitatif. last_price diteruskan agar tidak ada query DB ulang."""
@@ -414,6 +459,9 @@ def get_stats():
             "active_reasoning": combined_reasoning,
             "technicals": tech_data,
             "sectors": sectors,
+            "alpha_contributor": top_pair,
+            "best_trade": best_trade,
+            "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1),
             "weights": db.get_all_weights(),
             "quant_audit": quant_audit,
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
@@ -1018,9 +1066,82 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
-        equity_reasoning = _generate_equity_reasoning(active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'])
+        # Cari Top Pair & Best Trade Today
+        top_pair_row = conn.execute(
+            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
+        ).fetchone()
+        best_trade_row = conn.execute(
+            "SELECT MAX(pnl_idr) FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
+        ).fetchone()
+        
+        top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
+        best_trade = float(best_trade_row[0] or 0)
+        regime = stats_dict.get('market_regime', 'CHOPPY')
+
+        equity_reasoning, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+
+        # --- Uptime Logic ---
+        first_trade_row = conn.execute("SELECT MIN(created_at) FROM trade_history WHERE reason != 'BACKTEST'").fetchone()
+        first_trade_ts = 0
+        if first_trade_row and first_trade_row[0]:
+            try:
+                dt_str = first_trade_row[0]
+                dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                first_trade_ts = int(dt.timestamp() * 1000)
+            except: pass
+
+        # --- LLM Executive Report Integration ---
+        equity_reasoning_ai, updated_at = db.get_state_with_time("llm_equity_report")
+        
+        is_stale_report = True
+        if updated_at:
+            try:
+                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                if (datetime.utcnow() - dt).total_seconds() < 600:
+                    is_stale_report = False
+            except: pass
+            
+        if is_stale_report:
+            _generate_equity_report_llm({
+                "pnl": active_pnl, "unrealized": unrealized_pnl, "win_rate": active_win_rate,
+                "trades": perf['total_trades'], "regime": regime, "top_pair": top_pair,
+                "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1)
+            })
+            
+        latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
+        if latest_report:
+            db.set_state("llm_equity_report", latest_report)
+            equity_reasoning_ai = latest_report
+
+        equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+        
+        final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
+            
+        # Poll for any finished reports
+        latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
+        if latest_report:
+            db.set_state("llm_equity_report", latest_report)
+            equity_reasoning_ai = latest_report
+
+        # Fallback ke technical reasoning jika AI belum siap
+        equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
+            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            top_pair=top_pair, best_trade=best_trade, regime=regime
+        )
+        
+        final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
         return {
+            "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
@@ -1041,7 +1162,8 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "active_reasoning": combined_reasoning,
-            "equity_reasoning": equity_reasoning,
+            "equity_reasoning": final_equity_report,
+            "equity_action_plan": equity_action_plan,
             "technicals": tech_data,
             "sectors": db.get_all_latest_sector_sentiment(),
             "weights": db.get_all_weights(),
@@ -1062,7 +1184,8 @@ def _build_radar_payload():
     
     try:
         rows = conn.execute(
-            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at FROM ticker_history"
+            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at "
+            "FROM ticker_history ORDER BY score DESC LIMIT 50"
         ).fetchall()
         results = []
         for row in rows:

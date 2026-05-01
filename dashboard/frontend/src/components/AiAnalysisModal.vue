@@ -4,7 +4,7 @@
       <div class="ai-modal-header">
         <div class="header-title">
           <span class="ai-icon">🔮</span>
-          <span>ORACLE INTELLIGENCE: {{ pair?.pair || '-' }}</span>
+          <span>ORACLE INTELLIGENCE: {{ formatPair(pair?.pair) }}</span>
         </div>
         <button class="close-btn" @click="close">×</button>
       </div>
@@ -67,6 +67,11 @@ let chartInstance = null
 
 function close() {
   props.onClose && props.onClose()
+}
+
+function formatPair(pair) {
+  if (!pair) return '-'
+  return pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
 }
 
 async function loadInsight() {

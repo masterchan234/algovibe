@@ -36,7 +36,7 @@
           :class="pos.pnl_idr >= 0 ? 'green' : 'red'"
         >
           <div class="pos-main">
-            <span class="pair">{{ pos.pair }}</span>
+            <span class="pair">{{ formatPair(pos.pair) }}</span>
             <span class="pos-info">Rp {{ formatNumber(pos.entry_price) }}</span>
           </div>
           <div class="pos-pnl">
@@ -60,7 +60,7 @@
           <div class="feed-top">
             <span class="feed-time">{{ formatTime(item.created_at) }}</span>
             <span class="feed-tag" :class="tagClass(item)">{{ item.side }}</span>
-            <span class="feed-pair">{{ item.pair }}</span>
+            <span class="feed-pair">{{ formatPair(item.pair) }}</span>
           </div>
           <div class="feed-msg">{{ item.message }}</div>
         </div>
@@ -118,6 +118,12 @@ function formatTime(ts) {
   } catch {
     return ts.length > 8 ? ts.slice(-8) : ts
   }
+}
+
+function formatPair(pair) {
+  if (!pair) return ''
+  if (pair.toLowerCase() === 'system' || pair.toLowerCase() === 'global') return pair.toUpperCase()
+  return pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
 }
 
 function formatNumber(val) {

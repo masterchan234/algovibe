@@ -23,6 +23,11 @@ export const useTradeStore = defineStore('trade', () => {
     latest_llm_insight: '',
     active_reasoning: '',
     equity_reasoning: '',
+    equity_action_plan: '',
+    first_trade_ts: 0,
+    alpha_contributor: '',
+    best_trade: 0,
+    intensity: 0,
   })
 
   // Open positions (trades)
@@ -150,6 +155,11 @@ export const useTradeStore = defineStore('trade', () => {
         latest_llm_insight: data.latest_llm_insight ?? '',
         active_reasoning: data.active_reasoning ?? '',
         equity_reasoning: data.equity_reasoning ?? '',
+        equity_action_plan: data.equity_action_plan ?? '',
+        first_trade_ts: data.first_trade_ts ?? 0,
+        alpha_contributor: data.alpha_contributor ?? '',
+        best_trade: data.best_trade ?? 0,
+        intensity: data.intensity ?? 0,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })
@@ -197,7 +207,7 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
-        radarPairs.value = data.slice(0, 20)
+        radarPairs.value = data.slice(0, 50)
       }
     })
 

@@ -73,8 +73,25 @@
         </div>
       </div>
       <div class="intel-body">
-        <div class="intel-reasoning">
+        <div class="intel-reasoning report-style">
           {{ stats.equity_reasoning }}
+        </div>
+        <div class="report-meta">
+          LAST AUDIT: {{ currentTime }}
+        </div>
+        <div class="intel-pulse-grid" v-if="stats.alpha_contributor || stats.best_trade">
+          <div class="pulse-card">
+            <span class="p-label">THE ALPHA</span>
+            <span class="p-value highlight">{{ formatPair(stats.alpha_contributor) || 'SCANNING...' }}</span>
+          </div>
+          <div class="pulse-card">
+            <span class="p-label">BEST TRADE</span>
+            <span class="p-value">{{ formatIdr(stats.best_trade) }}</span>
+          </div>
+          <div class="pulse-card">
+            <span class="p-label">INTENSITY</span>
+            <span class="p-value">{{ stats.intensity }} <small>TX/HR</small></span>
+          </div>
         </div>
       </div>
     </div>
@@ -82,32 +99,34 @@
     <!-- Top Radar -->
     <div class="radar-section">
       <div class="section-label">Signal Radar</div>
-      <div class="radar-list">
-        <div
-          v-for="pair in store.radarPairs.slice(0, 8)"
-          :key="pair.pair"
-          class="radar-item"
-          :class="[
-            itemClass(pair),
-            { 'active-radar': selectedPair === pair.pair }
-          ]"
-          @click="onRadarClick(pair)"
-        >
-          <div class="radar-top">
-            <span class="radar-pair">
-              {{ pair.pair }}
-              <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="leader-crown">👑</span>
-            </span>
-            <span class="radar-score">{{ (pair.score || 0).toFixed(0) }}</span>
-          </div>
-          <div class="radar-meter">
-            <div class="meter-fill" :style="{ width: (pair.score || 0) + '%', background: scoreColor(pair.score) }"></div>
-          </div>
-          <div class="radar-bottom">
-            <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
-            <span class="radar-prob" v-if="pair.prediction != null">
-              {{ (pair.prediction * 100).toFixed(0) }}%
-            </span>
+      <div class="radar-scroll-wrap">
+        <div class="radar-list">
+          <div
+            v-for="pair in store.radarPairs"
+            :key="pair.pair"
+            class="radar-item"
+            :class="[
+              itemClass(pair),
+              { 'active-radar': selectedPair === pair.pair }
+            ]"
+            @click="onRadarClick(pair)"
+          >
+            <div class="radar-top">
+              <span class="radar-pair">
+                {{ formatPair(pair.pair) }}
+                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="leader-crown">👑</span>
+              </span>
+              <span class="radar-score">{{ (pair.score || 0).toFixed(0) }}</span>
+            </div>
+            <div class="radar-meter">
+              <div class="meter-fill" :style="{ width: (pair.score || 0) + '%', background: scoreColor(pair.score) }"></div>
+            </div>
+            <div class="radar-bottom">
+              <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
+              <span class="radar-prob" v-if="pair.prediction != null">
+                {{ (pair.prediction * 100).toFixed(0) }}%
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -135,7 +154,14 @@ import AiAnalysisModal from './AiAnalysisModal.vue'
 echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
 
 const store = useTradeStore()
-const stats = store.stats
+const stats = computed(() => store.stats)
+const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
+
+onMounted(() => {
+  setInterval(() => {
+    currentTime.value = new Date().toLocaleTimeString('id-ID')
+  }, 5000)
+})
 const chartContainer = ref(null)
 let chart = null
 let resizeObserver = null
@@ -254,6 +280,11 @@ function trendClass(trend) {
   if (t === 'UP' || t === 'BULLISH') return 'trend-up'
   if (t === 'DOWN' || t === 'BEARISH') return 'trend-down'
   return 'trend-neutral'
+}
+
+function formatPair(pair) {
+  if (!pair) return ''
+  return pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
 }
 
 function formatIdr(val) {
@@ -629,11 +660,106 @@ onUnmounted(() => {
   padding-left: 14px;
 }
 
-.intel-reasoning {
+.intel-reasoning.report-style {
   color: #e6edf3;
-  font-size: 13.5px;
-  line-height: 1.6;
-  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-line;
+  margin-bottom: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  background: rgba(13, 17, 23, 0.4);
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.report-meta {
+  font-size: 9px;
+  color: #484f58;
+  font-weight: 800;
+  margin-bottom: 12px;
+  text-align: right;
+  letter-spacing: 0.5px;
+}
+
+.intel-action-plan {
+  background: rgba(88, 166, 255, 0.05);
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.action-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #58a6ff;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.action-pulse {
+  width: 6px;
+  height: 6px;
+  background: #58a6ff;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #58a6ff;
+  animation: action-blink 1s ease-in-out infinite;
+}
+
+@keyframes action-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.action-text {
+  color: #e6edf3;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.intel-pulse-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #30363d;
+}
+
+.pulse-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.p-label {
+  font-size: 9px;
+  font-weight: 800;
+  color: #8b949e;
+  letter-spacing: 1px;
+}
+
+.p-value {
+  font-size: 14px;
+  font-weight: 800;
+  color: #e6edf3;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.p-value.highlight {
+  color: #a371f7;
+  text-shadow: 0 0 8px rgba(163, 113, 247, 0.4);
+}
+
+.p-value small {
+  font-size: 9px;
+  opacity: 0.6;
 }
 
 .intel-loading {
@@ -681,6 +807,18 @@ onUnmounted(() => {
   letter-spacing: 1.5px;
   color: #8b949e;
 }
+
+.radar-scroll-wrap {
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* Custom scrollbar for radar */
+.radar-scroll-wrap::-webkit-scrollbar { width: 4px; }
+.radar-scroll-wrap::-webkit-scrollbar-track { background: transparent; }
+.radar-scroll-wrap::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+.radar-scroll-wrap::-webkit-scrollbar-thumb:hover { background: #a371f7; }
 
 .radar-list {
   display: grid;

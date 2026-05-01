@@ -14,10 +14,6 @@
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>
         </div>
-        <div class="stat-bubble" v-if="store.stats.regime_leader">
-          <span class="bubble-label">Leader</span>
-          <span class="bubble-value highlight">{{ store.stats.regime_leader }}</span>
-        </div>
         <div class="stat-bubble">
           <span class="bubble-label">Uptime</span>
           <span class="bubble-value">{{ uptimeStr }}</span>
@@ -56,7 +52,7 @@
         <div class="ticker-tape">
           <div class="ticker-content">
             <span v-for="pair in store.radarPairs" :key="pair.pair" class="ticker-item">
-              <span class="t-pair">{{ pair.pair }}</span>
+              <span class="t-pair">{{ formatPair(pair.pair) }}</span>
               <span class="t-price">{{ formatNumber(pair.price) }}</span>
               <span class="t-change" :class="pair.change >= 0 ? 'up' : 'down'">
                 {{ pair.change >= 0 ? '▲' : '▼' }}{{ Math.abs(pair.change).toFixed(2) }}%
@@ -91,11 +87,21 @@ const isDryRun = computed(() => {
 })
 
 const uptimeStr = computed(() => {
-  const diff = Math.floor((now.value - startTime.value) / 1000)
-  const h = Math.floor(diff / 3600)
-  const m = Math.floor((diff % 3600) / 60)
-  const s = diff % 60
-  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+  const start = store.stats.first_trade_ts || startTime.value
+  const diff = Math.floor((now.value - start) / 1000)
+  if (diff < 0) return '00:00:00'
+  
+  const days = Math.floor(diff / 86400)
+  const hours = Math.floor((diff % 86400) / 3600)
+  const minutes = Math.floor((diff % 3600) / 60)
+  const seconds = diff % 60
+  
+  const h = hours.toString().padStart(2, '0')
+  const m = minutes.toString().padStart(2, '0')
+  const s = seconds.toString().padStart(2, '0')
+  
+  if (days > 0) return `${days}d ${h}:${m}:${s}`
+  return `${h}:${m}:${s}`
 })
 
 const regimeClass = computed(() => {
@@ -104,6 +110,11 @@ const regimeClass = computed(() => {
   if (r === 'BEAR') return 'c-bear'
   return 'c-choppy'
 })
+
+function formatPair(pair) {
+  if (!pair) return '-'
+  return pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
+}
 
 function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
