@@ -10,7 +10,7 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
         return -1.0  # Warming Up
 
     try:
-        prob = 0.40  # Base Score
+        prob = 0.45  # Base Score (Increased for Scalping)
         current_price = price_history[-1]
 
         # --- 1. LLM Qualitative Boost ---
@@ -24,10 +24,10 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
             total_depth = bid_depth + ask_depth
             if total_depth > 0:
                 imbalance = bid_depth / total_depth
-                if imbalance > 0.65:
-                    prob += 0.20  # Strong Buying Pressure
-                elif imbalance < 0.40:
-                    prob -= 0.35  # Fake Breakout / Strong Selling Pressure
+                if imbalance > 0.60:
+                    prob += 0.15  # More lenient buy flow
+                elif imbalance < 0.35:
+                    prob -= 0.15  # Reduced penalty for imbalance (Scalp focus)
 
         # --- 3. Noise Filtering (EMA Smoothing) ---
         alpha = 0.2
@@ -39,19 +39,18 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
         smoothed_current = smoothed_history[-1]
 
         # --- 4. Micro-Pullback & Peak Penalty ---
-        # Jangan beli di pucuk (Peak Penalty)
+        # Untuk scalping, breakout di puncak terkadang adalah sinyal beli terbaik.
         recent_10 = price_history[-10:]
         recent_max = max(recent_10)
         
         if current_price >= recent_max:
-            # Harga sedang di ujung atas, rawan Fomo/Terjebak
-            prob -= 0.25 
+            # Scalping: Jangan terlalu takut beli di puncak jika ada momentum
+            prob -= 0.05 # Reduced penalty significantly
         else:
-            # Harga turun sedikit dari pucuk
+            # Harga turun sedikit dari pucuk (Ideal Pullback)
             drop_from_max = (recent_max - current_price) / recent_max
-            # Jika turun antara 0.1% hingga 0.4% (Ideal Pullback)
-            if 0.001 <= drop_from_max <= 0.004:
-                prob += 0.30 # Bonus Pullback Entry
+            if 0.0005 <= drop_from_max <= 0.005:
+                prob += 0.25 # Bonus Pullback Entry
 
         # --- 5. Linear Regression Slope (Trend Check) ---
         sum_x = n * (n - 1) / 2

@@ -112,7 +112,7 @@ def run_market_cycle(bot):
             if "toomanyrequests" in str(e).lower():
                 time.sleep(10)
 
-    bot.exit_manager.manage_shadow_jaring(ranked, tickers)
+    bot.exit_manager.manage_shadow_jaring(ranked, tickers, balance=getattr(bot, 'cached_balance', 0))
 
     log_message(
         f"Oracle Loop | Regime: {regime:8} | "

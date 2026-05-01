@@ -44,7 +44,8 @@ def execute_trade(
             if balance < MIN_BALANCE_THRESHOLD:
                 log_message(f"STOP: Balance {balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                 return False
-            target_amount = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
+            # Use real balance as the basis for sizing in LIVE mode
+            target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
             amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
 
         if amount_idr < MIN_TRADE_IDR:

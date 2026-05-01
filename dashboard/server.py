@@ -239,7 +239,9 @@ def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None,
         report += "Konsolidasi harga terdeteksi, minim tren kuat. "
         
     # 2. Performance Audit
-    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {win_rate}%. "
+    # Win rate 0 if no trades to avoid hallucination or misleading stats
+    display_win_rate = win_rate if trades > 0 else 0
+    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {display_win_rate}%. "
     if top_pair:
         report += f"Aset {top_pair.replace('idr','').upper()} menunjukkan anomali profit positif. "
     
@@ -429,6 +431,22 @@ def get_stats():
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
         from config import DRY_RUN
+        
+        # Performance & Stats definitions
+        perf = db.get_daily_stats()
+        
+        top_pair_row = conn.execute(
+            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
+        ).fetchone()
+        top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
+
+        best_trade_row = conn.execute(
+            "SELECT MAX(pnl_idr) FROM trade_history "
+            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
+        ).fetchone()
+        best_trade = float(best_trade_row[0] or 0)
 
         # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
         active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
