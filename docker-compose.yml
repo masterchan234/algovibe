@@ -23,5 +23,7 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
         max-file: "3"

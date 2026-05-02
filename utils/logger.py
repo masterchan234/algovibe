@@ -1,18 +1,26 @@
 import logging
 import os
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from app.interfaces.telegram_bot import send_telegram_message
 
 # Setup logging ke file dan konsol
-from config import LOG_FILE
+from config import LOG_BACKUP_COUNT, LOG_FILE, LOG_MAX_BYTES
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+file_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=LOG_MAX_BYTES,
+    backupCount=LOG_BACKUP_COUNT,
+    encoding="utf-8",
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(LOG_FILE)
+        file_handler,
     ]
 )
 
