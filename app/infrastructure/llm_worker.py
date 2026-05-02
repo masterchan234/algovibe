@@ -28,31 +28,60 @@ def _parse_engine_response(response):
         # Case 1: Sudah string
         if isinstance(response, str):
             return response
-            
+
         # Case 2: Response object dengan .text (Gemma-2 style)
         if hasattr(response, 'text') and not callable(response.text):
             return response.text
-            
-        # Case 3: Iterable (list atau generator)
+
+        # Case 4 (DULU): Dict tunggal — harus dicek SEBELUM iterable
+        # karena dict juga iterable dan iterasinya menghasilkan keys, bukan values
+        if isinstance(response, dict):
+            # Gemma-4 format: {"content": [{"text": "..."}], "role": "model"}
+            content_field = response.get("content")
+            if isinstance(content_field, list):
+                parts = []
+                for part in content_field:
+                    if isinstance(part, dict):
+                        parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        parts.append(part)
+                text = "".join(parts)
+                if text:
+                    return text
+            elif isinstance(content_field, str):
+                return content_field
+            # Fallback: key "text" langsung
+            return response.get("text", str(response))
+
+        # Case 3: Iterable (list atau generator) — dict sudah ditangani di atas
         if hasattr(response, '__iter__'):
             full_text = ""
             for chunk in response:
                 if isinstance(chunk, dict):
-                    full_text += chunk.get("text", chunk.get("content", ""))
+                    # Gemma-4 chunk format: {"content": [{"text": "..."}], "role": "model"}
+                    content_field = chunk.get("content")
+                    if isinstance(content_field, list):
+                        for part in content_field:
+                            if isinstance(part, dict):
+                                full_text += part.get("text", "")
+                            elif isinstance(part, str):
+                                full_text += part
+                    elif isinstance(content_field, str):
+                        full_text += content_field
+                    else:
+                        full_text += chunk.get("text", "")
                 elif isinstance(chunk, str):
                     full_text += chunk
                 else:
-                    # Mungkin ini adalah object Part
-                    full_text += getattr(chunk, "text", str(chunk))
-            if full_text: return full_text
+                    text_val = getattr(chunk, "text", None)
+                    if text_val and isinstance(text_val, str):
+                        full_text += text_val
+            if full_text:
+                return full_text
 
-        # Case 4: Dict tunggal
-        if isinstance(response, dict):
-            return response.get("text", response.get("content", str(response)))
-            
     except Exception as e:
         logger.error(f"Error parsing LLM response: {e}")
-        
+
     return str(response)
 
 def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
