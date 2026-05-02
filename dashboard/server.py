@@ -1660,7 +1660,7 @@ def _build_radar_payload():
                         parsed_veto = LLMWorker.parse_structured_result(veto_raw)
                         veto_conf = int(parsed_veto.get('confidence', 0) or 0)
                         veto_reason = parsed_veto.get('reason', '')
-                        ai_veto = str(parsed_veto.get('verdict', 'HOLD')).upper() == 'AVOID' and veto_conf >= 65
+                        ai_veto = str(parsed_veto.get('verdict', 'HOLD')).upper() == 'AVOID' and veto_conf >= 75
                     except Exception:
                         pass
 

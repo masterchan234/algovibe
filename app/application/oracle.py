@@ -545,13 +545,13 @@ class Oracle:
         Returns: (vetoed: bool, reason: str)
 
         Veto aktif jika:
-        - LLM verdict == AVOID dengan confidence >= 65%
+        - LLM verdict == AVOID dengan confidence >= 75%
         - Analisis masih fresh (< 10 menit in-memory, < 2 jam di DB)
 
         Jika tidak ada analisis LLM → TIDAK veto (bot tetap jalan berdasarkan teknikal).
         """
         pair_lower = pair.lower()
-        LLM_VETO_THRESHOLD   = 65   # Minimum confidence untuk veto
+        LLM_VETO_THRESHOLD   = 75   # Minimum confidence untuk veto
         LLM_VETO_TTL_MINUTES = 10   # In-memory cache TTL
         LLM_DB_VETO_TTL_MIN  = 120  # [Fix Bug#5] DB veto TTL: 2 jam (bukan selamanya!)
 
