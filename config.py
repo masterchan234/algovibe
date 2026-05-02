@@ -11,6 +11,7 @@ BASE_PATH    = os.getenv("APP_BASE_PATH", os.path.dirname(os.path.abspath(__file
 DATA_PATH    = "data"
 LOG_FILE     = f"{DATA_PATH}/logs/scalper.log"
 MODEL_PATH   = "models/gemma-4-E2B-it.litertlm"
+MODEL_CACHE_DIR = "models/cache"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
 DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
 EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED

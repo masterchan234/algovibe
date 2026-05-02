@@ -24,7 +24,7 @@ import ccxt
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
 
-app = Flask(__name__, static_folder='static')
+app = Flask(__name__, static_folder='static/dist', static_url_path='')
 
 # ── Pentest Fix: Secure Session Configuration ──
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
@@ -60,7 +60,7 @@ def set_csrf_cookie(response):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Cek token handshake dari auth payload
+    # Handshake keamanan: Cek session atau view-token
     client_token = auth.get('token') if auth else None
     valid_token = generate_view_token()
     
@@ -68,7 +68,7 @@ def handle_connect(auth=None):
     is_token_valid = (client_token == valid_token)
 
     if not is_authenticated and not is_token_valid:
-        logging.warning("🚫 Unauthorized WS connection (No Session, No Valid Token)")
+        logging.warning(f"🚫 Unauthorized WS connection (Token: {client_token[:8] if client_token else 'None'})")
         return False # Tolak koneksi
     
     # Semua orang yang lolos masuk ke room public
@@ -78,28 +78,23 @@ def handle_connect(auth=None):
         user_id = session.get('user_id')
         username = session.get('username')
         join_room(f"user_{user_id}")
-        logging.info(f"🔌 Authenticated User {username} connected (Public + Private)")
+        logging.info(f"🔌 Authenticated User {username} connected")
     else:
-        logging.info("🔌 Guest User connected via Valid Token (Public Only)")
+        logging.info("🔌 Guest User connected via Valid Token (Public Mode)")
+    return True
 
 @socketio.on('disconnect')
 def handle_disconnect():
     username = session.get('username', 'Unknown')
     logging.info(f"📡 User {username} disconnected from WS")
-
 # ── Background Throttler for UI Performance ──
 def ui_emitter_thread():
     """Mengirim update ke UI secara berkala (Throttling) agar HP user tidak panas."""
     while True:
         socketio.sleep(0.5) # Emit setiap 500ms
-        # Emit data publik ke semua
-        # (Data radar dan ohlcv biasanya di-handle oleh event spesifik, 
-        # tapi di sini kita bisa batch update harga jika perlu)
         pass
 
-# Start the background thread
 # socketio.start_background_task(ui_emitter_thread)
-
 # ── Authentication Middleware ──
 def login_required(f):
     @wraps(f)
@@ -319,7 +314,7 @@ def mobile_dashboard():
 
 @app.route('/')
 def index():
-    return send_from_directory(os.path.join(app.static_folder, 'dist'), 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/favicon.ico')
 def favicon():
