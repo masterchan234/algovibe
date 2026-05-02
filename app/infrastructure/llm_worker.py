@@ -52,6 +52,7 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
         engine = Engine(model_path, cache_dir=cache_dir)
         
         _consciousness_messages = []
+        _current_conv = None
         log_message("🧠 LLM Worker: Engine initialized.")
 
         while True:
@@ -62,7 +63,16 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                     _consciousness_messages = [{"role": "user", "content": prompt}]
                     continue
 
+                # Hapus session sebelumnya agar tidak terjadi FAILED_PRECONDITION
+                if _current_conv is not None:
+                    try:
+                        del _current_conv
+                    except Exception:
+                        pass
+                    _current_conv = None
+
                 conv = engine.create_conversation()
+                _current_conv = conv
                 if _consciousness_messages:
                     conv.messages = list(_consciousness_messages)
 
