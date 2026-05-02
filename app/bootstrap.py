@@ -1,4 +1,8 @@
+import logging
+import traceback
 from app.application.scalper_bot import ScalperBot
+
+logger = logging.getLogger(__name__)
 
 
 def build_bot() -> ScalperBot:
@@ -7,5 +11,9 @@ def build_bot() -> ScalperBot:
 
 
 def run_bot() -> None:
-    bot = build_bot()
-    bot.run()
+    try:
+        bot = build_bot()
+        bot.run()
+    except Exception as e:
+        logger.critical(f"❌ FATAL: Bot crashed at startup: {e}\n{traceback.format_exc()}")
+        raise

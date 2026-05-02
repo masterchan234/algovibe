@@ -167,10 +167,13 @@ class LLMWorker:
         if not self.is_active: return
         
         if self.worker_process and self.worker_process.is_alive() and self._current_task_id:
-            if (datetime.now() - self._current_task_ts).total_seconds() > 120:
+            if (datetime.now() - self._current_task_ts).total_seconds() > 60:
                 logger.error(f"🧠 [LLMWorker] Task {self._current_task_id} HANGING. Restarting...")
                 self.worker_process.terminate()
-                self.worker_process.join(timeout=1)
+                self.worker_process.join(timeout=3)
+                if self.worker_process.is_alive():
+                    self.worker_process.kill()
+                    self.worker_process.join(timeout=2)
                 self.worker_process = self._ctx.Process(target=_llm_process_loop, args=(self.req_queue, self.res_queue, self.model_path, self.cache_dir), daemon=True)
                 self.worker_process.start()
                 self._current_task_id = None

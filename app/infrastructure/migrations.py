@@ -57,7 +57,8 @@ def run_migrations(db_path):
                     log_message(f"✅ Database Migration Applied: {name}")
                 except sqlite3.OperationalError as e:
                     # Tangani kasus jika kolom sudah ada secara manual
-                    if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                    err_lower = str(e).lower()
+                    if "duplicate column name" in err_lower or "already exists" in err_lower or "cannot add" in err_lower:
                         cursor.execute("INSERT INTO migrations (name) VALUES (?)", (name,))
                         conn.commit()
                     else:

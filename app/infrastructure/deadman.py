@@ -60,7 +60,7 @@ class DeadmanSwitch:
                 "pair": self.pairs,
                 "countdownTime": DEADMAN_TIMEOUT_MS,
                 "timestamp": timestamp,
-                "recvWindow": 5000
+                "recvWindow": 10000
             }
             # Convert to query string format for signing
             params_str = "&".join([f"{k}={v}" for k, v in params.items()])
