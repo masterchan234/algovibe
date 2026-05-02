@@ -33,9 +33,6 @@
       </div>
 
       <div class="header-right">
-        <button class="audio-toggle" @click="toggleMute" :title="isMuted ? 'Unmute' : 'Mute'">
-          {{ isMuted ? '🔇' : '🔊' }}
-        </button>
         <div class="conn-status" :class="{ 'is-live': store.connected }">
           <span class="conn-text">{{ store.connected ? 'TERMINAL ONLINE' : 'LINK LOST' }}</span>
           <span class="conn-dot"></span>
@@ -126,13 +123,11 @@
 <script setup>
 import { onMounted, ref, computed } from 'vue'
 import { useTradeStore } from './stores/trade'
-import { useAudio } from './composables/useAudio'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 
 const store = useTradeStore()
-const { isMuted, toggleMute } = useAudio()
 const startTime = ref(Date.now())
 const now = ref(Date.now())
 
@@ -410,25 +405,6 @@ body {
   gap: 16px;
 }
 
-.audio-toggle {
-  background: var(--bg-hover);
-  border: 1px solid var(--border-dim);
-  color: var(--text-main);
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  transition: all 0.2s;
-}
-
-.audio-toggle:hover {
-  background: var(--border-dim);
-  transform: scale(1.05);
-}
 
 .conn-status {
   display: flex;
