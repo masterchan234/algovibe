@@ -50,9 +50,13 @@ class ScalperBot:
                     log_message(f"⚠️ Recovery Error: {e}")
 
         self.price_history = defaultdict(lambda: deque(maxlen=100))
-        from config import BLACKLIST_COINS
-
-        self.blacklist = set(db.get_blacklist()) | set(BLACKLIST_COINS)
+        
+        # Initialize default blacklist to database (if empty on first startup)
+        from config import DEFAULT_BLACKLIST_COINS
+        db.initialize_default_blacklist(DEFAULT_BLACKLIST_COINS)
+        
+        # Load blacklist from database (managed dynamically, not hardcoded)
+        self.blacklist = set(db.get_blacklist())
         self.pool = ThreadPool(processes=4)
 
         log_message("Loading price history from database...")

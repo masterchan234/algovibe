@@ -601,6 +601,24 @@ class Database:
             cursor.execute("SELECT 1 FROM blacklist WHERE pair = ?", (pair,))
             return cursor.fetchone() is not None
 
+    def initialize_default_blacklist(self, default_coins):
+        """
+        Initialize default stablecoins to blacklist if table is empty.
+        Called at bot startup to ensure defaults are always in database.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as cnt FROM blacklist")
+            count = cursor.fetchone()['cnt']
+            
+            if count == 0:
+                for pair in default_coins:
+                    cursor.execute(
+                        "INSERT INTO blacklist (pair, reason) VALUES (?, ?)",
+                        (pair, "DEFAULT_STABLECOIN")
+                    )
+                logging.info(f"✅ Initialized {len(default_coins)} default blacklist entries")
+
     # ── Sector & Shadow Order Methods (Predator) ─────────────────────────
 
     def save_sector_sentiment(self, sector, score, momentum=0.0, leader='N/A', leader_ch=0.0):

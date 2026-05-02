@@ -115,14 +115,12 @@ DRY_RUN =   True
 # Set ke False sebelum live trading!
 DRY_RUN_LOOSE_GATES = False
 
-# --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
-# Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.
-BLACKLIST_COINS = [
-    "usdtidr", "usdcidr", "paxgidr",  # Stablecoins (No profit in scalping)
-    "pxgidr", "vexidr", "dgbidr",     # Low liquidity / "Zombie" coins
-    "bfidr", "sumoidr",               # Common pump & dump traps
-    # Backtest loser list (April 2026) — performa sangat buruk, sementara dihindari
-    "jellyjellyidr", "plpaidr", "clvidr", "dlcidr", "metaidr"
+# --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins (Managed via Database) ---
+# Default stablecoins akan diinisialisasi ke database saat startup.
+# Untuk menambah/mengurangi blacklist, gunakan db.add_to_blacklist() atau dashboard.
+# Bot akan membaca dari tabel blacklist (bukan hardcoded list lagi).
+DEFAULT_BLACKLIST_COINS = [
+    "usdtidr", "usdcidr", "paxgidr",  # Stablecoins (ESSENTIAL - No profit in scalping)
 ]
 
 # --- [Anti-Shitcoin] Filter Harga Rendah ---
