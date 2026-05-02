@@ -617,43 +617,58 @@ class Oracle:
 
         return None
 
-    def request_trade_verdict(self, pair: str, history: list, tech: dict,
-                              imbalance_ratio: float, tq_prob: float) -> bool:
+    def request_trade_verdict(self, pair, ctx):
         """
-        Queue explicit LLM verdict untuk keputusan entry pair tertentu.
-        Return True jika request dikirim, False jika di-throttle/invalid.
+        [Non-Blocking] Meminta analisis mendalam dari LLM.
+        Jika hasil belum ada, bot akan mengantrekan tugas dan mengembalikan 'ANALYZING'.
         """
-        pair_lower = pair.lower()
-        now = datetime.now()
-
-        # Batas frekuensi: jangan ganggu LLM jika sudah tanya < 2 menit lalu
-        last_req = self.last_trade_verdict_request.get(pair_lower)
-        if last_req and (now - last_req).total_seconds() < 120:
-            # log_message(f"🕒 LLM verdict for {pair} was requested recently. Waiting...")
-            return False
-
         if not self.llm_worker or not self.llm_worker.is_active:
-            log_message(f"⚠️ LLM Worker is inactive. Cannot request verdict for {pair}.")
-            return False
+            return "HOLD", 0, "LLM Offline"
 
-        last_price = float(history[-1])
-        rsi_val = float(tech.get("rsi", 50.0))
-        slope_val = float(tech.get("slope", 0.0))
-        vol_val = float(tech.get("volatility", 0.0))
+        pair_lower = pair.lower()
 
-        prompt = (
-            f"PAIR={pair.upper()} | PRICE={last_price:.8f} | RSI={rsi_val:.2f} | "
-            f"SLOPE={slope_val:.6f} | VOL={vol_val:.2f}% | IMBALANCE={imbalance_ratio:.2f}x | "
-            f"AI_PROB={tq_prob*100:.1f}%\n"
-            "Tugas: putuskan entry scalping sekarang. Gunakan output fungsi submit_verdict. "
-            "Aturan ketat: AVOID jika risiko dump/fake breakout tinggi, HOLD jika edge belum jelas, "
-            "BUY hanya jika probabilitas menang jelas lebih tinggi dari rugi setelah fee. "
-            "Berikan reason singkat dan confidence realistis."
-        )
+        # 1. Cek hasil yang sudah matang di Oracle memory (analysis_results)
+        if pair_lower in self.analysis_results:
+            res = self.analysis_results[pair_lower]
+            # Expire cache setelah 5 menit (analisis lama dianggap basi)
+            if (datetime.now() - res['time']).total_seconds() < 300:
+                return res['verdict'], res['confidence'], res['reason']
+        
+        # 2. Cek apakah ada task yang sedang berjalan (active_analysis)
+        if pair_lower in self.active_analysis:
+            task_id = self.active_analysis[pair_lower]
+            res = self.llm_worker.get_result(task_id)
+            if res:
+                # Hasil baru saja selesai di LLMWorker!
+                del self.active_analysis[pair_lower]
+                parsed = self.llm_worker.parse_structured_result(res['result'])
+                self.analysis_results[pair_lower] = {
+                    "verdict": parsed['verdict'],
+                    "confidence": parsed['confidence'],
+                    "reason": parsed['reason'],
+                    "time": datetime.now()
+                }
+                return parsed['verdict'], parsed['confidence'], parsed['reason']
+            else:
+                # Masih antre/proses di background LLM process
+                return "ANALYZING", 0, "Deep reasoning in progress..."
 
-        self.llm_worker.query_structured(f"ANALYSIS:{pair_lower}", prompt)
-        self.last_trade_verdict_request[pair_lower] = now
-        return True
+        # 3. Jika belum ada di antrean maupun di hasil, buat task baru
+        # Gunakan throttling agar tidak spamming LLM (max 1 request per 2 menit)
+        last_req = self.last_trade_verdict_request.get(pair_lower)
+        if last_req and (datetime.now() - last_req).total_seconds() < 120:
+             return "HOLD", 0, "Wait for cooldown..."
+
+        # Bangun konteks untuk LLM
+        prompt = self._build_rich_market_context(pair, ctx.get('history', []), ctx, None)
+        task_id = self.llm_worker.query_structured(f"ANALYSIS {pair}", prompt)
+        
+        if task_id:
+            self.active_analysis[pair_lower] = task_id
+            self.last_trade_verdict_request[pair_lower] = datetime.now()
+            return "ANALYZING", 0, "Analysis queued..."
+            
+        return "HOLD", 0, "Queue Failed"
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 
