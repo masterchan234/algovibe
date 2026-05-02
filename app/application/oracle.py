@@ -849,8 +849,8 @@ class Oracle:
             # Apply dynamic weight adjustments based on regime
             self._apply_regime_weights(regime)
             
-            prompt = f"The crypto market regime shifted from {self.last_regime} to {regime}. The leading coin is {leader_str}. The average 24h change of top 50 pairs is {avg_change:.2f}%. As an expert trader, give a 2-sentence strategic advice for trading in this environment."
-            self.llm_worker.query_async("REGIME_ANALYSIS", prompt)
+            # [Senior Debug] Temporarily disable global regime analysis to prevent queue stall
+            # self.llm_worker.query_async("REGIME_ANALYSIS", prompt)
             
         self.last_regime = regime
         self.last_regime_update = datetime.now()
