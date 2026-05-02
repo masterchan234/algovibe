@@ -140,34 +140,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 7. LLM verdict — queue if missing, block until ready ──────────────
-    # [Scalp Optimization] Jika AI prob cukup tinggi (>40%), bypass LLM untuk entry instan.
-    is_fast_track = tq_prob >= 0.40
-    
-    llm_verdict = bot.oracle.get_pair_trade_verdict(pair, max_age_minutes=15)
-    if not llm_verdict:
-        if DRY_RUN_LOOSE_GATES or is_fast_track:
-            # Pakai default BUY agar tidak stuck
-            llm_verdict = {"verdict": "BUY", "confidence": 60, "reason": "FAST_TRACK_SCALP" if is_fast_track else "DRY_RUN_LOOSE"}
-        else:
-            queued = bot.oracle.request_trade_verdict(
-                pair=pair,
-                history=history,
-                tech=tech,
-                imbalance_ratio=imbalance_ratio,
-                tq_prob=tq_prob,
-            )
-            if queued:
-                msg = "⏳ LLM verdict queued — menunggu keputusan AI sebelum entry."
-                log_message(f"{msg} [{pair}]")
-                save_gate_state(msg)
-            return None
-
-    llm_v = llm_verdict.get('verdict', 'HOLD')
-    llm_c = float(llm_verdict.get('confidence', 0))
-    llm_r = llm_verdict.get('reason', '')
-
-    # ── 8. Dynamic threshold based on volatility + trend ──────────────────
+    # ── 9. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
     dynamic_threshold = 50.0 # [SCALP] Lowered from 57.0
     if current_vol > 2.0:
@@ -180,28 +153,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
 
-    # ── 9. LLM verdict policy gate ────────────────────────────────────────
-    if llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
-        msg = f"🚫 LLM BLOCK {llm_c:.0f}%: {llm_r}"
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
-    if llm_v == 'HOLD' and llm_c >= entry_policy['llm_hold_block_conf']:
-        msg = f"🕒 LLM HOLD {llm_c:.0f}%: {llm_r}"
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
-
-    llm_bonus = 0.0
-    if llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
-        llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
-
     # ── 10. Consecutive-loss halt / Shadow Recovery ─────────────────────────
     bot.consecutive_losses = int(db.get_state("consecutive_losses", 0))
     is_shadow_mode = bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES
     if is_shadow_mode:
-        # [Senior Fix] Shadow Probing: Kita tetap lanjut evaluasi sampai akhir
-        # agar target TP/SL terhitung dengan benar, tapi kita tandai sebagai SHADOW.
         msg = f"🛰️  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
@@ -243,11 +198,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 # [SCALP] Lowered from 45/50
+    min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 
     if DRY_RUN_LOOSE_GATES:
-        min_base_conf = 0.0  # bypass K-NN floor saat testing
-    boost_credit = min(scalper_boost, 6.0)
-    total_confidence = base_confidence + boost_credit + llm_bonus
+        min_base_conf = 0.0  
 
     if base_confidence < min_base_conf:
         msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"
@@ -255,22 +208,35 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 12. Confidence threshold ──────────────────────────────────────────
+    # ── 12. [Senior Fix] Non-Blocking LLM Verdict ─────────────────────────
+    # Meminta opini LLM secara asinkron. Jika belum ada, bot tetap lanjut (Technical Priority).
+    llm_v, llm_c, llm_r = bot.oracle.request_trade_verdict(pair, enriched)
+    
+    llm_bonus = 0.0
+    if llm_v == "ANALYZING":
+        log_message(f"⏳ LLM analyzing {pair}... Proceeding on technicals.")
+    elif llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
+        msg = f"🚫 LLM VETO {llm_c:.0f}%: {llm_r}"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
+        return None
+    elif llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
+        llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
+
+    # ── 13. Final Confidence threshold ────────────────────────────────────
+    boost_credit = min(scalper_boost, 6.0)
+    total_confidence = base_confidence + boost_credit + llm_bonus
+
     effective_threshold = 0.0 if DRY_RUN_LOOSE_GATES else dynamic_threshold
     if total_confidence < effective_threshold:
-        if knn_decision['verdict'] == "AVOID":
-            msg = "🚫 [K-NN Avoid]: Pola identik dengan Falling Knife masa lalu. Skip."
-        else:
-            msg = f"SKIP: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}%"
-        
+        msg = f"SKIP: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}%"
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
 
     log_message(
-        f"🚀 [Scalper Boost] {pair}: Base {base_confidence:.1f}% + BoostCredit {boost_credit:.1f}% "
-        f"+ LLM {llm_bonus:.1f}% ({llm_v} {llm_c:.0f}%) = {total_confidence:.1f}% "
-        f"(Thresh: {dynamic_threshold:.1f}%)"
+        f"🚀 [Entry Ready] {pair}: Tech {base_confidence:.1f}% + Boost {boost_credit:.1f}% "
+        f"+ LLM {llm_bonus:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
     )
 
     return {

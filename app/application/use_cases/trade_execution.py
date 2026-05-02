@@ -140,7 +140,21 @@ def execute_trade(
         except Exception:
             pass
 
+        import threading
+        def background_logging(p, d, o, m_label, t_prob, b_p, f_tp, f_sl):
+            try:
+                db.save_trade_dna(p, d)
+                db.log_order(p, "BUY", b_p, d.get("amount_crypto", 0), o.get('status'), o)
+                db.log_system_event(
+                    p, "BUY",
+                    f"{m_label} | Prob:{t_prob*100:.1f}% | Rp {b_p:,.0f} | TP:{f_tp*100:.1f}% SL:{f_sl*100:.1f}%",
+                    'INFO'
+                )
+            except Exception as ex:
+                log_message(f"⚠️ Async Logging Error: {ex}")
+
         dna_data = {
+            "amount_crypto": amount_crypto,
             "ai_prob": tq_prob * 100,
             "whale_boost": whale_boost,
             "sector_sentiment": bot.oracle.get_sector_sentiment_val(pair),
@@ -153,18 +167,13 @@ def execute_trade(
             "llm_reason": llm_reason,
             "dry_run": DRY_RUN,
         }
-        db.save_trade_dna(pair, dna_data)
-
-        db.log_order(pair, "BUY", buy_price, amount_crypto, order.get('status'), order)
-
-        # Catat ke system_events agar muncul di Activity Feed dashboard
+        
         mode_label = "DRY RUN BUY" if DRY_RUN else "LIVE BUY"
-        db.log_system_event(
-            pair,
-            "BUY",
-            f"{mode_label} | Prob:{tq_prob*100:.1f}% | Rp {buy_price:,.0f} | TP:{final_tp*100:.1f}% SL:{final_sl*100:.1f}%",
-            'INFO'
-        )
+        threading.Thread(
+            target=background_logging,
+            args=(pair, dna_data, order, mode_label, tq_prob, buy_price, final_tp, final_sl),
+            daemon=True
+        ).start()
 
         data = {
             "entry_price": buy_price,

@@ -45,6 +45,10 @@ class Oracle:
         # veto cache: {pair: {verdict, confidence, reason, ts}}
         # Diisi saat LLM structured result masuk; dibaca oleh check_llm_veto()
         self._veto_cache: dict = {}
+        
+        # [Senior Fix] Non-blocking tracking
+        self.active_analysis: dict = {}   # {pair: task_id}
+        self.analysis_results: dict = {}  # {pair: {verdict, confidence, reason, time}}
 
     # ── Rich Market Context Builder ────────────────────────────────────────────
 
