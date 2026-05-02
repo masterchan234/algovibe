@@ -30,11 +30,17 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# Setup logging — hanya file handler, stdout dihandle oleh systemd
-logging.basicConfig(level=logging.WARNING)  # Suppress root logger ke stdout
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("auto_trainer")
 logger.setLevel(logging.INFO)
-logger.propagate = False  # Jangan propagate ke root agar tidak duplikat
+logger.propagate = False
+
+_fmt = logging.Formatter("%(asctime)s [AUTO-TRAINER] %(message)s", "%Y-%m-%d %H:%M:%S")
+
+# Always log to stdout so Docker captures trainer output via `docker logs`
+_sh = logging.StreamHandler()
+_sh.setFormatter(_fmt)
+logger.addHandler(_sh)
 
 
 def _setup_file_logger(log_path: str):
@@ -47,7 +53,7 @@ def _setup_file_logger(log_path: str):
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
-    fh.setFormatter(logging.Formatter("%(asctime)s [AUTO-TRAINER] %(message)s", "%Y-%m-%d %H:%M:%S"))
+    fh.setFormatter(_fmt)
     logger.addHandler(fh)
 
 
