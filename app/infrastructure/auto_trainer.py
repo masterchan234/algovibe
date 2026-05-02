@@ -16,6 +16,7 @@ import sys
 import time
 import sqlite3
 import logging
+from logging.handlers import RotatingFileHandler
 import joblib
 import pandas as pd
 import numpy as np
@@ -38,7 +39,14 @@ logger.propagate = False  # Jangan propagate ke root agar tidak duplikat
 
 def _setup_file_logger(log_path: str):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    fh = logging.FileHandler(log_path)
+    from config import LOG_BACKUP_COUNT, LOG_MAX_BYTES
+
+    fh = RotatingFileHandler(
+        log_path,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(logging.Formatter("%(asctime)s [AUTO-TRAINER] %(message)s", "%Y-%m-%d %H:%M:%S"))
     logger.addHandler(fh)
 
