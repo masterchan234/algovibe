@@ -429,6 +429,36 @@ class Database:
 
     # ── METODE UNTUK TICKER HISTORY ──
 
+    def save_ticker_history_batch(self, updates_list):
+        """
+        [Senior Optimization] Bulk update untuk ticker history.
+        Menerima list of tuples: (pair, history_list, ch_5m, ch_15m, ch_1h)
+        """
+        import json
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            data = [
+                (
+                    json.dumps(h), p, h[0] if h else 0, # history_json, signal (dummy), trend (dummy)
+                    c5, c15, c1, 0.0, 0.0, # ch_5m, ch_15m, ch_1h, vol, score
+                    json.dumps(h), c5, c15, c1 # updates for conflict
+                )
+                for p, h, c5, c15, c1 in updates_list
+            ]
+            
+            # Kita gunakan query yang lebih efisien untuk executemany
+            cursor.executemany('''
+                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
+                                          ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
+                VALUES (?, ?, 0.0, 'BACKFILLED', 'HOLD', ?, ?, ?, 0.0, 0.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(pair) DO UPDATE SET
+                    history_json=excluded.history_json,
+                    ch_5m=excluded.ch_5m,
+                    ch_15m=excluded.ch_15m,
+                    ch_1h=excluded.ch_1h,
+                    updated_at=excluded.updated_at
+            ''', [(p, json.dumps(h), c5, c15, c1) for p, h, c5, c15, c1 in updates_list])
+
     def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A', signal='HOLD',
                             ch_5m=0.0, ch_15m=0.0, ch_1h=0.0, volatility=0.0, score=0.0):
         import json

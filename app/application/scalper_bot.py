@@ -159,8 +159,10 @@ class ScalperBot:
                 except Exception:
                     return None
 
-            batch_size = 10
+            batch_size = 15
             count = 0
+            all_updates = []
+
             for i in range(0, total_pairs, batch_size):
                 batch = idr_pairs[i:i + batch_size]
                 log_message(f"🔄 Syncing batch {i//batch_size + 1}... ({min(i+batch_size, total_pairs)}/{total_pairs})")
@@ -176,22 +178,22 @@ class ScalperBot:
                             ch_5m = ((last - prices[-5]) / prices[-5] * 100) if len(prices) >= 5 else 0
                             ch_15m = ((last - prices[-15]) / prices[-15] * 100) if len(prices) >= 15 else 0
                             ch_1h = ((last - prices[0]) / prices[0] * 100) if len(prices) >= 60 else 0
-                            db.save_ticker_history(
+                            
+                            all_updates.append((
                                 pair_id,
                                 list(self.price_history[pair_id]),
-                                0,
-                                "BACKFILLED",
                                 ch_5m,
                                 ch_15m,
-                                ch_1h,
-                                0,
-                                0,
-                            )
+                                ch_1h
+                            ))
                         count += 1
+                time.sleep(0.5) # Reduced from 2.5s due to faster DB I/O
 
-                time.sleep(2.5)
-
-            log_message(f"✅ FULL Backfill completed for {count} pairs.")
+            # ── [Senior Fix] Batch DB Commit ────────────────────────────────
+            if all_updates:
+                db.save_ticker_history_batch(all_updates)
+                
+            log_message(f"✅ FULL Backfill completed for {count} pairs (Optimized Batch Commit).")
             db.save_state("backfill_status", "COMPLETED")
         except Exception as e:
             log_message(f"⚠️ Backfill failed: {e}")

@@ -457,8 +457,9 @@ class ExitManager:
                 try:
                     sell_value_est = amount * current_price
                     fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_MAKER
-                    # Rapid TP memakai jalur non-emergency (maker), maka estimasi fee juga maker.
-                    fee_sell_est = sell_value_est * FEE_SELL_MAKER
+                    # [Senior Scaling Fix] Karena kita sekarang menggunakan Market Order (Taker) untuk TP,
+                    # estimasi fee harus menggunakan Taker Rate (0.72%) agar profit tetap aman.
+                    fee_sell_est = sell_value_est * FEE_SELL_TAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
                     # Hard rule: jika sudah net profit, selalu tutup posisi sekarang juga.
@@ -606,51 +607,46 @@ class ExitManager:
             # TAPI offset harus kecil agar tidak memotong profit yang sudah diraih
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT")
 
-            if is_emergency:
-                # Gunakan SELL_TAKER_OFFSET (5%) hanya untuk SL darurat agar pasti terisi
-                exit_price = price * (1 - SELL_TAKER_OFFSET)
+            if is_emergency or is_tp_exit:
+                # [Senior Scaling Fix] Gunakan Market Order untuk kecepatan maksimal
+                # TP dan SL darurat tidak boleh antre, harus hajar BID pembeli sekarang juga.
+                exit_price = price * (1 - 0.001) # Buffer tipis untuk estimasi
                 fee_sell_rate = FEE_SELL_TAKER
-            elif is_tp_exit:
-                # TP exits: jual sedikit di ATAS market agar order Maker terisi saat ada buyer
-                # Offset kecil 0.05% sudah cukup untuk memastikan fill
-                exit_price = price * (1 + SELL_MAKER_OFFSET)
-                fee_sell_rate = FEE_SELL_MAKER
             else:
-                # Maker mode untuk Take Profit standar
+                # Maker mode (masih digunakan untuk beberapa strategi jaring/limit)
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_MAKER
 
-            # --- Piggyback Strategy (Dust Sweeper) ---
+            # [Senior Scaling Fix] PIGGYBACK: Ambil seluruh saldo koin yang tersedia
             coin = pair.replace('idr', '').upper()
             try:
                 if not self.dry_run:
                     balance = self.exchange.fetch_balance()
                     real_balance = float(balance['free'].get(coin, 0))
-                    if real_balance > amount:
-                        log_message(f"🐷 Piggyback Strategy: Boosting sell amount from {amount} to {real_balance} {coin} to sweep dust!")
+                    if real_balance > (amount * 0.9): # Jika ada saldo koin nyata
                         amount = real_balance
-            except Exception as e:
-                log_message(f"Warning: Failed to fetch real balance for Piggyback on {pair}: {e}")
+            except Exception: pass
 
-            # [Senior Fix] Standard CCXT Symbol for Validation
             symbol = f"{pair[:-3].upper()}/IDR"
             
             if self.dry_run:
                 order = {
-                    "id": f"DRY-{int(time.time())}",
+                    "id": f"DRY-EXIT-{int(time.time())}",
                     "status": "closed",
                     "price": exit_price,
                     "amount": amount,
                     "symbol": symbol
                 }
-                print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
-                params = {
-                    # Non-emergency exits dijaga tetap maker (post-only) untuk hemat fee.
-                    'post_only': not is_emergency,
-                    'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
-                }
-                order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
+                params = {'pair': pair.replace("idr", "_idr")}
+                if is_emergency or is_tp_exit:
+                    # Ganti ke Market Order untuk eksekusi instan
+                    order = self.exchange.create_market_sell_order(symbol, amount, params)
+                    # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
+                    exit_price = order.get('price') or price
+                else:
+                    params['post_only'] = True
+                    order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
