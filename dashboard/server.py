@@ -936,6 +936,115 @@ def get_radar_data():
     finally:
         conn.close()
 
+
+@app.route('/api/radar-audit')
+def get_radar_audit():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT key, value, updated_at
+            FROM bot_state
+            WHERE key LIKE 'radar_reco_%'
+               OR key LIKE 'gate_skip_%'
+               OR key LIKE 'llm_veto_ts_%'
+            """
+        ).fetchall()
+
+        now = datetime.datetime.now()
+        window_sec = 24 * 3600
+        per_pair = {}
+
+        def _pair_state(pair_name):
+            if pair_name not in per_pair:
+                per_pair[pair_name] = {
+                    'radar_reco': None,
+                    'radar_ts': None,
+                    'gate_msg': None,
+                    'gate_ts': None,
+                    'veto_ts': None,
+                }
+            return per_pair[pair_name]
+
+        for r in rows:
+            key = str(r['key'] or '')
+            val = str(r['value'] or '')
+            ts_text = str(r['updated_at'] or '')
+            try:
+                ts = datetime.datetime.fromisoformat(ts_text.replace(' ', 'T'))
+            except Exception:
+                continue
+
+            if key.startswith('radar_reco_'):
+                pair = key.replace('radar_reco_', '', 1)
+                state = _pair_state(pair)
+                state['radar_reco'] = val.upper()
+                state['radar_ts'] = ts
+            elif key.startswith('gate_skip_'):
+                pair = key.replace('gate_skip_', '', 1)
+                state = _pair_state(pair)
+                state['gate_msg'] = val
+                state['gate_ts'] = ts
+            elif key.startswith('llm_veto_ts_'):
+                pair = key.replace('llm_veto_ts_', '', 1)
+                state = _pair_state(pair)
+                try:
+                    state['veto_ts'] = datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+                except Exception:
+                    state['veto_ts'] = ts
+
+        buy_signals = 0
+        buy_blocked_total = 0
+        buy_blocked_ai_veto = 0
+        buy_blocked_gate = 0
+        buy_tradable = 0
+
+        for _, st in per_pair.items():
+            radar_ts = st['radar_ts']
+            if not radar_ts or (now - radar_ts).total_seconds() > window_sec:
+                continue
+            if st['radar_reco'] != 'BUY':
+                continue
+
+            buy_signals += 1
+
+            gate_msg = str(st.get('gate_msg') or '')
+            gate_ts = st.get('gate_ts')
+            gate_fresh = bool(gate_ts and (now - gate_ts).total_seconds() <= window_sec)
+            gate_up = gate_msg.upper()
+
+            veto_ts = st.get('veto_ts')
+            veto_fresh = bool(veto_ts and (now - veto_ts).total_seconds() <= window_sec)
+            has_ai_veto = veto_fresh or ('LLM VETO' in gate_up)
+
+            has_gate_block = gate_fresh and (
+                gate_up.startswith('SKIP')
+                or 'BLOCK' in gate_up
+                or 'VETO' in gate_up
+            )
+
+            if has_ai_veto:
+                buy_blocked_total += 1
+                buy_blocked_ai_veto += 1
+            elif has_gate_block:
+                buy_blocked_total += 1
+                buy_blocked_gate += 1
+            else:
+                buy_tradable += 1
+
+        return jsonify({
+            "window_hours": 24,
+            "buy_signals_24h": buy_signals,
+            "buy_blocked_total_24h": buy_blocked_total,
+            "buy_blocked_ai_veto_24h": buy_blocked_ai_veto,
+            "buy_blocked_gate_24h": buy_blocked_gate,
+            "buy_tradable_24h": buy_tradable,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/api/logs')
 def get_logs():
     conn = get_db_connection()
@@ -1343,7 +1452,7 @@ def _build_stats_payload():
         conn.close()
 
 def _build_radar_payload():
-    """Bangun payload radar dengan injeksi harga realtime dari WS."""
+    """Bangun payload radar untuk semua pair market (WS + DB ticker_history)."""
     conn = get_db_connection()
     # Ambil snapshot harga terbaru dari WS Buffer (Realtime detik)
     ws_tickers = mws.get_tickers()
@@ -1351,16 +1460,58 @@ def _build_radar_payload():
     try:
         rows = conn.execute(
             "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, signal, history_json, updated_at "
-            "FROM ticker_history ORDER BY score DESC LIMIT 50"
+            "FROM ticker_history"
         ).fetchall()
-        results = []
-        for row in rows:
+
+        db_by_pair = {str(r['pair']).lower(): r for r in rows if r['pair']}
+        all_pairs = set(db_by_pair.keys()) | {str(p).lower() for p in ws_tickers.keys()}
+
+        def _clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        def _derive_signal(score, prediction, change_now, trend):
+            t = str(trend or '').upper()
+            if score >= 70 and prediction >= 0.55:
+                return "BUY"
+            if score <= 30 and prediction <= 0.45:
+                return "SELL"
+            if change_now >= 0.35 and ("UP" in t or "BULL" in t):
+                return "BUY"
+            if change_now <= -0.35 and ("DOWN" in t or "BEAR" in t):
+                return "SELL"
+            return "HOLD"
+
+        def _is_fresh(ts_str, max_age_sec=600):
+            if not ts_str:
+                return False
             try:
-                pair = row['pair']
-                history = json.loads(row['history_json'] or '[]')
+                ts = datetime.datetime.fromisoformat(str(ts_str))
+                return (datetime.datetime.now() - ts).total_seconds() <= max_age_sec
+            except Exception:
+                return False
+
+        def _parse_state_ts(ts_str):
+            if not ts_str:
+                return None
+            text = str(ts_str)
+            candidates = [text, text.replace(' ', 'T')]
+            for c in candidates:
+                try:
+                    return datetime.datetime.fromisoformat(c)
+                except Exception:
+                    continue
+            return None
+
+        results = []
+        for pair in all_pairs:
+            try:
+                row = db_by_pair.get(pair)
+                history = []
+                if row and row['history_json']:
+                    history = json.loads(row['history_json'] or '[]')
                 
                 # Injeksi harga dari WS jika ada, jika tidak pakai dari DB
-                ws_data = ws_tickers.get(pair, {})
+                ws_data = ws_tickers.get(pair, {}) or ws_tickers.get(pair.upper(), {})
                 last = float(ws_data.get('last', 0))
                 ch_24h = float(ws_data.get('change_24h', 0))
                 
@@ -1372,24 +1523,73 @@ def _build_radar_payload():
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
                 
 
+                trend = (row['trend'] if row else None) or ('UP' if change > 0 else ('DOWN' if change < 0 else 'SIDEWAYS'))
+                score = float(row['score'] or 0) if row else _clamp(50 + (change * 4.0) + (ch_24h * 0.8), 0, 100)
+                prediction = float(row['prediction_prob'] or 0.0) if row else _clamp(0.5 + (change / 20.0) + (ch_24h / 200.0), 0.0, 1.0)
+                signal = (row['signal'] if row else None) or _derive_signal(score, prediction, change, trend)
+
+                radar_reco = db.get_state(f"radar_reco_{pair}", signal)
+                radar_reason = db.get_state(f"radar_reco_reason_{pair}", "")
+
+                gate_skip, gate_updated_at = db.get_state_with_time(f"gate_skip_{pair}")
+                gate_ts = _parse_state_ts(gate_updated_at)
+                gate_fresh = bool(gate_ts and (datetime.datetime.now() - gate_ts).total_seconds() <= 600)
+                gate_msg = gate_skip if gate_fresh else ""
+
+                veto_raw = db.get_state(f"llm_veto_{pair}")
+                veto_ts_raw = db.get_state(f"llm_veto_ts_{pair}")
+                veto_fresh = _is_fresh(veto_ts_raw, max_age_sec=15 * 60)
+                veto_conf = 0
+                veto_reason = ""
+                ai_veto = False
+                if veto_raw and veto_fresh:
+                    try:
+                        parsed_veto = LLMWorker.parse_structured_result(veto_raw)
+                        veto_conf = int(parsed_veto.get('confidence', 0) or 0)
+                        veto_reason = parsed_veto.get('reason', '')
+                        ai_veto = str(parsed_veto.get('verdict', 'HOLD')).upper() == 'AVOID' and veto_conf >= 65
+                    except Exception:
+                        pass
+
+                is_blocked = ai_veto or (gate_fresh and str(gate_msg).upper().startswith('SKIP')) or (gate_fresh and 'BLOCK' in str(gate_msg).upper())
+                tradable_reason = "AI VETO" if ai_veto else (gate_msg or "READY")
+
                 results.append({
                     "pair":       pair,
                     "price":      last,
                     "change":     round(change, 2),
                     "change_24h": round(ch_24h, 2),
                     "vol_idr":    float(ws_data.get("vol_idr", 0)),
-                    "ch_5m":      float(row['ch_5m'] or 0),
-                    "ch_15m":     float(row['ch_15m'] or 0),
-                    "ch_1h":      float(row['ch_1h'] or 0),
-                    "volatility": float(row['volatility'] or 0),
-                    "score":      float(row['score'] or 0),
-                    "prediction": float(row['prediction_prob'] or 0.0),
-                    "trend":      row['trend'] or 'N/A',
-                    "signal":     row["signal"] or "HOLD",
-                    "updated_at": row["updated_at"]
+                    "ch_5m":      float(row['ch_5m'] or 0) if row else 0.0,
+                    "ch_15m":     float(row['ch_15m'] or 0) if row else 0.0,
+                    "ch_1h":      float(row['ch_1h'] or 0) if row else 0.0,
+                    "volatility": float(row['volatility'] or 0) if row else 0.0,
+                    "score":      float(score),
+                    "prediction": float(prediction),
+                    "trend":      trend,
+                    "signal":     signal,
+                    "radar_reco": str(radar_reco or signal).upper(),
+                    "radar_reason": radar_reason,
+                    "gate_status": gate_msg,
+                    "gate_updated_at": gate_updated_at,
+                    "ai_veto": ai_veto,
+                    "ai_veto_reason": veto_reason,
+                    "ai_veto_confidence": veto_conf,
+                    "tradable": not is_blocked,
+                    "tradable_reason": tradable_reason,
+                    "updated_at": row["updated_at"] if row else None
                 })
             except Exception:
                 continue
+        def _signal_rank(it):
+            s = str(it.get('radar_reco') or it.get('signal', '')).upper()
+            if 'BUY' in s:
+                return 0
+            if 'SELL' in s:
+                return 1
+            return 2
+
+        results.sort(key=lambda x: (_signal_rank(x), -float(x.get('score', 0)), str(x.get('pair', ''))))
         return results
     finally:
         conn.close()

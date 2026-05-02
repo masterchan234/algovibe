@@ -46,12 +46,30 @@ def reset_dry_run_data():
         """)
         cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'trigger_exit_pair'")
 
-        # 5. Bersihkan cooldown, shadow meta, AI cache
+        # 5. Bersihkan cooldown, shadow meta, AI cache, dan state radar/veto
+        deleted_states = 0
         cursor.execute("DELETE FROM bot_state WHERE key LIKE 'pair_cooldown_until_%'")
+        deleted_states += cursor.rowcount
         cursor.execute("DELETE FROM bot_state WHERE key LIKE 'shadow_meta_%'")
+        deleted_states += cursor.rowcount
         cursor.execute("DELETE FROM bot_state WHERE key LIKE 'llm_reasoning_%'")
+        deleted_states += cursor.rowcount
         cursor.execute("DELETE FROM bot_state WHERE key = 'llm_equity_report'")
-        deleted_states = cursor.rowcount
+        deleted_states += cursor.rowcount
+
+        # Radar execution visibility state (live + audit)
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'radar_reco_%'")
+        deleted_states += cursor.rowcount
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'radar_reco_reason_%'")
+        deleted_states += cursor.rowcount
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'gate_skip_%'")
+        deleted_states += cursor.rowcount
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'gate_ts_%'")
+        deleted_states += cursor.rowcount
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'llm_veto_%'")
+        deleted_states += cursor.rowcount
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'llm_veto_ts_%'")
+        deleted_states += cursor.rowcount
 
         conn.commit()
 

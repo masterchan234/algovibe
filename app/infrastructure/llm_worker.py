@@ -8,6 +8,18 @@ logger = logging.getLogger(__name__)
 
 _CONSCIOUSNESS_SIGNAL = "__CONSCIOUSNESS_UPDATE__"
 
+
+def _is_session_conflict(err: Exception | str) -> bool:
+    raw = str(err or "").upper()
+    return "FAILED_PRECONDITION" in raw and "SESSION ALREADY EXISTS" in raw
+
+
+def _humanize_inference_error(err: Exception | str) -> str:
+    raw = str(err or "")
+    if _is_session_conflict(raw):
+        return "inference error: LLM session conflict. Worker auto-recovered, please retry."
+    return f"inference error: {raw}"
+
 def _parse_engine_response(response):
     """
     Tangguh terhadap berbagai tipe kembalian litert_lm (Response, list, dict, str).
@@ -52,10 +64,11 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
         engine = Engine(model_path, cache_dir=cache_dir)
         
         _consciousness_messages = []
-        _current_conv = None
         log_message("🧠 LLM Worker: Engine initialized.")
 
         while True:
+            task_id = None
+            task_type = None
             try:
                 task_id, task_type, prompt, mode = req_queue.get()
                 
@@ -63,29 +76,34 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                     _consciousness_messages = [{"role": "user", "content": prompt}]
                     continue
 
-                # Hapus session sebelumnya agar tidak terjadi FAILED_PRECONDITION
-                if _current_conv is not None:
+                # Retry otomatis 1x jika session conflict transient muncul.
+                last_error = None
+                result = None
+                for attempt in range(2):
                     try:
-                        del _current_conv
-                    except Exception:
-                        pass
-                    _current_conv = None
+                        conv_messages = list(_consciousness_messages) if _consciousness_messages else []
+                        with engine.create_conversation(messages=conv_messages) as conv:
+                            log_message(f"🧠 LLM Worker: Starting {mode} inference for {task_id} (attempt {attempt + 1}/2)")
+                            response = conv.send_message(prompt)
+                            result = _parse_engine_response(response)
+                        break
+                    except Exception as inner_e:
+                        last_error = inner_e
+                        if _is_session_conflict(inner_e) and attempt == 0:
+                            log_message("🧠 LLM Worker: Session conflict detected, retrying task once...")
+                            continue
+                        raise
 
-                conv = engine.create_conversation()
-                _current_conv = conv
-                if _consciousness_messages:
-                    conv.messages = list(_consciousness_messages)
-
-                log_message(f"🧠 LLM Worker: Starting {mode} inference for {task_id}")
-                response = conv.send_message(prompt)
-                result = _parse_engine_response(response)
+                if result is None and last_error is not None:
+                    raise last_error
 
                 log_message(f"🧠 LLM Worker: Task {task_id} completed.")
                 res_queue.put((task_id, task_type, result))
             except Exception as e:
-                log_message(f"🧠 LLM Worker: Inference error - {e}")
+                friendly_err = _humanize_inference_error(e)
+                log_message(f"🧠 LLM Worker: Inference error - {friendly_err}")
                 if task_id:
-                    res_queue.put((task_id, task_type, f"inference error: {e}"))
+                    res_queue.put((task_id, task_type, friendly_err))
     except Exception as e:
         print(f"CRITICAL LLM ERROR: {e}")
 
@@ -183,7 +201,12 @@ class LLMWorker:
     @staticmethod
     def parse_structured_result(result_str: str) -> dict:
         import json
-        defaults = {"verdict": "HOLD", "confidence": 0, "reason": f"Tool not called. AI says: {result_str}", "stop_loss_pct": 1.2, "take_profit_pct": 2.0}
+        safe_reason = str(result_str)
+        upper_reason = safe_reason.upper()
+        if "FAILED_PRECONDITION" in upper_reason and "SESSION ALREADY EXISTS" in upper_reason:
+            safe_reason = "LLM session conflict detected. Auto-recovered and waiting next analysis cycle."
+
+        defaults = {"verdict": "HOLD", "confidence": 0, "reason": f"Tool not called. AI says: {safe_reason}", "stop_loss_pct": 1.2, "take_profit_pct": 2.0}
         if not result_str: return defaults
         try:
             if "{" in result_str and "}" in result_str:

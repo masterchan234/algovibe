@@ -223,7 +223,7 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
-        radarPairs.value = data.slice(0, 50)
+        radarPairs.value = data
       }
     })
 

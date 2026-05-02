@@ -29,6 +29,34 @@ from utils.logger import log_message
 _BREAK = "BREAK"  # sentinel value returned to caller
 
 
+def _derive_radar_recommendation(p, enriched, adaptive_cfg):
+    """Satu sumber rekomendasi untuk Radar + gate entry bot."""
+    signal_v = str(enriched.get('signal_verdict', 'HOLD') or 'HOLD').upper()
+    trend = str(enriched.get('trend', 'N/A') or 'N/A').upper()
+    score = float(p.get('score', 0) or 0)
+    tq_prob = float(enriched.get('tq_prob', 0) or 0)
+    imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
+    ai_threshold = float(adaptive_cfg.get('ai_threshold', 0.6) or 0.6)
+
+    if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
+        return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
+
+    buy_ready = (
+        signal_v == 'BUY' and (
+            tq_prob >= max(0.35, ai_threshold * 0.9)
+            or score >= 60
+            or (trend == 'UP' and imbalance_ratio >= 1.2)
+        )
+    )
+    if buy_ready:
+        return "BUY", (
+            f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
+            f"imbalance={imbalance_ratio:.2f}x"
+        )
+
+    return "HOLD", f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}"
+
+
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     """
     Runs all pre-entry gate checks in sequence.
@@ -78,6 +106,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         "imbalance": imbalance_ratio,
     }
     final_score = bot.oracle.apply_learning_to_score(p['score'], features)
+
+    radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
+    db.save_state(f"radar_reco_{pair}", radar_rec)
+    db.save_state(f"radar_reco_reason_{pair}", radar_reason)
 
     prob_display = f"{tq_prob * 100:.0f}%" if tq_prob >= 0 else "WARMUP"
     boost_str = ""
@@ -136,6 +168,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # ── 6. Trend / breakout requirement ───────────────────────────────────
     if not DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
         msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
+        return None
+
+    # ── 7. Radar recommendation guard (sinkron dashboard <-> eksekusi bot) ──
+    if radar_rec == "SELL":
+        msg = f"🚫 RADAR BLOCK: rekomendasi SELL ({radar_reason})"
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -241,6 +280,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     return {
         "mode": "SHADOW" if is_shadow_mode else "LIVE",
+        "radar_rec": radar_rec,
+        "radar_reason": radar_reason,
         "llm_v": llm_v,
         "llm_c": llm_c,
         "llm_r": llm_r,

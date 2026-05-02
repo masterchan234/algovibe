@@ -111,16 +111,33 @@
 
     <!-- Top Radar -->
     <div class="radar-section">
-      <div class="section-label">Signal Radar</div>
+      <div class="section-label radar-header-row">
+        <span>Signal Radar</span>
+        <span class="radar-total">{{ radarDisplayPairs.length }}/{{ sortedRadarPairs.length }} Coins</span>
+      </div>
+      <div class="radar-toolbar">
+        <div class="radar-filters">
+          <button class="radar-filter-btn" :class="{ active: radarFilter === 'all' }" @click="radarFilter = 'all'">All {{ radarCounts.all }}</button>
+          <button class="radar-filter-btn" :class="{ active: radarFilter === 'tradable' }" @click="radarFilter = 'tradable'">Tradable {{ radarCounts.tradable }}</button>
+          <button class="radar-filter-btn" :class="{ active: radarFilter === 'blocked' }" @click="radarFilter = 'blocked'">Blocked {{ radarCounts.blocked }}</button>
+          <button class="radar-filter-btn" :class="{ active: radarFilter === 'veto' }" @click="radarFilter = 'veto'">AI Veto {{ radarCounts.veto }}</button>
+        </div>
+        <div class="radar-audit-mini" title="Histori 24 jam, bukan status live saat ini">
+          <span class="audit-label">Audit 24h</span>
+          <span>BUY {{ radarAudit.buy_signals_24h || 0 }}</span>
+          <span>Blocked {{ radarAudit.buy_blocked_total_24h || 0 }}</span>
+          <span>Veto {{ radarAudit.buy_blocked_ai_veto_24h || 0 }}</span>
+        </div>
+      </div>
       <div class="radar-scroll-wrap">
         <div class="radar-list">
           <div
-            v-for="pair in store.radarPairs"
+            v-for="pair in radarDisplayPairs"
             :key="pair.pair"
             class="radar-item"
             :class="[
               itemClass(pair),
-              { 'active-radar': selectedPair === pair.pair }
+              { 'active-radar': selectedPair?.pair === pair.pair }
             ]"
             @click="onRadarClick(pair)"
           >
@@ -129,16 +146,20 @@
                 {{ formatPair(pair.pair) }}
                 <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="leader-crown">👑</span>
               </span>
-              <span class="radar-score">{{ (pair.score || 0).toFixed(0) }}</span>
+              <span class="radar-signal" :class="signalClass(pair)">{{ recommendationOf(pair) }}</span>
             </div>
             <div class="radar-meter">
               <div class="meter-fill" :style="{ width: (pair.score || 0) + '%', background: scoreColor(pair.score) }"></div>
             </div>
             <div class="radar-bottom">
-              <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend }}</span>
+              <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend || 'N/A' }}</span>
               <span class="radar-prob" v-if="pair.prediction != null">
-                {{ (pair.prediction * 100).toFixed(0) }}%
+                {{ (pair.prediction * 100).toFixed(0) }}% · S{{ (pair.score || 0).toFixed(0) }}
               </span>
+            </div>
+            <div class="radar-note" :class="pair.tradable ? 'note-ready' : 'note-blocked'">
+              <span v-if="pair.ai_veto" class="veto-chip">AI VETO {{ pair.ai_veto_confidence || 0 }}%</span>
+              <span class="note-text">{{ shortStatus(pair) }}</span>
             </div>
           </div>
         </div>
@@ -169,6 +190,16 @@ echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLin
 const store = useTradeStore()
 const stats = computed(() => store.stats)
 const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
+const radarFilter = ref('all')
+const radarAudit = ref({
+  buy_signals_24h: 0,
+  buy_blocked_total_24h: 0,
+  buy_blocked_ai_veto_24h: 0,
+  buy_blocked_gate_24h: 0,
+  buy_tradable_24h: 0,
+})
+let clockIntervalId = null
+let radarAuditIntervalId = null
 
 const tileStyle = (pnl) => {
   if (pnl === 0) return { background: '#161b22', color: '#8b949e' }
@@ -186,7 +217,7 @@ const tileStyle = (pnl) => {
 }
 
 onMounted(() => {
-  setInterval(() => {
+  clockIntervalId = setInterval(() => {
     currentTime.value = new Date().toLocaleTimeString('id-ID')
   }, 5000)
 })
@@ -293,6 +324,118 @@ function itemClass(pair) {
   if (s <= 20) return 'conviction-high-down'
   return ''
 }
+
+function recommendationOf(pair) {
+  const backendReco = String(pair?.radar_reco || '').toUpperCase()
+  if (backendReco === 'BUY' || backendReco === 'SELL' || backendReco === 'HOLD') {
+    return backendReco
+  }
+
+  const rawSignal = String(pair?.signal || '').toUpperCase()
+  if (rawSignal.includes('BUY')) return 'BUY'
+  if (rawSignal.includes('SELL')) return 'SELL'
+
+  const score = Number(pair?.score || 0)
+  const prediction = Number(pair?.prediction || 0)
+  const trend = String(pair?.trend || '').toUpperCase()
+
+  if (score >= 70 && prediction >= 0.55) return 'BUY'
+  if (score <= 30 && prediction <= 0.45) return 'SELL'
+  if ((trend.includes('BULL') || trend.includes('UP')) && score >= 60) return 'BUY'
+  if ((trend.includes('BEAR') || trend.includes('DOWN')) && score <= 40) return 'SELL'
+  return 'HOLD'
+}
+
+function shortStatus(pair) {
+  if (pair?.ai_veto) {
+    const raw = String(pair?.ai_veto_reason || pair?.tradable_reason || 'AI memveto entry ini')
+    return raw.length > 68 ? raw.slice(0, 68) + '...' : raw
+  }
+  if (pair?.tradable === false) {
+    const raw = String(pair?.tradable_reason || pair?.gate_status || 'Belum memenuhi gate entry')
+    return raw.length > 68 ? raw.slice(0, 68) + '...' : raw
+  }
+  const radarReason = String(pair?.radar_reason || '')
+  if (radarReason) {
+    return radarReason.length > 68 ? radarReason.slice(0, 68) + '...' : radarReason
+  }
+  return 'Ready untuk eksekusi jika gate lain lolos'
+}
+
+function signalPriority(pair) {
+  const rec = recommendationOf(pair)
+  if (rec === 'BUY') return 0
+  if (rec === 'SELL') return 1
+  return 2
+}
+
+function signalClass(pair) {
+  const rec = recommendationOf(pair)
+  if (rec === 'BUY') return 'signal-buy'
+  if (rec === 'SELL') return 'signal-sell'
+  return 'signal-hold'
+}
+
+const radarDisplayPairs = computed(() => {
+  const filter = radarFilter.value
+  const filtered = sortedRadarPairs.value.filter((pair) => {
+    if (filter === 'tradable') return pair?.tradable !== false
+    if (filter === 'blocked') return pair?.tradable === false
+    if (filter === 'veto') return !!pair?.ai_veto
+    return true
+  })
+  return filtered
+})
+
+const sortedRadarPairs = computed(() => {
+  const data = Array.isArray(store.radarPairs) ? store.radarPairs : []
+  return [...data].sort((a, b) => {
+    const pri = signalPriority(a) - signalPriority(b)
+    if (pri !== 0) return pri
+    const scoreDiff = Number(b?.score || 0) - Number(a?.score || 0)
+    if (scoreDiff !== 0) return scoreDiff
+    return String(a?.pair || '').localeCompare(String(b?.pair || ''))
+  })
+})
+
+const radarCounts = computed(() => {
+  const all = sortedRadarPairs.value
+  const tradable = all.filter(p => p?.tradable !== false).length
+  const blocked = all.filter(p => p?.tradable === false).length
+  const veto = all.filter(p => !!p?.ai_veto).length
+  return {
+    all: all.length,
+    tradable,
+    blocked,
+    veto,
+  }
+})
+
+async function fetchRadarAudit() {
+  const backendUrl = import.meta.env.DEV
+    ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+    : window.location.origin
+
+  try {
+    const res = await fetch(`${backendUrl}/api/radar-audit`)
+    if (!res.ok) return
+    const data = await res.json()
+    radarAudit.value = {
+      buy_signals_24h: Number(data?.buy_signals_24h || 0),
+      buy_blocked_total_24h: Number(data?.buy_blocked_total_24h || 0),
+      buy_blocked_ai_veto_24h: Number(data?.buy_blocked_ai_veto_24h || 0),
+      buy_blocked_gate_24h: Number(data?.buy_blocked_gate_24h || 0),
+      buy_tradable_24h: Number(data?.buy_tradable_24h || 0),
+    }
+  } catch (e) {
+    console.error('Failed to fetch radar audit:', e)
+  }
+}
+
+onMounted(() => {
+  fetchRadarAudit()
+  radarAuditIntervalId = setInterval(fetchRadarAudit, 30000)
+})
 
 function scoreColor(s) {
   if (s >= 80) return '#3fb950'
@@ -451,6 +594,14 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (clockIntervalId) {
+    clearInterval(clockIntervalId)
+    clockIntervalId = null
+  }
+  if (radarAuditIntervalId) {
+    clearInterval(radarAuditIntervalId)
+    radarAuditIntervalId = null
+  }
   if (rafId != null) {
     cancelAnimationFrame(rafId)
     rafId = null
@@ -922,6 +1073,70 @@ onUnmounted(() => {
   color: #8b949e;
 }
 
+.radar-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.radar-total {
+  color: #58a6ff;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.radar-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 14px 6px;
+}
+
+.radar-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.radar-filter-btn {
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #8b949e;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.radar-filter-btn:hover {
+  color: #e6edf3;
+  border-color: #58a6ff;
+}
+
+.radar-filter-btn.active {
+  background: rgba(88, 166, 255, 0.12);
+  color: #58a6ff;
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.radar-audit-mini {
+  display: flex;
+  gap: 8px;
+  font-size: 9px;
+  font-weight: 800;
+  color: #8b949e;
+  white-space: nowrap;
+}
+
+.audit-label {
+  color: #58a6ff;
+  letter-spacing: 0.3px;
+}
+
 .radar-scroll-wrap {
   max-height: 280px;
   overflow-y: auto;
@@ -936,7 +1151,7 @@ onUnmounted(() => {
 
 .radar-list {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 8px;
   padding: 4px 14px 12px;
 }
@@ -986,7 +1201,33 @@ onUnmounted(() => {
 }
 .radar-pair { font-weight: 800; color: #58a6ff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
 .leader-crown { font-size: 10px; filter: drop-shadow(0 0 4px gold); }
-.radar-score { color: #8b949e; font-size: 9px; font-weight: 800; }
+
+.radar-signal {
+  font-size: 8.5px;
+  font-weight: 900;
+  padding: 2px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+  border: 1px solid transparent;
+}
+
+.signal-buy {
+  background: rgba(63, 185, 80, 0.12);
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.32);
+}
+
+.signal-sell {
+  background: rgba(248, 81, 73, 0.12);
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.32);
+}
+
+.signal-hold {
+  background: rgba(210, 153, 34, 0.12);
+  color: #d29922;
+  border-color: rgba(210, 153, 34, 0.3);
+}
 
 .radar-meter {
   height: 3px;
@@ -1004,6 +1245,41 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.radar-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+}
+
+.veto-chip {
+  font-size: 8px;
+  font-weight: 900;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.35);
+}
+
+.note-text {
+  font-size: 8px;
+  line-height: 1.2;
+  color: #8b949e;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-ready .note-text {
+  color: #3fb950;
+}
+
+.note-blocked .note-text {
+  color: #f85149;
 }
 .radar-trend { font-size: 8.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
 .trend-up   { color: #3fb950; }
@@ -1049,14 +1325,20 @@ onUnmounted(() => {
   .tile-label { font-size: 8px; }
 
   .radar-list {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
     padding: 4px 10px 12px;
+  }
+
+  .radar-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 0 10px 6px;
   }
 }
 
 @media (max-width: 480px) {
-  .radar-list { grid-template-columns: 1fr; }
+  .radar-list { grid-template-columns: repeat(2, 1fr); }
   .heatmap-tile { flex: 0 0 calc(25% - 3px); } /* 4 columns for very small */
 }
 </style>
