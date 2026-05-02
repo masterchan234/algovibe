@@ -51,9 +51,16 @@ class Database:
                     target_sl_pct REAL DEFAULT -0.02,
                     trailing_sl_price REAL DEFAULT 0.0,
                     highest_price REAL DEFAULT 0.0,
-                    reason_backup TEXT
+                    reason_backup TEXT,
+                    ai_confidence REAL DEFAULT 0.0,
+                    dca_tier INTEGER DEFAULT 0
                 )
             ''')
+            # Migrations
+            try: cursor.execute("ALTER TABLE positions ADD COLUMN ai_confidence REAL DEFAULT 0.0")
+            except: pass
+            try: cursor.execute("ALTER TABLE positions ADD COLUMN dca_tier INTEGER DEFAULT 0")
+            except: pass
             
             # Tabel untuk Market Depth (Order Book)
             cursor.execute('''
@@ -243,6 +250,15 @@ class Database:
             cursor.execute("SELECT * FROM positions")
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
+
+    def update_position_after_dca(self, pair, new_price, new_amount_crypto, new_amount_idr, new_tier):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE positions 
+                SET entry_price = ?, amount_crypto = ?, amount_idr = ?, dca_tier = ?, timestamp = CURRENT_TIMESTAMP
+                WHERE pair = ?
+            ''', (new_price, new_amount_crypto, new_amount_idr, new_tier, pair))
 
     def get_position(self, pair):
         with self.get_connection() as conn:

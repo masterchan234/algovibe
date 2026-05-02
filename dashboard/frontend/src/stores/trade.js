@@ -14,6 +14,9 @@ export const useTradeStore = defineStore('trade', () => {
   const stats = reactive({
     daily_pnl: 0,
     all_time_pnl_dry: 0,
+    available_idr: 0,
+    total_equity: 0,
+    utilization: 0,
     win_rate: 0,
     active_positions: 0,
     unrealized_pnl: 0,
@@ -147,6 +150,9 @@ export const useTradeStore = defineStore('trade', () => {
       Object.assign(stats, {
         daily_pnl: data.daily_pnl ?? 0,
         all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
+        available_idr: data.available_idr ?? 0,
+        total_equity: data.total_equity ?? 0,
+        utilization: data.utilization ?? 0,
         win_rate: data.win_rate ?? 0,
         active_positions: data.active_positions ?? 0,
         unrealized_pnl: data.unrealized_pnl ?? 0,

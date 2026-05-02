@@ -10,6 +10,18 @@
       </div>
       
       <div class="header-center hide-mobile">
+        <div class="stat-bubble">
+          <span class="bubble-label">Total Equity</span>
+          <span class="bubble-value highlight">Rp {{ formatNumber(store.stats.total_equity) }}</span>
+        </div>
+        <div class="stat-bubble">
+          <span class="bubble-label">Liquidity</span>
+          <span class="bubble-value">Rp {{ formatNumber(store.stats.available_idr) }}</span>
+        </div>
+        <div class="stat-bubble" v-if="store.stats.utilization !== undefined">
+          <span class="bubble-label">Utilization</span>
+          <span class="bubble-value" :class="store.stats.utilization > 80 ? 'c-bear' : 'c-bull'">{{ store.stats.utilization }}%</span>
+        </div>
         <div class="stat-bubble" v-if="store.stats.regime">
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>

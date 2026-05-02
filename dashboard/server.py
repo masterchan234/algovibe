@@ -430,10 +430,29 @@ def get_stats():
         _last_price = tech_data.get('last_price')
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
-        from config import DRY_RUN
+        from config import DRY_RUN, INITIAL_CAPITAL
         
-        # Performance & Stats definitions
+        # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
+        # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
+        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in positions])
+        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        
+        if DRY_RUN:
+            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            active_pnl = realized_pnl_dry
+            active_win_rate = dry_win_rate
+        else:
+            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
+            active_pnl = realized_pnl_live
+            active_win_rate = win_rate
+            
+        total_equity = available_idr + total_used_idr + unrealized_pnl
+        utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
+        
+        # Performance definitions
         perf = db.get_daily_stats()
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
         
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
@@ -448,14 +467,12 @@ def get_stats():
         ).fetchone()
         best_trade = float(best_trade_row[0] or 0)
 
-        # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
-        active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
-        active_win_rate = dry_win_rate if DRY_RUN else win_rate
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
-
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "all_time_pnl_dry": float(dry_stats['total_pnl'] or 0) if dry_stats else 0,
+            "all_time_pnl_dry": realized_pnl_dry,
+            "available_idr": round(available_idr, 0),
+            "total_equity": round(total_equity, 0),
+            "utilization": round(utilization_pct, 1),
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
@@ -1050,11 +1067,29 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
-        from config import DRY_RUN
+        from config import DRY_RUN, INITIAL_CAPITAL
         dr_val = 1 if DRY_RUN else 0
         
+        # [NEW] Predator Metrics Calculation
+        total_used_idr = 0.0
         for pos in positions:
-            # [Senior Audit] Filter unrealized PnL by current mode
+            if int(pos['dry_run'] or 0) == dr_val:
+                total_used_idr += float(pos['amount_idr'] or 0)
+
+        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        
+        if DRY_RUN:
+            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            active_pnl = realized_pnl_dry
+            active_win_rate = dry_win_rate
+        else:
+            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
+            active_pnl = realized_pnl_live
+            active_win_rate = win_rate
+            
+        # [Senior Audit] Calculate Unrealized PnL
+        for pos in positions:
             if int(pos['dry_run'] or 0) != dr_val:
                 continue
 
@@ -1080,10 +1115,12 @@ def _build_stats_payload():
                         history = json.loads(row['history_json'])
                         if history: last_price = float(history[-1])
                 except: pass
-            
+
             if last_price > 0:
                 unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
 
+        total_equity = available_idr + total_used_idr + unrealized_pnl
+        utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         # Injeksi Harga Realtime (Prioritas: Trade Stream > Summary > DB)
         ws_tickers = mws.get_tickers()
         ws_trades = mws.get_trades(CURRENT_WATCH_PAIR)
@@ -1221,6 +1258,9 @@ def _build_stats_payload():
         final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
         return {
+            "available_idr": round(available_idr, 0),
+            "total_equity": round(total_equity, 0),
+            "utilization": round(utilization_pct, 1),
             "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
             "daily_pnl": active_pnl,

@@ -55,7 +55,14 @@ STRONG_IMBALANCE_RATIO  = 1.4
 # --- AI & Probability ---
 AI_CONFIDENCE_THRESHOLD = 0.25 # [PRO SCALP] Lebih responsif terhadap momentum mikro
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
-AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
+AI_MIN_HISTORY_POINTS   = 30   
+
+# --- [Senior Strategy: Averaging Down] ---
+DCA_ENABLED = True
+DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
+DCA_STEP_PCT = -0.035          # Tambah muatan setiap turun 3.5%
+DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
+DCA_MIN_AI_CONFIDENCE = 0.40   # Hanya tambah muatan jika AI masih optimis > 40%# Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
