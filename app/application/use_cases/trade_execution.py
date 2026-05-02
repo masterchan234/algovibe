@@ -119,10 +119,13 @@ def execute_trade(
             send_telegram_message(msg)
 
             params = {
-                'post_only': False if taker else True,
                 'pair': pair.replace("idr", "_idr"),
             }
-            order = bot.exchange.create_limit_buy_order(symbol, amount_crypto, buy_price, params)
+            # [Senior Scaling Fix] Gunakan Market Buy untuk eksekusi instan tanpa antre.
+            # Indodax membutuhkan total IDR (cost) untuk market buy.
+            order = bot.exchange.create_market_buy_order(symbol, amount_idr, params)
+            # Update buy_price dengan harga eksekusi asli jika tersedia
+            buy_price = float(order.get('price') or price)
 
         _rsi_dna = None
         _ema_dist_dna = None

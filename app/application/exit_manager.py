@@ -105,7 +105,7 @@ class ExitManager:
                     
                     sell_value = amount * current_price
                     fee_sell = sell_value * FEE_SELL_TAKER
-                    fee_buy = amount_idr * FEE_BUY_MAKER
+                    fee_buy = amount_idr * FEE_BUY_TAKER
                     
                     gross_pnl = (current_price - entry_price) * amount
                     net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
@@ -456,7 +456,7 @@ class ExitManager:
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
                 try:
                     sell_value_est = amount * current_price
-                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_MAKER
+                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_TAKER
                     # [Senior Scaling Fix] Karena kita sekarang menggunakan Market Order (Taker) untuk TP,
                     # estimasi fee harus menggunakan Taker Rate (0.72%) agar profit tetap aman.
                     fee_sell_est = sell_value_est * FEE_SELL_TAKER
@@ -658,8 +658,8 @@ class ExitManager:
             exec_type = "TAKER" if is_emergency else "MAKER"
             fee_sell_rate = FEE_SELL_TAKER if is_emergency else FEE_SELL_MAKER
             
-            # Entry fee selalu Maker (karena bot antri beli)
-            fee_buy = amount_idr * FEE_BUY_MAKER
+            # Entry fee sekarang Taker (karena bot hajar kanan/market buy)
+            fee_buy = amount_idr * FEE_BUY_TAKER
             
             # Gunakan exit_price (harga limit order) bukan price (ticker mentah) untuk akurasi PnL
             sell_value = amount * exit_price

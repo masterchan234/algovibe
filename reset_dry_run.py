@@ -9,29 +9,45 @@ def reset_dry_run_data():
         print(f"❌ Database tidak ditemukan di: {DB_PATH}")
         return
 
-    print("🚀 Memulai pembersihan data DRY RUN...")
+    print("🚀 Memulai pembersihan total data DRY RUN & System State...")
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     try:
-        # 1. Hapus riwayat perdagangan simulasi
+        # 1. Hapus riwayat perdagangan & analitik simulasi
         cursor.execute("DELETE FROM trade_history WHERE dry_run = 1")
         deleted_history = cursor.rowcount
         
-        # 2. Hapus posisi terbuka simulasi
+        cursor.execute("DELETE FROM trade_analytics WHERE dry_run = 1")
+        
+        # 2. Hapus posisi terbuka simulasi & Shadow Orders
         cursor.execute("DELETE FROM positions WHERE dry_run = 1")
         deleted_positions = cursor.rowcount
         
-        # 3. Opsional: Bersihkan analitik yang berkaitan dengan transaksi lama
-        # cursor.execute("DELETE FROM trade_analytics")
+        cursor.execute("DELETE FROM shadow_orders")
+        deleted_shadows = cursor.rowcount
+        
+        # 3. Reset Global Pause & Daily Stats
+        cursor.execute("UPDATE bot_state SET value = '0' WHERE key IN ('consecutive_losses', 'daily_trades')")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'trigger_exit_pair'")
+        
+        # 4. Bersihkan Cooldowns & Metadata Shadow (Hapus semua key berpola)
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'pair_cooldown_until_%'")
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'shadow_meta_%'")
+        deleted_states = cursor.rowcount
+
+        # 5. Opsional: Bersihkan Activity Feed (Dashboard)
+        cursor.execute("DELETE FROM system_events")
         
         conn.commit()
         
-        print(f"✅ Berhasil menghapus {deleted_history} riwayat transaksi (Dry Run).")
-        print(f"✅ Berhasil menghapus {deleted_positions} posisi terbuka (Dry Run).")
-        print("\n✨ Dashboard Anda sekarang seharusnya kembali ke Rp 0 dan 0.0% Win Rate.")
-        print("💡 Jangan lupa merestart layanan dashboard untuk melihat perubahan.")
+        print(f"✅ {deleted_history} riwayat transaksi dibersihkan.")
+        print(f"✅ {deleted_positions} posisi terbuka dibersihkan.")
+        print(f"✅ {deleted_shadows} shadow orders dibersihkan.")
+        print(f"✅ {deleted_states} state (cooldowns/meta) dibersihkan.")
+        print("🔓 Global Pause direset ke 0. Bot kembali aktif!")
+        print("\n✨ Sistem Algovibe sekarang dalam kondisi bersih (Clean Slate).")
 
     except Exception as e:
         conn.rollback()
