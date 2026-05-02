@@ -316,9 +316,9 @@ def mobile_dashboard():
 def index():
     return send_from_directory(app.static_folder, 'index.html')
 
-@app.route('/favicon.ico')
+@app.route("/favicon.ico")
 def favicon():
-    return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/x-icon')
+    return send_from_directory("static", "favicon.ico", mimetype="image/x-icon")
 
 
 @app.route('/api/login', methods=['GET', 'POST'])
