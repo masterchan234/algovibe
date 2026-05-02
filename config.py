@@ -22,9 +22,7 @@ DB_PATH         = f"{DATA_PATH}/algotrade.db"
 # ==========================================
 #INITIAL_CAPITAL        = 10000000
 INITIAL_CAPITAL        = 100000000
-MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
-MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)

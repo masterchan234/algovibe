@@ -1,4 +1,5 @@
 import os
+import json
 import time
 from datetime import datetime
 from collections import defaultdict, deque
@@ -313,7 +314,3 @@ class ScalperBot:
         while True:
             run_market_cycle(self)
 
-
-def run_bot():
-    bot = ScalperBot()
-    bot.run()

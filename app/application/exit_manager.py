@@ -25,6 +25,7 @@ class ExitManager:
         self.oracle = oracle
         self.jaring_orders = {} # {pair: {id, price, amount}}
         self.last_jaring_update = {} # {pair: timestamp}
+        self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
         self._sync_jaring_from_db()
 
     def get_open_positions(self):
@@ -166,22 +167,21 @@ class ExitManager:
                 # Check for exit
                 if current_price >= target_tp:
                     # Shadow WIN
-                    bot.consecutive_shadow_wins += 1
-                    log_message(f"🏆 [SHADOW WIN] {pair} hit TP! Streak: {bot.consecutive_shadow_wins}/2")
+                    self.consecutive_shadow_wins += 1
+                    log_message(f"🏆 [SHADOW WIN] {pair} hit TP! Streak: {self.consecutive_shadow_wins}/2")
                     db.delete_shadow_order(pair)
                     db.save_state(f"shadow_meta_{pair}", "")
                     
-                    if bot.consecutive_shadow_wins >= 2:
+                    if self.consecutive_shadow_wins >= 2:
                         log_message("🔓 [SHADOW RECOVERY] 2 Consecutive Wins! Unlocking Global Pause.")
-                        bot.consecutive_losses = 0
-                        bot.consecutive_shadow_wins = 0
                         db.save_state("consecutive_losses", 0)
+                        self.consecutive_shadow_wins = 0
                         send_telegram_message("🔓 *GLOBAL PAUSE UNLOCKED*\nPasar terdeteksi membaik via Shadow Probing (2x Win). Bot kembali beroperasi normal.")
                 
                 elif current_price <= target_sl:
                     # Shadow LOSS
                     log_message(f"💀 [SHADOW LOSS] {pair} hit SL. Streak reset.")
-                    bot.consecutive_shadow_wins = 0
+                    self.consecutive_shadow_wins = 0
                     db.delete_shadow_order(pair)
                     db.save_state(f"shadow_meta_{pair}", "")
         except Exception as e:
@@ -494,7 +494,7 @@ class ExitManager:
                         continue
 
                     # Logika Tier 1: NORMAL SCALP (Ikuti Trailing Stop / TP target standar)
-                    is_stagnant = pos_age_min > 25 and net_pnl_idr > 1000
+                    is_stagnant = pos_age_min > (MAX_HOLD_MINUTES * 0.7) and net_pnl_idr > 1000
                     if is_stagnant:
                         reason_tp = "STAGNANT_PROFIT_EXIT"
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
@@ -625,10 +625,9 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT")
-            # TP exits (RAPID_TP_*, STAGNANT_EXIT, TAKE_PROFIT) menggunakan taker market sell
-            # TAPI offset harus kecil agar tidak memotong profit yang sudah diraih
-            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
+            # TP exits menggunakan market sell untuk eksekusi instan
+            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "TIME_STOP_EXIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
 
             if is_emergency or is_tp_exit:
                 # [Senior Scaling Fix] Gunakan Market Order untuk kecepatan maksimal
@@ -678,8 +677,8 @@ class ExitManager:
             order_id = order.get('id')
             
             # Tentukan fee jual berdasarkan strategi exit
-            exec_type = "TAKER" if is_emergency else "MAKER"
-            fee_sell_rate = FEE_SELL_TAKER if is_emergency else FEE_SELL_MAKER
+            exec_type = "TAKER" if (is_emergency or is_tp_exit) else "MAKER"
+            fee_sell_rate = FEE_SELL_TAKER if (is_emergency or is_tp_exit) else FEE_SELL_MAKER
             
             # Entry fee sekarang Taker (karena bot hajar kanan/market buy)
             fee_buy = amount_idr * FEE_BUY_TAKER

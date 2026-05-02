@@ -209,7 +209,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         ema_20 = prices[0]
         for price_v in prices[1:]:
             ema_20 = (price_v * alpha) + (ema_20 * (1 - alpha))
-        ema_dist = ((ema_20 - p['last']) / ema_20) * 100
+        ema_dist = round((p['last'] - ema_20) / ema_20, 6)
     else:
         ema_dist = 0.0
 
