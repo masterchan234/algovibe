@@ -11,6 +11,7 @@ BASE_PATH    = os.getenv("APP_BASE_PATH", os.path.dirname(os.path.abspath(__file
 DATA_PATH    = "data"
 LOG_FILE     = f"{DATA_PATH}/logs/scalper.log"
 MODEL_PATH   = "models/gemma-4-E2B-it.litertlm"
+MODEL_CACHE_DIR = "models/cache"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
 DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
 EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED
@@ -26,12 +27,14 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 150
-MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
+MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
+LIQUIDITY_MULTIPLIER   = 50        # [DYNAMIC] Volume 24h harus minimal 50x besar modal per trade
 
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.25    # [AGGRESSIVE] Gunakan 25% saldo per koin (Fixed for 90k Balance)
+CAPITAL_PER_TRADE_PCT = 0.05    # [DYNAMIC BASE] Dasar 5% per koin (Bisa naik/turun via Oracle Velocity)
+MAX_OPEN_POSITIONS = 15          # [WIDE NET] Maksimal 15 posisi terbuka (Menangkap lebih banyak probabilitas)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
@@ -55,7 +58,14 @@ STRONG_IMBALANCE_RATIO  = 1.4
 # --- AI & Probability ---
 AI_CONFIDENCE_THRESHOLD = 0.25 # [PRO SCALP] Lebih responsif terhadap momentum mikro
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
-AI_MIN_HISTORY_POINTS   = 30   # Minimal data points sebelum AI aktif
+AI_MIN_HISTORY_POINTS   = 30   
+
+# --- [Senior Strategy: Averaging Down] ---
+DCA_ENABLED = True
+DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
+DCA_STEP_PCT = -0.035          # Tambah muatan setiap turun 3.5%
+DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
+DCA_MIN_AI_CONFIDENCE = 0.40   # Hanya tambah muatan jika AI masih optimis > 40%# Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)

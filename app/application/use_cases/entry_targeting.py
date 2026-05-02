@@ -36,17 +36,43 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             closes = [c[4] for c in ohlcv_atr]
             atr_val = calculate_atr(highs, lows, closes)
 
-            base_sl_pct = (atr_val * 1.5) / p['last']
-            rebound_multiplier = 1.20 if rsi_val < 35 else 1.0
-            final_sl_val = max(0.015, base_sl_pct * rebound_multiplier)
+            # --- [Multi-Factor Intelligence Scaling] ---
+            # 1. Base Volatility Component (ATR)
+            # base_risk represents the natural breathing room of the coin
+            base_risk_pct = (atr_val * 1.5) / p['last']
+            
+            # 2. Conviction Scaling (Confidence & Probability)
+            # Higher confidence allows for 'stretching' the targets
+            conviction_factor = (tq_prob + (gate.get('llm_c', 50) / 100.0)) / 2.0
+            # Stretch multiplier: 0.8x to 1.3x based on conviction
+            stretch_mult = 0.8 + (conviction_factor * 0.5)
+            
+            # 3. Exhaustion & Pressure Factor (RSI & Imbalance)
+            # If RSI is high (>65), we are entering exhaustion, tighten TP
+            # If Imbalance is high (>2.0), there is strong buying pressure, allow wider TP
+            exhaustion_mult = 1.0
+            if rsi_val > 65: exhaustion_mult = 0.85
+            elif rsi_val < 35: exhaustion_mult = 1.15 # Rebound potential
+            
+            pressure_mult = 1.0 + (min(2.0, imbalance_ratio) - 1.0) * 0.1 # +/- 10% based on book pressure
 
-            raw_tp = (atr_val * 3.0) / p['last']
-            final_dyn_tp = min(0.12, max(final_sl_val * 2.0, raw_tp))
-            final_dyn_sl = -min(0.04, final_sl_val)
+            # --- [Final Calculation] ---
+            # Stop Loss: Focused on protection, adjusted by volatility and pressure
+            # We tighten SL if pressure is against us
+            final_sl_val = base_risk_pct * (1.1 if imbalance_ratio < 0.8 else 1.0)
+            final_sl_val = max(0.007, min(0.035, final_sl_val)) # Capped for safety
+            
+            # Take Profit: Focused on alpha, adjusted by conviction and exhaustion
+            # TP = ATR_Base * 3.0 * Conviction * Exhaustion * Pressure
+            final_dyn_tp = (atr_val * 3.0 / p['last']) * stretch_mult * exhaustion_mult * pressure_mult
+            
+            # Ensure a healthy Risk-to-Reward (Min 1.2, Max 4.0)
+            final_dyn_tp = max(final_sl_val * 1.2, min(0.15, final_dyn_tp))
+            final_dyn_sl = -final_sl_val
 
             log_message(
-                f"🎯 [ATR Target] {pair}: TP {final_dyn_tp * 100:.1f}%, "
-                f"SL {final_dyn_sl * 100:.1f}% (Rebound: {rebound_multiplier}x)"
+                f"🧠 [INTELLIGENT TARGET] {pair}: TP {final_dyn_tp * 100:.2f}%, "
+                f"SL {final_dyn_sl * 100:.2f}% | Conviction: {conviction_factor:.2f}, RSI: {rsi_val:.1f}"
             )
         else:
             final_dyn_tp = knn_decision['target_tp']

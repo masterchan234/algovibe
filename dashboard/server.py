@@ -24,7 +24,7 @@ import ccxt
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
 
-app = Flask(__name__, static_folder='static')
+app = Flask(__name__, static_folder='static/dist', static_url_path='')
 
 # ── Pentest Fix: Secure Session Configuration ──
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
@@ -60,7 +60,7 @@ def set_csrf_cookie(response):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Cek token handshake dari auth payload
+    # Handshake keamanan: Cek session atau view-token
     client_token = auth.get('token') if auth else None
     valid_token = generate_view_token()
     
@@ -68,7 +68,7 @@ def handle_connect(auth=None):
     is_token_valid = (client_token == valid_token)
 
     if not is_authenticated and not is_token_valid:
-        logging.warning("🚫 Unauthorized WS connection (No Session, No Valid Token)")
+        logging.warning(f"🚫 Unauthorized WS connection (Token: {client_token[:8] if client_token else 'None'})")
         return False # Tolak koneksi
     
     # Semua orang yang lolos masuk ke room public
@@ -78,28 +78,23 @@ def handle_connect(auth=None):
         user_id = session.get('user_id')
         username = session.get('username')
         join_room(f"user_{user_id}")
-        logging.info(f"🔌 Authenticated User {username} connected (Public + Private)")
+        logging.info(f"🔌 Authenticated User {username} connected")
     else:
-        logging.info("🔌 Guest User connected via Valid Token (Public Only)")
+        logging.info("🔌 Guest User connected via Valid Token (Public Mode)")
+    return True
 
 @socketio.on('disconnect')
 def handle_disconnect():
     username = session.get('username', 'Unknown')
     logging.info(f"📡 User {username} disconnected from WS")
-
 # ── Background Throttler for UI Performance ──
 def ui_emitter_thread():
     """Mengirim update ke UI secara berkala (Throttling) agar HP user tidak panas."""
     while True:
         socketio.sleep(0.5) # Emit setiap 500ms
-        # Emit data publik ke semua
-        # (Data radar dan ohlcv biasanya di-handle oleh event spesifik, 
-        # tapi di sini kita bisa batch update harga jika perlu)
         pass
 
-# Start the background thread
 # socketio.start_background_task(ui_emitter_thread)
-
 # ── Authentication Middleware ──
 def login_required(f):
     @wraps(f)
@@ -131,6 +126,7 @@ _start_time = time.time()
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
+    # print(f"🔗 DB Access: {os.path.abspath(DB_PATH)}")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -201,7 +197,8 @@ def _generate_equity_report_llm(stats):
         f"- Status PnL: {stats['pnl']:,.0f} IDR\n"
         f"- Unrealized: {stats['unrealized']:,.0f} IDR\n"
         f"- Win Rate: {stats['win_rate']}%\n"
-        f"- Total Trades: {stats['trades']}\n"
+        f"- Total Engagements: {stats['trades']}\n"
+        f"- Active Positions: {stats['open_count']}\n"
         f"- Regime: {stats['regime']}\n"
         f"- Alpha Contributor: {stats['top_pair']}\n"
         f"- Trading Intensity: {stats['intensity']} tx/hr\n\n"
@@ -209,6 +206,7 @@ def _generate_equity_report_llm(stats):
         "Pada section [NEXT ACTION], berikan satu kalimat direktif tajam apa yang harus dilakukan bot selanjutnya. "
         "Gunakan bahasa Indonesia yang profesional."
     )
+    logging.info(f"🧠 [ORACLE PROMPT DEBUG]\n{prompt}")
     worker.query_async("equity_report", prompt)
 
 def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
@@ -238,18 +236,22 @@ def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None,
     else:
         report += "Konsolidasi harga terdeteksi, minim tren kuat. "
         
-    # 2. Performance Audit
-    # Win rate 0 if no trades to avoid hallucination or misleading stats
-    display_win_rate = win_rate if trades > 0 else 0
-    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {display_win_rate}%. "
-    if top_pair:
-        report += f"Aset {top_pair.replace('idr','').upper()} menunjukkan anomali profit positif. "
+    # 2. Performance Audit (Overall)
+    if trades > 0:
+        report += f"\nAUDIT KESELURUHAN: Terdeteksi {trades} keterlibatan pasar (termasuk posisi aktif) dengan akurasi selesai {win_rate}%. "
+        if top_pair:
+            report += f"Aset {top_pair.replace('idr','').upper()} merupakan kontributor profit tertinggi saat ini. "
+    else:
+        report += f"\nAUDIT: Belum ada transaksi riwayat yang tercatat dalam database (0 eksekusi). "
+        report += "Oracle sedang menunggu data transaksi pertama untuk kalibrasi performa. "
     
     if unrealized < 0 and abs(unrealized) > 150000:
         report += "Terdapat floating loss signifikan yang memerlukan pengawasan ketat. "
 
     # 3. Strategy Narrative
-    if total_equity > 0:
+    if trades == 0:
+        report += "Saat ini bot memprioritaskan keamanan modal dengan filter likuiditas dan probabilitas yang sangat ketat."
+    elif total_equity > 0:
         report += "Strategi saat ini mempertahankan profit buffer untuk mitigasi risiko mendadak."
     else:
         report += "Bot berfokus pada efisiensi keluar posisi untuk meminimalkan degradasi ekuitas."
@@ -312,11 +314,11 @@ def mobile_dashboard():
 
 @app.route('/')
 def index():
-    return send_from_directory(os.path.join(app.static_folder, 'dist'), 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
-@app.route('/favicon.ico')
+@app.route("/favicon.ico")
 def favicon():
-    return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/x-icon')
+    return send_from_directory("static", "favicon.ico", mimetype="image/x-icon")
 
 
 @app.route('/api/login', methods=['GET', 'POST'])
@@ -430,10 +432,29 @@ def get_stats():
         _last_price = tech_data.get('last_price')
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
-        from config import DRY_RUN
+        from config import DRY_RUN, INITIAL_CAPITAL
         
-        # Performance & Stats definitions
+        # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
+        # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
+        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in positions])
+        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        
+        if DRY_RUN:
+            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            active_pnl = realized_pnl_dry
+            active_win_rate = dry_win_rate
+        else:
+            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
+            active_pnl = realized_pnl_live
+            active_win_rate = win_rate
+            
+        total_equity = available_idr + total_used_idr + unrealized_pnl
+        utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
+        
+        # Performance definitions
         perf = db.get_daily_stats()
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
         
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
@@ -448,14 +469,12 @@ def get_stats():
         ).fetchone()
         best_trade = float(best_trade_row[0] or 0)
 
-        # Statistik aktif mengikuti mode runtime (tanpa fallback silang).
-        active_pnl = float((dry_stats['total_pnl'] if DRY_RUN else live_stats['total_pnl']) or 0)
-        active_win_rate = dry_win_rate if DRY_RUN else win_rate
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
-
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "all_time_pnl_dry": float(dry_stats['total_pnl'] or 0) if dry_stats else 0,
+            "all_time_pnl_dry": realized_pnl_dry,
+            "available_idr": round(available_idr, 0),
+            "total_equity": round(total_equity, 0),
+            "utilization": round(utilization_pct, 1),
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
@@ -782,12 +801,16 @@ def get_bot_status():
         ).fetchone()
         last_trade_at = str(last_trade['created_at']) if last_trade else None
 
+        # LLM Stats
+        llm_stats = LLMWorker.get_instance().get_stats()
+
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(DRY_RUN),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
-            "last_trade_at": last_trade_at
+            "last_trade_at": last_trade_at,
+            "llm": llm_stats
         })
     except Exception as e:
         return jsonify({"is_running": False, "dry_run": bool(DRY_RUN), "uptime_sec": 0})
@@ -1046,11 +1069,29 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
-        from config import DRY_RUN
+        from config import DRY_RUN, INITIAL_CAPITAL
         dr_val = 1 if DRY_RUN else 0
         
+        # [NEW] Predator Metrics Calculation
+        total_used_idr = 0.0
         for pos in positions:
-            # [Senior Audit] Filter unrealized PnL by current mode
+            if int(pos['dry_run'] or 0) == dr_val:
+                total_used_idr += float(pos['amount_idr'] or 0)
+
+        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        
+        if DRY_RUN:
+            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            active_pnl = realized_pnl_dry
+            active_win_rate = dry_win_rate
+        else:
+            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
+            active_pnl = realized_pnl_live
+            active_win_rate = win_rate
+            
+        # [Senior Audit] Calculate Unrealized PnL
+        for pos in positions:
             if int(pos['dry_run'] or 0) != dr_val:
                 continue
 
@@ -1076,10 +1117,12 @@ def _build_stats_payload():
                         history = json.loads(row['history_json'])
                         if history: last_price = float(history[-1])
                 except: pass
-            
+
             if last_price > 0:
                 unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
 
+        total_equity = available_idr + total_used_idr + unrealized_pnl
+        utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         # Injeksi Harga Realtime (Prioritas: Trade Stream > Summary > DB)
         ws_tickers = mws.get_tickers()
         ws_trades = mws.get_trades(CURRENT_WATCH_PAIR)
@@ -1127,16 +1170,16 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
-        # Cari Top Pair, Best Trade & Asset Contributions
+        # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "WHERE reason != 'BACKTEST' "
             "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
         ).fetchone()
         
         contribution_rows = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "WHERE reason != 'BACKTEST' "
             "GROUP BY pair ORDER BY total_pnl DESC"
         ).fetchall()
         
@@ -1150,15 +1193,20 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
+            "WHERE reason != 'BACKTEST'"
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
         best_trade = float(best_trade_row[0] or 0)
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
+        # Overall engagements (Closed + Open)
+        total_trades_overall = dry_stats['trades'] if DRY_RUN else live_stats['trades']
+        open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
+        total_engagements = total_trades_overall + open_count
+        
         equity_reasoning, equity_action_plan = _generate_equity_reasoning(
-            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            active_pnl, unrealized_pnl, active_win_rate, total_engagements,
             top_pair=top_pair, best_trade=best_trade, regime=regime
         )
 
@@ -1186,8 +1234,8 @@ def _build_stats_payload():
         if is_stale_report:
             _generate_equity_report_llm({
                 "pnl": active_pnl, "unrealized": unrealized_pnl, "win_rate": active_win_rate,
-                "trades": perf['total_trades'], "regime": regime, "top_pair": top_pair,
-                "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1)
+                "trades": total_engagements, "open_count": open_count, "regime": regime, "top_pair": top_pair,
+                "intensity": round(total_engagements / max(1, (time.time() - _start_time) / 3600), 1)
             })
             
         latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
@@ -1210,15 +1258,55 @@ def _build_stats_payload():
 
         # Fallback ke technical reasoning jika AI belum siap
         equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
-            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            active_pnl, unrealized_pnl, active_win_rate, total_engagements,
             top_pair=top_pair, best_trade=best_trade, regime=regime
         )
         
         final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
-        return {
+        # --- Recent Trades for History Tab (Safe Fetch) ---
+        recent_trades = []
+        try:
+            # [Senior Optimization] Pull AI Reasoning directly from trade_analytics via Subquery
+            query = """
+                SELECT h.*, 
+                       (SELECT llm_verdict FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_verdict,
+                       (SELECT llm_confidence FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_confidence,
+                       (SELECT llm_reason FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_reason
+                FROM trade_history h
+                WHERE h.reason != 'BACKTEST' 
+                ORDER BY h.created_at DESC LIMIT 20
+            """
+            recent_trades_rows = conn.execute(query).fetchall()
+            for r in recent_trades_rows:
+                recent_trades.append({
+                    "pair":          r['pair'],
+                    "side":          'SELL',
+                    "entry_price":   float(r['entry_price'] or 0),
+                    "exit_price":    float(r['exit_price'] or 0),
+                    "amount":        float(r['amount_crypto'] or 0),
+                    "amount_idr":    float(r['amount_idr'] or 0),
+                    "pnl_idr":       float(r['pnl_idr'] or 0),
+                    "pnl_pct":       float(r['pnl_pct'] or 0),
+                    "created_at":    r['created_at'],
+                    "llm_verdict":   r['llm_verdict'],
+                    "llm_reason":    r['llm_reason'],
+                    "ai_confidence": float(r['llm_confidence'] or 0)
+                })
+        except Exception as e:
+            print(f"⚠️ History Fetch Error: {e}")
+
+
+        payload = {
+            "available_idr": round(available_idr, 0),
+            "total_equity": round(total_equity, 0),
+            "utilization": round(utilization_pct, 1),
+            "recent_trades": recent_trades,
             "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
+            "trades": total_engagements,
+            "history_count": total_trades_overall,
+            "open_count": open_count,
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
@@ -1250,6 +1338,7 @@ def _build_stats_payload():
             "new_listings": db.get_new_listings(),
             "bot_running": True
         }
+        return payload
     finally:
         conn.close()
 
@@ -1317,7 +1406,8 @@ def _build_trades_payload():
         positions = conn.execute("SELECT * FROM positions").fetchall()
         ws_tickers = mws.get_tickers()
 
-        for p in positions:
+        for row in positions:
+            p = dict(row)
             try:
                 pair = p['pair']
                 # Filter by dry_run if needed, but usually we show all active in current mode
@@ -1352,6 +1442,19 @@ def _build_trades_payload():
                 else:
                     display_reason = "OPEN POSITION"
 
+                # Dynamic TP/SL percentages based on actual prices in DB
+                stored_tp_pct = float(p.get('target_tp_pct') or 0)
+                stored_sl_pct = float(p.get('target_sl_pct') or 0)
+                
+                # SL dynamic calculation
+                trailing_sl_price = float(p.get('trailing_sl_price') or 0)
+                if trailing_sl_price > 0 and entry_price > 0:
+                    current_sl_pct = (trailing_sl_price - entry_price) / entry_price
+                else:
+                    current_sl_pct = stored_sl_pct
+
+                current_tp_pct = stored_tp_pct
+
                 results.append({
                     "id":          f"pos_{pair}",
                     "pair":        pair,
@@ -1360,49 +1463,23 @@ def _build_trades_payload():
                     "pnl_pct":     round(pnl_pct, 2),
                     "entry_price": entry_price,
                     "exit_price":  last_price,
-                    "amount_idr":  float(p['amount_idr'] or 0),
+                    "target_tp":   current_tp_pct * 100,
+                    "target_sl":   current_sl_pct * 100,
+                    "confidence":  int(p.get('ai_confidence') or 0),
+                    "amount_idr":  float(p.get('amount_idr') or 0),
                     "amount_coin": amount_crypto,
                     "duration":    0,
-                    "created_at":  str(p['timestamp'] or ''),
-                    "status":      "OPEN",  # Semua posisi aktif masuk tab OPEN
-                    "pos_status":  pos_status,  # Status detail untuk UI
+                    "created_at":  str(p.get('timestamp') or ''),
+                    "status":      "OPEN",
+                    "pos_status":  pos_status,
                     "is_manual":   0
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
 
-        # 2. Fetch Trade History (CLOSED)
-        # [Fix] Tampilkan MANUAL_SYNC (is_manual=1) selalu, tanpa filter dry_run
-        # karena ini adalah transaksi nyata dari akun exchange.
-        # Untuk trade reguler, filter sesuai mode DRY_RUN.
-        trades = conn.execute("""
-            SELECT * FROM trade_history 
-            WHERE (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'
-            ORDER BY created_at DESC LIMIT 200
-        """, (dr_val,)).fetchall()
-
-        for t in trades:
-            try:
-                results.append({
-                    "id":          int(t['id'] or 0),  # [Fix] Sertakan id DB untuk deduplication di mobile
-                    "pair":        t['pair'] or 'UNKNOWN',
-                    "reason":      t['reason'] or 'EXIT',
-                    "pnl_idr":     float(t['pnl_idr'] or 0),
-                    "pnl_pct":     float(t['pnl_pct'] or 0),
-                    "entry_price": float(t['entry_price'] or 0),
-                    "exit_price":  float(t['exit_price'] or 0),
-                    "amount_idr":  float(t['amount_idr'] or 0),
-                    "amount_coin": float(t['amount_crypto'] or 0),
-                    "duration":    int(t['duration_seconds'] or 0),
-                    "created_at":  str(t['created_at']),
-                    "status":      'CLOSED',
-                    "is_manual":   int(t['is_manual'] or 0)
-                })
-            except Exception as e:
-                print(f"Error processing trade {t.get('id')}: {e}")
-
+        # 2. Sort by creation time to show newest positions first
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return results[:100]
+        return results
     except Exception as e:
         print(f"CRITICAL: _build_trades_payload failure: {e}")
         import traceback
@@ -1502,7 +1579,7 @@ def _build_market_trades_payload():
                 continue
         return results
     except Exception as e:
-        print(f"Build trades error: {e}")
+        logging.error(f"Build trades error: {e}")
         return []
 
 def push_data_loop():
@@ -1511,6 +1588,7 @@ def push_data_loop():
         try:
             socketio.emit('stats_update',  _build_stats_payload())
             socketio.emit('radar_update',  _build_radar_payload())
+            
             socketio.emit('trades_update', _build_trades_payload())
             socketio.emit('logs_update',   _build_logs_payload())
 

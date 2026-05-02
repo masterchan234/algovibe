@@ -15,7 +15,9 @@ class Database:
 
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.row_factory = sqlite3.Row
         try:
             # Mengaktifkan Write-Ahead Logging untuk konkurensi maksimal (penting karena diakses multiprocess)
@@ -49,9 +51,16 @@ class Database:
                     target_sl_pct REAL DEFAULT -0.02,
                     trailing_sl_price REAL DEFAULT 0.0,
                     highest_price REAL DEFAULT 0.0,
-                    reason_backup TEXT
+                    reason_backup TEXT,
+                    ai_confidence REAL DEFAULT 0.0,
+                    dca_tier INTEGER DEFAULT 0
                 )
             ''')
+            # Migrations
+            try: cursor.execute("ALTER TABLE positions ADD COLUMN ai_confidence REAL DEFAULT 0.0")
+            except: pass
+            try: cursor.execute("ALTER TABLE positions ADD COLUMN dca_tier INTEGER DEFAULT 0")
+            except: pass
             
             # Tabel untuk Market Depth (Order Book)
             cursor.execute('''
@@ -242,6 +251,22 @@ class Database:
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
 
+    def get_active_positions_count(self, dry_run=0):
+        """Menghitung jumlah posisi terbuka untuk mode tertentu (Dry Run/Live)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = ?", (int(dry_run),))
+            return cursor.fetchone()[0] or 0
+
+    def update_position_after_dca(self, pair, new_price, new_amount_crypto, new_amount_idr, new_tier):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE positions 
+                SET entry_price = ?, amount_crypto = ?, amount_idr = ?, dca_tier = ?, timestamp = CURRENT_TIMESTAMP
+                WHERE pair = ?
+            ''', (new_price, new_amount_crypto, new_amount_idr, new_tier, pair))
+
     def get_position(self, pair):
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -426,6 +451,36 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     # ── METODE UNTUK TICKER HISTORY ──
+
+    def save_ticker_history_batch(self, updates_list):
+        """
+        [Senior Optimization] Bulk update untuk ticker history.
+        Menerima list of tuples: (pair, history_list, ch_5m, ch_15m, ch_1h)
+        """
+        import json
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            data = [
+                (
+                    json.dumps(h), p, h[0] if h else 0, # history_json, signal (dummy), trend (dummy)
+                    c5, c15, c1, 0.0, 0.0, # ch_5m, ch_15m, ch_1h, vol, score
+                    json.dumps(h), c5, c15, c1 # updates for conflict
+                )
+                for p, h, c5, c15, c1 in updates_list
+            ]
+            
+            # Kita gunakan query yang lebih efisien untuk executemany
+            cursor.executemany('''
+                INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
+                                          ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
+                VALUES (?, ?, 0.0, 'BACKFILLED', 'HOLD', ?, ?, ?, 0.0, 0.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(pair) DO UPDATE SET
+                    history_json=excluded.history_json,
+                    ch_5m=excluded.ch_5m,
+                    ch_15m=excluded.ch_15m,
+                    ch_1h=excluded.ch_1h,
+                    updated_at=excluded.updated_at
+            ''', [(p, json.dumps(h), c5, c15, c1) for p, h, c5, c15, c1 in updates_list])
 
     def save_ticker_history(self, pair, history_list, prediction_prob=0.0, trend='N/A', signal='HOLD',
                             ch_5m=0.0, ch_15m=0.0, ch_1h=0.0, volatility=0.0, score=0.0):
@@ -736,6 +791,18 @@ class Database:
         except Exception as e:
             logging.error(f"[DB] get_quant_audit_report error: {e}")
             return report
+
+    def update_llm_reasoning(self, pair, verdict, confidence, reason):
+        """Update the latest trade analytics record with fresh LLM insights."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE trade_analytics SET llm_verdict = ?, llm_confidence = ?, llm_reason = ? "
+                    "WHERE pair = ? AND entry_timestamp = (SELECT MAX(entry_timestamp) FROM trade_analytics WHERE pair = ?)",
+                    (verdict, confidence, reason, pair, pair)
+                )
+        except Exception as e:
+            print(f"DB Error (update_llm_reasoning): {e}")
 
     def update_trade_outcome(self, pair, pnl_idr):
         try:

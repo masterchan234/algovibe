@@ -26,12 +26,13 @@ def sync_live_data():
     try:
         # 2. Reset Live Data
         print("🧹 Clearing local LIVE history and positions...")
-        cursor.execute("DELETE FROM trade_history WHERE dry_run = 0")
+        # [CRITICAL] Hapus data live (0) dan data hantu (NULL) sebelum sinkronisasi ulang
+        cursor.execute("DELETE FROM trade_history WHERE dry_run = 0 OR dry_run IS NULL")
         hist_count = cursor.rowcount
-        cursor.execute("DELETE FROM positions WHERE dry_run = 0")
+        cursor.execute("DELETE FROM positions WHERE dry_run = 0 OR dry_run IS NULL")
         pos_count = cursor.rowcount
         conn.commit()
-        print(f"✅ Deleted {hist_count} history records and {pos_count} positions.")
+        print(f"✅ Deleted {hist_count} history records and {pos_count} old positions.")
 
         # 3. Initialize Exchange
         print("🔗 Connecting to Indodax...")

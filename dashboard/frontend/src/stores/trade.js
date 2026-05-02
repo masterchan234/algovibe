@@ -14,6 +14,9 @@ export const useTradeStore = defineStore('trade', () => {
   const stats = reactive({
     daily_pnl: 0,
     all_time_pnl_dry: 0,
+    available_idr: 0,
+    total_equity: 0,
+    utilization: 0,
     win_rate: 0,
     active_positions: 0,
     unrealized_pnl: 0,
@@ -29,6 +32,10 @@ export const useTradeStore = defineStore('trade', () => {
     best_trade: 0,
     intensity: 0,
     asset_contributions: [],
+    recent_trades: [],
+    trades: 0,
+    history_count: 0,
+    open_count: 0,
   })
 
   // Open positions (trades)
@@ -147,6 +154,9 @@ export const useTradeStore = defineStore('trade', () => {
       Object.assign(stats, {
         daily_pnl: data.daily_pnl ?? 0,
         all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
+        available_idr: data.available_idr ?? 0,
+        total_equity: data.total_equity ?? 0,
+        utilization: data.utilization ?? 0,
         win_rate: data.win_rate ?? 0,
         active_positions: data.active_positions ?? 0,
         unrealized_pnl: data.unrealized_pnl ?? 0,
@@ -162,6 +172,10 @@ export const useTradeStore = defineStore('trade', () => {
         best_trade: data.best_trade ?? 0,
         intensity: data.intensity ?? 0,
         asset_contributions: data.asset_contributions ?? [],
+        recent_trades: data.recent_trades ?? [],
+        trades: data.trades ?? 0,
+        history_count: data.history_count ?? 0,
+        open_count: data.open_count ?? 0,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

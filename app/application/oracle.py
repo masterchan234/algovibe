@@ -45,6 +45,10 @@ class Oracle:
         # veto cache: {pair: {verdict, confidence, reason, ts}}
         # Diisi saat LLM structured result masuk; dibaca oleh check_llm_veto()
         self._veto_cache: dict = {}
+        
+        # [Senior Fix] Non-blocking tracking
+        self.active_analysis: dict = {}   # {pair: task_id}
+        self.analysis_results: dict = {}  # {pair: {verdict, confidence, reason, time}}
 
     # ── Rich Market Context Builder ────────────────────────────────────────────
 
@@ -241,7 +245,8 @@ class Oracle:
             f"{'Confirm or reject this BUY signal.' if task_type == 'auto' else 'Provide a sharp tactical analysis.'} "
             f"Using ALL data above — technicals, orderbook microstructure, flow, regime, and bot memory.\n"
             f"Output: Verdict (BUY/HOLD/AVOID) + 1 concise sentence reasoning + "
-            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes)."
+            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes).\n"
+            f"Special Directive: In CHOPPY/SIDEWAYS markets, if RSI < 35 or Buy Pressure > 65%, be more aggressive in suggesting BUY with a tight Stop Loss to capture quick rebounds."
         )
 
     def auto_queue_buy_candidates(self, ranked_signals):
@@ -435,6 +440,22 @@ class Oracle:
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
 
+                # ── [Senior Sync] Update Trade DNA Table ──────────────────
+                if is_structured:
+                    db.update_llm_reasoning(
+                        pair_name, 
+                        structured.get('verdict', 'HOLD'),
+                        float(structured.get('confidence', 0)),
+                        structured.get('reason', t_res)
+                    )
+                    # Log to System Events for Dashboard Visibility
+                    db.log_system_event(
+                        pair_name, 
+                        "AI_ANALYSIS", 
+                        f"Audit synced: {structured['verdict']} ({structured['confidence']}%)", 
+                        'SUCCESS'
+                    )
+
                 # ── Veto Cache: simpan untuk check_llm_veto() ─────────────
                 if is_structured and label in ("ANALYSIS", "PUMP_ALERT"):
                     self._veto_cache[pair_name] = {
@@ -452,12 +473,14 @@ class Oracle:
                 if is_structured:
                     # Ambil harga terakhir dari DB untuk kalibrasi math ETA
                     try:
-                        row = db.get_ticker_history(pair_name, limit=1)
-                        if row:
-                            history = json.loads(row[0]['history_json'])
-                            current_price = history[-1]
+                        # [Fix] Gunakan limit lebih banyak (50) agar math ETA punya data untuk velocity
+                        # Dan perbaiki KeyError: 'history_json' karena get_ticker_history() mengembalikan list of dict harga.
+                        rows = db.get_ticker_history(pair_name, limit=50)
+                        if rows:
+                            prices = [r['last'] for r in rows]
+                            current_price = prices[-1]
                             target_tp = current_price * (1 + (structured.get('take_profit_pct', 2.0)/100))
-                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, history)
+                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, prices)
                             
                             # Calibrate: Rata-rata AI vs Math (Bobot 60% Math, 40% AI)
                             ai_eta = structured.get('eta_minutes', 15)
@@ -610,43 +633,58 @@ class Oracle:
 
         return None
 
-    def request_trade_verdict(self, pair: str, history: list, tech: dict,
-                              imbalance_ratio: float, tq_prob: float) -> bool:
+    def request_trade_verdict(self, pair, ctx):
         """
-        Queue explicit LLM verdict untuk keputusan entry pair tertentu.
-        Return True jika request dikirim, False jika di-throttle/invalid.
+        [Non-Blocking] Meminta analisis mendalam dari LLM.
+        Jika hasil belum ada, bot akan mengantrekan tugas dan mengembalikan 'ANALYZING'.
         """
+        if not self.llm_worker or not self.llm_worker.is_active:
+            return "HOLD", 0, "LLM Offline"
+
         pair_lower = pair.lower()
-        now = datetime.now()
 
-        # Batas frekuensi: jangan ganggu LLM jika sudah tanya < 2 menit lalu
+        # 1. Cek hasil yang sudah matang di Oracle memory (analysis_results)
+        if pair_lower in self.analysis_results:
+            res = self.analysis_results[pair_lower]
+            # Expire cache setelah 5 menit (analisis lama dianggap basi)
+            if (datetime.now() - res['time']).total_seconds() < 300:
+                return res['verdict'], res['confidence'], res['reason']
+        
+        # 2. Cek apakah ada task yang sedang berjalan (active_analysis)
+        if pair_lower in self.active_analysis:
+            task_id = self.active_analysis[pair_lower]
+            res = self.llm_worker.get_result(task_id)
+            if res:
+                # Hasil baru saja selesai di LLMWorker!
+                del self.active_analysis[pair_lower]
+                parsed = self.llm_worker.parse_structured_result(res['result'])
+                self.analysis_results[pair_lower] = {
+                    "verdict": parsed['verdict'],
+                    "confidence": parsed['confidence'],
+                    "reason": parsed['reason'],
+                    "time": datetime.now()
+                }
+                return parsed['verdict'], parsed['confidence'], parsed['reason']
+            else:
+                # Masih antre/proses di background LLM process
+                return "ANALYZING", 0, "Deep reasoning in progress..."
+
+        # 3. Jika belum ada di antrean maupun di hasil, buat task baru
+        # Gunakan throttling agar tidak spamming LLM (max 1 request per 2 menit)
         last_req = self.last_trade_verdict_request.get(pair_lower)
-        if last_req and (now - last_req).total_seconds() < 120:
-            # log_message(f"🕒 LLM verdict for {pair} was requested recently. Waiting...")
-            return False
+        if last_req and (datetime.now() - last_req).total_seconds() < 120:
+             return "HOLD", 0, "Wait for cooldown..."
 
-        if not self.llm or not self.llm.is_active:
-            log_message(f"⚠️ LLM Worker is inactive. Cannot request verdict for {pair}.")
-            return False
-
-        last_price = float(history[-1])
-        rsi_val = float(tech.get("rsi", 50.0))
-        slope_val = float(tech.get("slope", 0.0))
-        vol_val = float(tech.get("volatility", 0.0))
-
-        prompt = (
-            f"PAIR={pair.upper()} | PRICE={last_price:.8f} | RSI={rsi_val:.2f} | "
-            f"SLOPE={slope_val:.6f} | VOL={vol_val:.2f}% | IMBALANCE={imbalance_ratio:.2f}x | "
-            f"AI_PROB={tq_prob*100:.1f}%\n"
-            "Tugas: putuskan entry scalping sekarang. Gunakan output fungsi submit_verdict. "
-            "Aturan ketat: AVOID jika risiko dump/fake breakout tinggi, HOLD jika edge belum jelas, "
-            "BUY hanya jika probabilitas menang jelas lebih tinggi dari rugi setelah fee. "
-            "Berikan reason singkat dan confidence realistis."
-        )
-
-        self.llm_worker.query_structured(f"ANALYSIS:{pair_lower}", prompt)
-        self.last_trade_verdict_request[pair_lower] = now
-        return True
+        # Bangun konteks untuk LLM
+        prompt = self._build_rich_market_context(pair, ctx.get('history', []), ctx, None)
+        task_id = self.llm_worker.query_structured(f"ANALYSIS {pair}", prompt)
+        
+        if task_id:
+            self.active_analysis[pair_lower] = task_id
+            self.last_trade_verdict_request[pair_lower] = datetime.now()
+            return "ANALYZING", 0, "Analysis queued..."
+            
+        return "HOLD", 0, "Queue Failed"
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 
@@ -811,8 +849,8 @@ class Oracle:
             # Apply dynamic weight adjustments based on regime
             self._apply_regime_weights(regime)
             
-            prompt = f"The crypto market regime shifted from {self.last_regime} to {regime}. The leading coin is {leader_str}. The average 24h change of top 50 pairs is {avg_change:.2f}%. As an expert trader, give a 2-sentence strategic advice for trading in this environment."
-            self.llm_worker.query_async("REGIME_ANALYSIS", prompt)
+            # [Senior Debug] Temporarily disable global regime analysis to prevent queue stall
+            # self.llm_worker.query_async("REGIME_ANALYSIS", prompt)
             
         self.last_regime = regime
         self.last_regime_update = datetime.now()
@@ -919,8 +957,8 @@ class Oracle:
         elif regime == MarketRegime.CHOPPY:
             dyn += 4.0
             llm_buy_min_conf = 65.0
-            llm_hold_block_conf = 66.0
-            llm_avoid_block_conf = 58.0
+            llm_hold_block_conf = 75.0  # [Loosened] was 66.0
+            llm_avoid_block_conf = 65.0 # [Loosened] was 58.0
         elif regime == MarketRegime.RANGING:
             dyn += 1.0
             llm_buy_min_conf = 62.0
@@ -970,16 +1008,39 @@ class Oracle:
             logger.error(f"[Oracle] Learning Error: {e}")
             return 0.0
 
-    def get_sizing_multiplier(self) -> float:
+    def get_sizing_multiplier(self, pair: str, velocity_score: float = 0.5, confidence: float = 0.5) -> float:
         """
-        Adjust capital allocation based on market risk (Aggressive Mode).
+        [PROFIT VELOCITY SIZING]
+        Menentukan besarnya modal berdasarkan 'kecepatan' koin mencapai target.
+        Multiplier = Base (Regime) * Performance (Velocity + Confidence)
         """
+        # 1. Base Multiplier dari Market Regime
         regime = self.get_market_regime()
-        if regime == MarketRegime.CRASH: return 0.0 # Stop trading
-        if regime == MarketRegime.BEARISH: return 0.6 # Moderate size
-        if regime == MarketRegime.CHOPPY: return 0.9 # Almost full
-        if regime == MarketRegime.BULLISH: return 1.5 # [AGGRESSIVE] 1.5x Size
-        return 1.2 # [RANGING] 1.2x Size
+        if regime == MarketRegime.CRASH: return 0.0
+        
+        base_m = 1.0
+        if regime == MarketRegime.BEARISH: base_m = 0.6
+        elif regime == MarketRegime.BULLISH: base_m = 1.3
+        elif regime == MarketRegime.CHOPPY: base_m = 0.9
+        
+        # 2. Velocity & Confidence Factor (0.0 - 1.0)
+        # velocity_score tinggi = tren sangat curam / momentum kuat
+        # confidence tinggi = probabilitas AI tinggi
+        perf_score = (velocity_score * 0.65) + (confidence * 0.35)
+        
+        # 3. Final Multiplier Calculation
+        # Kita ingin multiplier berada di rentang 0.2x hingga 2.5x dari base porsi modal
+        # Jika perf_score rendah (0.1), multiplier akan kecil (~0.2x) -> Modal receh untuk koin lemot
+        # Jika perf_score tinggi (0.9), multiplier bisa mencapai 2.0x -> Modal gajah untuk koin fast-track
+        
+        final_multiplier = base_m * (perf_score * 2.2)
+        
+        # Batasi agar tetap rasional (Safety Guard)
+        final_multiplier = max(0.15, min(2.5, final_multiplier))
+        
+        # logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        return final_multiplier
 
     def get_rationale(self, pair: str, decision: str) -> str:
         """

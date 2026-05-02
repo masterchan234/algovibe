@@ -11,7 +11,8 @@ from config import (
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
-    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS, MAX_HOLD_MINUTES
+    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS, MAX_HOLD_MINUTES,
+    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_AI_CONFIDENCE
 )
 from app.infrastructure.database import db
 from app.domain.technicals import get_technical_summary, derive_trade_signal
@@ -105,7 +106,7 @@ class ExitManager:
                     
                     sell_value = amount * current_price
                     fee_sell = sell_value * FEE_SELL_TAKER
-                    fee_buy = amount_idr * FEE_BUY_MAKER
+                    fee_buy = amount_idr * FEE_BUY_TAKER
                     
                     gross_pnl = (current_price - entry_price) * amount
                     net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
@@ -145,6 +146,47 @@ class ExitManager:
                 return # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
         except Exception as e:
             log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
+
+        # --- [Shadow Recovery Monitoring] ---
+        try:
+            shadows = db.get_all_shadow_orders()
+            for s in shadows:
+                pair = s['pair']
+                if pair not in current_tickers: continue
+                
+                # Load metadata
+                meta_raw = db.get_state(f"shadow_meta_{pair}")
+                if not meta_raw: continue
+                meta = json.loads(meta_raw)
+                
+                current_price = float(current_tickers[pair].get('last', 0))
+                target_tp = float(meta.get('target_tp', 0))
+                target_sl = float(meta.get('target_sl', 0))
+                
+                # Check for exit
+                if current_price >= target_tp:
+                    # Shadow WIN
+                    bot.consecutive_shadow_wins += 1
+                    log_message(f"🏆 [SHADOW WIN] {pair} hit TP! Streak: {bot.consecutive_shadow_wins}/2")
+                    db.delete_shadow_order(pair)
+                    db.save_state(f"shadow_meta_{pair}", "")
+                    
+                    if bot.consecutive_shadow_wins >= 2:
+                        log_message("🔓 [SHADOW RECOVERY] 2 Consecutive Wins! Unlocking Global Pause.")
+                        bot.consecutive_losses = 0
+                        bot.consecutive_shadow_wins = 0
+                        db.save_state("consecutive_losses", 0)
+                        send_telegram_message("🔓 *GLOBAL PAUSE UNLOCKED*\nPasar terdeteksi membaik via Shadow Probing (2x Win). Bot kembali beroperasi normal.")
+                
+                elif current_price <= target_sl:
+                    # Shadow LOSS
+                    log_message(f"💀 [SHADOW LOSS] {pair} hit SL. Streak reset.")
+                    bot.consecutive_shadow_wins = 0
+                    db.delete_shadow_order(pair)
+                    db.save_state(f"shadow_meta_{pair}", "")
+        except Exception as e:
+            log_message(f"⚠️ Shadow Monitoring Error: {e}")
+
         for pair, data in list(positions.items()):
             try:
                 # Ambil harga terakhir dari ticker terbaru
@@ -415,67 +457,52 @@ class ExitManager:
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
                 try:
                     sell_value_est = amount * current_price
-                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_MAKER
-                    # Rapid TP memakai jalur non-emergency (maker), maka estimasi fee juga maker.
-                    fee_sell_est = sell_value_est * FEE_SELL_MAKER
+                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_TAKER
+                    # [Senior Scaling Fix] Karena kita sekarang menggunakan Market Order (Taker) untuk TP,
+                    # estimasi fee harus menggunakan Taker Rate (0.72%) agar profit tetap aman.
+                    fee_sell_est = sell_value_est * FEE_SELL_TAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
-                    # Hard rule: jika sudah net profit, selalu tutup posisi sekarang juga.
-                    if net_pnl_idr > 0:
-                        reason_tp = "FORCE_PROFIT_EXIT"
-                        log_msg = (
-                            f"⚡ [{reason_tp}] {pair}: Net profit Rp {net_pnl_idr:,.0f} "
-                            f"(+{current_profit_pct*100:.2f}%)"
-                        )
-                        log_message(log_msg)
-                        db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
-
-                        order_id = self.execute_exit(
-                            pair,
-                            amount,
-                            current_price,
-                            reason_tp,
-                            entry_price=entry_price,
-                            amount_idr=data.get('amount_idr', 0),
-                            position_data=data,
-                        )
-                        if order_id:
-                            mark_exit_requested(pair, order_id)
+                    # [Senior Optimization] Hapus FORCE_PROFIT_EXIT kaku.
+                    # Kita biarkan koin 'bernafas' dan mengikuti Trailing Stop agar dapat harga terb                    # [Senior Global Strategy] Multi-Tiered Take Profit
+                    # Tier 1: Small Profit (Ride the Trend)
+                    # Tier 2: Good Profit (Fast Exit on any weakness)
+                    # Tier 3: High Profit (FORCE EXIT NOW - Lock it in!)
+                    
+                    is_tier2_good_profit = net_pnl_idr >= 7500 or current_profit_pct >= 0.015
+                    is_tier3_high_profit = net_pnl_idr >= 15000 or current_profit_pct >= 0.045
+                    
+                    # Logika Tier 3: FORCE EXIT (Profit sudah sangat bagus, jangan serakah)
+                    if is_tier3_high_profit:
+                        reason_tp = "FORCE_PROFIT_HIGH_TIER"
+                        log_message(f"💎 [GOD-MODE EXIT] {pair}: High Profit {current_profit_pct*100:.2f}% secured instantly!")
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id: mark_exit_requested(pair, order_id)
                         continue
 
-                    # Syarat 1: Profit Bersih sudah melampaui target minimum (Jangan menunggu!)
-                    is_profit_secure = net_pnl_idr >= MIN_NET_PROFIT_IDR
+                    # Logika Tier 2: FAST EXIT (Profit sudah bagus, keluar jika ada indikasi lelah)
+                    is_momentum_sell = momentum_signal == 'SELL'
+                    is_ai_fade = live_ai_prob >= 0 and live_ai_prob < 0.45
                     
-                    # Syarat 2: Momentum mulai melemah berdasarkan engine yang sama dengan entry.
-                    # SELL signal dari derive_trade_signal + AI prob live rendah -> lock profit lebih cepat.
-                    is_momentum_sell = momentum_signal == 'SELL' and momentum_conf >= 58
-                    is_ai_fade = live_ai_prob >= 0 and live_ai_prob < 0.42
-                    is_rapid_momentum_fade = net_pnl_idr > 1000 and (
-                        is_momentum_sell or current_rsi > 62 or is_ai_fade
-                    )
-                    
-                    # Hitung umur posisi dengan aman
-                    pos_ts = datetime.fromisoformat(data['timestamp'])
-                    pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
-                    # Syarat 3: Stagnancy Exit (Hold > 20m & Profit sudah cover fee) -> Free up capital
-                    is_stagnant_profit = pos_age_min > 20 and net_pnl_idr > 500
-    
-                    if is_profit_secure or is_rapid_momentum_fade or is_stagnant_profit:
-                        reason_tp = "RAPID_TP_SECURE" if is_profit_secure else ("STAGNANT_EXIT" if is_stagnant_profit else "RAPID_TP_MOMENTUM")
-                        log_msg = (
-                            f"⚡ [{reason_tp}] {pair}: Locked profit +{current_profit_pct*100:.2f}% "
-                            f"(Age: {pos_age_min:.0f}m, Sig={momentum_signal}:{momentum_conf}, RSI={current_rsi:.1f}, AI={live_ai_prob:.2f})"
-                        )
-                        log_message(log_msg)
-                        db.log_system_event(pair, reason_tp, log_msg, 'SUCCESS')
-                        
+                    if is_tier2_good_profit and (is_momentum_sell or current_rsi > 72 or is_ai_fade):
+                        reason_tp = "RAPID_TP_GOOD_PROFIT"
+                        log_message(f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% secured on momentum fade.")
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
-                                                  entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                        if order_id:
-                            mark_exit_requested(pair, order_id)
+                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id: mark_exit_requested(pair, order_id)
+                        continue
+
+                    # Logika Tier 1: NORMAL SCALP (Ikuti Trailing Stop / TP target standar)
+                    is_stagnant = pos_age_min > 25 and net_pnl_idr > 1000
+                    if is_stagnant:
+                        reason_tp = "STAGNANT_PROFIT_EXIT"
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id: mark_exit_requested(pair, order_id)
                         continue
                 except Exception as e:
-                    log_message(f"⚠️ Error in Rapid TP for {pair}: {e}")
+                    log_message(f"⚠️ Error in Global Tiered TP for {pair}: {e}")
                     continue
     
                 # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
@@ -519,11 +546,49 @@ class ExitManager:
                     if order_id:
                         mark_exit_requested(pair, order_id)
     
-                # 3. Stop Loss (Initial or Trailing)
+                # 3. [Senior Strategy] Averaging Down (DCA) or Stop Loss
                 elif current_price <= active_sl_price:
-                    # Deteksi tipe exit proteksi
+                    current_tier = data.get('dca_tier', 0)
+                    
+                    # Cek apakah kita bisa menambah muatan (DCA) daripada Cut Loss
+                    can_dca = (
+                        DCA_ENABLED and 
+                        current_tier < DCA_MAX_TIERS and 
+                        current_profit_pct <= DCA_STEP_PCT and
+                        live_ai_prob >= DCA_MIN_AI_CONFIDENCE
+                    )
+                    
+                    if can_dca:
+                        reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
+                        log_msg = (
+                            f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
+                            f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, AI: {live_ai_prob:.2f})"
+                        )
+                        log_message(log_msg)
+                        db.log_system_event(pair, "DCA", log_msg, 'INFO')
+                        
+                        # Eksekusi Tambah Muatan (Gunakan logic yang sama dengan entry awal)
+                        from app.application.use_cases.trade_execution import execute_trade
+                        # Ambil instance bot (diperlukan untuk eksekusi)
+                        # Di ExitManager, kita biasanya tidak punya akses langsung ke 'bot' object, 
+                        # tapi kita punya 'exchange' dan 'oracle'. 
+                        # Kita akan panggil execute_trade dengan parameter yang sesuai.
+                        
+                        # [Critical] Kita butuh mereferensikan bot object. 
+                        # Kita akan asumsikan ExitManager memiliki referensi bot jika kita tambahkan di __init__
+                        # Untuk saat ini, kita panggil via trigger event di DB agar bot main loop yang handle
+                        # ATAU kita langsung panggil exchange.
+                        
+                        success = self.execute_averaging_down(pair, data, current_price)
+                        if success:
+                            # Update dca_tier dan biarkan posisi tetap terbuka
+                            positions[pair]['dca_tier'] = current_tier + 1
+                            modified_pairs.add(pair)
+                            continue
+
+                    # Jika tidak bisa DCA, baru lakukan Stop Loss (Initial or Trailing)
                     is_trailing_hit = active_sl_price > break_even_price
-                    is_be_hit = abs(active_sl_price - break_even_price) < 1.0  # toleransi Rp 1 untuk float comparison
+                    is_be_hit = abs(active_sl_price - break_even_price) < 1.0  
                     
                     if is_be_hit:
                         reason_str = "BREAK-EVEN SL"
@@ -565,51 +630,46 @@ class ExitManager:
             # TAPI offset harus kecil agar tidak memotong profit yang sudah diraih
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT")
 
-            if is_emergency:
-                # Gunakan SELL_TAKER_OFFSET (5%) hanya untuk SL darurat agar pasti terisi
-                exit_price = price * (1 - SELL_TAKER_OFFSET)
+            if is_emergency or is_tp_exit:
+                # [Senior Scaling Fix] Gunakan Market Order untuk kecepatan maksimal
+                # TP dan SL darurat tidak boleh antre, harus hajar BID pembeli sekarang juga.
+                exit_price = price * (1 - 0.001) # Buffer tipis untuk estimasi
                 fee_sell_rate = FEE_SELL_TAKER
-            elif is_tp_exit:
-                # TP exits: jual sedikit di ATAS market agar order Maker terisi saat ada buyer
-                # Offset kecil 0.05% sudah cukup untuk memastikan fill
-                exit_price = price * (1 + SELL_MAKER_OFFSET)
-                fee_sell_rate = FEE_SELL_MAKER
             else:
-                # Maker mode untuk Take Profit standar
+                # Maker mode (masih digunakan untuk beberapa strategi jaring/limit)
                 exit_price = price * (1 + SELL_MAKER_OFFSET)
                 fee_sell_rate = FEE_SELL_MAKER
 
-            # --- Piggyback Strategy (Dust Sweeper) ---
+            # [Senior Scaling Fix] PIGGYBACK: Ambil seluruh saldo koin yang tersedia
             coin = pair.replace('idr', '').upper()
             try:
                 if not self.dry_run:
                     balance = self.exchange.fetch_balance()
                     real_balance = float(balance['free'].get(coin, 0))
-                    if real_balance > amount:
-                        log_message(f"🐷 Piggyback Strategy: Boosting sell amount from {amount} to {real_balance} {coin} to sweep dust!")
+                    if real_balance > (amount * 0.9): # Jika ada saldo koin nyata
                         amount = real_balance
-            except Exception as e:
-                log_message(f"Warning: Failed to fetch real balance for Piggyback on {pair}: {e}")
+            except Exception: pass
 
-            # [Senior Fix] Standard CCXT Symbol for Validation
             symbol = f"{pair[:-3].upper()}/IDR"
             
             if self.dry_run:
                 order = {
-                    "id": f"DRY-{int(time.time())}",
+                    "id": f"DRY-EXIT-{int(time.time())}",
                     "status": "closed",
                     "price": exit_price,
                     "amount": amount,
                     "symbol": symbol
                 }
-                print(f"DRY RUN: Virtual Exit ({reason}) | {pair} | Price: {exit_price:,.2f}")
             else:
-                params = {
-                    # Non-emergency exits dijaga tetap maker (post-only) untuk hemat fee.
-                    'post_only': not is_emergency,
-                    'pair': pair.replace("idr", "_idr") # Forced Internal Indodax Format
-                }
-                order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
+                params = {'pair': pair.replace("idr", "_idr")}
+                if is_emergency or is_tp_exit:
+                    # Ganti ke Market Order untuk eksekusi instan
+                    order = self.exchange.create_market_sell_order(symbol, amount, params)
+                    # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
+                    exit_price = order.get('price') or price
+                else:
+                    params['post_only'] = True
+                    order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
@@ -621,8 +681,8 @@ class ExitManager:
             exec_type = "TAKER" if is_emergency else "MAKER"
             fee_sell_rate = FEE_SELL_TAKER if is_emergency else FEE_SELL_MAKER
             
-            # Entry fee selalu Maker (karena bot antri beli)
-            fee_buy = amount_idr * FEE_BUY_MAKER
+            # Entry fee sekarang Taker (karena bot hajar kanan/market buy)
+            fee_buy = amount_idr * FEE_BUY_TAKER
             
             # Gunakan exit_price (harga limit order) bukan price (ticker mentah) untuk akurasi PnL
             sell_value = amount * exit_price
@@ -701,6 +761,68 @@ class ExitManager:
             db.log_system_event(pair, "EXIT_ERROR", err_msg, 'ERROR')
             return None
                 
+    def execute_averaging_down(self, pair, data, current_price):
+        """
+        [Senior Strategy] Menambah muatan (DCA) pada posisi yang sedang drawdown.
+        Menghitung ulang harga rata-rata dan memperbarui state di DB.
+        """
+        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, FEE_BUY_TAKER
+        
+        try:
+            old_entry_price = float(data['entry_price'])
+            old_amount_crypto = float(data['amount_crypto'])
+            old_amount_idr = float(data['amount_idr'])
+            
+            # 1. Tentukan nominal penambahan muatan
+            # Default: Tambahkan nominal yang sama dengan muatan sebelumnya
+            add_amount_idr = old_amount_idr * DCA_MULTIPLIER
+            
+            symbol = f"{pair[:-3].upper()}/IDR"
+            
+            if self.dry_run:
+                # Simulasi penambahan muatan
+                add_amount_crypto = add_amount_idr / current_price
+                log_message(f"🧪 [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR load at Rp {current_price:,.2f}")
+            else:
+                # Eksekusi Market Buy Riil
+                params = {'pair': pair.replace("idr", "_idr")}
+                order = self.exchange.create_market_buy_order(symbol, add_amount_idr, params)
+                # Gunakan harga eksekusi asli jika tersedia
+                exec_price = float(order.get('price') or current_price)
+                add_amount_crypto = float(order.get('amount') or (add_amount_idr / exec_price))
+                current_price = exec_price # Update to real execution price
+
+            # 2. Hitung Harga Rata-Rata Baru (Weighted Average)
+            new_total_amount_idr = old_amount_idr + add_amount_idr
+            new_total_amount_crypto = old_amount_crypto + add_amount_crypto
+            
+            # Rumus: (Total Modal / Total Koin)
+            new_avg_entry_price = new_total_amount_idr / new_total_amount_crypto
+            
+            # 3. Update Database
+            new_tier = data.get('dca_tier', 0) + 1
+            db.update_position_after_dca(
+                pair, 
+                new_avg_entry_price, 
+                new_total_amount_crypto, 
+                new_total_amount_idr, 
+                new_tier
+            )
+            
+            msg = (
+                f"⚓ *DCA SUCCESS* ⚓\n"
+                f"Pair: `{pair}` (Tier {new_tier})\n"
+                f"Old Entry: Rp {old_entry_price:,.2f}\n"
+                f"New Average: Rp {new_avg_entry_price:,.2f} 🔥\n"
+                f"Total Load: Rp {new_total_amount_idr:,.0f}"
+            )
+            send_telegram_message(msg)
+            return True
+            
+        except Exception as e:
+            log_message(f"🚨 Critical error in execute_averaging_down for {pair}: {e}")
+            return False
+
     def handle_order_update(self, order):
         """
         Callback dari PrivateWS. Memproses order yang terisi (Filled).

@@ -10,6 +10,18 @@
       </div>
       
       <div class="header-center hide-mobile">
+        <div class="stat-bubble">
+          <span class="bubble-label">Total Equity</span>
+          <span class="bubble-value highlight">Rp {{ formatNumber(store.stats.total_equity) }}</span>
+        </div>
+        <div class="stat-bubble">
+          <span class="bubble-label">Liquidity</span>
+          <span class="bubble-value">Rp {{ formatNumber(store.stats.available_idr) }}</span>
+        </div>
+        <div class="stat-bubble" v-if="store.stats.utilization !== undefined">
+          <span class="bubble-label">Utilization</span>
+          <span class="bubble-value" :class="store.stats.utilization > 80 ? 'c-bear' : 'c-bull'">{{ store.stats.utilization }}%</span>
+        </div>
         <div class="stat-bubble" v-if="store.stats.regime">
           <span class="bubble-label">Regime</span>
           <span class="bubble-value" :class="regimeClass">{{ store.stats.regime }}</span>
@@ -21,9 +33,6 @@
       </div>
 
       <div class="header-right">
-        <button class="audio-toggle" @click="toggleMute" :title="isMuted ? 'Unmute' : 'Mute'">
-          {{ isMuted ? '🔇' : '🔊' }}
-        </button>
         <div class="conn-status" :class="{ 'is-live': store.connected }">
           <span class="conn-text">{{ store.connected ? 'TERMINAL ONLINE' : 'LINK LOST' }}</span>
           <span class="conn-dot"></span>
@@ -46,10 +55,13 @@
 
     <NotificationCenter />
 
-    <main class="main-grid">
+    <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
         <ActivityFeed />
       </section>
+      
+      <div class="resizer" @mousedown="startResize" :class="{ 'is-active': isResizing }"></div>
+
       <section class="right-panel">
         <ProfitChart />
       </section>
@@ -111,13 +123,11 @@
 <script setup>
 import { onMounted, ref, computed } from 'vue'
 import { useTradeStore } from './stores/trade'
-import { useAudio } from './composables/useAudio'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 
 const store = useTradeStore()
-const { isMuted, toggleMute } = useAudio()
 const startTime = ref(Date.now())
 const now = ref(Date.now())
 
@@ -205,6 +215,33 @@ async function triggerRefresh() {
     isRefreshing.value = false
     pullDistance.value = 0
   }
+}
+
+// Resizer Logic
+const leftPanelWidth = ref(400)
+const isResizing = ref(false)
+
+function startResize(e) {
+  isResizing.value = true
+  window.addEventListener('mousemove', handleMouseMove)
+  window.addEventListener('mouseup', stopResize)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+function handleMouseMove(e) {
+  if (!isResizing.value) return
+  // Limit min 300px, max 800px or 50% of window
+  const newWidth = Math.max(300, Math.min(800, e.clientX))
+  leftPanelWidth.value = newWidth
+}
+
+function stopResize() {
+  isResizing.value = false
+  window.removeEventListener('mousemove', handleMouseMove)
+  window.removeEventListener('mouseup', stopResize)
+  document.body.style.cursor = 'default'
+  document.body.style.userSelect = 'auto'
 }
 
 onMounted(() => {
@@ -368,25 +405,6 @@ body {
   gap: 16px;
 }
 
-.audio-toggle {
-  background: var(--bg-hover);
-  border: 1px solid var(--border-dim);
-  color: var(--text-main);
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  transition: all 0.2s;
-}
-
-.audio-toggle:hover {
-  background: var(--border-dim);
-  transform: scale(1.05);
-}
 
 .conn-status {
   display: flex;
@@ -488,12 +506,32 @@ body {
 
 .main-grid {
   display: grid;
-  grid-template-columns: 400px 1fr;
-  gap: 12px;
+  grid-template-columns: var(--left-width, 400px) 4px 1fr;
+  gap: 8px;
   padding: 12px;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.resizer {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.2s;
+  border-radius: 2px;
+  margin: 0 -4px;
+  z-index: 10;
+}
+
+.resizer:hover, .resizer.is-active {
+  background: var(--accent-blue);
+  box-shadow: 0 0 8px var(--accent-blue);
+}
+
+.resizer:hover, .resizer.is-active {
+  background: var(--accent-blue);
+  box-shadow: 0 0 8px var(--accent-blue);
 }
 
 .left-panel,
@@ -619,7 +657,7 @@ body {
 
 .ticker-content {
   display: inline-block;
-  animation: ticker 80s linear infinite;
+  animation: ticker 200s linear infinite;
 }
 
 .ticker-item {
@@ -640,6 +678,7 @@ body {
 }
 
 @media (max-width: 1000px) {
+  .resizer { display: none; }
   .app {
     height: auto;
     overflow-y: auto;
