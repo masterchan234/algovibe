@@ -1400,7 +1400,8 @@ def _build_trades_payload():
         positions = conn.execute("SELECT * FROM positions").fetchall()
         ws_tickers = mws.get_tickers()
 
-        for p in positions:
+        for row in positions:
+            p = dict(row)
             try:
                 pair = p['pair']
                 # Filter by dry_run if needed, but usually we show all active in current mode
@@ -1435,6 +1436,19 @@ def _build_trades_payload():
                 else:
                     display_reason = "OPEN POSITION"
 
+                # Dynamic TP/SL percentages based on actual prices in DB
+                stored_tp_pct = float(p.get('target_tp_pct') or 0)
+                stored_sl_pct = float(p.get('target_sl_pct') or 0)
+                
+                # SL dynamic calculation
+                trailing_sl_price = float(p.get('trailing_sl_price') or 0)
+                if trailing_sl_price > 0 and entry_price > 0:
+                    current_sl_pct = (trailing_sl_price - entry_price) / entry_price
+                else:
+                    current_sl_pct = stored_sl_pct
+
+                current_tp_pct = stored_tp_pct
+
                 results.append({
                     "id":          f"pos_{pair}",
                     "pair":        pair,
@@ -1443,15 +1457,15 @@ def _build_trades_payload():
                     "pnl_pct":     round(pnl_pct, 2),
                     "entry_price": entry_price,
                     "exit_price":  last_price,
-                    "target_tp":   float(p['target_tp_pct'] or 0) * 100,
-                    "target_sl":   float(p['target_sl_pct'] or 0) * 100,
-                    "confidence":  int(p['ai_confidence'] or 0),
-                    "amount_idr":  float(p['amount_idr'] or 0),
+                    "target_tp":   current_tp_pct * 100,
+                    "target_sl":   current_sl_pct * 100,
+                    "confidence":  int(p.get('ai_confidence') or 0),
+                    "amount_idr":  float(p.get('amount_idr') or 0),
                     "amount_coin": amount_crypto,
                     "duration":    0,
-                    "created_at":  str(p['timestamp'] or ''),
-                    "status":      "OPEN",  # Semua posisi aktif masuk tab OPEN
-                    "pos_status":  pos_status,  # Status detail untuk UI
+                    "created_at":  str(p.get('timestamp') or ''),
+                    "status":      "OPEN",
+                    "pos_status":  pos_status,
                     "is_manual":   0
                 })
             except Exception as e:
