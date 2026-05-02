@@ -43,11 +43,11 @@ else
     echo "[algovibe] Model AI ditemukan, siap digunakan."
 fi
 
-# --- [Shutdown Handler] Teruskan SIGTERM ke proses Python agar graceful ---
+# --- [Shutdown Handler] Teruskan SIGTERM ke semua proses agar graceful ---
 _shutdown() {
     echo "[algovibe] Received shutdown signal. Stopping all processes..."
-    kill "$BOT_PID" "$DASH_PID" 2>/dev/null
-    wait "$BOT_PID" "$DASH_PID" 2>/dev/null
+    kill "$BOT_PID" "$DASH_PID" "$TRAINER_PID" 2>/dev/null
+    wait "$BOT_PID" "$DASH_PID" "$TRAINER_PID" 2>/dev/null
     echo "[algovibe] All processes stopped."
     exit 0
 }
@@ -61,11 +61,15 @@ echo "[algovibe] Starting dashboard server (dashboard/server.py)..."
 python -u dashboard/server.py &
 DASH_PID=$!
 
-# Jika salah satu proses mati, matikan yang lain dan exit
+echo "[algovibe] Starting RF auto-trainer (app/infrastructure/auto_trainer.py)..."
+python -u app/infrastructure/auto_trainer.py &
+TRAINER_PID=$!
+
+# Jika bot atau dashboard mati, shutdown semua (trainer boleh crash sendiri, tidak critical)
 wait -n $BOT_PID $DASH_PID
 EXIT_CODE=$?
 
-echo "[algovibe] A process exited (code: $EXIT_CODE). Shutting down..."
-kill $BOT_PID $DASH_PID 2>/dev/null
-wait $BOT_PID $DASH_PID 2>/dev/null
+echo "[algovibe] A critical process exited (code: $EXIT_CODE). Shutting down..."
+kill $BOT_PID $DASH_PID $TRAINER_PID 2>/dev/null
+wait $BOT_PID $DASH_PID $TRAINER_PID 2>/dev/null
 exit $EXIT_CODE

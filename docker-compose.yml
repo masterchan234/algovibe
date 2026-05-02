@@ -10,10 +10,10 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/app/data:rw
+      - ./data/models:/app/models:rw   # auto_trainer butuh write untuk atomic swap model
     read_only: true
     tmpfs:
       - /tmp:exec,mode=777
-      - /app/models/cache:mode=777
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]
       interval: 30s

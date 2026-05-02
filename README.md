@@ -13,6 +13,7 @@
 - **Interactive Dashboard:** Monitoring realtime via Flask & SocketIO dengan visualisasi radar market dan eksekusi manual.
 - **Dry Run Mode:** Simulasi trading tanpa risiko finansial untuk validasi strategi.
 - **Docker-First Deployment:** Container image siap pakai dengan health check, graceful shutdown, dan HTTP auth registry.
+- **RF Auto-Trainer:** Background service yang secara otomatis melatih ulang model RandomForest (Scalper V2) setiap 6 jam berdasarkan data trade terbaru, dengan atomic model swap dan hot-reload tanpa restart bot.
 
 ---
 
@@ -53,12 +54,22 @@ sequenceDiagram
         EX->>DB: Update Position (CLOSED)
     end
 
-    Note over OR, LLM: Self-Learning Loop
+    Note over OR, LLM: Self-Learning Loop (LLM Consciousness)
     EX->>OR: Send Trade Outcome (PnL)
     OR->>LLM: Post-Mortem Analysis Prompt
     LLM-->>OR: Lessons Learned
     OR->>DB: Save Lesson to Database
     OR->>LLM: Update Consciousness Context
+
+    participant TR as Auto-Trainer (auto_trainer)
+    Note over TR, DB: RF Self-Training Loop (background)
+    loop Setiap 6 Jam
+        TR->>DB: Query trade_analytics (CLOSED, >= 300 samples)
+        TR->>TR: Train RandomForestClassifier baru
+        TR->>TR: Bandingkan accuracy vs model lama
+        TR->>TR: Atomic swap scalper_v2.joblib (jika lebih baik)
+        TR-->>MN: predictor.py hot-reload via mtime check
+    end
 ```
 
 ---
@@ -69,7 +80,8 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
 
 1.  **Oracle Contextualizer**: Mengumpulkan data dari 9 tier (VWAP, Orderbook Imbalance, Whale Prints, Momentum, dll) menjadi narasi yang kaya konteks.
 2.  **AI Veto Power**: LLM melakukan penalaran pada prompt yang dikirim Oracle. AI dapat membatalkan (*veto*) sinyal teknikal jika mendeteksi anomali atau risiko tinggi.
-3.  **Self-Learning Loop**: Setiap trade (Profit/Loss) dianalisis ulang melalui proses *Post-Mortem*. Hasilnya di-inject kembali ke memori jangka pendek bot ("Consciousness") setiap 30 menit.
+3.  **Self-Learning Loop (LLM)**: Setiap trade (Profit/Loss) dianalisis ulang melalui proses *Post-Mortem*. Hasilnya di-inject kembali ke memori jangka pendek bot ("Consciousness") setiap 30 menit.
+4.  **RF Auto-Trainer**: Model probabilistik (`scalper_v2.joblib`) dilatih ulang secara otomatis oleh `indodax-trainer.service` setiap 6 jam. Model hanya di-deploy jika accuracy lebih baik dari model sebelumnya, tanpa perlu restart bot (hot-reload via mtime check).
 
 ---
 
@@ -98,6 +110,7 @@ app/
     ├── ws_market.py          # Indodax Market WebSocket
     ├── ws_private.py         # Indodax Private WebSocket (order updates)
     ├── llm_worker.py         # LiteRT-LM background process + queue
+    ├── auto_trainer.py       # RF self-training loop (indodax-trainer.service)
     ├── exchange_factory.py   # CCXT Indodax client
     └── deadman.py            # Deadman switch safety monitor
 dashboard/server.py           # Flask + SocketIO dashboard (port 8080)
@@ -229,7 +242,29 @@ python3 dashboard/server.py
 ```bash
 systemctl --user start indodax-scalper.service
 systemctl --user start indodax-dashboard.service
+systemctl --user start indodax-trainer.service   # RF auto-trainer (background)
 ```
+
+#### RF Auto-Trainer
+
+Service `indodax-trainer.service` berjalan terpisah dari bot utama. Setiap 6 jam, trainer akan:
+1. Query `trade_analytics` dari `algotrade.db` (sliding window 5.000 trade terakhir)
+2. Validasi minimal **300 closed trades** — jika belum cukup, skip dan tidur
+3. Train `RandomForestClassifier` baru
+4. Deploy hanya jika accuracy baru ≥ model lama + 1% **dan** ≥ 55% floor
+5. Atomic swap file (`scalper_v2.joblib.tmp` → `scalper_v2.joblib`)
+6. Bot utama **hot-reload** model otomatis di predict berikutnya tanpa restart
+
+Konfigurasi di `config.py`:
+```python
+AUTO_TRAIN_ENABLED        = True
+AUTO_TRAIN_INTERVAL_HOURS = 6      # Interval training
+AUTO_TRAIN_MIN_SAMPLES    = 300    # Minimal closed trades
+AUTO_TRAIN_MIN_ACCURACY   = 0.55   # Floor accuracy
+AUTO_TRAIN_MIN_DELTA      = 0.01   # Delta minimum vs model lama
+```
+
+Log trainer tersedia di: `data/logs/auto_trainer.log`
 
 ---
 

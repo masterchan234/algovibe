@@ -9,16 +9,22 @@ from utils.logger import log_message
 # Global model cache
 MODEL_PATH = "models/scalper_v2.joblib"
 _model = None
+_model_mtime: float = 0.0  # Timestamp file saat model terakhir di-load
+
 
 def _load_model():
-    global _model
-    if _model is None and os.path.exists(MODEL_PATH):
-        try:
-            # Pastikan scikit-learn tersedia di environment saat memuat
+    global _model, _model_mtime
+    if not os.path.exists(MODEL_PATH):
+        return None
+    try:
+        current_mtime = os.path.getmtime(MODEL_PATH)
+        if _model is None or current_mtime > _model_mtime:
+            # Load pertama kali, atau ada versi lebih baru (atomic swap dari auto_trainer)
             _model = joblib.load(MODEL_PATH)
-            log_message(f"🧠 [AI Engine] Scalper V2 Model loaded successfully.")
-        except Exception as e:
-            log_message(f"⚠️ [AI Engine] Failed to load model: {e}")
+            _model_mtime = current_mtime
+            log_message(f"🧠 [AI Engine] Scalper V2 Model loaded (mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')}).")
+    except Exception as e:
+        log_message(f"⚠️ [AI Engine] Failed to load model: {e}")
     return _model
 
 def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: float = 0.0) -> float:
