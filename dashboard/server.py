@@ -1272,20 +1272,31 @@ def _build_stats_payload():
         # --- Recent Trades for History Tab (Safe Fetch) ---
         recent_trades = []
         try:
-            recent_trades_rows = conn.execute(
-                "SELECT pair, entry_price, exit_price, amount_crypto, pnl_idr, pnl_pct, created_at "
-                "FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 20"
-            ).fetchall()
+            # [Senior Optimization] Pull AI Reasoning directly from trade_analytics via Subquery
+            query = """
+                SELECT h.*, 
+                       (SELECT llm_verdict FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_verdict,
+                       (SELECT llm_confidence FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_confidence,
+                       (SELECT llm_reason FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_reason
+                FROM trade_history h
+                WHERE h.reason != 'BACKTEST' 
+                ORDER BY h.created_at DESC LIMIT 20
+            """
+            recent_trades_rows = conn.execute(query).fetchall()
             for r in recent_trades_rows:
                 recent_trades.append({
-                    "pair": r['pair'],
-                    "side": 'SELL',
-                    "entry_price": float(r['entry_price'] or 0),
-                    "exit_price": float(r['exit_price'] or 0),
-                    "amount": float(r['amount_crypto'] or 0),
-                    "pnl_idr": float(r['pnl_idr'] or 0),
-                    "pnl_pct": float(r['pnl_pct'] or 0),
-                    "created_at": r['created_at']
+                    "pair":          r['pair'],
+                    "side":          'SELL',
+                    "entry_price":   float(r['entry_price'] or 0),
+                    "exit_price":    float(r['exit_price'] or 0),
+                    "amount":        float(r['amount_crypto'] or 0),
+                    "amount_idr":    float(r['amount_idr'] or 0),
+                    "pnl_idr":       float(r['pnl_idr'] or 0),
+                    "pnl_pct":       float(r['pnl_pct'] or 0),
+                    "created_at":    r['created_at'],
+                    "llm_verdict":   r['llm_verdict'],
+                    "llm_reason":    r['llm_reason'],
+                    "ai_confidence": float(r['llm_confidence'] or 0)
                 })
         except Exception as e:
             print(f"⚠️ History Fetch Error: {e}")

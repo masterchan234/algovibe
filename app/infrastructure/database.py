@@ -792,6 +792,18 @@ class Database:
             logging.error(f"[DB] get_quant_audit_report error: {e}")
             return report
 
+    def update_llm_reasoning(self, pair, verdict, confidence, reason):
+        """Update the latest trade analytics record with fresh LLM insights."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE trade_analytics SET llm_verdict = ?, llm_confidence = ?, llm_reason = ? "
+                    "WHERE pair = ? AND entry_timestamp = (SELECT MAX(entry_timestamp) FROM trade_analytics WHERE pair = ?)",
+                    (verdict, confidence, reason, pair, pair)
+                )
+        except Exception as e:
+            print(f"DB Error (update_llm_reasoning): {e}")
+
     def update_trade_outcome(self, pair, pnl_idr):
         try:
             with self.get_connection() as conn:

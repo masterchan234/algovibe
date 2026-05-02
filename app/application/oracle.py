@@ -440,6 +440,22 @@ class Oracle:
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
 
+                # ── [Senior Sync] Update Trade DNA Table ──────────────────
+                if is_structured:
+                    db.update_llm_reasoning(
+                        pair_name, 
+                        structured.get('verdict', 'HOLD'),
+                        float(structured.get('confidence', 0)),
+                        structured.get('reason', t_res)
+                    )
+                    # Log to System Events for Dashboard Visibility
+                    db.log_system_event(
+                        pair_name, 
+                        "AI_ANALYSIS", 
+                        f"Audit synced: {structured['verdict']} ({structured['confidence']}%)", 
+                        'SUCCESS'
+                    )
+
                 # ── Veto Cache: simpan untuk check_llm_veto() ─────────────
                 if is_structured and label in ("ANALYSIS", "PUMP_ALERT"):
                     self._veto_cache[pair_name] = {

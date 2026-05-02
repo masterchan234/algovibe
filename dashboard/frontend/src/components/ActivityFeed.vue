@@ -84,8 +84,8 @@
                 <div class="target-marker tp" title="Take Profit"></div>
               </div>
               <div class="target-labels">
-                <span class="sl-val">SL -{{ (pos.target_sl || 0).toFixed(1) }}%</span>
-                <span class="tp-val">TP +{{ (pos.target_tp || 0).toFixed(1) }}%</span>
+                <span class="sl-val">SL -{{ Math.abs(pos.target_sl || 0).toFixed(1) }}%</span>
+                <span class="tp-val">TP +{{ Math.abs(pos.target_tp || 0).toFixed(1) }}%</span>
               </div>
             </div>
 
@@ -115,20 +115,35 @@
             class="history-item"
             :class="trade.pnl_idr >= 0 ? 'green' : 'red'"
           >
-            <div class="col-pair">
-              <div class="pair-name">{{ formatPair(trade.pair) }}</div>
-              <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
+            <div class="history-row">
+              <div class="col-pair">
+                <div class="pair-name">{{ formatPair(trade.pair) }}</div>
+                <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
+              </div>
+              <div class="col-size">
+                <div class="val-idr">{{ formatIdr(trade.pnl_idr + (trade.amount_idr || 0)) }}</div>
+              </div>
+              <div class="col-price">
+                <div class="entry">{{ formatNumber(trade.entry_price) }}</div>
+                <div class="exit">{{ formatNumber(trade.exit_price) }}</div>
+              </div>
+              <div class="col-pnl">
+                <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
+                <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
+              </div>
             </div>
-            <div class="col-size">
-              <div class="val-idr">{{ formatIdr(trade.pnl_idr + (trade.amount_idr || 0)) }}</div>
-            </div>
-            <div class="col-price">
-              <div class="entry">{{ formatNumber(trade.entry_price) }}</div>
-              <div class="exit">{{ formatNumber(trade.exit_price) }}</div>
-            </div>
-            <div class="col-pnl">
-              <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
-              <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
+            
+            <!-- In-Line AI Reasoning (Ide #2) -->
+            <div class="ai-audit-trail" v-if="trade.llm_reason || trade.ai_confidence">
+              <div class="audit-header">
+                <span class="audit-icon">🧠</span>
+                <span class="audit-title">AI AUDIT</span>
+                <span class="audit-confidence" v-if="trade.ai_confidence">Conf: {{ trade.ai_confidence.toFixed(0) }}%</span>
+              </div>
+              <div class="audit-body">
+                <span class="audit-verdict" :class="trade.llm_verdict?.toLowerCase()">{{ trade.llm_verdict || 'TRADE' }}</span>
+                <p class="audit-text">{{ trade.llm_reason || 'No detailed reasoning recorded for this transaction.' }}</p>
+              </div>
             </div>
           </div>
           <div v-if="store.stats.recent_trades.length === 0" class="empty-state">
@@ -187,26 +202,9 @@ const activeStreamTab = ref('analisa')
 
 const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
 
-const visibleFeed = computed(() => {
-  const items = store.activityFeed
-  if (filterMode.value === 'active') {
-    return items.filter(item => {
-      const p = (item.pair || '').toLowerCase()
-      return p === 'system' || p === 'global' || openPairSet.value.has(p)
-    })
-  }
-  if (filterMode.value === 'history') {
-    return items.filter(item => {
-      const msg = (item.message || '').toUpperCase()
-      const side = (item.side || '').toUpperCase()
-      return side === 'SELL' || msg.includes('EXIT') || msg.includes('TP') || msg.includes('SL') || msg.includes('CLOSED')
-    })
-  }
-  return items
-})
-
 const filteredStream = computed(() => {
-  const items = visibleFeed.value
+  const items = store.activityFeed
+  // Stream di kanan sekarang independen (tampil semua)
   if (activeStreamTab.value === 'market') {
     return items.filter(item => item.status === 'LIVE')
   } else {
@@ -459,6 +457,45 @@ function formatIdr(val) {
 .badge.live { color: #3fb950; background: rgba(63, 185, 80, 0.1); border: 1px solid rgba(63, 185, 80, 0.2); }
 .badge.offline { color: #8b949e; background: rgba(139, 148, 158, 0.1); border: 1px solid rgba(139, 148, 158, 0.2); }
 
-.feed-slide-enter-active { transition: all 0.3s; }
-.feed-slide-enter-from { opacity: 0; transform: translateX(-10px); }
+.history-item { flex-direction: column; align-items: stretch; gap: 8px; }
+.history-row { display: flex; align-items: center; gap: 15px; width: 100%; }
+
+.ai-audit-trail {
+  margin-top: 8px;
+  background: rgba(163, 113, 247, 0.05);
+  border-radius: 6px;
+  border-left: 2px solid #a371f7;
+  padding: 8px 12px;
+}
+
+.audit-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.audit-icon { font-size: 12px; }
+.audit-title { font-size: 9px; font-weight: 900; color: #a371f7; letter-spacing: 1px; }
+.audit-confidence { margin-left: auto; font-size: 9px; color: #8b949e; font-weight: 700; }
+
+.audit-body { display: flex; align-items: flex-start; gap: 8px; }
+.audit-verdict {
+  font-size: 9px;
+  font-weight: 900;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #21262d;
+  color: #c9d1d9;
+}
+.audit-verdict.buy { color: #3fb950; }
+.audit-verdict.sell { color: #f85149; }
+
+.audit-text {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #8b949e;
+  font-style: italic;
+}
 </style>
