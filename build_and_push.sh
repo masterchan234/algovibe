@@ -14,6 +14,15 @@ echo "========================================="
 # Enable BuildKit for faster, more efficient builds
 export DOCKER_BUILDKIT=1
 
+REGISTRY_USER=${REGISTRY_USER:-chandra}
+if [ -z "$REGISTRY_PASS" ]; then
+    echo "❌ ERROR: Set REGISTRY_PASS env var sebelum push."
+    exit 1
+fi
+
+echo "🔐 Logging in to registry..."
+echo "$REGISTRY_PASS" | docker login "$REGISTRY_IP:5000" -u "$REGISTRY_USER" --password-stdin
+
 echo "📦 Step 1: Building Docker Image..."
 # Build image with progress bar
 docker build \

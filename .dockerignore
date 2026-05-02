@@ -26,8 +26,25 @@ patch_*.py
 # Secrets — jangan pernah masuk image
 .env
 
-# Models
+# Models — exclude cache files & subdirs (750MB+, regenerated at runtime)
 models/*.xnnpack_cache*
+models/cache/
 
 # Data
 data/
+
+# Build/deploy scripts (tidak dibutuhkan di dalam container)
+build_and_push.sh
+deploy_sync.sh
+fetch_sync.sh
+run_backtest.sh
+
+# Frontend host build (dioverride oleh Stage 1 builder di Dockerfile)
+dashboard/static/dist/
+
+# Tool & analysis outputs
+graphify-out/
+
+# Misc dev artifacts
+default.profraw
+*.profraw

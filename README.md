@@ -12,6 +12,7 @@
 - **Indodax Tax Compliant:** Kalkulasi PnL akurat yang sudah termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
 - **Interactive Dashboard:** Monitoring realtime via Flask & SocketIO dengan visualisasi radar market dan eksekusi manual.
 - **Dry Run Mode:** Simulasi trading tanpa risiko finansial untuk validasi strategi.
+- **Docker-First Deployment:** Container image siap pakai dengan health check, graceful shutdown, dan HTTP auth registry.
 
 ---
 
@@ -74,14 +75,33 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
 
 ## ⚙️ Arsitektur Proyek
 
-- `main.py`: Entry point tipis (composition root launcher).
-- `app/bootstrap.py`: Wiring dependency dan bootstrap runtime.
-- `app/application/scalper_bot.py`: Application service/orchestration use case bot.
-- `app/application/use_cases/`: Use-case terpisah (market cycle, pair pipeline, trade execution) agar orchestration modular.
-- `app/domain/`: Layer domain untuk entity/value object/rules (bertahap dipindahkan).
-- `app/infrastructure/`: Adapter infrastruktur (exchange, database, ws).
-- `app/interfaces/`: Interface layer (CLI/API/dashboard integration).
-- `engines/`: Modul legacy yang masih dipakai runtime dan akan dimigrasi bertahap.
+```
+app/
+├── bootstrap.py              # Composition root — wiring semua dependency
+├── application/
+│   ├── scalper_bot.py        # Orchestrator utama bot
+│   ├── exit_manager.py       # Monitoring posisi & eksekusi exit (TP/SL/DCA)
+│   ├── oracle.py             # Market regime, AI reasoning, self-learning
+│   └── use_cases/
+│       ├── market_cycle.py   # Loop utama per siklus market
+│       ├── pair_pipeline.py  # Kandidat pair: build & process
+│       ├── entry_gates.py    # Semua gate pre-entry (AI, K-NN, LLM)
+│       ├── entry_targeting.py# ATR-based dynamic TP/SL calculation
+│       ├── entry_dispatch.py # Final trade execution trigger
+│       └── candidate_enrichment.py
+├── domain/
+│   ├── predictor.py          # ML model inference (scikit-learn)
+│   ├── scoring.py            # Volatility-adjusted momentum scoring
+│   └── technicals.py        # EMA, RSI, ATR, orderbook analysis
+└── infrastructure/
+    ├── database.py           # SQLite WAL schema & queries
+    ├── ws_market.py          # Indodax Market WebSocket
+    ├── ws_private.py         # Indodax Private WebSocket (order updates)
+    ├── llm_worker.py         # LiteRT-LM background process + queue
+    ├── exchange_factory.py   # CCXT Indodax client
+    └── deadman.py            # Deadman switch safety monitor
+dashboard/server.py           # Flask + SocketIO dashboard (port 8080)
+```
 
 ---
 
@@ -99,9 +119,17 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
    ```env
    INDODAX_API_KEY="your_api_key"
    INDODAX_API_SECRET="your_secret_key"
+   SECRET_KEY="random_hex_64_chars"        # Wajib — keamanan dashboard session
+   TELEGRAM_BOT_TOKEN="your_token"         # Opsional — notifikasi Telegram
+   MIN_TRADE_IDR=11000                     # Opsional — override minimum order IDR
    ```
 
-3. **Risk Management:**
+3. **Generate SECRET_KEY:**
+   ```bash
+   python3 -c "import secrets; print(secrets.token_hex(32))"
+   ```
+
+4. **Risk Management:**
    Atur target TP/SL dan batasan capital di `config.py`.
 
 ---
@@ -152,7 +180,7 @@ AlgoVibe menggunakan sistem hibrida antara matematika kuantitatif dan penalaran 
 2.  **Technical Filter**: Menggunakan kombinasi EMA Cross (EMA-20 > EMA-50) dan strategi **Pullback Entry** (beli saat harga retrace ke support EMA).
 3.  **Microstructure Check**: Mengecek *Orderbook Imbalance*. Bot hanya masuk jika ada dominasi "tembok beli" (bid) yang kuat.
 4.  **AI Pattern Matching (k-NN)**: Bot membandingkan pola harga saat ini dengan ribuan transaksi historis di database. Jika pola tersebut memiliki *win rate* rendah di masa lalu, AI akan melakukan **Veto**.
-5.  **Execution Intelligence**: Bot secara otomatis memilih antara **Maker Order** (antri di EMA-9 untuk hemat fee) atau **Taker Order** (langsung hajar market jika momentum sangat kuat).
+5.  **Execution Intelligence:** Semua entry menggunakan **Taker (Market Order)** untuk eksekusi instan tanpa antre. Harga beli mengacu pada snapshot realtime ticker saat sinyal terpenuhi.
 
 ### 📐 Verifikasi Kuantitatif: Estimasi Waktu (ETA)
 AlgoVibe tidak hanya menebak target harga, tetapi juga mengestimasi **kapan** target tersebut akan tercapai. Sistem menggunakan model hibrida:
@@ -161,31 +189,46 @@ AlgoVibe tidak hanya menebak target harga, tetapi juga mengestimasi **kapan** ta
 -   **Calibration**: Sistem menggabungkan kedua angka tersebut (60% Math, 40% AI) untuk memberikan estimasi ETA yang realistis di Dashboard.
 
 ### 🔴 Strategi SELL (Exit)
-1.  **ATR-Based Take Profit**: Target profit tidak statis, melainkan dihitung berdasarkan volatilitas ATR (*Average True Range*). Target dinamis antara 2% hingga 12%.
-2.  **Trailing Stop Loss**: Mengunci profit secara otomatis saat harga naik. Bot akan terus "mengikuti" harga ke atas dan hanya menjual jika harga berbalik turun sebesar jarak tertentu.
-3.  **Protective Stop Loss**: Batas rugi maksimal (biasanya 3.5% - 6%) untuk mencegah kerugian besar saat terjadi *flash crash*.
-4.  **Oracle Emergency Exit**: AI Oracle dapat memerintahkan bot untuk menjual posisi lebih awal jika mendeteksi perubahan rezim market menjadi **Bearish** atau **Crash** secara mendadak.
+1.  **ATR-Based Dynamic Take Profit**: Target profit dihitung berdasarkan volatilitas ATR 1 menit, dimodifikasi oleh faktor conviction (probabilitas AI × kepercayaan LLM), RSI exhaustion, dan orderbook pressure. Range dinamis **0.84% — 15%**, dengan minimum risk-to-reward 1:1.2.
+2.  **Trailing Stop Loss**: Mengunci profit secara otomatis saat harga naik. Jarak trailing adaptif — semakin besar profit, semakin ketat jaraknya (0.4% di profit normal, 0.2% di profit > 4%).
+3.  **Break-Even Stop**: Saat profit menyentuh 1%, SL otomatis dipindahkan ke harga entry + fee (trade bebas risiko).
+4.  **Tiered Rapid Exit**: Profit bagus (≥ Rp 7.500 atau ≥ 1.5%) langsung keluar jika ada tanda momentum melemah (RSI > 72, AI fade, atau SELL signal). Profit tinggi (≥ Rp 15.000 atau ≥ 4.5%) di-force exit instan.
+5.  **Time-Stop**: Posisi yang tidak bergerak lebih dari `MAX_HOLD_MINUTES` (default 10 menit) ditutup otomatis.
+6.  **Protective Stop Loss**: SL awal berbasis ATR, capped antara **0.7% — 3.5%** dari harga entry.
+7.  **Oracle Emergency Exit**: AI Oracle dapat memerintahkan bot menjual lebih awal jika mendeteksi perubahan rezim market menjadi **Bearish** atau **Crash** secara mendadak.
+8.  **Strategic DCA (Averaging Down)**: Sebelum cut-loss, bot dapat menambah muatan hingga 2 tier jika AI masih optimis (confidence > 35%), dengan harga rata-rata baru yang dihitung ulang.
 
 ---
 
-## 🛠 Deployment (Systemd)
+## 🛠 Deployment
 
-Jalankan bot sebagai service agar tetap aktif 24/7 di background.
+### Docker (Recommended — Production)
 
-**Bot Engine (`indodax-scalper.service`):**
-```ini
-[Service]
-WorkingDirectory=/root/algovibe
-ExecStart=/root/algovibe/venv/bin/python /root/algovibe/main.py
-Restart=always
+```bash
+# Build dan push ke private registry
+REGISTRY_PASS=xxx ./build_and_push.sh
+
+# Deploy ke server (pull + restart + health check)
+REGISTRY_PASS=xxx ./deploy_sync.sh
 ```
 
-**Dashboard (`indodax-dashboard.service`):**
-```ini
-[Service]
-WorkingDirectory=/root/algovibe
-ExecStart=/root/algovibe/venv/bin/python /root/algovibe/dashboard/server.py
-Restart=always
+Container berjalan sebagai non-root user, `read_only` filesystem, dengan `tmpfs` untuk `/tmp` dan `models/cache`. Data bot di-persist via volume `./data:/app/data`.
+
+### Native (Development)
+
+```bash
+# Bot engine
+python3 main.py
+
+# Dashboard (terminal terpisah)
+python3 dashboard/server.py
+```
+
+### Systemd (Native 24/7)
+
+```bash
+systemctl --user start indodax-scalper.service
+systemctl --user start indodax-dashboard.service
 ```
 
 ---
