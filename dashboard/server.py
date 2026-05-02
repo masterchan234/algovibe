@@ -185,28 +185,105 @@ def _get_pair_technicals(pair):
     finally:
         conn.close()
 
+def _get_trade_history_summary():
+    """Ambil ringkasan statistik seluruh riwayat transaksi untuk Executive Report."""
+    try:
+        conn = get_db_connection()
+        dry_val = 1 if DRY_RUN else 0
+        row = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(AVG(CASE WHEN pnl_idr > 0 THEN pnl_pct END), 3) as avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl_idr <= 0 THEN pnl_pct END), 3) as avg_loss_pct,
+                ROUND(MAX(pnl_idr), 0) as best_trade,
+                ROUND(MIN(pnl_idr), 0) as worst_trade,
+                ROUND(SUM(pnl_idr), 0) as total_pnl,
+                ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
+            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+        """, (dry_val,)).fetchone()
+
+        exits = conn.execute("""
+            SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
+            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            GROUP BY reason ORDER BY cnt DESC LIMIT 6
+        """, (dry_val,)).fetchall()
+
+        top_pairs = conn.execute("""
+            SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
+            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
+        """, (dry_val,)).fetchall()
+
+        conn.close()
+
+        total = row['total'] or 0
+        wins  = row['wins'] or 0
+        losses = row['losses'] or 0
+        win_rate = round(wins / total * 100, 1) if total else 0
+        avg_win  = row['avg_win_pct'] or 0
+        avg_loss = row['avg_loss_pct'] or 0
+        rr = round(abs(avg_win / avg_loss), 2) if avg_loss else 0
+
+        exit_lines = " | ".join([
+            f"{e['reason']}({e['cnt']}x, avg {e['avg_pct']:+.2f}%)" for e in exits
+        ])
+        pair_lines = " | ".join([
+            f"{p['pair'].replace('idr','').upper()}({p['trades']}tx, {p['total_pnl']:+,.0f}IDR)" for p in top_pairs
+        ])
+
+        return {
+            "total": total, "wins": wins, "losses": losses, "win_rate": win_rate,
+            "avg_win_pct": avg_win, "avg_loss_pct": avg_loss, "rr": rr,
+            "best_trade": row['best_trade'] or 0, "worst_trade": row['worst_trade'] or 0,
+            "total_pnl": row['total_pnl'] or 0, "avg_hold_min": row['avg_hold_min'] or 0,
+            "exit_breakdown": exit_lines, "top_pairs": pair_lines,
+        }
+    except Exception as e:
+        logging.warning(f"[Equity Report] Trade history summary error: {e}")
+        return {}
+
+
 def _generate_equity_report_llm(stats):
-    """Kirim prompt ke LLM untuk membuat Executive Report yang sesungguhnya."""
+    """Kirim prompt ke LLM untuk membuat Executive Report berdasarkan seluruh riwayat transaksi."""
     worker = LLMWorker.get_instance()
     if not worker.is_active:
         return
-        
+
+    hist = _get_trade_history_summary()
+    if not hist or hist.get('total', 0) < 3:
+        return  # Belum cukup data untuk laporan bermakna
+
+    rr_note = "BAIK (>1)" if hist['rr'] >= 1.0 else f"BURUK (<1, perlu perbaikan)"
+
     prompt = (
-        "Buatlah 'Executive Report' singkat tentang performa trading bot saat ini.\n"
-        f"DATA SESI:\n"
-        f"- Status PnL: {stats['pnl']:,.0f} IDR\n"
-        f"- Unrealized: {stats['unrealized']:,.0f} IDR\n"
-        f"- Win Rate: {stats['win_rate']}%\n"
-        f"- Total Engagements: {stats['trades']}\n"
-        f"- Active Positions: {stats['open_count']}\n"
-        f"- Regime: {stats['regime']}\n"
-        f"- Alpha Contributor: {stats['top_pair']}\n"
-        f"- Trading Intensity: {stats['intensity']} tx/hr\n\n"
-        "Format laporan dengan section: [REPORT STATUS], [CONTEXT], [AUDIT], [STRATEGY], [NEXT ACTION]. "
-        "Pada section [NEXT ACTION], berikan satu kalimat direktif tajam apa yang harus dilakukan bot selanjutnya. "
-        "Gunakan bahasa Indonesia yang profesional."
+        "Kamu adalah Quant Analyst senior. Buat 'Executive Performance Report' berdasarkan data historis trading bot berikut.\n\n"
+        f"=== RINGKASAN SELURUH RIWAYAT TRANSAKSI ===\n"
+        f"Total Trade     : {hist['total']} (W:{hist['wins']} / L:{hist['losses']})\n"
+        f"Win Rate        : {hist['win_rate']}%\n"
+        f"Total PnL       : {hist['total_pnl']:+,.0f} IDR\n"
+        f"Avg Win         : +{hist['avg_win_pct']:.2f}%  |  Avg Loss: {hist['avg_loss_pct']:.2f}%\n"
+        f"Risk/Reward     : {hist['rr']:.2f}x — {rr_note}\n"
+        f"Best Trade      : +{hist['best_trade']:,.0f} IDR\n"
+        f"Worst Trade     : {hist['worst_trade']:,.0f} IDR\n"
+        f"Avg Hold Time   : {hist['avg_hold_min']} menit\n"
+        f"Exit Breakdown  : {hist['exit_breakdown']}\n"
+        f"Top Pairs       : {hist['top_pairs']}\n\n"
+        f"=== STATUS SESI SAAT INI ===\n"
+        f"PnL Sesi        : {stats['pnl']:+,.0f} IDR\n"
+        f"Unrealized      : {stats['unrealized']:+,.0f} IDR\n"
+        f"Posisi Aktif    : {stats['open_count']}\n"
+        f"Regime Pasar    : {stats['regime']}\n"
+        f"Intensitas      : {stats['intensity']:.1f} tx/jam\n\n"
+        "Tulis laporan dalam 4 section singkat: "
+        "[VERDICT] status overall profit/loss dan win rate, "
+        "[DIAGNOSIS] apa penyebab utama performa ini (RR ratio, fee drag, exit pattern), "
+        "[EDGE] kekuatan bot yang harus dipertahankan, "
+        "[AKSI] satu rekomendasi taktis spesifik yang harus dilakukan sekarang. "
+        "Gunakan bahasa Indonesia profesional, padat, dan tajam. Tidak perlu panjang."
     )
-    logging.info(f"🧠 [ORACLE PROMPT DEBUG]\n{prompt}")
+    logging.info(f"🧠 [ORACLE EQUITY REPORT PROMPT]\n{prompt}")
     worker.query_async("equity_report", prompt)
 
 def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
@@ -1373,34 +1450,28 @@ def _build_stats_payload():
         
         final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
-        # --- Recent Trades for History Tab (Safe Fetch) ---
+        # --- Recent Trades for History Tab ---
         recent_trades = []
         try:
-            # [Senior Optimization] Pull AI Reasoning directly from trade_analytics via Subquery
-            query = """
-                SELECT h.*, 
-                       (SELECT llm_verdict FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_verdict,
-                       (SELECT llm_confidence FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_confidence,
-                       (SELECT llm_reason FROM trade_analytics a WHERE a.pair = h.pair AND a.status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1) as llm_reason
-                FROM trade_history h
-                WHERE h.reason != 'BACKTEST' 
-                ORDER BY h.created_at DESC LIMIT 20
-            """
-            recent_trades_rows = conn.execute(query).fetchall()
+            recent_trades_rows = conn.execute("""
+                SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
+                       pnl_idr, pnl_pct, reason, duration_seconds, created_at
+                FROM trade_history
+                WHERE reason != 'BACKTEST'
+                ORDER BY created_at DESC LIMIT 20
+            """).fetchall()
             for r in recent_trades_rows:
                 recent_trades.append({
-                    "pair":          r['pair'],
-                    "side":          'SELL',
-                    "entry_price":   float(r['entry_price'] or 0),
-                    "exit_price":    float(r['exit_price'] or 0),
-                    "amount":        float(r['amount_crypto'] or 0),
-                    "amount_idr":    float(r['amount_idr'] or 0),
-                    "pnl_idr":       float(r['pnl_idr'] or 0),
-                    "pnl_pct":       float(r['pnl_pct'] or 0),
-                    "created_at":    r['created_at'],
-                    "llm_verdict":   r['llm_verdict'],
-                    "llm_reason":    r['llm_reason'],
-                    "ai_confidence": float(r['llm_confidence'] or 0)
+                    "pair":        r['pair'],
+                    "side":        'SELL',
+                    "entry_price": float(r['entry_price'] or 0),
+                    "exit_price":  float(r['exit_price'] or 0),
+                    "amount":      float(r['amount_crypto'] or 0),
+                    "amount_idr":  float(r['amount_idr'] or 0),
+                    "pnl_idr":     float(r['pnl_idr'] or 0),
+                    "pnl_pct":     float(r['pnl_pct'] or 0),
+                    "reason":      r['reason'],
+                    "created_at":  r['created_at'],
                 })
         except Exception as e:
             print(f"⚠️ History Fetch Error: {e}")

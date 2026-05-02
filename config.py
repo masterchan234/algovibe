@@ -26,26 +26,26 @@ MIN_BALANCE_THRESHOLD  = 10000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
-MAX_TRACKED_PAIRS      = 150
+MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
 LIQUIDITY_MULTIPLIER   = 50        # [DYNAMIC] Volume 24h harus minimal 50x besar modal per trade
 
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.05    # [DYNAMIC BASE] Dasar 5% per koin (Bisa naik/turun via Oracle Velocity)
-MAX_OPEN_POSITIONS = 15          # [WIDE NET] Maksimal 15 posisi terbuka (Menangkap lebih banyak probabilitas)
+CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih banyak posisi dari modal sama
+MAX_OPEN_POSITIONS = 25          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
 # --- [Scalping Targets] ---
-TP_PCT = 0.012                  # [SCALP] Target 1.2% untuk rotasi cepat
-SL_PCT = -0.015                 # [SCALP] Stop Loss -1.5%
-TRAILING_STOP_ACTIVATION_PCT = 0.012 # Aktifkan trailing setelah +1.2%
-TRAILING_STOP_DISTANCE_PCT = 0.005   # Jarak trailing 0.5%
-MAX_HOLD_MINUTES = 15           # [SCALP] Rotasi cepat, jangan jadi bagholder
+TP_PCT = 0.030                  # [TRAILING DOMINANT] Fallback TP 3.0% — biarkan trailing stop yang lock profit
+SL_PCT = -0.010                 # [KETAT] Stop Loss -1.0% (dari -1.5%) → kurangi avg loss ~37%
+TRAILING_STOP_ACTIVATION_PCT = 0.008 # Aktifkan trailing lebih cepat: +0.8% (dari +1.2%)
+TRAILING_STOP_DISTANCE_PCT = 0.004   # Jarak trailing lebih ketat: 0.4% (dari 0.5%) → lock profit
+MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
-MIN_NET_PROFIT_IDR = 500  # [DRY RUN TEST] Dilonggarkan dari 2500 → 500
+MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
@@ -56,16 +56,16 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.25 # [PRO SCALP] Lebih responsif terhadap momentum mikro
+AI_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
 AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 AI_MIN_HISTORY_POINTS   = 30   
 
 # --- [Senior Strategy: Averaging Down] ---
 DCA_ENABLED = True
 DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
-DCA_STEP_PCT = -0.035          # Tambah muatan setiap turun 3.5%
+DCA_STEP_PCT = -0.025          # Tambah muatan setiap turun 2.5% (dari 3.5%) → DCA lebih cepat
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
-DCA_MIN_AI_CONFIDENCE = 0.40   # Hanya tambah muatan jika AI masih optimis > 40%# Minimal data points sebelum AI aktif
+DCA_MIN_AI_CONFIDENCE = 0.35   # Hanya tambah muatan jika AI masih optimis > 35% (dari 40%)# Minimal data points sebelum AI aktif
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)

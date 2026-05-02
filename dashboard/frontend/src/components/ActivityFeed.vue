@@ -119,6 +119,7 @@
               <div class="col-pair">
                 <div class="pair-name">{{ formatPair(trade.pair) }}</div>
                 <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
+                <div class="exit-reason" v-if="trade.reason">{{ trade.reason }}</div>
               </div>
               <div class="col-size">
                 <div class="val-idr">{{ formatIdr(trade.pnl_idr + (trade.amount_idr || 0)) }}</div>
@@ -130,19 +131,6 @@
               <div class="col-pnl">
                 <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
                 <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
-              </div>
-            </div>
-            
-            <!-- In-Line AI Reasoning (Ide #2) -->
-            <div class="ai-audit-trail" v-if="trade.llm_reason || trade.ai_confidence">
-              <div class="audit-header">
-                <span class="audit-icon">🧠</span>
-                <span class="audit-title">AI AUDIT</span>
-                <span class="audit-confidence" v-if="trade.ai_confidence">Conf: {{ trade.ai_confidence.toFixed(0) }}%</span>
-              </div>
-              <div class="audit-body">
-                <span class="audit-verdict" :class="trade.llm_verdict?.toLowerCase()">{{ trade.llm_verdict || 'TRADE' }}</span>
-                <p class="audit-text">{{ trade.llm_reason || 'No detailed reasoning recorded for this transaction.' }}</p>
               </div>
             </div>
           </div>
@@ -355,6 +343,10 @@ function formatIdr(val) {
 }
 
 .pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
+.exit-reason {
+  font-size: 8px; font-weight: 700; text-transform: uppercase;
+  color: #8b949e; letter-spacing: 0.4px; margin-top: 2px; opacity: 0.75;
+}
 .status-pill {
   display: inline-block;
   font-size: 8px;
