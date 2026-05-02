@@ -268,6 +268,9 @@ Log trainer tersedia di: `data/logs/auto_trainer.log`
 
 ---
 
+Untuk reset dry run dari docker
+docker exec -ti algovibe python3 reset_dry_run.py
+
 ## ⚠️ Disclaimer
 
 Software ini dibuat untuk tujuan edukasi dan eksperimen. **Gunakan dengan risiko Anda sendiri.** Pembuat tidak bertanggung jawab atas kerugian finansial. Selalu gunakan **DRY RUN** sebelum masuk ke live market.
