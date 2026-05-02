@@ -39,7 +39,13 @@
     <div class="context-panel" :class="{ 'collapsed': filterMode === 'all' && store.positions.length === 0 }">
       <!-- Active Positions Mode -->
       <div class="positions-section" v-if="filterMode === 'active' || (filterMode === 'all' && store.positions.length > 0)">
-        <div class="section-label">Active Positions ({{ store.positions.length }})</div>
+        <div class="section-header">
+          <div class="col-pair">PAIR</div>
+          <div class="col-size">SIZE</div>
+          <div class="col-price">ENTRY/MARK</div>
+          <div class="col-target">TARGETS</div>
+          <div class="col-pnl">PnL</div>
+        </div>
         <div class="positions-list">
           <div
             v-for="pos in store.positions"
@@ -47,13 +53,25 @@
             class="position-item"
             :class="pos.pnl_idr >= 0 ? 'green' : 'red'"
           >
-            <div class="pos-main">
-              <span class="pair">{{ formatPair(pos.pair) }}</span>
-              <span class="pos-info">Entry: {{ formatNumber(pos.entry_price) }}</span>
+            <div class="col-pair">
+              <div class="pair-name">{{ formatPair(pos.pair) }}</div>
+              <div class="status-pill" :class="pos.status.toLowerCase()">{{ pos.status }}</div>
             </div>
-            <div class="pos-pnl">
-              <span class="pnl">{{ formatIdr(pos.pnl_idr) }}</span>
-              <span class="pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ pos.pnl_pct.toFixed(2) }}%</span>
+            <div class="col-size">
+              <div class="val-idr">{{ formatIdr(pos.amount_idr) }}</div>
+              <div class="val-coin">{{ (pos.amount_coin || 0).toFixed(2) }} units</div>
+            </div>
+            <div class="col-price">
+              <div class="entry">{{ formatNumber(pos.entry_price) }}</div>
+              <div class="current">{{ formatNumber(pos.exit_price) }}</div>
+            </div>
+            <div class="col-target">
+              <div class="tp">TP: +{{ (pos.target_tp || 0).toFixed(1) }}%</div>
+              <div class="sl">SL: -{{ (pos.target_sl || 0).toFixed(1) }}%</div>
+            </div>
+            <div class="col-pnl">
+              <div class="pnl-val">{{ formatIdr(pos.pnl_idr) }}</div>
+              <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
             </div>
           </div>
           <div v-if="filterMode === 'active' && store.positions.length === 0" class="empty-state">
@@ -64,7 +82,12 @@
 
       <!-- Real History Mode (Fetched from DB) -->
       <div class="history-section" v-if="filterMode === 'history'">
-        <div class="section-label">Recent Trades (Database)</div>
+        <div class="section-header">
+          <div class="col-pair">PAIR</div>
+          <div class="col-size">SIZE</div>
+          <div class="col-price">ENTRY/EXIT</div>
+          <div class="col-pnl">RESULT</div>
+        </div>
         <div class="history-list">
           <div
             v-for="trade in store.stats.recent_trades"
@@ -72,13 +95,20 @@
             class="history-item"
             :class="trade.pnl_idr >= 0 ? 'green' : 'red'"
           >
-            <div class="hist-main">
-              <span class="pair">{{ formatPair(trade.pair) }}</span>
-              <span class="hist-info">Exit: {{ formatNumber(trade.exit_price) }}</span>
+            <div class="col-pair">
+              <div class="pair-name">{{ formatPair(trade.pair) }}</div>
+              <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
             </div>
-            <div class="hist-pnl">
-              <span class="pnl">{{ formatIdr(trade.pnl_idr) }}</span>
-              <span class="pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ trade.pnl_pct.toFixed(2) }}%</span>
+            <div class="col-size">
+              <div class="val-idr">{{ formatIdr(trade.pnl_idr + (trade.amount_idr || 0)) }}</div>
+            </div>
+            <div class="col-price">
+              <div class="entry">{{ formatNumber(trade.entry_price) }}</div>
+              <div class="exit">{{ formatNumber(trade.exit_price) }}</div>
+            </div>
+            <div class="col-pnl">
+              <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
+              <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
             </div>
           </div>
           <div v-if="store.stats.recent_trades.length === 0" class="empty-state">
@@ -195,12 +225,20 @@ function formatPair(pair) {
   return pair.replace(/idr$/i, '').toUpperCase()
 }
 
+function formatTimeShort(ts) {
+  if (!ts) return ''
+  try {
+    const d = new Date(ts)
+    return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+  } catch { return '' }
+}
+
 function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
 }
 
 function formatIdr(val) {
-  const n = Number(val) || 0
+  const n = Math.round(Number(val) || 0)
   const abs = Math.abs(n)
   const prefix = n >= 0 ? '+' : '-'
   if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
@@ -250,19 +288,70 @@ function formatIdr(val) {
 
 .tab-count { background: #f85149; color: white; font-size: 9px; padding: 1px 5px; border-radius: 10px; margin-left: 5px; }
 
-.context-panel { background: #0d1117; max-height: 40%; overflow-y: auto; border-bottom: 1px solid #30363d; transition: all 0.3s; }
+.context-panel { background: #0d1117; max-height: 60%; overflow-y: auto; border-bottom: 1px solid #30363d; transition: all 0.3s; }
 .context-panel.collapsed { max-height: 0; border-bottom: none; }
 
-.section-label { padding: 12px 20px 6px; font-size: 10px; font-weight: 800; text-transform: uppercase; color: #8b949e; }
+.section-header {
+  display: flex;
+  padding: 10px 20px;
+  background: rgba(13, 17, 23, 0.8);
+  border-bottom: 1px solid #30363d;
+  font-size: 10px;
+  font-weight: 800;
+  color: #484f58;
+  letter-spacing: 0.5px;
+}
 
-.position-item, .history-item { display: flex; justify-content: space-between; padding: 12px 20px; border-bottom: 1px solid rgba(48, 54, 61, 0.2); }
-.pair { font-weight: 800; color: #e6edf3; font-size: 14px; }
-.pos-info, .hist-info { color: #8b949e; font-size: 10px; }
-.pnl { font-weight: 900; font-size: 13px; }
-.pct { font-size: 11px; font-weight: 800; }
+.col-pair { flex: 1.5; }
+.col-size { flex: 1.2; text-align: right; padding-right: 15px; }
+.col-price { flex: 1.5; text-align: right; padding-right: 15px; }
+.col-target { flex: 1.2; text-align: right; padding-right: 15px; }
+.col-pnl { flex: 1.2; text-align: right; }
 
-.green .pnl, .green .pct { color: #3fb950; }
-.red .pnl, .red .pct { color: #f85149; }
+.position-item, .history-item {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 12px 20px;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+  transition: background 0.2s;
+}
+
+.position-item:hover, .history-item:hover {
+  background: rgba(88, 166, 255, 0.03);
+}
+
+.pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
+.status-pill {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: 900;
+  padding: 1px 5px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  background: #21262d;
+  color: #8b949e;
+}
+.status-pill.exiting { color: #f85149; border: 1px solid rgba(248, 81, 73, 0.2); }
+.status-pill.pending_buy { color: #d29922; border: 1px solid rgba(210, 153, 34, 0.2); }
+.status-pill.open { color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.2); }
+
+.val-idr { font-weight: 800; font-size: 12px; color: #c9d1d9; }
+.val-coin, .time { font-size: 10px; color: #484f58; font-family: monospace; }
+
+.entry { font-size: 11px; color: #8b949e; }
+.current, .exit { font-size: 12px; font-weight: 800; color: #e6edf3; }
+
+.tp { color: #3fb950; font-size: 10px; font-weight: 700; }
+.sl { color: #f85149; font-size: 10px; font-weight: 700; }
+
+.pnl-val { font-weight: 900; font-size: 13px; }
+.pnl-pct { font-size: 11px; font-weight: 800; padding: 1px 4px; border-radius: 4px; display: inline-block; }
+
+.green .pnl-val { color: #3fb950; }
+.green .pnl-pct { background: rgba(63, 185, 80, 0.1); color: #3fb950; }
+.red .pnl-val { color: #f85149; }
+.red .pnl-pct { background: rgba(248, 81, 73, 0.1); color: #f85149; }
 
 .empty-state { padding: 20px; text-align: center; color: #484f58; font-size: 12px; font-style: italic; }
 

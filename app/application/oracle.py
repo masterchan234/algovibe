@@ -992,16 +992,39 @@ class Oracle:
             logger.error(f"[Oracle] Learning Error: {e}")
             return 0.0
 
-    def get_sizing_multiplier(self) -> float:
+    def get_sizing_multiplier(self, pair: str, velocity_score: float = 0.5, confidence: float = 0.5) -> float:
         """
-        Adjust capital allocation based on market risk (Aggressive Mode).
+        [PROFIT VELOCITY SIZING]
+        Menentukan besarnya modal berdasarkan 'kecepatan' koin mencapai target.
+        Multiplier = Base (Regime) * Performance (Velocity + Confidence)
         """
+        # 1. Base Multiplier dari Market Regime
         regime = self.get_market_regime()
-        if regime == MarketRegime.CRASH: return 0.0 # Stop trading
-        if regime == MarketRegime.BEARISH: return 0.6 # Moderate size
-        if regime == MarketRegime.CHOPPY: return 0.9 # Almost full
-        if regime == MarketRegime.BULLISH: return 1.5 # [AGGRESSIVE] 1.5x Size
-        return 1.2 # [RANGING] 1.2x Size
+        if regime == MarketRegime.CRASH: return 0.0
+        
+        base_m = 1.0
+        if regime == MarketRegime.BEARISH: base_m = 0.6
+        elif regime == MarketRegime.BULLISH: base_m = 1.3
+        elif regime == MarketRegime.CHOPPY: base_m = 0.9
+        
+        # 2. Velocity & Confidence Factor (0.0 - 1.0)
+        # velocity_score tinggi = tren sangat curam / momentum kuat
+        # confidence tinggi = probabilitas AI tinggi
+        perf_score = (velocity_score * 0.65) + (confidence * 0.35)
+        
+        # 3. Final Multiplier Calculation
+        # Kita ingin multiplier berada di rentang 0.2x hingga 2.5x dari base porsi modal
+        # Jika perf_score rendah (0.1), multiplier akan kecil (~0.2x) -> Modal receh untuk koin lemot
+        # Jika perf_score tinggi (0.9), multiplier bisa mencapai 2.0x -> Modal gajah untuk koin fast-track
+        
+        final_multiplier = base_m * (perf_score * 2.2)
+        
+        # Batasi agar tetap rasional (Safety Guard)
+        final_multiplier = max(0.15, min(2.5, final_multiplier))
+        
+        # logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        return final_multiplier
 
     def get_rationale(self, pair: str, decision: str) -> str:
         """

@@ -12,6 +12,8 @@ from config import (
     MIN_TRADE_IDR,
     CAPITAL_PER_TRADE_PCT,
     MAX_OPEN_POSITIONS,
+    MIN_VOLUME_FILTER,
+    LIQUIDITY_MULTIPLIER,
 )
 
 
@@ -39,7 +41,25 @@ def execute_trade(
             log_message(f"⚠️ SKIP {pair}: Max active positions ({MAX_OPEN_POSITIONS}) reached. Waiting for exit.")
             return False
 
-        multiplier = bot.oracle.get_sizing_multiplier()
+        # --- [Risk Check: Dynamic Liquidity Guard] ---
+        tickers = bot.market_ws.get_tickers()
+        coin_data = tickers.get(pair, {})
+        vol_24h = float(coin_data.get('vol_idr', 0))
+        
+        # 1. Global Minimum check
+        if vol_24h < MIN_VOLUME_FILTER:
+            log_message(f"⚠️ SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
+            return False
+
+        # Hitung estimasi modal yang akan dipakai dengan Profit Velocity Sizing
+        # tq_prob mewakili kecepatan/kekuatan tren teknikal
+        # llm_confidence mewakili keyakinan analisa AI
+        multiplier = bot.oracle.get_sizing_multiplier(
+            pair=pair, 
+            velocity_score=tq_prob, 
+            confidence=llm_confidence / 100.0  # Konversi dari 0-100 ke 0-1
+        )
+        
         if multiplier <= 0:
             log_message(f"SKIP: Oracle blocked trade ({bot.oracle.get_rationale(pair, 'SKIP_REGIME')})")
             return False
@@ -54,6 +74,13 @@ def execute_trade(
             # Use real balance as the basis for sizing in LIVE mode
             target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
             amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
+
+        # 2. Dynamic check (Participation Rate)
+        # Kita tidak ingin trade kita > 1/Multiplier (e.g. 1/50 = 2%) dari volume harian
+        required_vol = amount_idr * LIQUIDITY_MULTIPLIER
+        if vol_24h < required_vol:
+            log_message(f"⚠️ SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
+            return False
 
         if amount_idr < MIN_TRADE_IDR:
             log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")

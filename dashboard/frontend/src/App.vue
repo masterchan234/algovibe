@@ -58,10 +58,13 @@
 
     <NotificationCenter />
 
-    <main class="main-grid">
+    <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
         <ActivityFeed />
       </section>
+      
+      <div class="resizer" @mousedown="startResize" :class="{ 'is-active': isResizing }"></div>
+
       <section class="right-panel">
         <ProfitChart />
       </section>
@@ -217,6 +220,33 @@ async function triggerRefresh() {
     isRefreshing.value = false
     pullDistance.value = 0
   }
+}
+
+// Resizer Logic
+const leftPanelWidth = ref(400)
+const isResizing = ref(false)
+
+function startResize(e) {
+  isResizing.value = true
+  window.addEventListener('mousemove', handleMouseMove)
+  window.addEventListener('mouseup', stopResize)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+function handleMouseMove(e) {
+  if (!isResizing.value) return
+  // Limit min 300px, max 800px or 50% of window
+  const newWidth = Math.max(300, Math.min(800, e.clientX))
+  leftPanelWidth.value = newWidth
+}
+
+function stopResize() {
+  isResizing.value = false
+  window.removeEventListener('mousemove', handleMouseMove)
+  window.removeEventListener('mouseup', stopResize)
+  document.body.style.cursor = 'default'
+  document.body.style.userSelect = 'auto'
 }
 
 onMounted(() => {
@@ -500,12 +530,32 @@ body {
 
 .main-grid {
   display: grid;
-  grid-template-columns: 400px 1fr;
-  gap: 12px;
+  grid-template-columns: var(--left-width, 400px) 4px 1fr;
+  gap: 8px;
   padding: 12px;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.resizer {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.2s;
+  border-radius: 2px;
+  margin: 0 -4px;
+  z-index: 10;
+}
+
+.resizer:hover, .resizer.is-active {
+  background: var(--accent-blue);
+  box-shadow: 0 0 8px var(--accent-blue);
+}
+
+.resizer:hover, .resizer.is-active {
+  background: var(--accent-blue);
+  box-shadow: 0 0 8px var(--accent-blue);
 }
 
 .left-panel,
@@ -652,6 +702,7 @@ body {
 }
 
 @media (max-width: 1000px) {
+  .resizer { display: none; }
   .app {
     height: auto;
     overflow-y: auto;

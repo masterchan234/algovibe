@@ -26,13 +26,14 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_TRADES_PER_DAY     = 1000
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 150
-MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
+MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
+LIQUIDITY_MULTIPLIER   = 50        # [DYNAMIC] Volume 24h harus minimal 50x besar modal per trade
 
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.10    # [CONSERVATIVE] Gunakan 10% saldo per koin (Lebih aman untuk modal besar)
-MAX_OPEN_POSITIONS = 5          # [LIMIT] Maksimal 5 posisi terbuka sekaligus
+CAPITAL_PER_TRADE_PCT = 0.05    # [DYNAMIC BASE] Dasar 5% per koin (Bisa naik/turun via Oracle Velocity)
+MAX_OPEN_POSITIONS = 15          # [WIDE NET] Maksimal 15 posisi terbuka (Menangkap lebih banyak probabilitas)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
