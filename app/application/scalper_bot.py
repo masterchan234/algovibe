@@ -32,6 +32,21 @@ class ScalperBot:
         self.start_day = int(db.get_state("start_day", datetime.now().day))
         self.daily_trades = int(db.get_state("daily_trades", 0))
         self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
+        self.consecutive_shadow_wins = 0 # In-memory only for recovery streak
+
+        # [Senior Fix] Stale Halt Recovery: Jika ada loss beruntun tapi trade terakhir sudah lama (> 4 jam), 
+        # anggap sesi baru dan bebaskan bot dari PAUSE.
+        if self.consecutive_losses > 0:
+            last_trades = db.get_recent_trades(limit=1)
+            if last_trades:
+                try:
+                    last_ts = datetime.fromisoformat(last_trades[0]['created_at'])
+                    if (datetime.now() - last_ts).total_seconds() > 14400: # 4 jam
+                        log_message(f"♻️  RECOVERY: Resetting stale consecutive_losses ({self.consecutive_losses} -> 0)")
+                        self.consecutive_losses = 0
+                        db.save_state("consecutive_losses", 0)
+                except Exception as e:
+                    log_message(f"⚠️ Recovery Error: {e}")
 
         self.price_history = defaultdict(lambda: deque(maxlen=100))
         from config import BLACKLIST_COINS
@@ -233,6 +248,43 @@ class ScalperBot:
             llm_confidence=llm_confidence,
             llm_reason=llm_reason,
         )
+
+    def execute_shadow_trade(self, pair, price, gate, target):
+        """
+        [Shadow Recovery] Eksekusi transaksi bayangan untuk mengetes kondisi pasar.
+        Disimpan di tabel shadow_orders agar ExitManager bisa memantaunya.
+        """
+        try:
+            # Pastikan tidak ada duplikasi shadow trade untuk pair yang sama
+            existing = db.get_all_shadow_orders()
+            if any(s['pair'] == pair for s in existing):
+                return
+            
+            # [Limit] Maksimal 2 shadow probe sekaligus agar tidak spamming
+            shadow_count = sum(1 for s in existing if s['order_id'].startswith('SHADOW-'))
+            if shadow_count >= 2:
+                return
+
+            log_message(f"🔍 [SHADOW PROBE] Entering virtual trade for {pair} at Rp {price:,.2f}...")
+            
+            # Kita gunakan format yang mirip dengan jaring/position agar monitor_and_execute bisa handle
+            data = {
+                "pair": pair,
+                "order_id": f"SHADOW-{int(time.time())}",
+                "price": price,
+                "amount": 0, # Dummy for shadow
+                "target_tp": target['tp_price'],
+                "target_sl": target['sl_price'],
+                "is_shadow_probe": True, # Flag khusus
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            db.upsert_shadow_order(pair, data['order_id'], data['price'], data['amount'])
+            # Simpan metadata tambahan ke state agar terbaca di monitor loop
+            db.save_state(f"shadow_meta_{pair}", json.dumps(data))
+            
+        except Exception as e:
+            log_message(f"⚠️ Shadow Execution Error: {e}")
 
     def _insight_loop(self):
         while True:

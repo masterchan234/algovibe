@@ -119,11 +119,16 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 continue
             if gate == _BREAK:
                 break
+            
+            target = calculate_entry_target(bot, p, enriched, gate, adaptive_cfg)
+
+            # [Senior Fix] Shadow Recovery Path
+            if isinstance(gate, dict) and gate.get('mode') == "SHADOW":
+                bot.execute_shadow_trade(pair, p['last'], gate, target)
+                continue
 
             if bot.daily_trades >= MAX_TRADES_PER_DAY:
                 continue
-
-            target = calculate_entry_target(bot, p, enriched, gate, adaptive_cfg)
 
             if dispatch_entry(bot, p, enriched, gate, target):
                 bot.daily_trades += 1

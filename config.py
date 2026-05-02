@@ -103,7 +103,7 @@ DRY_RUN =   True
 
 # Longgarkan semua gate entry saat DRY_RUN untuk testing dashboard.
 # Set ke False sebelum live trading!
-DRY_RUN_LOOSE_GATES = False
+DRY_RUN_LOOSE_GATES = True
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins ---
 # Koin yang ada di daftar ini akan otomatis diabaikan oleh radar bot.

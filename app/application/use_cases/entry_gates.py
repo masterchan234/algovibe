@@ -196,14 +196,15 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
         llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
 
-    # ── 10. Consecutive-loss halt ─────────────────────────────────────────
+    # ── 10. Consecutive-loss halt / Shadow Recovery ─────────────────────────
     bot.consecutive_losses = int(db.get_state("consecutive_losses", 0))
-    if bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-        msg = f"PAUSE: Hit max losses ({MAX_CONSECUTIVE_LOSSES})."
+    is_shadow_mode = bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES
+    if is_shadow_mode:
+        # [Senior Fix] Shadow Probing: Kita tetap lanjut evaluasi sampai akhir
+        # agar target TP/SL terhitung dengan benar, tapi kita tandai sebagai SHADOW.
+        msg = f"🛰️  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
-        time.sleep(60)
-        return _BREAK
 
     # ── 11. K-NN pattern scoring ──────────────────────────────────────────
     rsi_val = calculate_rsi(history)
@@ -273,6 +274,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     )
 
     return {
+        "mode": "SHADOW" if is_shadow_mode else "LIVE",
         "llm_v": llm_v,
         "llm_c": llm_c,
         "llm_r": llm_r,

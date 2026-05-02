@@ -145,6 +145,47 @@ class ExitManager:
                 return # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
         except Exception as e:
             log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
+
+        # --- [Shadow Recovery Monitoring] ---
+        try:
+            shadows = db.get_all_shadow_orders()
+            for s in shadows:
+                pair = s['pair']
+                if pair not in current_tickers: continue
+                
+                # Load metadata
+                meta_raw = db.get_state(f"shadow_meta_{pair}")
+                if not meta_raw: continue
+                meta = json.loads(meta_raw)
+                
+                current_price = float(current_tickers[pair].get('last', 0))
+                target_tp = float(meta.get('target_tp', 0))
+                target_sl = float(meta.get('target_sl', 0))
+                
+                # Check for exit
+                if current_price >= target_tp:
+                    # Shadow WIN
+                    bot.consecutive_shadow_wins += 1
+                    log_message(f"🏆 [SHADOW WIN] {pair} hit TP! Streak: {bot.consecutive_shadow_wins}/2")
+                    db.delete_shadow_order(pair)
+                    db.save_state(f"shadow_meta_{pair}", "")
+                    
+                    if bot.consecutive_shadow_wins >= 2:
+                        log_message("🔓 [SHADOW RECOVERY] 2 Consecutive Wins! Unlocking Global Pause.")
+                        bot.consecutive_losses = 0
+                        bot.consecutive_shadow_wins = 0
+                        db.save_state("consecutive_losses", 0)
+                        send_telegram_message("🔓 *GLOBAL PAUSE UNLOCKED*\nPasar terdeteksi membaik via Shadow Probing (2x Win). Bot kembali beroperasi normal.")
+                
+                elif current_price <= target_sl:
+                    # Shadow LOSS
+                    log_message(f"💀 [SHADOW LOSS] {pair} hit SL. Streak reset.")
+                    bot.consecutive_shadow_wins = 0
+                    db.delete_shadow_order(pair)
+                    db.save_state(f"shadow_meta_{pair}", "")
+        except Exception as e:
+            log_message(f"⚠️ Shadow Monitoring Error: {e}")
+
         for pair, data in list(positions.items()):
             try:
                 # Ambil harga terakhir dari ticker terbaru

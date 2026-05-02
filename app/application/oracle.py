@@ -241,7 +241,8 @@ class Oracle:
             f"{'Confirm or reject this BUY signal.' if task_type == 'auto' else 'Provide a sharp tactical analysis.'} "
             f"Using ALL data above — technicals, orderbook microstructure, flow, regime, and bot memory.\n"
             f"Output: Verdict (BUY/HOLD/AVOID) + 1 concise sentence reasoning + "
-            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes)."
+            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes).\n"
+            f"Special Directive: In CHOPPY/SIDEWAYS markets, if RSI < 35 or Buy Pressure > 65%, be more aggressive in suggesting BUY with a tight Stop Loss to capture quick rebounds."
         )
 
     def auto_queue_buy_candidates(self, ranked_signals):
@@ -452,12 +453,14 @@ class Oracle:
                 if is_structured:
                     # Ambil harga terakhir dari DB untuk kalibrasi math ETA
                     try:
-                        row = db.get_ticker_history(pair_name, limit=1)
-                        if row:
-                            history = json.loads(row[0]['history_json'])
-                            current_price = history[-1]
+                        # [Fix] Gunakan limit lebih banyak (50) agar math ETA punya data untuk velocity
+                        # Dan perbaiki KeyError: 'history_json' karena get_ticker_history() mengembalikan list of dict harga.
+                        rows = db.get_ticker_history(pair_name, limit=50)
+                        if rows:
+                            prices = [r['last'] for r in rows]
+                            current_price = prices[-1]
                             target_tp = current_price * (1 + (structured.get('take_profit_pct', 2.0)/100))
-                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, history)
+                            math_eta = self._calculate_math_eta(pair_name, target_tp, current_price, prices)
                             
                             # Calibrate: Rata-rata AI vs Math (Bobot 60% Math, 40% AI)
                             ai_eta = structured.get('eta_minutes', 15)
@@ -919,8 +922,8 @@ class Oracle:
         elif regime == MarketRegime.CHOPPY:
             dyn += 4.0
             llm_buy_min_conf = 65.0
-            llm_hold_block_conf = 66.0
-            llm_avoid_block_conf = 58.0
+            llm_hold_block_conf = 75.0  # [Loosened] was 66.0
+            llm_avoid_block_conf = 65.0 # [Loosened] was 58.0
         elif regime == MarketRegime.RANGING:
             dyn += 1.0
             llm_buy_min_conf = 62.0
