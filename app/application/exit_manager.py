@@ -512,7 +512,15 @@ class ExitManager:
                     ai_veto, veto_reason = self.oracle.check_llm_veto(pair)
                 
                 # 1. AI Emergency Exit (Highest Priority)
-                if ai_veto and current_profit_pct > -0.005: # Hanya exit jika bukan sedang dalam kerugian besar (cut loss AI)
+                # [Fix Bug#2] Izinkan exit paksa pada kerugian dalam jika confidence veto sangat tinggi (>=80%)
+                # Ini mencegah bot terus hold posisi yang AI nilai akan semakin memburuk
+                veto_confidence = 0
+                if veto_reason:
+                    import re as _re
+                    _m = _re.search(r'(\d+)%', veto_reason)
+                    if _m: veto_confidence = int(_m.group(1))
+                allow_deep_cut = veto_confidence >= 80  # Veto sangat yakin → izinkan cut loss dalam
+                if ai_veto and (current_profit_pct > -0.005 or allow_deep_cut):
                     msg = (
                         f"🚨 *AI EMERGENCY EXIT* 🚨\n"
                         f"Pair: `{pair}`\n"

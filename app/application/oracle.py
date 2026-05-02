@@ -246,7 +246,8 @@ class Oracle:
             f"Using ALL data above — technicals, orderbook microstructure, flow, regime, and bot memory.\n"
             f"Output: Verdict (BUY/HOLD/AVOID) + 1 concise sentence reasoning + "
             f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes).\n"
-            f"Special Directive: In CHOPPY/SIDEWAYS markets, if RSI < 35 or Buy Pressure > 65%, be more aggressive in suggesting BUY with a tight Stop Loss to capture quick rebounds."
+            f"Be objective: issue AVOID if orderbook is thin, sell flow dominates, or price is at 24h high. "
+            f"Only suggest BUY if multiple signals align (RSI, flow, regime, history). Do not default to BUY."
         )
 
     def auto_queue_buy_candidates(self, ranked_signals):
@@ -643,6 +644,14 @@ class Oracle:
 
         pair_lower = pair.lower()
 
+        # 0. [Fix Bug#1] Cek _veto_cache TERLEBIH DAHULU agar tidak bypass veto
+        #    _veto_cache diisi oleh auto_queue & insight_thread (jalur lain dari analysis_results)
+        cached_veto = self._veto_cache.get(pair_lower)
+        if cached_veto:
+            age_min = (datetime.now() - cached_veto["ts"]).total_seconds() / 60
+            if age_min <= 10:  # TTL sama dengan check_llm_veto
+                return cached_veto["verdict"], cached_veto["confidence"], cached_veto["reason"]
+
         # 1. Cek hasil yang sudah matang di Oracle memory (analysis_results)
         if pair_lower in self.analysis_results:
             res = self.analysis_results[pair_lower]
@@ -663,6 +672,11 @@ class Oracle:
                     "confidence": parsed['confidence'],
                     "reason": parsed['reason'],
                     "time": datetime.now()
+                }
+                # [Fix Bug#1] Sinkronkan ke _veto_cache agar jalur check_llm_veto konsisten
+                self._veto_cache[pair_lower] = {
+                    **parsed,
+                    "ts": datetime.now()
                 }
                 return parsed['verdict'], parsed['confidence'], parsed['reason']
             else:
