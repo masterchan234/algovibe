@@ -101,15 +101,36 @@
         </div>
       </div>
       <div class="footer-center">
-        <div class="ticker-tape">
-          <div class="ticker-content">
-            <span v-for="pair in store.radarPairs" :key="pair.pair" class="ticker-item">
-              <span class="t-pair">{{ formatPair(pair.pair) }}</span>
-              <span class="t-price">{{ formatNumber(pair.price) }}</span>
-              <span class="t-change" :class="pair.change >= 0 ? 'up' : 'down'">
-                {{ pair.change >= 0 ? '▲' : '▼' }}{{ Math.abs(pair.change).toFixed(2) }}%
+        <div class="ticker-tape" ref="tickerTape">
+          <div class="ticker-content" ref="tickerContent">
+            <template v-if="newsHeadlines.length">
+              <span v-for="(item, i) in newsHeadlines" :key="i" class="ticker-item">
+                <span class="t-source">[{{ item.source }}]</span>
+                <span class="t-title">{{ item.title }}</span>
+                <span class="t-sep">&middot;</span>
               </span>
-            </span>
+              <span v-for="(item, i) in newsHeadlines" :key="'b'+i" class="ticker-item" aria-hidden="true">
+                <span class="t-source">[{{ item.source }}]</span>
+                <span class="t-title">{{ item.title }}</span>
+                <span class="t-sep">&middot;</span>
+              </span>
+            </template>
+            <template v-else>
+              <span v-for="pair in store.radarPairs" :key="pair.pair" class="ticker-item">
+                <span class="t-pair">{{ formatPair(pair.pair) }}</span>
+                <span class="t-price">{{ formatNumber(pair.price) }}</span>
+                <span class="t-change" :class="pair.change >= 0 ? 'up' : 'down'">
+                  {{ pair.change >= 0 ? '\u25b2' : '\u25bc' }}{{ Math.abs(pair.change).toFixed(2) }}%
+                </span>
+              </span>
+              <span v-for="pair in store.radarPairs" :key="'b'+pair.pair" class="ticker-item" aria-hidden="true">
+                <span class="t-pair">{{ formatPair(pair.pair) }}</span>
+                <span class="t-price">{{ formatNumber(pair.price) }}</span>
+                <span class="t-change" :class="pair.change >= 0 ? 'up' : 'down'">
+                  {{ pair.change >= 0 ? '\u25b2' : '\u25bc' }}{{ Math.abs(pair.change).toFixed(2) }}%
+                </span>
+              </span>
+            </template>
           </div>
         </div>
       </div>
@@ -121,13 +142,50 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed, watch, nextTick } from 'vue'
 import { useTradeStore } from './stores/trade'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 
 const store = useTradeStore()
+const newsHeadlines = ref([])
+const tickerContent = ref(null)
+const tickerTape = ref(null)
+let _rafId = null
+let _tickerX = 0
+const TICKER_PX_PER_FRAME = 0.5
+
+function _runTicker() {
+  const el = tickerContent.value
+  if (!el) return
+  const half = el.scrollWidth / 2
+  if (half <= 0) { _rafId = requestAnimationFrame(_runTicker); return }
+  _tickerX -= TICKER_PX_PER_FRAME
+  if (Math.abs(_tickerX) >= half) _tickerX = 0
+  el.style.transform = `translateX(${_tickerX}px)`
+  _rafId = requestAnimationFrame(_runTicker)
+}
+
+function _startTicker() {
+  if (_rafId) return
+  _tickerX = 0
+  _runTicker()
+}
+
+watch([newsHeadlines, () => store.radarPairs], async () => {
+  await nextTick()
+  _tickerX = 0  // reset position on content change
+})
+
+async function fetchNews() {
+  try {
+    const resp = await fetch('/api/news')
+    if (!resp.ok) return
+    const items = await resp.json()
+    if (Array.isArray(items) && items.length) newsHeadlines.value = items
+  } catch (e) { /* fallback ke radarPairs */ }
+}
 const startTime = ref(Date.now())
 const now = ref(Date.now())
 
@@ -246,14 +304,19 @@ function stopResize() {
 
 onMounted(() => {
   store.connect()
-  setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
-  
+  fetchNews()
+  setInterval(fetchNews, 5 * 60 * 1000)
+  setInterval(() => { now.value = Date.now() }, 1000)
+  _startTicker()
+
   // Mobile Touch listeners
   window.addEventListener('touchstart', handleTouchStart, { passive: true })
   window.addEventListener('touchmove', handleTouchMove, { passive: false })
   window.addEventListener('touchend', handleTouchEnd, { passive: true })
+})
+
+onUnmounted(() => {
+  if (_rafId) cancelAnimationFrame(_rafId)
 })
 </script>
 
@@ -652,30 +715,37 @@ body {
 
 .ticker-tape {
   width: 100%;
+  overflow: hidden;
   white-space: nowrap;
 }
 
 .ticker-content {
-  display: inline-block;
-  animation: ticker 200s linear infinite;
+  display: inline-flex;
+  will-change: transform;
+  white-space: nowrap;
 }
 
 .ticker-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-right: 24px;
+  margin-right: 32px;
+  flex-shrink: 0;
 }
 
 .t-pair { font-weight: 800; color: var(--accent-blue); }
 .t-price { font-family: 'JetBrains Mono', monospace; font-size: 10px; }
 .t-change.up { color: var(--accent-green); }
 .t-change.down { color: var(--accent-red); }
+.t-source { font-weight: 700; color: var(--accent-blue); margin-right: 4px; }
+.t-title { color: var(--text-secondary, #c9cdd8); }
+.t-sep { color: rgba(255,255,255,0.2); margin: 0 12px; }
 
 @keyframes ticker {
-  0% { transform: translateX(100%); }
-  100% { transform: translateX(-100%); }
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
 }
+/* ticker now driven by requestAnimationFrame — keyframe kept as fallback */
 
 @media (max-width: 1000px) {
   .resizer { display: none; }

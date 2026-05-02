@@ -5,6 +5,8 @@ import sys
 import time
 import datetime
 import logging
+import urllib.request
+import xml.etree.ElementTree as ET
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
@@ -245,8 +247,13 @@ def _get_trade_history_summary():
         return {}
 
 
+_last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari push_data_loop
+
 def _generate_equity_report_llm(stats):
     """Kirim prompt ke LLM untuk membuat Executive Report berdasarkan seluruh riwayat transaksi."""
+    global _last_equity_llm_ts
+    if time.time() - _last_equity_llm_ts < 600:  # 10-menit cooldown in-process
+        return
     worker = LLMWorker.get_instance()
     if not worker.is_active:
         return
@@ -284,6 +291,7 @@ def _generate_equity_report_llm(stats):
         "Gunakan bahasa Indonesia profesional, padat, dan tajam. Tidak perlu panjang."
     )
     logging.info(f"🧠 [ORACLE EQUITY REPORT PROMPT]\n{prompt}")
+    _last_equity_llm_ts = time.time()
     worker.query_async("equity_report", prompt)
 
 def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
@@ -1205,6 +1213,53 @@ def get_logs():
     finally:
         conn.close()
 
+# ── Crypto News Feed ──────────────────────────────────────────────────────────
+_news_cache = {"items": [], "fetched_at": 0}
+_NEWS_TTL = 300  # seconds
+
+_NEWS_FEEDS = [
+    ("CoinDesk",      "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("CoinTelegraph",  "https://cointelegraph.com/rss"),
+    ("Decrypt",        "https://decrypt.co/feed"),
+]
+
+def _fetch_rss_titles(url: str, source: str, limit: int = 8) -> list:
+    """Fetch RSS and return list of {title, source} dicts. Never raises."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "AlgoVibe/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            raw = resp.read()
+        root = ET.fromstring(raw)
+        ns = ""
+        items = root.findall(".//item") or root.findall(".//entry")
+        results = []
+        for item in items[:limit]:
+            title_el = item.find("title")
+            if title_el is not None and title_el.text:
+                results.append({"title": title_el.text.strip(), "source": source})
+        return results
+    except Exception as e:
+        logging.warning(f"[news] Failed to fetch {source}: {e}")
+        return []
+
+
+@app.route('/api/news')
+def api_news():
+    global _news_cache
+    now = time.time()
+    if now - _news_cache["fetched_at"] < _NEWS_TTL and _news_cache["items"]:
+        return jsonify(_news_cache["items"])
+
+    items = []
+    for source, url in _NEWS_FEEDS:
+        items.extend(_fetch_rss_titles(url, source))
+
+    if items:
+        _news_cache = {"items": items, "fetched_at": now}
+
+    return jsonify(items or _news_cache["items"])
+
+
 @app.route('/<path:path>')
 def static_proxy(path):
     dist_dir = os.path.join(app.static_folder, 'dist')
@@ -1424,30 +1479,17 @@ def _build_stats_payload():
                 "intensity": round(total_engagements / max(1, (time.time() - _start_time) / 3600), 1)
             })
             
+        # Poll sekali untuk laporan terbaru
         latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
         if latest_report:
             db.set_state("llm_equity_report", latest_report)
             equity_reasoning_ai = latest_report
 
-        equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
-            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
-            top_pair=top_pair, best_trade=best_trade, regime=regime
-        )
-        
-        final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
-            
-        # Poll for any finished reports
-        latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
-        if latest_report:
-            db.set_state("llm_equity_report", latest_report)
-            equity_reasoning_ai = latest_report
-
-        # Fallback ke technical reasoning jika AI belum siap
         equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
             active_pnl, unrealized_pnl, active_win_rate, total_engagements,
             top_pair=top_pair, best_trade=best_trade, regime=regime
         )
-        
+
         final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
         # --- Recent Trades for History Tab ---
@@ -1854,26 +1896,33 @@ def _build_market_trades_payload():
         return []
 
 def push_data_loop():
-    """Background thread — push semua data via WebSocket setiap 1 detik."""
+    """Background thread — push data via WebSocket.
+    Fast path (1s): orderbook + market trades (realtime).
+    Slow path (5s): stats, radar, trades history, logs (berat).
+    """
+    _slow_counter = 0
     while True:
         try:
-            socketio.emit('stats_update',  _build_stats_payload())
-            socketio.emit('radar_update',  _build_radar_payload())
-            
-            socketio.emit('trades_update', _build_trades_payload())
-            socketio.emit('logs_update',   _build_logs_payload())
-
+            # Fast: data realtime sub-detik
             depth = db.get_market_depth(CURRENT_WATCH_PAIR)
             socketio.emit('orderbook_update', {
                 "pair": CURRENT_WATCH_PAIR,
                 "bids": depth.get('bids', []),
                 "asks": depth.get('asks', [])
             })
-            
             socketio.emit('market_trades_update', {
                 "pair": CURRENT_WATCH_PAIR,
                 "trades": _build_market_trades_payload()
             })
+
+            # Slow: setiap 5 iterasi (~5 detik)
+            _slow_counter += 1
+            if _slow_counter >= 5:
+                _slow_counter = 0
+                socketio.emit('stats_update',  _build_stats_payload())
+                socketio.emit('radar_update',  _build_radar_payload())
+                socketio.emit('trades_update', _build_trades_payload())
+                socketio.emit('logs_update',   _build_logs_payload())
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)
