@@ -131,6 +131,7 @@ _start_time = time.time()
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
+    # print(f"🔗 DB Access: {os.path.abspath(DB_PATH)}")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -201,7 +202,8 @@ def _generate_equity_report_llm(stats):
         f"- Status PnL: {stats['pnl']:,.0f} IDR\n"
         f"- Unrealized: {stats['unrealized']:,.0f} IDR\n"
         f"- Win Rate: {stats['win_rate']}%\n"
-        f"- Total Trades: {stats['trades']}\n"
+        f"- Total Engagements: {stats['trades']}\n"
+        f"- Active Positions: {stats['open_count']}\n"
         f"- Regime: {stats['regime']}\n"
         f"- Alpha Contributor: {stats['top_pair']}\n"
         f"- Trading Intensity: {stats['intensity']} tx/hr\n\n"
@@ -209,6 +211,7 @@ def _generate_equity_report_llm(stats):
         "Pada section [NEXT ACTION], berikan satu kalimat direktif tajam apa yang harus dilakukan bot selanjutnya. "
         "Gunakan bahasa Indonesia yang profesional."
     )
+    logging.info(f"🧠 [ORACLE PROMPT DEBUG]\n{prompt}")
     worker.query_async("equity_report", prompt)
 
 def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None, best_trade=0, regime='CHOPPY'):
@@ -238,18 +241,22 @@ def _generate_equity_reasoning(pnl, unrealized, win_rate, trades, top_pair=None,
     else:
         report += "Konsolidasi harga terdeteksi, minim tren kuat. "
         
-    # 2. Performance Audit
-    # Win rate 0 if no trades to avoid hallucination or misleading stats
-    display_win_rate = win_rate if trades > 0 else 0
-    report += f"\nAUDIT: Sesi ini mencatat {trades} eksekusi dengan akurasi {display_win_rate}%. "
-    if top_pair:
-        report += f"Aset {top_pair.replace('idr','').upper()} menunjukkan anomali profit positif. "
+    # 2. Performance Audit (Overall)
+    if trades > 0:
+        report += f"\nAUDIT KESELURUHAN: Terdeteksi {trades} keterlibatan pasar (termasuk posisi aktif) dengan akurasi selesai {win_rate}%. "
+        if top_pair:
+            report += f"Aset {top_pair.replace('idr','').upper()} merupakan kontributor profit tertinggi saat ini. "
+    else:
+        report += f"\nAUDIT: Belum ada transaksi riwayat yang tercatat dalam database (0 eksekusi). "
+        report += "Oracle sedang menunggu data transaksi pertama untuk kalibrasi performa. "
     
     if unrealized < 0 and abs(unrealized) > 150000:
         report += "Terdapat floating loss signifikan yang memerlukan pengawasan ketat. "
 
     # 3. Strategy Narrative
-    if total_equity > 0:
+    if trades == 0:
+        report += "Saat ini bot memprioritaskan keamanan modal dengan filter likuiditas dan probabilitas yang sangat ketat."
+    elif total_equity > 0:
         report += "Strategi saat ini mempertahankan profit buffer untuk mitigasi risiko mendadak."
     else:
         report += "Bot berfokus pada efisiensi keluar posisi untuk meminimalkan degradasi ekuitas."
@@ -1168,16 +1175,16 @@ def _build_stats_payload():
             active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
-        # Cari Top Pair, Best Trade & Asset Contributions
+        # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "WHERE reason != 'BACKTEST' "
             "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
         ).fetchone()
         
         contribution_rows = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
+            "WHERE reason != 'BACKTEST' "
             "GROUP BY pair ORDER BY total_pnl DESC"
         ).fetchall()
         
@@ -1191,15 +1198,20 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
+            "WHERE reason != 'BACKTEST'"
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
         best_trade = float(best_trade_row[0] or 0)
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
+        # Overall engagements (Closed + Open)
+        total_trades_overall = dry_stats['trades'] if DRY_RUN else live_stats['trades']
+        open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
+        total_engagements = total_trades_overall + open_count
+        
         equity_reasoning, equity_action_plan = _generate_equity_reasoning(
-            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            active_pnl, unrealized_pnl, active_win_rate, total_engagements,
             top_pair=top_pair, best_trade=best_trade, regime=regime
         )
 
@@ -1227,8 +1239,8 @@ def _build_stats_payload():
         if is_stale_report:
             _generate_equity_report_llm({
                 "pnl": active_pnl, "unrealized": unrealized_pnl, "win_rate": active_win_rate,
-                "trades": perf['total_trades'], "regime": regime, "top_pair": top_pair,
-                "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1)
+                "trades": total_engagements, "open_count": open_count, "regime": regime, "top_pair": top_pair,
+                "intensity": round(total_engagements / max(1, (time.time() - _start_time) / 3600), 1)
             })
             
         latest_report = LLMWorker.get_instance().get_latest_result_by_type("equity_report")
@@ -1251,7 +1263,7 @@ def _build_stats_payload():
 
         # Fallback ke technical reasoning jika AI belum siap
         equity_reasoning_tech, equity_action_plan = _generate_equity_reasoning(
-            active_pnl, unrealized_pnl, active_win_rate, perf['total_trades'],
+            active_pnl, unrealized_pnl, active_win_rate, total_engagements,
             top_pair=top_pair, best_trade=best_trade, regime=regime
         )
         
@@ -1286,6 +1298,9 @@ def _build_stats_payload():
             "recent_trades": recent_trades,
             "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
+            "trades": total_engagements,
+            "history_count": total_trades_overall,
+            "open_count": open_count,
             "daily_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
@@ -1442,38 +1457,9 @@ def _build_trades_payload():
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
 
-        # 2. Fetch Trade History (CLOSED)
-        # [Fix] Tampilkan MANUAL_SYNC (is_manual=1) selalu, tanpa filter dry_run
-        # karena ini adalah transaksi nyata dari akun exchange.
-        # Untuk trade reguler, filter sesuai mode DRY_RUN.
-        trades = conn.execute("""
-            SELECT * FROM trade_history 
-            WHERE (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'
-            ORDER BY created_at DESC LIMIT 200
-        """, (dr_val,)).fetchall()
-
-        for t in trades:
-            try:
-                results.append({
-                    "id":          int(t['id'] or 0),  # [Fix] Sertakan id DB untuk deduplication di mobile
-                    "pair":        t['pair'] or 'UNKNOWN',
-                    "reason":      t['reason'] or 'EXIT',
-                    "pnl_idr":     float(t['pnl_idr'] or 0),
-                    "pnl_pct":     float(t['pnl_pct'] or 0),
-                    "entry_price": float(t['entry_price'] or 0),
-                    "exit_price":  float(t['exit_price'] or 0),
-                    "amount_idr":  float(t['amount_idr'] or 0),
-                    "amount_coin": float(t['amount_crypto'] or 0),
-                    "duration":    int(t['duration_seconds'] or 0),
-                    "created_at":  str(t['created_at']),
-                    "status":      'CLOSED',
-                    "is_manual":   int(t['is_manual'] or 0)
-                })
-            except Exception as e:
-                print(f"Error processing trade {t.get('id')}: {e}")
-
+        # 2. Sort by creation time to show newest positions first
         results.sort(key=lambda x: str(x['created_at']), reverse=True)
-        return results[:100]
+        return results
     except Exception as e:
         print(f"CRITICAL: _build_trades_payload failure: {e}")
         import traceback

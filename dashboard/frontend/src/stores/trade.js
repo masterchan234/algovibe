@@ -33,6 +33,9 @@ export const useTradeStore = defineStore('trade', () => {
     intensity: 0,
     asset_contributions: [],
     recent_trades: [],
+    trades: 0,
+    history_count: 0,
+    open_count: 0,
   })
 
   // Open positions (trades)
@@ -170,6 +173,9 @@ export const useTradeStore = defineStore('trade', () => {
         intensity: data.intensity ?? 0,
         asset_contributions: data.asset_contributions ?? [],
         recent_trades: data.recent_trades ?? [],
+        trades: data.trades ?? 0,
+        history_count: data.history_count ?? 0,
+        open_count: data.open_count ?? 0,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

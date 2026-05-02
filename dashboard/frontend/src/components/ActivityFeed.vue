@@ -24,13 +24,16 @@
           @click="filterMode = 'active'"
         >
           Active
-          <span v-if="store.positions.length > 0" class="tab-count">{{ store.positions.length }}</span>
+          <span v-if="store.positions.filter(p => ['OPEN', 'EXITING'].includes(p.status.toUpperCase())).length > 0" class="tab-count">
+            {{ store.positions.filter(p => ['OPEN', 'EXITING'].includes(p.status.toUpperCase())).length }}
+          </span>
         </button>
         <button 
           :class="{ active: filterMode === 'history' }" 
           @click="filterMode = 'history'"
         >
           History
+          <span v-if="store.stats.history_count > 0" class="tab-count history">{{ store.stats.history_count }}</span>
         </button>
       </div>
     </nav>
@@ -57,18 +60,35 @@
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
               <div class="status-pill" :class="pos.status.toLowerCase()">{{ pos.status }}</div>
             </div>
+            
             <div class="col-size">
               <div class="val-idr">{{ formatIdr(pos.amount_idr) }}</div>
               <div class="val-coin">{{ (pos.amount_coin || 0).toFixed(2) }} units</div>
             </div>
-            <div class="col-price">
-              <div class="entry">{{ formatNumber(pos.entry_price) }}</div>
-              <div class="current">{{ formatNumber(pos.exit_price) }}</div>
+
+            <div class="col-price-progress">
+              <div class="price-labels">
+                <span class="entry-label">ENT: {{ formatNumber(pos.entry_price) }}</span>
+                <span class="current-label">MARK: {{ formatNumber(pos.exit_price) }}</span>
+              </div>
+              <div class="progress-container">
+                <div class="progress-bg"></div>
+                <div 
+                  class="progress-fill" 
+                  :style="{ 
+                    left: calculatePosition(pos) + '%',
+                    backgroundColor: pos.pnl_pct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
+                  }"
+                ></div>
+                <div class="target-marker sl" title="Stop Loss"></div>
+                <div class="target-marker tp" title="Take Profit"></div>
+              </div>
+              <div class="target-labels">
+                <span class="sl-val">SL -{{ (pos.target_sl || 0).toFixed(1) }}%</span>
+                <span class="tp-val">TP +{{ (pos.target_tp || 0).toFixed(1) }}%</span>
+              </div>
             </div>
-            <div class="col-target">
-              <div class="tp">TP: +{{ (pos.target_tp || 0).toFixed(1) }}%</div>
-              <div class="sl">SL: -{{ (pos.target_sl || 0).toFixed(1) }}%</div>
-            </div>
+
             <div class="col-pnl">
               <div class="pnl-val">{{ formatIdr(pos.pnl_idr) }}</div>
               <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
@@ -233,6 +253,21 @@ function formatTimeShort(ts) {
   } catch { return '' }
 }
 
+function calculatePosition(pos) {
+  const entry = Number(pos.entry_price || 0);
+  const current = Number(pos.exit_price || 0);
+  const targetTp = Number(pos.target_tp || 0);
+  const targetSl = Number(pos.target_sl || 0);
+  
+  const tpPrice = entry * (1 + targetTp / 100);
+  const slPrice = entry * (1 - targetSl / 100);
+  
+  if (tpPrice === slPrice) return 50;
+  
+  let pct = ((current - slPrice) / (tpPrice - slPrice)) * 100;
+  return Math.min(Math.max(pct, 0), 100);
+}
+
 function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
 }
@@ -287,6 +322,7 @@ function formatIdr(val) {
 .segmented-control button.active { background: #21262d; color: #58a6ff; }
 
 .tab-count { background: #f85149; color: white; font-size: 9px; padding: 1px 5px; border-radius: 10px; margin-left: 5px; }
+.tab-count.history { background: #30363d; color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.2); }
 
 .context-panel { background: #0d1117; max-height: 60%; overflow-y: auto; border-bottom: 1px solid #30363d; transition: all 0.3s; }
 .context-panel.collapsed { max-height: 0; border-bottom: none; }
@@ -302,10 +338,9 @@ function formatIdr(val) {
   letter-spacing: 0.5px;
 }
 
-.col-pair { flex: 1.5; }
-.col-size { flex: 1.2; text-align: right; padding-right: 15px; }
-.col-price { flex: 1.5; text-align: right; padding-right: 15px; }
-.col-target { flex: 1.2; text-align: right; padding-right: 15px; }
+.col-pair { flex: 1.2; }
+.col-size { flex: 1; text-align: right; padding-right: 15px; }
+.col-price-progress { flex: 3; padding: 0 10px; }
 .col-pnl { flex: 1.2; text-align: right; }
 
 .position-item, .history-item {
@@ -339,11 +374,51 @@ function formatIdr(val) {
 .val-idr { font-weight: 800; font-size: 12px; color: #c9d1d9; }
 .val-coin, .time { font-size: 10px; color: #484f58; font-family: monospace; }
 
-.entry { font-size: 11px; color: #8b949e; }
-.current, .exit { font-size: 12px; font-weight: 800; color: #e6edf3; }
+.col-price-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.price-labels, .target-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: monospace;
+}
+.entry-label { color: #8b949e; }
+.current-label { color: #e6edf3; font-weight: 900; }
+.sl-val { color: rgba(248, 81, 73, 0.7); }
+.tp-val { color: rgba(63, 185, 80, 0.7); }
 
-.tp { color: #3fb950; font-size: 10px; font-weight: 700; }
-.sl { color: #f85149; font-size: 10px; font-weight: 700; }
+.progress-container {
+  position: relative;
+  height: 6px;
+  margin: 2px 0;
+}
+.progress-bg {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: #21262d;
+  border-radius: 3px;
+}
+.progress-fill {
+  position: absolute;
+  top: 1px; bottom: 1px;
+  width: 4px;
+  border-radius: 2px;
+  box-shadow: 0 0 8px currentColor;
+  z-index: 2;
+  transition: left 0.3s ease;
+}
+.target-marker {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 1px;
+  z-index: 1;
+}
+.target-marker.sl { left: 0%; background: #f85149; }
+.target-marker.tp { left: 100%; background: #3fb950; }
 
 .pnl-val { font-weight: 900; font-size: 13px; }
 .pnl-pct { font-size: 11px; font-weight: 800; padding: 1px 4px; border-radius: 4px; display: inline-block; }

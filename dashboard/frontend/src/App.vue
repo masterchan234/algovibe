@@ -657,7 +657,7 @@ body {
 
 .ticker-content {
   display: inline-block;
-  animation: ticker 80s linear infinite;
+  animation: ticker 200s linear infinite;
 }
 
 .ticker-item {

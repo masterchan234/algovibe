@@ -15,14 +15,13 @@ def reset_dry_run_data():
     cursor = conn.cursor()
 
     try:
-        # 1. Hapus riwayat perdagangan & analitik simulasi
+        # 1. Hapus riwayat perdagangan & analitik (Semua Simulasi & Backtest)
         cursor.execute("DELETE FROM trade_history WHERE dry_run = 1 OR dry_run IS NULL")
         deleted_history = cursor.rowcount
         
-        cursor.execute("DELETE FROM trade_analytics WHERE dry_run = 1 OR dry_run IS NULL")
+        cursor.execute("DELETE FROM trade_analytics")
         
         # 2. Hapus posisi terbuka simulasi & Shadow Orders
-        # [CRITICAL FIX] Pastikan posisi hantu (NULL) juga ikut terhapus agar saldo tidak minus
         cursor.execute("DELETE FROM positions WHERE dry_run = 1 OR dry_run IS NULL")
         deleted_positions = cursor.rowcount
         
@@ -33,22 +32,26 @@ def reset_dry_run_data():
         cursor.execute("UPDATE bot_state SET value = '0' WHERE key IN ('consecutive_losses', 'daily_trades')")
         cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'trigger_exit_pair'")
         
-        # 4. Bersihkan Cooldowns & Metadata Shadow
+        # 4. Bersihkan Cooldowns, Metadata Shadow, & LLM Cache
         cursor.execute("DELETE FROM bot_state WHERE key LIKE 'pair_cooldown_until_%'")
         cursor.execute("DELETE FROM bot_state WHERE key LIKE 'shadow_meta_%'")
+        cursor.execute("DELETE FROM bot_state WHERE key LIKE 'llm_reasoning_%'")
+        cursor.execute("DELETE FROM bot_state WHERE key = 'llm_equity_report'")
         deleted_states = cursor.rowcount
 
-        # 5. Bersihkan Activity Feed
+        # 5. Bersihkan Activity Feed & Ticker History (Agar Grafik Bersih)
         cursor.execute("DELETE FROM system_events")
+        cursor.execute("DELETE FROM ticker_history")
         
         conn.commit()
         
         print(f"✅ {deleted_history} riwayat transaksi dibersihkan.")
-        print(f"✅ {deleted_positions} posisi terbuka dibersihkan (No more ghost positions!)")
+        print(f"✅ {deleted_positions} posisi terbuka dibersihkan.")
         print(f"✅ {deleted_shadows} shadow orders dibersihkan.")
-        print(f"✅ {deleted_states} state dibersihkan.")
+        print(f"✅ {deleted_states} state & AI cache dibersihkan.")
+        print("✅ Ticker history & System events dikosongkan.")
         print("🔓 Global Pause direset. Bot siap tempur!")
-        print("\n✨ Sistem Algovibe Clean Slate (Dry Run).")
+        print("\n✨ Sistem Algovibe Clean Slate (Total Wipe).")
 
     except Exception as e:
         conn.rollback()
