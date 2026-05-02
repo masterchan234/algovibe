@@ -16,8 +16,12 @@ export DOCKER_BUILDKIT=1
 
 REGISTRY_USER=${REGISTRY_USER:-chandra}
 if [ -z "$REGISTRY_PASS" ]; then
-    echo "❌ ERROR: Set REGISTRY_PASS env var sebelum push."
-    exit 1
+    read -r -s -p "🔑 Registry password: " REGISTRY_PASS
+    echo ""
+    if [ -z "$REGISTRY_PASS" ]; then
+        echo "❌ ERROR: Password tidak boleh kosong."
+        exit 1
+    fi
 fi
 
 echo "🔐 Logging in to registry..."
