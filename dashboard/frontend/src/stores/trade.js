@@ -36,6 +36,8 @@ export const useTradeStore = defineStore('trade', () => {
     trades: 0,
     history_count: 0,
     open_count: 0,
+    dry_run: true,
+    dry_run_loose_gates: false,
   })
 
   // Open positions (trades)
@@ -102,14 +104,21 @@ export const useTradeStore = defineStore('trade', () => {
 
   function _recordPnl(pnl) {
     const rounded = Math.round(pnl)
-    // Skip jika masih nol dan belum ada data bermakna — hindari grafik datar
-    const hasData = pnlHistory.value.some(h => h.pnl !== 0)
-    if (rounded === 0 && !hasData) return
-    // Skip jika nilai sama persis dengan entri terakhir
-    const last = pnlHistory.value[pnlHistory.value.length - 1]
-    if (last && last.pnl === rounded) return
     const now = new Date()
     const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    
+    // Always record two points if empty to ensure ECharts draws a line immediately
+    if (pnlHistory.value.length === 0) {
+      const prevNow = new Date(now.getTime() - 1000)
+      const prevTimeStr = prevNow.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      pnlHistory.value.push({ time: prevTimeStr, pnl: rounded })
+      pnlHistory.value.push({ time: timeStr, pnl: rounded })
+      return
+    }
+
+    // Skip only if value is same and we have enough data to avoid spam
+    const last = pnlHistory.value[pnlHistory.value.length - 1]
+    if (last && last.pnl === rounded && pnlHistory.value.length > 20) return
     pnlHistory.value.push({ time: timeStr, pnl: rounded })
     if (pnlHistory.value.length > MAX_HISTORY) {
       pnlHistory.value = pnlHistory.value.slice(-MAX_HISTORY)
@@ -176,6 +185,8 @@ export const useTradeStore = defineStore('trade', () => {
         trades: data.trades ?? 0,
         history_count: data.history_count ?? 0,
         open_count: data.open_count ?? 0,
+        dry_run: data.dry_run ?? true,
+        dry_run_loose_gates: data.dry_run_loose_gates ?? false,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

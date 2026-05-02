@@ -20,8 +20,8 @@ import numpy as np
 from config import (
     MAX_CONSECUTIVE_LOSSES,
     STRONG_IMBALANCE_RATIO,
-    DRY_RUN_LOOSE_GATES,
 )
+import config
 from app.infrastructure.database import db
 from app.domain.technicals import calculate_rsi, derive_trade_signal, get_technical_summary
 from utils.logger import log_message
@@ -155,7 +155,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-    if not DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
+    if not config.DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
         msg = (
             f"SKIP: AI prob {tq_prob * 100:.0f}% < threshold "
             f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
@@ -166,7 +166,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     # ── 6. Trend / breakout requirement ───────────────────────────────────
-    if not DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
+    if not config.DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
         msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
@@ -238,7 +238,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
     min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 
-    if DRY_RUN_LOOSE_GATES:
+    if config.DRY_RUN_LOOSE_GATES:
         min_base_conf = 0.0  
 
     if base_confidence < min_base_conf:
@@ -266,7 +266,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit + llm_bonus
 
-    effective_threshold = 0.0 if DRY_RUN_LOOSE_GATES else dynamic_threshold
+    effective_threshold = 0.0 if config.DRY_RUN_LOOSE_GATES else dynamic_threshold
     if total_confidence < effective_threshold:
         msg = f"SKIP: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}%"
         log_message(f"{msg} [{pair}]")

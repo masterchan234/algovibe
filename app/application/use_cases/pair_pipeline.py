@@ -13,8 +13,8 @@ from config import (
     MAX_TRACKED_PAIRS,
     MAX_TRADES_PER_DAY,
     MIN_TRACKING_VOLATILITY,
-    DRY_RUN_LOOSE_GATES,
 )
+import config
 from app.infrastructure.database import db
 from utils.logger import log_message
 
@@ -67,7 +67,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
             btc_last = 999_999_999
 
     btc_history = db.get_ticker_history("BTC/IDR", limit=20)
-    if btc_history and len(btc_history) >= 20 and not DRY_RUN_LOOSE_GATES:
+    if btc_history and len(btc_history) >= 20 and not config.DRY_RUN_LOOSE_GATES:
         btc_prices = [h['last'] for h in btc_history]
         btc_ema = sum(btc_prices) / 20
         if btc_last < btc_ema:

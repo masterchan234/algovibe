@@ -24,11 +24,7 @@ def enrich_pair(bot, p, tickers):
     imbalance_ratio = p.get('imbalance', 1.0)
 
     ai_boost = bot.oracle.get_sentiment_boost(pair)
-    tq_prob = (
-        get_prediction(history, tickers.get(pair), ai_boost)
-        if (trend == "UP" or breakout)
-        else 0.0
-    )
+    tq_prob = get_prediction(history, tickers.get(pair), ai_boost)
 
     ch_5m = ch_15m = ch_1h = 0.0
     if len(history) >= 2:

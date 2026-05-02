@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from app.application.use_cases.market_cycle import run_market_cycle
 from app.application.use_cases.trade_execution import execute_trade as execute_trade_use_case
 from app.infrastructure.exchange_factory import create_indodax_exchange
-from config import DRY_RUN
+import config
 from app.infrastructure.database import db
 from app.application.exit_manager import ExitManager
 from app.application.oracle import Oracle
@@ -28,7 +28,7 @@ class ScalperBot:
 
         self.market_ws = MarketDataWS()
         self.oracle = Oracle(self.market_ws)
-        self.exit_manager = ExitManager(self.exchange, dry_run=DRY_RUN, oracle=self.oracle)
+        self.exit_manager = ExitManager(self.exchange, oracle=self.oracle)
 
         self.start_day = int(db.get_state("start_day", datetime.now().day))
         self.daily_trades = int(db.get_state("daily_trades", 0))
@@ -89,7 +89,7 @@ class ScalperBot:
 
         # Initial balance fetch for LIVE mode
         self.cached_balance = 0
-        if not DRY_RUN:
+        if not config.DRY_RUN:
             try:
                 bal = self.exchange.fetch_balance()
                 self.cached_balance = bal['free'].get('IDR', 0)
@@ -101,7 +101,7 @@ class ScalperBot:
 
         init_msg = (
             f"🚀 *ALGOVIBE SCALPER v3.0* 🚀\n"
-            f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE'}\n"
+            f"Mode: {'DRY RUN' if config.DRY_RUN else 'LIVE'}\n"
             f"Oracle: ONLINE | Backfill: SYNCING"
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))

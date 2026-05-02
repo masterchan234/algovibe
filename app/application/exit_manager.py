@@ -19,14 +19,17 @@ from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
-    def __init__(self, exchange_client, dry_run: bool = False, oracle=None):
+    def __init__(self, exchange_client, oracle=None):
         self.exchange = exchange_client
-        self.dry_run  = dry_run
         self.oracle = oracle
         self.jaring_orders = {} # {pair: {id, price, amount}}
         self.last_jaring_update = {} # {pair: timestamp}
         self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
         self._sync_jaring_from_db()
+
+    @property
+    def dry_run(self):
+        return db.is_dry_run()
 
     def get_open_positions(self):
         return db.get_open_positions()
@@ -45,8 +48,12 @@ class ExitManager:
             log_message(f"⚠️ Failed set cooldown {pair}: {e}")
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
-        positions = self.get_open_positions()
-        # log_message(f"[ExitManager] Monitoring {len(positions)} positions...")
+        all_positions = self.get_open_positions()
+        current_dr_val = 1 if self.dry_run else 0
+        
+        # Filter: Hanya pantau posisi yang sesuai dengan mode saat ini
+        positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
+        
         if not positions:
             return
 
@@ -657,9 +664,12 @@ class ExitManager:
                         amount = real_balance
             except Exception: pass
 
-            symbol = f"{pair[:-3].upper()}/IDR"
-            
-            if self.dry_run:
+            # Use position's original mode if available, fallback to current global mode
+            use_dry_run = self.dry_run
+            if position_data and 'dry_run' in position_data:
+                use_dry_run = bool(position_data['dry_run'])
+
+            if use_dry_run:
                 order = {
                     "id": f"DRY-EXIT-{int(time.time())}",
                     "status": "closed",
@@ -670,13 +680,14 @@ class ExitManager:
             else:
                 params = {'pair': pair.replace("idr", "_idr")}
                 if is_emergency or is_tp_exit:
-                    # Ganti ke Market Order untuk eksekusi instan
-                    order = self.exchange.create_market_sell_order(symbol, amount, params)
+                    # [Final Fix] Use explicit create_order for market sell
+                    order = self.exchange.create_order(symbol, 'market', 'sell', amount, price, params)
                     # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
                     exit_price = order.get('price') or price
                 else:
                     params['post_only'] = True
-                    order = self.exchange.create_limit_sell_order(symbol, amount, exit_price, params)
+                    # [Final Fix] Use explicit create_order for limit sell
+                    order = self.exchange.create_order(symbol, 'limit', 'sell', amount, exit_price, params)
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
@@ -729,7 +740,7 @@ class ExitManager:
                         reason=reason,
                         exec_type=exec_type,
                         duration_seconds=int(duration_sec),
-                        dry_run=self.dry_run,
+                        dry_run=use_dry_run,
                         exit_order_id=order_id,
                         ai_confidence=position_data.get('ai_confidence', 0.0)
                     )
@@ -793,7 +804,8 @@ class ExitManager:
             else:
                 # Eksekusi Market Buy Riil
                 params = {'pair': pair.replace("idr", "_idr")}
-                order = self.exchange.create_market_buy_order(symbol, add_amount_idr, params)
+                # [Final Fix] Use explicit create_order for market buy (DCA)
+                order = self.exchange.create_order(symbol, 'market', 'buy', add_amount_idr, current_price, params)
                 # Gunakan harga eksekusi asli jika tersedia
                 exec_price = float(order.get('price') or current_price)
                 add_amount_crypto = float(order.get('amount') or (add_amount_idr / exec_price))
@@ -1460,7 +1472,8 @@ class ExitManager:
                 order_id = f"JARING-{int(time.time())}"
                 order = {"id": order_id, "status": "open", "price": price, "amount": amount}
             else:
-                order = self.exchange.create_limit_buy_order(pair, amount, price)
+                # [Final Fix] Use explicit create_order for limit buy (Jaring)
+                order = self.exchange.create_order(pair.upper().replace("IDR", "/IDR"), 'limit', 'buy', amount, price, {'post_only': True})
                 order_id = order['id']
             
             self.jaring_orders[pair] = {"id": order_id, "price": price, "amount": amount}

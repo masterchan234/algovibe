@@ -14,14 +14,14 @@ import json
 from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from flask_wtf.csrf import CSRFProtect, generate_csrf
-from functools import wraps
 import secrets
+from functools import wraps
 from app.infrastructure.database import db
 from app.infrastructure.ws_market import MarketDataWS
 from app.domain.technicals import get_technical_summary, derive_trade_signal
 from app.infrastructure.llm_worker import LLMWorker
 import ccxt
+import config as cfg
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
@@ -40,11 +40,30 @@ app.config.update(
 )
 
 # ── Pentest Fix: Global CSRF Protection ──
-csrf = CSRFProtect(app)
 # Exclude SocketIO from CSRF as it has its own mechanism
 # but keep it for normal API routes
 CORS(app, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
+
+# --- [Manual CSRF Protection] ---
+def generate_csrf():
+    if '_csrf_token' not in session:
+        session['_csrf_token'] = secrets.token_hex(32)
+    return session['_csrf_token']
+
+@app.before_request
+def validate_csrf():
+    # Only validate CSRF on POST/PUT/DELETE
+    if request.method in ["POST", "PUT", "DELETE"]:
+        # Skip CSRF for login if needed, but better keep it
+        # Special case for socket.io path (handled by socketio)
+        if request.path.startswith('/socket.io'):
+            return
+            
+        token = request.headers.get("X-CSRFToken")
+        if not token or token != session.get("_csrf_token"):
+            logging.warning(f"🚫 CSRF Validation Failed for {request.path}")
+            abort(403)
 
 # Provide CSRF token for the frontend
 def generate_view_token():
@@ -114,7 +133,8 @@ try:
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
-from config import DB_PATH, DRY_RUN
+from config import DB_PATH
+# NOTE: cfg.DRY_RUN is imported dynamically inside functions to always read current value
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
 CURRENT_WATCH_PAIR = "btcidr"
@@ -142,6 +162,40 @@ try:
     print(f"✅ Subscribed to {len(_open_pos)} open position trade streams.")
 except Exception as _e:
     print(f"⚠️ Failed to sync initial trade streams: {_e}")
+
+_REAL_BALANCE_CACHE = {"value": None, "last_check": 0}
+
+def _fetch_real_idr_balance():
+    """Fetch real IDR balance from Indodax via CCXT."""
+    try:
+        from app.infrastructure.database import db
+        user = db.get_user('admin')
+        if not user or not user['api_key'] or not user['api_secret']:
+            return None
+        
+        import ccxt
+        ex = ccxt.indodax({
+            'apiKey': user['api_key'],
+            'secret': user['api_secret'],
+            'enableRateLimit': True
+        })
+        balance = ex.fetch_balance()
+        # return free (liquidity) instead of total to avoid double counting
+        return float(balance.get('IDR', {}).get('free', 0))
+    except Exception as e:
+        logging.error(f"❌ Error fetching real balance: {e}")
+        return None
+
+def _get_cached_real_balance():
+    now = time.time()
+    if _REAL_BALANCE_CACHE["value"] is not None and (now - _REAL_BALANCE_CACHE["last_check"]) < 60:
+        return _REAL_BALANCE_CACHE["value"]
+    
+    val = _fetch_real_idr_balance()
+    if val is not None:
+        _REAL_BALANCE_CACHE["value"] = val
+        _REAL_BALANCE_CACHE["last_check"] = now
+    return val
 
 def _get_pair_technicals(pair):
     """Ambil histori harga dari JSON blob dan hitung technical summary."""
@@ -189,9 +243,10 @@ def _get_pair_technicals(pair):
 
 def _get_trade_history_summary():
     """Ambil ringkasan statistik seluruh riwayat transaksi untuk Executive Report."""
+    import config as cfg
     try:
         conn = get_db_connection()
-        dry_val = 1 if DRY_RUN else 0
+        dry_val = 1 if cfg.DRY_RUN else 0
         row = conn.execute("""
             SELECT
                 COUNT(*) as total,
@@ -463,6 +518,7 @@ def user_settings():
 def get_stats():
     conn = get_db_connection()
     try:
+        import config as cfg
         # PnL & Daily Trades
         stats = conn.execute("SELECT * FROM bot_state").fetchall()
         stats_dict = {row['key']: row['value'] for row in stats}
@@ -517,7 +573,7 @@ def get_stats():
         _last_price = tech_data.get('last_price')
         combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
 
-        from config import DRY_RUN, INITIAL_CAPITAL
+        import config as cfg
         
         # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
         # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
@@ -525,21 +581,29 @@ def get_stats():
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
         
-        if DRY_RUN:
-            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+        if cfg.DRY_RUN:
+            available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
         else:
-            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
-            active_pnl = realized_pnl_live
-            active_win_rate = win_rate
+            # LIVE MODE: Try to use real balance from exchange
+            real_bal = _get_cached_real_balance()
+            if real_bal is not None:
+                available_idr = real_bal
+                active_pnl = realized_pnl_live
+                active_win_rate = win_rate
+            else:
+                available_idr = _real_balance_cache if _real_balance_cache > 0 else 0
+                active_pnl = realized_pnl_live
+                active_win_rate = win_rate
             
         total_equity = available_idr + total_used_idr + unrealized_pnl
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         
         # Performance definitions
         perf = db.get_daily_stats()
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if DRY_RUN else 0)
+        import config as cfg
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if cfg.DRY_RUN else 0)
         
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
@@ -589,7 +653,9 @@ def get_stats():
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',
-            "new_listings": db.get_new_listings()
+            "new_listings": db.get_new_listings(),
+            "dry_run": bool(cfg.DRY_RUN),
+            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -668,8 +734,8 @@ def get_pnl_history_api(tf):
     """
     conn = get_db_connection()
     try:
-        from config import DRY_RUN
-        dr_val = 1 if DRY_RUN else 0
+        import config as cfg
+        dr_val = 1 if cfg.DRY_RUN else 0
         
         tf_map = {
             '1h': '-1 hours',
@@ -716,6 +782,7 @@ def get_pnl_history_api(tf):
 @app.route('/api/debug/positions-summary')
 def get_positions_summary():
     """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
+    import config as cfg
     conn = get_db_connection()
     try:
         rows = conn.execute(
@@ -769,7 +836,7 @@ def get_positions_summary():
                 continue
 
         return jsonify({
-            "runtime_mode": "DRY_RUN" if DRY_RUN else "LIVE",
+            "runtime_mode": "DRY_RUN" if cfg.DRY_RUN else "LIVE",
             "positions_total": len(rows),
             "mode_counts": mode_counts,
             "status_counts": status_counts,
@@ -857,6 +924,32 @@ def manual_exit(pair):
     db.save_state("trigger_exit_pair", pair.lower())
     return jsonify({"status": "exit_requested", "pair": pair})
 
+@app.route('/api/bot/toggle-dry-run', methods=['POST'])
+@login_required
+def toggle_dry_run():
+    """Toggle antara mode DRY RUN dan LIVE secara dinamis."""
+    import config as cfg
+    # Baca nilai saat ini dari DB agar toggle akurat
+    current_val = db.get_state("dry_run") == "true"
+    new_val = not current_val
+    
+    db.save_state("dry_run", str(new_val).lower())
+    cfg.clear_dry_run_cache() # Hapus cache agar efek instan
+    logging.info(f"🔄 [DYNAMIC MODE] User changed mode to: {'DRY RUN' if new_val else 'LIVE'}")
+    return jsonify({"success": True, "dry_run": new_val})
+
+@app.route('/api/bot/toggle-loose-gates', methods=['POST'])
+def toggle_loose_gates():
+    """Toggle mode LOOSE GATES untuk testing."""
+    import config as cfg
+    current_val = db.get_state("dry_run_loose_gates") == "true"
+    new_val = not current_val
+    
+    db.save_state("dry_run_loose_gates", str(new_val).lower())
+    cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
+    logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
+    return jsonify({"success": True, "loose_gates": new_val})
+
 @app.route('/api/bot-status')
 def get_bot_status():
     """Status bot: online/offline/dry_run, uptime, last trade."""
@@ -891,14 +984,14 @@ def get_bot_status():
 
         return jsonify({
             "is_running": bot_alive,
-            "dry_run": bool(DRY_RUN),
+            "dry_run": bool(cfg.DRY_RUN),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
             "last_trade_at": last_trade_at,
             "llm": llm_stats
         })
     except Exception as e:
-        return jsonify({"is_running": False, "dry_run": bool(DRY_RUN), "uptime_sec": 0})
+        return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "uptime_sec": 0})
     finally:
         conn.close()
 
@@ -1310,8 +1403,8 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
-        from config import DRY_RUN, INITIAL_CAPITAL
-        dr_val = 1 if DRY_RUN else 0
+        import config as cfg
+        dr_val = 1 if cfg.DRY_RUN else 0
         
         # [NEW] Predator Metrics Calculation
         total_used_idr = 0.0
@@ -1322,14 +1415,21 @@ def _build_stats_payload():
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
         
-        if DRY_RUN:
-            available_idr = INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+        if cfg.DRY_RUN:
+            available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
         else:
-            available_idr = INITIAL_CAPITAL + realized_pnl_live - total_used_idr
-            active_pnl = realized_pnl_live
-            active_win_rate = win_rate
+            # LIVE MODE: Try to use real balance from exchange
+            real_bal = _get_cached_real_balance()
+            if real_bal is not None:
+                available_idr = real_bal
+                active_pnl = realized_pnl_live
+                active_win_rate = win_rate
+            else:
+                available_idr = _real_balance_cache if _real_balance_cache > 0 else 0
+                active_pnl = realized_pnl_live
+                active_win_rate = win_rate
             
         # [Senior Audit] Calculate Unrealized PnL
         for pos in positions:
@@ -1401,10 +1501,10 @@ def _build_stats_payload():
             "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
         ).fetchone()[0] or '--/-- --:--'
 
-        from config import DRY_RUN
+        import config as cfg
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
-        if DRY_RUN:
+        if cfg.DRY_RUN:
             active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
@@ -1414,14 +1514,14 @@ def _build_stats_payload():
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE reason != 'BACKTEST' "
-            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
+            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1", (dr_val,)
         ).fetchone()
         
         contribution_rows = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE reason != 'BACKTEST' "
-            "GROUP BY pair ORDER BY total_pnl DESC"
+            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "GROUP BY pair ORDER BY total_pnl DESC", (dr_val,)
         ).fetchall()
         
         asset_contributions = []
@@ -1434,7 +1534,7 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST'"
+            "WHERE reason != 'BACKTEST' AND dry_run = ?", (dr_val,)
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
@@ -1442,7 +1542,7 @@ def _build_stats_payload():
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
         # Overall engagements (Closed + Open)
-        total_trades_overall = dry_stats['trades'] if DRY_RUN else live_stats['trades']
+        total_trades_overall = dry_stats['trades'] if cfg.DRY_RUN else live_stats['trades']
         open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
         total_engagements = total_trades_overall + open_count
         
@@ -1499,9 +1599,9 @@ def _build_stats_payload():
                 SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
                        pnl_idr, pnl_pct, reason, duration_seconds, created_at
                 FROM trade_history
-                WHERE reason != 'BACKTEST'
+                WHERE reason != 'BACKTEST' AND dry_run = ?
                 ORDER BY created_at DESC LIMIT 20
-            """).fetchall()
+            """, (int(dr_val),)).fetchall()
             for r in recent_trades_rows:
                 recent_trades.append({
                     "pair":        r['pair'],
@@ -1558,7 +1658,9 @@ def _build_stats_payload():
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": history_since,
             "new_listings": db.get_new_listings(),
-            "bot_running": True
+            "bot_running": True,
+            "dry_run": bool(cfg.DRY_RUN),
+            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
         }
         return payload
     finally:
@@ -1601,7 +1703,7 @@ def _build_radar_payload():
                 ts = datetime.datetime.fromisoformat(str(ts_str))
                 return (datetime.datetime.now() - ts).total_seconds() <= max_age_sec
             except Exception:
-                return False
+                return False # Default
 
         def _parse_state_ts(ts_str):
             if not ts_str:
@@ -1712,8 +1814,8 @@ def _build_trades_payload():
     conn = get_db_connection()
     results = []
     try:
-        from config import DRY_RUN
-        dr_val = 1 if DRY_RUN else 0
+        import config as cfg
+        dr_val = 1 if cfg.DRY_RUN else 0
 
         # 1. Fetch Positions (OPEN / PENDING_BUY / EXITING)
         positions = conn.execute("SELECT * FROM positions").fetchall()

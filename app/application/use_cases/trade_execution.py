@@ -5,8 +5,8 @@ import numpy as np
 
 from app.infrastructure.database import db
 from utils.logger import log_message, send_telegram_message
+import config
 from config import (
-    DRY_RUN,
     INITIAL_CAPITAL,
     MIN_BALANCE_THRESHOLD,
     MIN_TRADE_IDR,
@@ -36,9 +36,20 @@ def execute_trade(
 ):
     try:
         # --- [Risk Check: Max Positions] ---
-        active_count = db.get_active_positions_count(dry_run=1 if DRY_RUN else 0)
-        if active_count >= MAX_OPEN_POSITIONS:
-            log_message(f"⚠️ SKIP {pair}: Max active positions ({MAX_OPEN_POSITIONS}) reached. Waiting for exit.")
+        active_count = db.get_active_positions_count(dry_run=1 if config.DRY_RUN else 0)
+        
+        # [Senior Audit] Adaptive Position Limits based on Equity
+        effective_max_pos = MAX_OPEN_POSITIONS
+        is_small_account = False
+        
+        if not config.DRY_RUN:
+            balance = getattr(bot, 'cached_balance', 0)
+            if balance < 500000: # < 500rb IDR
+                is_small_account = True
+                effective_max_pos = min(5, MAX_OPEN_POSITIONS)
+                
+        if active_count >= effective_max_pos:
+            log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached for account size.")
             return False
 
         # --- [Risk Check: Dynamic Liquidity Guard] ---
@@ -64,7 +75,7 @@ def execute_trade(
             log_message(f"SKIP: Oracle blocked trade ({bot.oracle.get_rationale(pair, 'SKIP_REGIME')})")
             return False
 
-        if DRY_RUN:
+        if config.DRY_RUN:
             amount_idr = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
         else:
             balance = getattr(bot, 'cached_balance', 0)
@@ -73,6 +84,16 @@ def execute_trade(
                 return False
             # Use real balance as the basis for sizing in LIVE mode
             target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
+            
+            # [Small Account Optimization]
+            # If the calculated size is too small for the exchange but the account can afford it,
+            # we 'clamp' to the minimum trade amount to ensure the bot can actually execute.
+            if is_small_account and target_amount < MIN_TRADE_IDR:
+                # Only elevate if AI confidence or tech probability is solid
+                if (tq_prob >= 0.45 or llm_confidence >= 55) and balance >= MIN_TRADE_IDR * 1.15:
+                    log_message(f"🧠 [Intelligent Sizing] Elevating {pair} to Min Trade (Rp {MIN_TRADE_IDR:,.0f}) for execution.")
+                    target_amount = MIN_TRADE_IDR * 1.05 # Add 5% buffer for market volatility
+                    
             amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
 
         # 2. Dynamic check (Participation Rate)
@@ -112,7 +133,7 @@ def execute_trade(
         tp_target = buy_price * (1 + final_tp)
         sl_target = buy_price * (1 + final_sl)
 
-        if DRY_RUN:
+        if config.DRY_RUN:
             order = {
                 'id': f"DRY-{int(time.time())}",
                 'status': 'closed',
@@ -155,9 +176,8 @@ def execute_trade(
             params = {
                 'pair': pair.replace("idr", "_idr"),
             }
-            # [Senior Scaling Fix] Gunakan Market Buy untuk eksekusi instan tanpa antre.
-            # Indodax membutuhkan total IDR (cost) untuk market buy.
-            order = bot.exchange.create_market_buy_order(symbol, amount_idr, params)
+            # [Final Fix] Use explicit create_order for market buy to avoid argument count confusion
+            order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, buy_price, params)
             # Update buy_price dengan harga eksekusi asli jika tersedia
             buy_price = float(order.get('price') or price)
 
@@ -202,10 +222,10 @@ def execute_trade(
             "llm_verdict": llm_verdict,
             "llm_confidence": llm_confidence,
             "llm_reason": llm_reason,
-            "dry_run": DRY_RUN,
+            "dry_run": config.DRY_RUN,
         }
         
-        mode_label = "DRY RUN BUY" if DRY_RUN else "LIVE BUY"
+        mode_label = "DRY RUN BUY" if config.DRY_RUN else "LIVE BUY"
         threading.Thread(
             target=background_logging,
             args=(pair, dna_data, order, mode_label, tq_prob, buy_price, final_tp, final_sl),
@@ -217,9 +237,9 @@ def execute_trade(
             "amount": amount_crypto,
             "amount_idr": amount_idr,
             "timestamp": datetime.now().isoformat(),
-            "dry_run": DRY_RUN,
-            "status": "OPEN" if DRY_RUN else "PENDING_BUY",
-            "entry_order_id": order.get('id') if not DRY_RUN else None,
+            "dry_run": config.DRY_RUN,
+            "status": "OPEN" if config.DRY_RUN else "PENDING_BUY",
+            "entry_order_id": order.get('id') if not config.DRY_RUN else None,
             "exit_order_id": None,
             "target_tp_pct": final_tp,
             "target_sl_pct": final_sl,

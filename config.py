@@ -107,13 +107,51 @@ SECTOR_MAP = {
     "filidr": "STORAGE", "aridr": "STORAGE", "storjidr": "STORAGE", "ldoidr": "DEFI"
 }
 
-# Set ke False untuk eksekusi order nyata ke Indodax.
-# Saat True, semua order hanya disimulasikan — tidak ada uang yang bergerak.
-DRY_RUN =   True
+# Set ke True untuk keamanan (Safety First). 
+# Bot akan selalu mulai di mode simulasi kecuali diubah lewat dashboard ter-otentikasi.
+_DRY_RUN_INTERNAL = True 
+_DRY_RUN_CACHE = {"value": None, "last_check": 0}
 
-# Longgarkan semua gate entry saat DRY_RUN untuk testing dashboard.
-# Set ke False sebelum live trading!
-DRY_RUN_LOOSE_GATES = False
+def get_dynamic_dry_run():
+    import time
+    now = time.time()
+    # Cache for 2 seconds to avoid slamming SQLite on high-freq loops
+    if _DRY_RUN_CACHE["value"] is not None and (now - _DRY_RUN_CACHE["last_check"]) < 2:
+        return _DRY_RUN_CACHE["value"]
+
+    try:
+        from app.infrastructure.database import db
+        db_val = db.get_state("dry_run")
+        if db_val is not None:
+            val = db_val.lower() == "true"
+            _DRY_RUN_CACHE["value"] = val
+            _DRY_RUN_CACHE["last_check"] = now
+            return val
+    except Exception:
+        pass
+    
+    return _DRY_RUN_INTERNAL
+
+def get_dynamic_loose_gates():
+    try:
+        from app.infrastructure.database import db
+        db_val = db.get_state("dry_run_loose_gates")
+        if db_val is not None:
+            return db_val.lower() == "true"
+    except Exception:
+        pass
+    return False # Default
+
+def clear_dry_run_cache():
+    _DRY_RUN_CACHE["value"] = None
+    _DRY_RUN_CACHE["last_check"] = 0
+
+def __getattr__(name):
+    if name == "DRY_RUN":
+        return get_dynamic_dry_run()
+    if name == "DRY_RUN_LOOSE_GATES":
+        return get_dynamic_loose_gates()
+    raise AttributeError(f"module {__name__} has no attribute {name}")
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins (Managed via Database) ---
 # Default stablecoins akan diinisialisasi ke database saat startup.

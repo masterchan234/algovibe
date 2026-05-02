@@ -37,8 +37,55 @@
           <span class="conn-text">{{ store.connected ? 'TERMINAL ONLINE' : 'LINK LOST' }}</span>
           <span class="conn-dot"></span>
         </div>
+        
+        <div class="header-controls">
+          <button 
+            class="control-btn" 
+            :class="{ 'is-live': !store.stats.dry_run, 'is-loading': isToggling }"
+            @click="toggleDryRun"
+            :disabled="isToggling"
+            :title="store.stats.dry_run ? 'Switch to LIVE MODE' : 'Switch to DRY RUN'"
+          >
+            {{ isToggling ? '⏳ SYNC...' : (store.stats.dry_run ? '🛡️ DRY' : '🔥 LIVE') }}
+          </button>
+          
+          <button 
+            class="control-btn loose-btn" 
+            :class="{ 'active': store.stats.dry_run_loose_gates }"
+            @click="toggleLooseGates"
+            title="Toggle Loose Gates"
+          >
+            🔓
+          </button>
+        </div>
       </div>
     </header>
+    
+    <!-- Login Modal Overlay -->
+    <div class="login-modal-overlay" v-if="showLoginModal">
+      <div class="login-modal">
+        <div class="login-header">
+          <h3>AUTHENTICATION REQUIRED</h3>
+          <p>Please login to modify bot configuration</p>
+        </div>
+        <form @submit.prevent="handleLogin" class="login-form">
+          <div class="form-group">
+            <label>Username</label>
+            <input type="text" v-model="loginForm.username" placeholder="admin" required />
+          </div>
+          <div class="form-group">
+            <label>Password</label>
+            <input type="password" v-model="loginForm.password" placeholder="••••••••" required />
+          </div>
+          <div class="form-actions">
+            <button type="button" @click="showLoginModal = false" class="btn-cancel">CANCEL</button>
+            <button type="submit" class="btn-login" :disabled="isLoggingIn">
+              {{ isLoggingIn ? 'AUTHENTICATING...' : 'LOGIN' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
     
     <!-- Neural Pull-to-Refresh Indicator -->
     <div 
@@ -142,7 +189,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, computed, watch, nextTick } from 'vue'
+import { onMounted, onUnmounted, ref, reactive, computed, watch, nextTick } from 'vue'
 import { useTradeStore } from './stores/trade'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
@@ -188,11 +235,104 @@ async function fetchNews() {
 }
 const startTime = ref(Date.now())
 const now = ref(Date.now())
+const backendUrl = import.meta.env.DEV
+  ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+  : window.location.origin
+
+function getCookie(name) {
+  const value = `; ${document.cookie}`
+  const parts = value.split(`; ${name}=`)
+  if (parts.length === 2) return parts.pop().split(';').shift()
+}
+
+const showLoginModal = ref(false)
+const isLoggingIn = ref(false)
+const loginForm = reactive({ username: '', password: '' })
+const isToggling = ref(false)
+async function handleLogin() {
+  isLoggingIn.value = true
+  try {
+    const res = await fetch(`${backendUrl}/api/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': getCookie('csrf_token')
+      },
+      body: JSON.stringify(loginForm)
+    })
+    if (res.ok) {
+      showLoginModal.value = false
+      alert('Login successful! You can now toggle the mode.')
+    } else {
+      const err = await res.json()
+      alert(`Login failed: ${err.error || 'Invalid credentials'}`)
+    }
+  } catch (e) {
+    alert('Login error')
+  } finally {
+    isLoggingIn.value = false
+  }
+}
 
 const isDryRun = computed(() => {
-  // Usually passed from backend via stats
-  return true // Default to dry run for safety visual
+  return store.stats.dry_run
 })
+
+async function toggleDryRun() {
+  console.log("🚀 [UI] Toggle Mode Requested")
+  isToggling.value = true
+  try {
+    const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, { 
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'X-CSRFToken': getCookie('csrf_token')
+      }
+    })
+    console.log("📡 [UI] Server Response Status:", res.status)
+    if (res.ok) {
+      const data = await res.json()
+      console.log("✅ [UI] Mode Changed Successfully:", data.dry_run)
+      store.stats.dry_run = data.dry_run
+      
+      // Force reload to ensure all data & sockets are reset for the new mode
+      setTimeout(() => {
+        window.location.reload()
+      }, 500)
+    } else {
+      console.error("❌ [UI] Server Rejected Request")
+      if (res.status === 401) {
+        showLoginModal.value = true
+      } else {
+        alert("Server rejected the request. Please login first if needed.")
+      }
+    }
+  } catch (e) {
+    console.error("❌ [UI] Fetch Error:", e)
+    alert("Network error. Is the dashboard server running?")
+  } finally {
+    isToggling.value = false
+  }
+}
+
+async function toggleLooseGates() {
+  try {
+    const res = await fetch(`${backendUrl}/api/bot/toggle-loose-gates`, { 
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'X-CSRFToken': getCookie('csrf_token')
+      }
+    })
+    if (res.ok) {
+      const data = await res.json()
+      store.stats.dry_run_loose_gates = data.loose_gates
+      alert(`Loose Gates: ${data.loose_gates ? 'ON' : 'OFF'}`)
+    }
+  } catch (e) {
+    console.error('Failed to toggle loose gates', e)
+  }
+}
 
 const uptimeStr = computed(() => {
   const start = store.stats.first_trade_ts || startTime.value
@@ -512,6 +652,55 @@ body {
   50% { opacity: 0.3; }
 }
 
+.header-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.control-btn {
+  background: var(--bg-hover);
+  border: 1px solid var(--border-dim);
+  color: var(--text-main);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.control-btn:hover {
+  background: var(--border-dim);
+  border-color: var(--text-dim);
+}
+
+.control-btn.is-live {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--accent-red);
+  border-color: rgba(248, 81, 73, 0.3);
+  box-shadow: 0 0 10px rgba(248, 81, 73, 0.1);
+}
+
+.control-btn.is-live:hover {
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.loose-btn {
+  width: 32px;
+  padding: 0;
+  opacity: 0.5;
+}
+
+.loose-btn.active {
+  opacity: 1;
+  background: rgba(88, 166, 255, 0.1);
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
 /* Pull to Refresh UI */
 .pull-to-refresh {
   overflow: hidden;
@@ -560,6 +749,111 @@ body {
   font-weight: 800;
   color: var(--accent-purple);
   letter-spacing: 1px;
+}
+
+/* Login Modal */
+.login-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.login-modal {
+  width: 360px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.login-header h3 {
+  font-size: 16px;
+  font-weight: 900;
+  color: var(--accent-blue);
+  margin-bottom: 4px;
+}
+
+.login-header p {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-group label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.form-group input {
+  background: var(--bg-main);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.form-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.btn-cancel, .btn-login {
+  flex: 1;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-cancel {
+  background: transparent;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+}
+
+.btn-cancel:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.btn-login {
+  background: var(--accent-blue);
+  border: none;
+  color: #000;
+}
+
+.btn-login:hover {
+  filter: brightness(1.2);
+}
+
+.btn-login:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 @keyframes ptr-rotate {

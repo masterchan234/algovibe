@@ -9,9 +9,9 @@ from app.application.use_cases.pair_pipeline import (
 )
 from app.domain.scoring import calculate_score
 from config import (
-    DRY_RUN,
     LOG_FILE,
 )
+import config
 from app.infrastructure.database import db
 from app.domain.predictor import get_prediction
 from app.domain.technicals import get_technical_summary, derive_trade_signal
@@ -103,7 +103,7 @@ def run_market_cycle(bot):
             pass
     bot.oracle.auto_queue_buy_candidates(ranked_with_signals)
 
-    if not DRY_RUN:
+    if not config.DRY_RUN:
         try:
             bal_data = bot.exchange.fetch_balance()
             bot.cached_balance = bal_data['free'].get('IDR', 0)

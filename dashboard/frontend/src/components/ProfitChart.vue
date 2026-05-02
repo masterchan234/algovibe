@@ -57,11 +57,11 @@
       <div class="intel-body">
         <!-- Visual Equity Curve -->
         <div class="chart-wrap-integrated">
-          <div class="chart-canvas-small" ref="chartContainer"></div>
-          <div v-if="timeframe === 'live' && store.pnlHistory.length === 0" class="chart-empty-small">
+          <div v-show="timeframe === 'live' && store.pnlHistory.length === 0" class="chart-empty-small">
             <div class="loading-dots"><span></span><span></span><span></span></div>
             <span>Waiting for data…</span>
           </div>
+          <div ref="chartContainer" class="chart-canvas-small" :style="{ visibility: (timeframe !== 'live' || store.pnlHistory.length > 0) ? 'visible' : 'hidden' }"></div>
         </div>
 
         <!-- Executive Report Text -->
@@ -579,6 +579,12 @@ function scheduleUpdate() {
 }
 
 watch(() => store.pnlHistory.length, scheduleUpdate)
+watch(() => store.connected, (conn) => {
+  if (conn) {
+    setTimeout(scheduleUpdate, 500)
+    setTimeout(() => { if (chart) chart.resize() }, 1000)
+  }
+})
 
 onMounted(() => {
   if (!chartContainer.value) return

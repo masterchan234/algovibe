@@ -2,6 +2,7 @@ import time
 import json
 import logging
 from datetime import datetime, timedelta
+import config
 from app.infrastructure.database import db
 from app.infrastructure.llm_worker import LLMWorker
 from utils.logger import log_message
@@ -717,7 +718,7 @@ class Oracle:
             regime_leader = db.get_state("regime_leader") or "UNKNOWN"
 
             if not recent_stats:
-                recent_stats = db.get_daily_stats()
+                recent_stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
 
             win_rate = 0.0
             if recent_stats.get("total_trades", 0) > 0:
@@ -926,8 +927,7 @@ class Oracle:
 
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
-            from config import DRY_RUN
-            stats = db.get_daily_stats(dry_run=1 if DRY_RUN else 0) # Ambil statistik 24 jam terakhir
+            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0) # Ambil statistik 24 jam terakhir
             daily_pnl = stats.get('total_pnl_idr', 0)
             
             # 1. Profit-Pause (Proteksi Cuan)

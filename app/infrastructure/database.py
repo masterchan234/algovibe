@@ -118,6 +118,10 @@ class Database:
                 )
             ''')
 
+            # Initialize dry_run state from config default if not exists
+            from config import DRY_RUN as DEFAULT_DRY_RUN
+            cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('dry_run', ?)", (str(DEFAULT_DRY_RUN),))
+
             # Tabel untuk audit log semua order (Buy/Sell/Cancel)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS order_logs (
@@ -251,8 +255,10 @@ class Database:
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
 
-    def get_active_positions_count(self, dry_run=0):
+    def get_active_positions_count(self, dry_run=None):
         """Menghitung jumlah posisi terbuka untuk mode tertentu (Dry Run/Live)."""
+        if dry_run is None:
+            dry_run = 1 if self.is_dry_run() else 0
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = ?", (int(dry_run),))
@@ -409,8 +415,10 @@ class Database:
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
 
-    def get_daily_stats(self, date_str=None, dry_run=0):
-        """Mengambil rekap performa untuk 24 jam terakhir. Default = last 24h."""
+    def get_daily_stats(self, date_str=None, dry_run=None):
+        """Ambil statistik performa harian (24 jam terakhir) dari trade_history."""
+        if dry_run is None:
+            dry_run = 1 if self.is_dry_run() else 0
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -564,6 +572,15 @@ class Database:
             row = cursor.fetchone()
             return (row['value'], row['updated_at']) if row else (None, None)
 
+    def is_dry_run(self):
+        """Helper to get current dry_run mode dynamically."""
+        val = self.get_state("dry_run")
+        if val is None:
+            # Fallback to config if DB is somehow empty, though it shouldn't be
+            from config import DRY_RUN as DEFAULT_DRY_RUN
+            return DEFAULT_DRY_RUN
+        return val.lower() == "true"
+
     # ── METODE UNTUK AUDIT LOG & BLACKLIST ──
 
     def log_order(self, pair, side, price, amount, status, response=None, error=None):
@@ -689,7 +706,10 @@ class Database:
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")
 
-    def get_quant_audit_report(self, window_hours=24, dry_run=1):
+    def get_quant_audit_report(self, window_hours=24, dry_run=None):
+        """Menghasilkan laporan audit kuantitatif untuk 24 jam terakhir."""
+        if dry_run is None:
+            dry_run = 1 if self.is_dry_run() else 0
         """
         Laporan audit kuantitatif untuk dashboard:
         - Precision per LLM verdict

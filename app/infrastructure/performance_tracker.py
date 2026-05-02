@@ -21,16 +21,18 @@ from datetime import datetime
 
 from config import (
     MAKER_FEE, PPH_RATE, PPN_RATE, FEE_PER_SIDE, FEE_ROUNDTRIP,
-    DAILY_REPORT
+    DAILY_REPORT,
 )
 from app.interfaces.telegram_bot import send_telegram_message
+import config
 from app.infrastructure.database import db
 
 def calculate_24h_performance(reference_ts: float | None = None) -> dict:
     """
     Hitung ringkasan performa hari ini dari database trade_history.
     """
-    stats = db.get_daily_stats()
+    dr_val = 1 if config.DRY_RUN else 0
+    stats = db.get_daily_stats(dry_run=dr_val)
 
     total_trades    = stats['total_trades']
     winning_trades  = stats['win_count']
@@ -42,6 +44,7 @@ def calculate_24h_performance(reference_ts: float | None = None) -> dict:
     report = {
         "period":           "24h",
         "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode":             "DRY RUN" if config.DRY_RUN else "LIVE",
 
         # ── Ringkasan Utama ──────────────────────────────────────────────────
         "total_trades":     total_trades,
@@ -76,7 +79,7 @@ def print_daily_summary(report: dict) -> None:
 
     lines = [
         sep,
-        f"  📊 LAPORAN PERFORMA 24 JAM — {report['generated_at']}",
+        f"  📊 LAPORAN PERFORMA 24 JAM ({report['mode']}) — {report['generated_at']}",
         sep,
         f"  Total Trade    : {report['total_trades']}  "
             f"(Win: {report['win_count']} | Loss: {report['loss_count']})",
