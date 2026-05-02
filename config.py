@@ -31,7 +31,8 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.25    # [AGGRESSIVE] Gunakan 25% saldo per koin (Fixed for 90k Balance)
+CAPITAL_PER_TRADE_PCT = 0.10    # [CONSERVATIVE] Gunakan 10% saldo per koin (Lebih aman untuk modal besar)
+MAX_OPEN_POSITIONS = 5          # [LIMIT] Maksimal 5 posisi terbuka sekaligus
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 

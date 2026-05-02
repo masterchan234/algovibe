@@ -1257,10 +1257,33 @@ def _build_stats_payload():
         
         final_equity_report = equity_reasoning_ai if equity_reasoning_ai else equity_reasoning_tech
 
-        return {
+        # --- Recent Trades for History Tab (Safe Fetch) ---
+        recent_trades = []
+        try:
+            recent_trades_rows = conn.execute(
+                "SELECT pair, entry_price, exit_price, amount_crypto, pnl_idr, pnl_pct, created_at "
+                "FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+            for r in recent_trades_rows:
+                recent_trades.append({
+                    "pair": r['pair'],
+                    "side": 'SELL',
+                    "entry_price": float(r['entry_price'] or 0),
+                    "exit_price": float(r['exit_price'] or 0),
+                    "amount": float(r['amount_crypto'] or 0),
+                    "pnl_idr": float(r['pnl_idr'] or 0),
+                    "pnl_pct": float(r['pnl_pct'] or 0),
+                    "created_at": r['created_at']
+                })
+        except Exception as e:
+            print(f"⚠️ History Fetch Error: {e}")
+
+
+        payload = {
             "available_idr": round(available_idr, 0),
             "total_equity": round(total_equity, 0),
             "utilization": round(utilization_pct, 1),
+            "recent_trades": recent_trades,
             "first_trade_ts": first_trade_ts,
             "daily_trades": perf['total_trades'],
             "daily_pnl": active_pnl,
@@ -1294,6 +1317,7 @@ def _build_stats_payload():
             "new_listings": db.get_new_listings(),
             "bot_running": True
         }
+        return payload
     finally:
         conn.close()
 
@@ -1546,7 +1570,7 @@ def _build_market_trades_payload():
                 continue
         return results
     except Exception as e:
-        print(f"Build trades error: {e}")
+        logging.error(f"Build trades error: {e}")
         return []
 
 def push_data_loop():
@@ -1555,6 +1579,7 @@ def push_data_loop():
         try:
             socketio.emit('stats_update',  _build_stats_payload())
             socketio.emit('radar_update',  _build_radar_payload())
+            
             socketio.emit('trades_update', _build_trades_payload())
             socketio.emit('logs_update',   _build_logs_payload())
 

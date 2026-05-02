@@ -251,6 +251,13 @@ class Database:
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
 
+    def get_active_positions_count(self, dry_run=0):
+        """Menghitung jumlah posisi terbuka untuk mode tertentu (Dry Run/Live)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = ?", (int(dry_run),))
+            return cursor.fetchone()[0] or 0
+
     def update_position_after_dca(self, pair, new_price, new_amount_crypto, new_amount_idr, new_tier):
         with self.get_connection() as conn:
             cursor = conn.cursor()

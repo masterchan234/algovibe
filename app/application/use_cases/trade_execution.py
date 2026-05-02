@@ -11,6 +11,7 @@ from config import (
     MIN_BALANCE_THRESHOLD,
     MIN_TRADE_IDR,
     CAPITAL_PER_TRADE_PCT,
+    MAX_OPEN_POSITIONS,
 )
 
 
@@ -32,6 +33,12 @@ def execute_trade(
     llm_reason="",
 ):
     try:
+        # --- [Risk Check: Max Positions] ---
+        active_count = db.get_active_positions_count(dry_run=1 if DRY_RUN else 0)
+        if active_count >= MAX_OPEN_POSITIONS:
+            log_message(f"⚠️ SKIP {pair}: Max active positions ({MAX_OPEN_POSITIONS}) reached. Waiting for exit.")
+            return False
+
         multiplier = bot.oracle.get_sizing_multiplier()
         if multiplier <= 0:
             log_message(f"SKIP: Oracle blocked trade ({bot.oracle.get_rationale(pair, 'SKIP_REGIME')})")
