@@ -279,28 +279,31 @@ const isDryRun = computed(() => {
 })
 
 async function toggleDryRun() {
-  console.log("🚀 [UI] Toggle Mode Requested")
   isToggling.value = true
   try {
-    const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, { 
+    const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, {
       method: 'POST',
       credentials: 'include',
-      headers: {
-        'X-CSRFToken': getCookie('csrf_token')
-      }
+      headers: { 'X-CSRFToken': getCookie('csrf_token') }
     })
-    console.log("📡 [UI] Server Response Status:", res.status)
     if (res.ok) {
       const data = await res.json()
-      console.log("✅ [UI] Mode Changed Successfully:", data.dry_run)
+      // Update mode flag immediately (optimistic)
       store.stats.dry_run = data.dry_run
-      
-      // Force reload to ensure all data & sockets are reset for the new mode
-      setTimeout(() => {
-        window.location.reload()
-      }, 500)
+      // Clear stale mode-sensitive data (reactive-safe)
+      store.positions.splice(0)
+      store.pnlHistory.splice(0)
+      store.activityFeed.splice(0)
+      Object.assign(store.stats, {
+        recent_trades: [],
+        daily_pnl: 0,
+        unrealized_pnl: 0,
+        available_idr: 0,
+        total_equity: 0,
+        active_positions: 0,
+      })
+      // Backend already pushed fresh stats_update + trades_update via socket — no reload needed
     } else {
-      console.error("❌ [UI] Server Rejected Request")
       if (res.status === 401) {
         showLoginModal.value = true
       } else {

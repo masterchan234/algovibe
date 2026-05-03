@@ -133,7 +133,7 @@ try:
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
-from config import DB_PATH
+from config import DB_PATH_LIVE, DB_PATH_DRYRUN
 # NOTE: cfg.DRY_RUN is imported dynamically inside functions to always read current value
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
@@ -147,8 +147,9 @@ mws.subscribe_market_trades(CURRENT_WATCH_PAIR)
 _start_time = time.time()
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    # print(f"🔗 DB Access: {os.path.abspath(DB_PATH)}")
+    # Pilih DB sesuai mode aktif saat ini (live vs dryrun)
+    path = DB_PATH_DRYRUN if cfg.DRY_RUN else DB_PATH_LIVE
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -932,10 +933,19 @@ def toggle_dry_run():
     # Baca nilai saat ini dari DB agar toggle akurat
     current_val = db.get_state("dry_run") == "true"
     new_val = not current_val
-    
+
     db.save_state("dry_run", str(new_val).lower())
-    cfg.clear_dry_run_cache() # Hapus cache agar efek instan
+    cfg.clear_dry_run_cache()    # Hapus cache config
+    db._mode_cache = None        # Hapus cache DatabaseRouter langsung
     logging.info(f"🔄 [DYNAMIC MODE] User changed mode to: {'DRY RUN' if new_val else 'LIVE'}")
+
+    # Push stats_update langsung agar frontend tidak tunggu 5s push loop
+    try:
+        socketio.emit('stats_update', _build_stats_payload())
+        socketio.emit('trades_update', _build_trades_payload())
+    except Exception as _e:
+        logging.warning(f"[toggle] immediate push failed: {_e}")
+
     return jsonify({"success": True, "dry_run": new_val})
 
 @app.route('/api/bot/toggle-loose-gates', methods=['POST'])

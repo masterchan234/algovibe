@@ -8,7 +8,7 @@ from datetime import datetime
 # Load configuration
 load_dotenv()
 
-DB_PATH = 'data/algotrade.db'
+from config import DB_PATH_LIVE as DB_PATH, TP_PCT, SL_PCT
 API_KEY = os.getenv('INDODAX_API_KEY')
 API_SECRET = os.getenv('INDODAX_API_SECRET')
 
@@ -26,10 +26,9 @@ def sync_live_data():
     try:
         # 2. Reset Live Data
         print("🧹 Clearing local LIVE history and positions...")
-        # [CRITICAL] Hapus data live (0) dan data hantu (NULL) sebelum sinkronisasi ulang
-        cursor.execute("DELETE FROM trade_history WHERE dry_run = 0 OR dry_run IS NULL")
+        cursor.execute("DELETE FROM trade_history")
         hist_count = cursor.rowcount
-        cursor.execute("DELETE FROM positions WHERE dry_run = 0 OR dry_run IS NULL")
+        cursor.execute("DELETE FROM positions")
         pos_count = cursor.rowcount
         conn.commit()
         print(f"✅ Deleted {hist_count} history records and {pos_count} old positions.")
@@ -59,7 +58,7 @@ def sync_live_data():
                 last_price = ticker['last']
                 value_idr = total * last_price
                 
-                if value_idr < 5000: # Ignore dust
+                if value_idr < 1: # Ignore benar-benar nol
                     continue
                 
                 print(f"📦 Found holding: {coin} ({total}) | Approx Value: Rp {value_idr:,.0f}")
@@ -87,8 +86,8 @@ def sync_live_data():
                         entry_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    pair, entry_price, total, value_idr, 'OPEN', 
-                    'SYNCED-BY-RESET', timestamp, 0, 0.04, -0.025
+                    pair, entry_price, total, value_idr, 'OPEN',
+                    'SYNCED-BY-RESET', timestamp, 0, TP_PCT, SL_PCT
                 ))
                 print(f"   ✅ Position created for {pair}")
 
