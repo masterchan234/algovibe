@@ -7,11 +7,12 @@ services:
   # Jika model sudah ada di volume, service ini langsung exit 0 tanpa download ulang.
   # ─────────────────────────────────────────────────────────────────────────────
   model-downloader:
-    image: curlimages/curl:8.7.1   # Image kecil (~18MB), hanya butuh curl
+    image: alpine:3.19                 # Alpine includes sh + wget, jauh lebih fleksibel
     container_name: algovibe-model-init
-    restart: "no"                  # Hanya jalan sekali, tidak restart
+    restart: "no"                      # Hanya jalan sekali, tidak restart
+    user: root                         # Diperlukan untuk menulis ke named volume baru
     volumes:
-      - algovibe_models:/models    # Share volume dengan service utama
+      - algovibe_models:/models        # Share volume dengan service utama
     environment:
       - MODEL_FILE=/models/gemma-4-E2B-it.litertlm
       - MODEL_URL=https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm
@@ -28,16 +29,16 @@ services:
             echo "[model-init] ✅ Model sudah ada di volume ($$ACTUAL_SIZE bytes). Skip download."
             exit 0
           fi
-          echo "[model-init] ⚠️  Model ada tapi ukuran tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Re-download..."
+          echo "[model-init] ⚠️  Model tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Re-download..."
           rm -f "$$MODEL_FILE"
         fi
 
-        echo "[model-init] ⬇️  Mulai download model AI (2.5GB)..."
+        echo "[model-init] ⬇️  Mulai download model AI (~2.5GB)..."
         DOWNLOADED=0
         for attempt in 1 2 3; do
           echo "[model-init] Attempt $$attempt/3..."
-          if curl -L --retry 3 --retry-delay 15 --connect-timeout 60 \
-               --progress-bar "$$MODEL_URL" -o "$$MODEL_FILE"; then
+          if wget --tries=3 --timeout=60 --waitretry=15 \
+               -O "$$MODEL_FILE" "$$MODEL_URL"; then
             ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
             if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
               echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
@@ -46,7 +47,7 @@ services:
             fi
             echo "[model-init] ⚠️  File tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Retry..."
           else
-            echo "[model-init] ⚠️  curl gagal pada attempt $$attempt. Retry..."
+            echo "[model-init] ⚠️  wget gagal pada attempt $$attempt. Retry..."
           fi
           rm -f "$$MODEL_FILE"
         done
