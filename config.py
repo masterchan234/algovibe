@@ -12,6 +12,7 @@ DATA_PATH    = "data"
 LOG_FILE     = f"{DATA_PATH}/logs/scalper.log"
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", 10 * 1024 * 1024))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", 5))
+ENABLE_FILE_LOGGING = os.getenv("ENABLE_FILE_LOGGING", "true").lower() == "true"
 MODEL_PATH   = "models/gemma-4-E2B-it.litertlm"
 MODEL_CACHE_DIR = "models/cache"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
