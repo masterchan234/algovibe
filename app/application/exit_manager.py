@@ -2,6 +2,7 @@ import json
 import os
 import time
 import logging
+import re
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,32 @@ class ExitManager:
             log_message(f"⏸️ [PAIR COOLDOWN] {pair}: {minutes}m ({reason})")
         except Exception as e:
             log_message(f"⚠️ Failed set cooldown {pair}: {e}")
+
+    @staticmethod
+    def _order_id_variants(order_id):
+        """Generate comparable variants for heterogeneous order IDs.
+
+        Examples:
+        - 16309610
+        - opidr-limit-16309610
+        - buy-16309610
+        """
+        raw = str(order_id or '').strip()
+        if not raw:
+            return set()
+
+        variants = {raw}
+        if '-' in raw:
+            variants.add(raw.split('-')[-1])
+
+        tail_num = re.search(r"(\d+)$", raw)
+        if tail_num:
+            variants.add(tail_num.group(1))
+
+        return {v for v in variants if v}
+
+    def _order_id_match(self, a, b):
+        return bool(self._order_id_variants(a) & self._order_id_variants(b))
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
         all_positions = self.get_open_positions()
@@ -849,7 +876,13 @@ class ExitManager:
         """
         try:
             # [Senior Fix] Support both CCXT format and Native Indodax WS format
-            order_id = str(order.get('id') or order.get('orderId') or '')
+            order_id = str(
+                order.get('id')
+                or order.get('orderId')
+                or order.get('order_id')
+                or order.get('clientOrderId')
+                or ''
+            )
             pair = str(order.get('pair') or order.get('symbol') or '').lower().replace('/', '')
             side = str(order.get('side') or '').upper()
             status = str(order.get('status') or '').lower()
@@ -886,7 +919,7 @@ class ExitManager:
             
             # 1. Cek apakah ini Jaring yang terisi
             for p, jaring in list(self.jaring_orders.items()):
-                if str(jaring['id']) == order_id:
+                if self._order_id_match(jaring.get('id'), order_id):
                     log_message(f"🎯 JARING FILLED! {p} bought at Rp {jaring['price']:,.2f} via Liquidity Grab.")
                     
                     # Pindahkan dari Shadow ke Positions
@@ -912,7 +945,7 @@ class ExitManager:
             # 2. Cek apakah ini Buy Order reguler yang baru terisi
             positions = db.get_open_positions()
             for p_pair, p_data in positions.items():
-                if p_data.get('entry_order_id') == order_id and p_data.get('status') == "PENDING_BUY":
+                if self._order_id_match(p_data.get('entry_order_id'), order_id) and p_data.get('status') == "PENDING_BUY":
                     if status in cancel_statuses:
                         log_message(f"🧹 BUY {status.upper()} {p_pair} ({order_id}). Deleting stale PENDING_BUY.")
                         db.delete_position(p_pair)
@@ -943,7 +976,7 @@ class ExitManager:
 
             # 3. Cek apakah ini Sell Order (Take Profit/Stop Loss) yang terisi
             for p_pair, p_data in positions.items():
-                if p_data.get('exit_order_id') == order_id and p_data.get('status') == "EXITING":
+                if self._order_id_match(p_data.get('exit_order_id'), order_id) and p_data.get('status') == "EXITING":
                     if status in cancel_statuses:
                         # Exit dibatalkan/ditolak: balikkan ke OPEN agar dievaluasi ulang oleh monitor loop.
                         p_data['status'] = 'OPEN'
@@ -1288,7 +1321,7 @@ class ExitManager:
                         # [Fix] Hanya cocokkan berdasarkan exit_order_id yang spesifik
                         # Jangan gunakan `or status == 'EXITING'` karena itu terlalu longgar
                         # dan bisa salah menggunakan BUY trade untuk menutup posisi SELL
-                        order_id_match = pos.get('exit_order_id') and str(t.get('orderId')) == str(pos.get('exit_order_id'))
+                        order_id_match = pos.get('exit_order_id') and self._order_id_match(t.get('orderId'), pos.get('exit_order_id'))
                         # Fallback: jika EXITING dan ada trade SELL setelah timestamp entry posisi
                         entry_ts_ms = 0
                         try:
@@ -1467,7 +1500,7 @@ class ExitManager:
                             elif oid:
                                 # Jika order EXITING tidak aktif lagi, cek status final dari endpoint order history.
                                 hist = self._fetch_v2_order_histories(p, limit=50)
-                                matched = next((h for h in hist if str(h.get('orderId')) == oid), None)
+                                matched = next((h for h in hist if self._order_id_match(h.get('orderId'), oid)), None)
                                 if matched:
                                     final_status = str(matched.get('status') or '').upper()
                                     if final_status in ('CANCELLED', 'REJECTED'):
