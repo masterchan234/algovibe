@@ -12,6 +12,7 @@ class Database:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
         self._init_db()
+        run_migrations(self.db_path)
 
     @contextmanager
     def get_connection(self):
@@ -33,221 +34,23 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Tabel untuk menyimpan order yang masih berjalan
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS positions (
-                    pair TEXT PRIMARY KEY,
-                    entry_price REAL,
-                    amount_crypto REAL,
-                    amount_idr REAL,
-                    status TEXT,
-                    entry_order_id TEXT,
-                    exit_order_id TEXT,
-                    timestamp DATETIME,
-                    dry_run BOOLEAN,
-                    target_tp_pct REAL DEFAULT 0.05,
-                    target_sl_pct REAL DEFAULT -0.02,
-                    trailing_sl_price REAL DEFAULT 0.0,
-                    highest_price REAL DEFAULT 0.0,
-                    reason_backup TEXT,
-                    ai_confidence REAL DEFAULT 0.0,
-                    dca_tier INTEGER DEFAULT 0
-                )
-            ''')
-            # Migrations
-            try: cursor.execute("ALTER TABLE positions ADD COLUMN ai_confidence REAL DEFAULT 0.0")
-            except: pass
-            try: cursor.execute("ALTER TABLE positions ADD COLUMN dca_tier INTEGER DEFAULT 0")
-            except: pass
+            # Seeding data awal yang dibutuhkan bot untuk running pertama kali
+            # (Tabel sudah dibuat oleh run_migrations di __init__)
             
-            # Tabel untuk Market Depth (Order Book)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS market_depth (
-                    pair TEXT,
-                    price REAL,
-                    vol REAL,
-                    is_bid INTEGER
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_depth_pair ON market_depth(pair)')
-            
-            # Tabel untuk histori transaksi yang sudah exit (Take Profit, Stop Loss, Cancel)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trade_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT,
-                    entry_price REAL,
-                    exit_price REAL,
-                    amount_crypto REAL,
-                    amount_idr REAL,
-                    pnl_idr REAL,
-                    pnl_pct REAL,
-                    reason TEXT,
-                    exec_type TEXT DEFAULT 'MAKER',
-                    duration_seconds INTEGER,
-                    dry_run BOOLEAN,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Tabel untuk menyimpan history harga koin
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS ticker_history (
-                    pair TEXT PRIMARY KEY,
-                    history_json TEXT,
-                    prediction_prob REAL DEFAULT 0.0,
-                    trend TEXT DEFAULT 'N/A',
-                    signal TEXT DEFAULT 'HOLD',
-                    ch_5m REAL DEFAULT 0.0,
-                    ch_15m REAL DEFAULT 0.0,
-                    ch_1h REAL DEFAULT 0.0,
-                    volatility REAL DEFAULT 0.0,
-                    score REAL DEFAULT 0.0,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Tabel untuk status bot (daily counters, last day reset, dll)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS bot_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
             # Initialize dry_run state from config default if not exists
             from config import DRY_RUN as DEFAULT_DRY_RUN
-            cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('dry_run', ?)", (str(DEFAULT_DRY_RUN),))
-
-            # Tabel untuk audit log semua order (Buy/Sell/Cancel)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS order_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT,
-                    side TEXT,
-                    price REAL,
-                    amount REAL,
-                    status TEXT,
-                    response_json TEXT,
-                    error_msg TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Tabel untuk System Events (AI reasoning, Oracle decisions, Risk alerts)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS system_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT,
-                    type TEXT,
-                    message TEXT,
-                    level TEXT DEFAULT 'INFO',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_pair ON system_events(pair)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_time ON system_events(created_at)')
-
-            # Tabel untuk daftar koin yang diblokir
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS blacklist (
-                    pair TEXT PRIMARY KEY,
-                    reason TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Tabel untuk Autentikasi Pengguna (SaaS Ready)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT UNIQUE,
-                    password_hash TEXT,
-                    api_key TEXT,
-                    api_secret TEXT,
-                    role TEXT DEFAULT 'USER',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Tabel untuk sector history (Project Predator)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS sector_history (
-                sector TEXT,
-                sentiment_score REAL,
-                momentum_score REAL DEFAULT 0.0,
-                leader_pair TEXT DEFAULT 'N/A',
-                leader_change REAL DEFAULT 0.0,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # 7. Shadow Orders / Jaring (Project Predator)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS shadow_orders (
-                pair TEXT PRIMARY KEY,
-                order_id TEXT,
-                price REAL,
-                amount REAL,
-                side TEXT DEFAULT 'BUY',
-                status TEXT DEFAULT 'OPEN',
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # 8. Trade Analytics / DNA (Project Evolution)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS trade_analytics (
-                pair TEXT,
-                entry_timestamp DATETIME,
-                ai_prob REAL,
-                whale_boost REAL,
-                sector_sentiment REAL,
-                imbalance REAL,
-                volatility REAL,
-                eta_minutes INTEGER DEFAULT 15,
-                llm_verdict TEXT DEFAULT 'HOLD',
-                llm_confidence REAL DEFAULT 0.0,
-                llm_reason TEXT DEFAULT '',
-                dry_run BOOLEAN DEFAULT 1,
-                pnl_idr REAL,
-                status TEXT DEFAULT 'OPEN'
-            )''')
-            
-            # Migration: Tambahkan kolom eta_minutes jika belum ada
             try:
-                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15")
-            except: pass
-            try:
-                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_verdict TEXT DEFAULT 'HOLD'")
-            except: pass
-            try:
-                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_confidence REAL DEFAULT 0.0")
-            except: pass
-            try:
-                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN llm_reason TEXT DEFAULT ''")
-            except: pass
-            try:
-                cursor.execute("ALTER TABLE trade_analytics ADD COLUMN dry_run BOOLEAN DEFAULT 1")
+                cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('dry_run', ?)", (str(DEFAULT_DRY_RUN),))
             except: pass
 
-            # 9. Dynamic Weights (Project Evolution)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS dynamic_weights (
-                feature_name TEXT PRIMARY KEY,
-                weight_value REAL DEFAULT 1.0,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )''')
-            
-            # 10. Realtime Account Balances (Dashboard Sync)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS account_balances (
-                asset TEXT PRIMARY KEY,
-                free REAL DEFAULT 0.0,
-                used REAL DEFAULT 0.0,
-                total REAL DEFAULT 0.0,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )''')
-            
             # Initialize weights if empty
-            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
-            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
-            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
-            cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
+            try:
+                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
+                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
+                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
+                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
+            except: pass
+
             
             # Committing is handled by the context manager automatically
             

@@ -22,6 +22,7 @@ from app.domain.technicals import get_technical_summary, derive_trade_signal
 from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 import config as cfg
+import utils.logger # Ensure central logging config is applied
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()

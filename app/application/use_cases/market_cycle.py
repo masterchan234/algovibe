@@ -49,7 +49,7 @@ def run_market_cycle(bot):
     if current_day != bot.start_day:
         run_performance_report(log_fn=log_message)
 
-        if os.path.exists(LOG_FILE):
+        if ENABLE_FILE_LOGGING and os.path.exists(LOG_FILE):
             try:
                 with open(LOG_FILE, 'w') as f:
                     f.write(f"--- Log rotated at {datetime.now()} ---\n")

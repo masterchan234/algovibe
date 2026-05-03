@@ -44,8 +44,12 @@ logger.addHandler(_sh)
 
 
 def _setup_file_logger(log_path: str):
+    from config import LOG_BACKUP_COUNT, LOG_MAX_BYTES, ENABLE_FILE_LOGGING
+    
+    if not ENABLE_FILE_LOGGING:
+        return
+
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    from config import LOG_BACKUP_COUNT, LOG_MAX_BYTES
 
     fh = RotatingFileHandler(
         log_path,
