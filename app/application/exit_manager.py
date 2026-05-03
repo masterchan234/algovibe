@@ -643,6 +643,7 @@ class ExitManager:
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "TIME_STOP_EXIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
+            symbol = f"{pair[:-3].upper()}/IDR"
 
             if is_emergency or is_tp_exit:
                 # [Senior Scaling Fix] Gunakan Market Order untuk kecepatan maksimal
@@ -849,11 +850,39 @@ class ExitManager:
         try:
             # [Senior Fix] Support both CCXT format and Native Indodax WS format
             order_id = str(order.get('id') or order.get('orderId') or '')
-            pair = order.get('pair') or order.get('symbol') or ''
+            pair = str(order.get('pair') or order.get('symbol') or '').lower().replace('/', '')
+            side = str(order.get('side') or '').upper()
             status = str(order.get('status') or '').lower()
+
+            if not order_id:
+                return
+
+            # Simpan jejak event order dari PrivateWS untuk audit desync.
+            try:
+                db.log_order(
+                    pair or 'unknown',
+                    side or 'UNKNOWN',
+                    float(order.get('price') or 0),
+                    float(order.get('executedQty') or order.get('origQty') or order.get('amount') or 0),
+                    status.upper() if status else 'UNKNOWN',
+                    response=order,
+                )
+            except Exception:
+                pass
+
+            done_statuses = {'filled', 'closed', 'done'}
+            fill_statuses = {'fill'}
+            cancel_statuses = {'canceled', 'cancelled', 'rejected'}
+
+            # Status 'fill' pada PWS bisa partial fill. Final dianggap selesai bila status done/closed/filled
+            # atau unfilledQty sudah nol.
+            unfilled_qty = float(order.get('unfilledQty') or 0)
+            executed_qty = float(order.get('executedQty') or order.get('amount') or 0)
+            is_terminal_fill = (status in done_statuses) or (status in fill_statuses and unfilled_qty <= 0)
             
-            # Status 'done' di Indodax WS berarti order selesai (full fill atau cancel-done)
-            if status not in ['filled', 'closed', 'fill', 'done']: return
+            # Event NEW tidak mengubah state lokal.
+            if status not in done_statuses and status not in fill_statuses and status not in cancel_statuses:
+                return
             
             # 1. Cek apakah ini Jaring yang terisi
             for p, jaring in list(self.jaring_orders.items()):
@@ -884,25 +913,52 @@ class ExitManager:
             positions = db.get_open_positions()
             for p_pair, p_data in positions.items():
                 if p_data.get('entry_order_id') == order_id and p_data.get('status') == "PENDING_BUY":
-                    log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
-                    
+                    if status in cancel_statuses:
+                        log_message(f"🧹 BUY {status.upper()} {p_pair} ({order_id}). Deleting stale PENDING_BUY.")
+                        db.delete_position(p_pair)
+                        return
+
                     # [Senior Fix] Capture actual fill price and amount for accurate basis
                     fill_price = float(order.get('price', p_data.get('entry_price')))
-                    fill_amount = float(order.get('executedQty', order.get('amount', p_data.get('amount_crypto'))))
-                    
-                    # Update data dengan nilai asli dari bursa
-                    p_data['status'] = "OPEN"
-                    p_data['entry_price'] = fill_price
-                    p_data['amount_crypto'] = fill_amount
-                    p_data['amount_idr'] = fill_price * fill_amount
-                    
-                    db.upsert_position(p_pair, p_data)
-                    send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
+                    fill_amount = executed_qty if executed_qty > 0 else float(p_data.get('amount_crypto', 0))
+
+                    if is_terminal_fill:
+                        log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
+                        p_data['status'] = "OPEN"
+                        p_data['entry_price'] = fill_price
+                        p_data['amount_crypto'] = fill_amount
+                        p_data['amount_idr'] = fill_price * fill_amount
+                        db.upsert_position(p_pair, p_data)
+                        send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
+                    else:
+                        # Partial buy fill: pertahankan PENDING_BUY sampai benar-benar selesai.
+                        p_data['entry_price'] = fill_price
+                        p_data['amount_crypto'] = max(fill_amount, float(p_data.get('amount_crypto', 0)))
+                        p_data['amount_idr'] = fill_price * p_data['amount_crypto']
+                        db.upsert_position(p_pair, p_data)
+                        log_message(
+                            f"⏳ BUY PARTIAL {p_pair} ({order_id}): exec={fill_amount:.8f}, unfilled={unfilled_qty:.8f}"
+                        )
                     return
 
             # 3. Cek apakah ini Sell Order (Take Profit/Stop Loss) yang terisi
             for p_pair, p_data in positions.items():
                 if p_data.get('exit_order_id') == order_id and p_data.get('status') == "EXITING":
+                    if status in cancel_statuses:
+                        # Exit dibatalkan/ditolak: balikkan ke OPEN agar dievaluasi ulang oleh monitor loop.
+                        p_data['status'] = 'OPEN'
+                        p_data['exit_order_id'] = None
+                        db.upsert_position(p_pair, p_data)
+                        log_message(f"↩️ EXIT {status.upper()} {p_pair} ({order_id}). Reverting position to OPEN.")
+                        return
+
+                    if not is_terminal_fill:
+                        # Partial sell fill: simpan status EXITING, tunggu event DONE agar histori tidak double.
+                        log_message(
+                            f"⏳ SELL PARTIAL {p_pair} ({order_id}): exec={executed_qty:.8f}, unfilled={unfilled_qty:.8f}. Waiting DONE."
+                        )
+                        return
+
                     log_message(f"💰 SELL FILLED! {p_pair} order {order_id} is now CLOSED.")
                     
                     try:
@@ -910,7 +966,7 @@ class ExitManager:
                         # Fallback
                         if exit_price == 0: exit_price = float(p_data.get('entry_price', 0)) * (1 + p_data.get('target_tp_pct', TP_PCT))
                         
-                        amount_crypto = float(order.get('amount', p_data.get('amount_crypto', 0)))
+                        amount_crypto = executed_qty if executed_qty > 0 else float(p_data.get('amount_crypto', 0))
                         entry_price = float(p_data.get('entry_price', 0))
                         amount_idr = float(p_data.get('amount_idr', 0))
                         
@@ -942,6 +998,7 @@ class ExitManager:
                         
                         # Reason determination
                         reason = p_data.get('reason_backup', "TAKE_PROFIT" if net_pnl_idr > 0 else "STOP_LOSS")
+                        ws_trade_id = str(order.get('tradeId', '') or '') or None
                         
                         timestamp_str = p_data.get('timestamp') or datetime.now().isoformat()
                         duration_sec = (datetime.now() - datetime.fromisoformat(timestamp_str)).total_seconds()
@@ -951,6 +1008,8 @@ class ExitManager:
                             amount_crypto=amount_crypto, amount_idr=amount_idr,
                             pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
                             duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
+                            trade_id=ws_trade_id,
+                            exit_order_id=order_id,
                             ai_confidence=p_data.get('ai_confidence', 0.0)
                         )
                         
@@ -1028,6 +1087,56 @@ class ExitManager:
             return data.get('data', [])
         except Exception as e:
             logger.error(f"V2 Manual Fetch Error for {pair}: {e}")
+            return []
+
+    def _fetch_v2_order_histories(self, pair, startTime=None, endTime=None, limit=200):
+        """Fetch order history v2 untuk validasi status order (FILLED/CANCELLED/REJECTED)."""
+        try:
+            import hmac, hashlib, requests
+
+            api_key = self.exchange.apiKey
+            api_secret = self.exchange.secret
+            if not api_key or not api_secret:
+                return []
+
+            symbol = pair.lower().replace('/', '')
+            timestamp = int(time.time() * 1000)
+
+            params = [
+                ("symbol", symbol),
+                ("limit", int(limit)),
+                ("sort", "desc"),
+            ]
+            if startTime:
+                params.append(("startTime", int(startTime)))
+            if endTime:
+                params.append(("endTime", int(endTime)))
+            params.extend([
+                ("timestamp", timestamp),
+                ("recvWindow", 60000),
+            ])
+
+            query_str = "&".join([f"{k}={v}" for k, v in params])
+            sign = hmac.new(api_secret.encode(), query_str.encode(), hashlib.sha512).hexdigest()
+
+            headers = {
+                "X-APIKEY": api_key,
+                "Sign": sign,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+
+            url = f"https://tapi.indodax.com/api/v2/order/histories?{query_str}"
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            if data.get("code") or data.get("error"):
+                return []
+            return data.get("data", [])
+        except Exception as e:
+            logger.error(f"V2 order history fetch error for {pair}: {e}")
             return []
 
     def sync_all_history(self):
@@ -1211,18 +1320,24 @@ class ExitManager:
                             gross_pnl = (exit_price - entry_price) * amount_crypto
                             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
                             pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
-                            
-                            # Ambil trade_id dari WS event jika ada (untuk dedup dengan sync_all_history)
-                            ws_trade_id = str(order.get('tradeId', '') or order.get('trade_id', '') or '') or None
+
+                            # Metadata untuk dedup history dengan sync_all_history.
+                            ws_trade_id = str(t.get('tradeId', '') or '') or None
+                            reason = pos.get('reason_backup', 'RECONCILE_EXIT_FILL')
+                            participant = exec_type
+                            try:
+                                duration_sec = int((datetime.now() - datetime.fromisoformat(str(pos.get('timestamp')))).total_seconds())
+                            except Exception:
+                                duration_sec = 300
                             db.insert_trade_history(
-                                pair=p_pair, entry_price=entry_price, exit_price=exit_price,
+                                pair=pair, entry_price=entry_price, exit_price=exit_price,
                                 amount_crypto=amount_crypto, amount_idr=amount_idr,
                                 pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
                                 exec_type=participant,
-                                duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
+                                duration_seconds=int(duration_sec), dry_run=False,
                                 trade_id=ws_trade_id,
-                                exit_order_id=order_id,
-                                ai_confidence=position_data.get('ai_confidence', 0.0)
+                                exit_order_id=pos.get('exit_order_id'),
+                                ai_confidence=pos.get('ai_confidence', 0.0)
                             )
                             found_fill = True
                             break
@@ -1349,6 +1464,19 @@ class ExitManager:
                                         db.upsert_position(p, pos)
                                     except Exception as ce:
                                         log_message(f"Failed to cancel stuck order {oid}: {ce}")
+                            elif oid:
+                                # Jika order EXITING tidak aktif lagi, cek status final dari endpoint order history.
+                                hist = self._fetch_v2_order_histories(p, limit=50)
+                                matched = next((h for h in hist if str(h.get('orderId')) == oid), None)
+                                if matched:
+                                    final_status = str(matched.get('status') or '').upper()
+                                    if final_status in ('CANCELLED', 'REJECTED'):
+                                        pos['status'] = 'OPEN'
+                                        pos['exit_order_id'] = None
+                                        db.upsert_position(p, pos)
+                                        log_message(f"↩️ Reality Sync: {p} exit order {oid} {final_status}. Position reverted to OPEN.")
+                                    elif final_status == 'FILLED':
+                                        log_message(f"✅ Reality Sync: {p} exit order {oid} already FILLED. Waiting trade reconcile.")
 
                     if isinstance(orders_dict, dict):
                         for pair_key, order_list in orders_dict.items():

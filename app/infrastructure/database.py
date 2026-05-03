@@ -1036,5 +1036,83 @@ class Database:
             logging.error(f"[DB] Error updating keys: {e}")
             return False
 
+import time as _time
+
+class DatabaseRouter:
+    """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
+    based on the current dry_run flag in bot_state.
+
+    - Mode-control keys (dry_run, dry_run_loose_gates) are always read from
+      the live DB (source of truth) and written to BOTH DBs on change.
+    - All other operations go to the currently-active DB.
+    - Mode is cached for 2 seconds to avoid hammering SQLite.
+    """
+    _SYNC_KEYS = {"dry_run", "dry_run_loose_gates"}
+
+    def __init__(self):
+        from config import DB_PATH_LIVE, DB_PATH_DRYRUN
+        self._live   = Database(DB_PATH_LIVE)
+        self._dryrun = Database(DB_PATH_DRYRUN)
+        self._mode_cache: bool | None = None
+        self._mode_cache_ts: float = 0.0
+
+    def _read_mode_raw(self) -> bool:
+        """Return True if dry_run, False if live. Reads from live DB with 2s cache."""
+        now = _time.time()
+        if self._mode_cache is not None and (now - self._mode_cache_ts) < 2.0:
+            return self._mode_cache
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(self._live.db_path, timeout=5)
+            row = conn.execute("SELECT value FROM bot_state WHERE key='dry_run'").fetchone()
+            conn.close()
+            val = (row[0].lower() == "true") if row else True
+        except Exception:
+            val = True  # safe fallback: treat as dryrun if uncertain
+        self._mode_cache = val
+        self._mode_cache_ts = now
+        return val
+
+    def _active(self) -> Database:
+        return self._dryrun if self._read_mode_raw() else self._live
+
+    # ── Override mode-control keys so they sync across both DBs ──
+
+    def _sync_write(self, method: str, key: str, value: str):
+        """Write a key via `method` ('set_state' or 'save_state'), syncing to both DBs for control keys."""
+        if key in self._SYNC_KEYS:
+            getattr(self._live,   method)(key, value)
+            getattr(self._dryrun, method)(key, value)
+            if key == "dry_run":
+                self._mode_cache = None  # invalidate cache immediately
+        else:
+            getattr(self._active(), method)(key, value)
+
+    def set_state(self, key: str, value: str):
+        self._sync_write("set_state", key, value)
+
+    def save_state(self, key: str, value):
+        self._sync_write("save_state", key, str(value))
+
+    def get_state(self, key: str, default=None):
+        # Mode-control keys always come from live DB (single source of truth)
+        if key in self._SYNC_KEYS:
+            return self._live.get_state(key, default)
+        return self._active().get_state(key, default)
+
+    # ── Expose both instances for dashboard multi-DB queries ──
+
+    @property
+    def live(self) -> Database:
+        return self._live
+
+    @property
+    def dryrun(self) -> Database:
+        return self._dryrun
+
+    def __getattr__(self, name: str):
+        return getattr(self._active(), name)
+
+
 # Instantiate a global db object for ease of use
-db = Database()
+db = DatabaseRouter()
