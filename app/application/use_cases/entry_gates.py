@@ -23,7 +23,10 @@ from config import (
 )
 import config
 from app.infrastructure.database import db
-from app.domain.technicals import calculate_rsi, derive_trade_signal, get_technical_summary
+from app.domain.technicals import (
+    calculate_rsi, derive_trade_signal, get_technical_summary,
+    calculate_macd, calculate_bollinger_bands, calculate_stochastic_rsi, calculate_ema,
+)
 from utils.logger import log_message
 
 _BREAK = "BREAK"  # sentinel value returned to caller
@@ -127,7 +130,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
     )
 
-    # ── 4. Overbought / sell-signal block ──────────────────────────────────
+    # ── 4. Multi-Confluence Technical Gate ────────────────────────────────
+    # Kita tidak hanya cek RSI — harus ada konfirmasi multi-indikator.
     tech = get_technical_summary(history)
     depth_data = db.get_market_depth(pair)
     if depth_data['bids'] and depth_data['asks']:
@@ -138,13 +142,20 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
     tech_sig = derive_trade_signal(tech)
 
-    if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
-        msg = f"⛔ OVERBOUGHT BLOCK: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
+    # Block jika sinyal SELL dengan skor tinggi (multi-confluence, bukan hanya RSI)
+    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 8.0:
+        msg = (
+            f"⛔ STRONG SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
+            f"— {tech_sig['reason'][:80]}"
+        )
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
     elif tech_sig['verdict'] == 'SELL':
-        log_message(f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN.")
+        log_message(
+            f"⚠️  SELL-WARN [{pair}]: sell_score={tech_sig.get('sell_score',0):.1f} "
+            f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
+        )
 
     # ── 5. AI probability + imbalance threshold ────────────────────────────
     if tq_prob < 0:
@@ -247,20 +258,23 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 12. [Senior Fix] Non-Blocking LLM Verdict ─────────────────────────
-    # Meminta opini LLM secara asinkron. Jika belum ada, bot tetap lanjut (Technical Priority).
+    # ── 12. LLM Advisory Gate (Veto-Only, Non-Amplifier) ─────────────────
+    # LLM hanya bisa MEMBLOKIR entry (veto), tidak bisa MENDORONG entry.
+    # Keputusan entry utama harus dari technical score, bukan opini LLM.
     llm_v, llm_c, llm_r = bot.oracle.request_trade_verdict(pair, enriched)
-    
-    llm_bonus = 0.0
+
+    llm_bonus = 0.0  # LLM tidak lagi memberikan bonus positif ke confidence
     if llm_v == "ANALYZING":
-        log_message(f"⏳ LLM analyzing {pair}... Proceeding on technicals.")
+        log_message(f"⏳ LLM analyzing {pair}... Lanjut berdasarkan teknikal.")
     elif llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
-        msg = f"🚫 LLM VETO {llm_c:.0f}%: {llm_r}"
+        # LLM boleh veto hanya jika confidence sangat tinggi
+        msg = f"🚫 LLM ADVISORY VETO {llm_c:.0f}%: {llm_r[:60]}"
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
+    # LLM BUY hanya memberikan bonus sangat kecil (konfirmasi, bukan driver)
     elif llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
-        llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
+        llm_bonus = min(3.0, (llm_c - 60.0) * 0.1)  # Max +3% (sebelumnya +8%)
 
     # ── 13. Final Confidence threshold ────────────────────────────────────
     boost_credit = min(scalper_boost, 6.0)

@@ -16,7 +16,10 @@ from config import (
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_AI_CONFIDENCE
 )
 from app.infrastructure.database import db
-from app.domain.technicals import get_technical_summary, derive_trade_signal
+from app.domain.technicals import (
+    get_technical_summary, derive_trade_signal,
+    calculate_macd, calculate_stochastic_rsi,
+)
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
@@ -624,33 +627,45 @@ class ExitManager:
                     fee_sell_est = sell_value_est * FEE_SELL_TAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
-                    # [Senior Optimization] Hapus FORCE_PROFIT_EXIT kaku.
-                    # Kita biarkan koin 'bernafas' dan mengikuti Trailing Stop agar dapat harga terbaik.
-                    # [Senior Global Strategy] Multi-Tiered Take Profit
+                    # [Senior Global Strategy] Multi-Tiered Take Profit berbasis teknikal murni.
                     # Tier 1: Small Profit (Ride the Trend)
-                    # Tier 2: Good Profit (Fast Exit on any weakness)
+                    # Tier 2: Good Profit (Fast Exit on any weakness — dikonfirmasi multi-indicator)
                     # Tier 3: High Profit (FORCE EXIT NOW - Lock it in!)
-                    
+
                     is_tier2_good_profit = net_pnl_idr >= 7500 or current_profit_pct >= 0.015
                     is_tier3_high_profit = net_pnl_idr >= 15000 or current_profit_pct >= 0.045
-                    
-                    # Logika Tier 3: FORCE EXIT (Profit sudah sangat bagus, jangan serakah)
+
+                    # Logika Tier 3: FORCE EXIT (Profit sangat bagus, amankan)
                     if is_tier3_high_profit:
                         reason_tp = "FORCE_PROFIT_HIGH_TIER"
                         log_message(f"💎 [GOD-MODE EXIT] {pair}: High Profit {current_profit_pct*100:.2f}% secured instantly!")
-                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
-                    # Logika Tier 2: FAST EXIT (Profit sudah bagus, keluar jika ada indikasi lelah)
+                    # Logika Tier 2: FAST EXIT — hanya jika ada konfirmasi MULTI-INDIKATOR melemah.
+                    # Tidak lagi bergantung pada AI prob saja; butuh technical sell signal.
                     is_momentum_sell = momentum_signal == 'SELL'
-                    is_ai_fade = live_ai_prob >= 0 and live_ai_prob < 0.45
-                    
-                    if is_tier2_good_profit and (is_momentum_sell or current_rsi > 72 or is_ai_fade):
+
+                    # Tambahkan konfirmasi MACD dan Stochastic RSI untuk exit
+                    is_tech_weak = False
+                    try:
+                        if len(hist) >= 35:
+                            _, _, _mh = calculate_macd(hist)
+                            _sk, _sd = calculate_stochastic_rsi(hist)
+                            # Lemah jika MACD histogram negatif DAN Stoch overbought
+                            is_tech_weak = (_mh < 0 and _sk > 65) or (_sk > 80 and current_rsi > 65)
+                    except Exception:
+                        pass
+
+                    if is_tier2_good_profit and (is_momentum_sell or is_tech_weak or current_rsi > 75):
                         reason_tp = "RAPID_TP_GOOD_PROFIT"
-                        log_message(f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% secured on momentum fade.")
-                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
+                        log_message(
+                            f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
+                            f"secured on tech weakness (rsi={current_rsi:.0f}, tech_weak={is_tech_weak})."
+                        )
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
