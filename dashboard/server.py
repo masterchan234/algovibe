@@ -740,6 +740,10 @@ def get_stats():
         ).fetchone()
         best_trade = float(best_trade_row[0] or 0)
 
+        # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
+        _dr_val = 1 if cfg.DRY_RUN else 0
+        active_positions_count = len([p for p in positions if int(p['dry_run'] or 0) == _dr_val])
+
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "all_time_pnl_dry": realized_pnl_dry,
@@ -758,7 +762,7 @@ def get_stats():
             "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
-            "active_positions": len(positions),
+            "active_positions": active_positions_count,
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
@@ -971,7 +975,111 @@ def get_positions_summary():
     finally:
         conn.close()
 
-@app.route('/api/market-context/<pair>')
+@app.route('/api/wallet/sync', methods=['POST'])
+def sync_wallet():
+    """
+    Sinkronisasi posisi di DB dengan saldo wallet Indodax secara real-time.
+    Mengadopsi koin yang ada di wallet tapi belum ada di DB (orphan adoption).
+    Menghapus posisi ghost di DB jika koin sudah tidak ada di wallet (dust < 1e-8).
+    """
+    import config as cfg
+    if cfg.DRY_RUN:
+        return jsonify({"success": False, "message": "Wallet sync hanya tersedia di mode LIVE."}), 400
+
+    try:
+        user = db.get_user('admin')
+        api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
+        api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
+
+        if not api_key or not api_secret:
+            return jsonify({"success": False, "message": "API key tidak tersedia."}), 400
+
+        import ccxt as _ccxt
+        ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
+        balance = ex.fetch_balance()
+        total_bal = balance.get('total', {})
+
+        conn = get_db_connection()
+        try:
+            current_positions = {row['pair']: dict(row) for row in conn.execute("SELECT * FROM positions").fetchall()}
+            blacklist = set(r['pair'] for r in conn.execute("SELECT pair FROM blacklist").fetchall())
+        finally:
+            conn.close()
+
+        adopted = []
+        removed = []
+        ws_tickers = mws.get_tickers()
+
+        # 1. Ghost removal: posisi di DB tapi koin tidak ada di wallet
+        for pair, pos in list(current_positions.items()):
+            if int(pos.get('dry_run') or 0) != 0:
+                continue
+            coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
+            amount_on_exchange = float(total_bal.get(coin, 0) or 0)
+            if amount_on_exchange < 1e-8:
+                db.delete_position(pair)
+                current_positions.pop(pair, None)
+                removed.append(pair)
+                logging.info(f"[WalletSync] Ghost removed: {pair}")
+
+        # 2. Orphan adoption: koin di wallet tapi belum ada di DB sebagai LIVE posisi
+        from config import TP_PCT, SL_PCT
+        for coin, amount in total_bal.items():
+            if coin in ('IDR', 'info') or not amount or float(amount) <= 0:
+                continue
+            pair = f"{coin.lower()}idr"
+            if pair in blacklist:
+                continue
+            live_pos = current_positions.get(pair)
+            if live_pos and int(live_pos.get('dry_run') or 0) == 0:
+                continue  # Sudah ada posisi LIVE untuk koin ini
+
+            # Coba ambil harga dari WS dulu, fallback REST
+            price = float(ws_tickers.get(pair, {}).get('last', 0))
+            if price <= 0:
+                try:
+                    symbol = f"{coin}/IDR"
+                    ticker = ex.fetch_ticker(symbol)
+                    price = float(ticker.get('last', 0))
+                except Exception:
+                    pass
+
+            amount = float(amount)
+            value_idr = amount * price
+
+            if value_idr < 1000:  # Abaikan dust (< Rp 1.000)
+                continue
+
+            adopt_data = {
+                "entry_price": price,
+                "amount": amount,
+                "amount_crypto": amount,
+                "amount_idr": value_idr,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "dry_run": False,
+                "status": "OPEN",
+                "entry_order_id": f"WALLET-SYNC-{int(time.time())}",
+                "exit_order_id": None,
+                "target_tp_pct": TP_PCT,
+                "target_sl_pct": SL_PCT,
+                "reason_backup": "WALLET_SYNC"
+            }
+            db.upsert_position(pair, adopt_data)
+            current_positions[pair] = adopt_data
+            adopted.append({"pair": pair, "amount": amount, "value_idr": round(value_idr, 0)})
+            logging.info(f"[WalletSync] Adopted orphan: {pair} ({amount} @ Rp {price:,.0f})")
+
+        return jsonify({
+            "success": True,
+            "adopted": adopted,
+            "removed": removed,
+            "message": f"Sync selesai. Diadopsi: {len(adopted)} koin, dihapus: {len(removed)} posisi ghost."
+        })
+    except Exception as e:
+        logging.error(f"[WalletSync] Error: {e}")
+        return jsonify({"success": False, "message": "Wallet sync gagal. Cek log server untuk detail."}), 500
+
+
 def get_market_context(pair):
     """
     Menyediakan konteks pasar lengkap untuk modal ORACLE:
@@ -1812,7 +1920,7 @@ def _build_stats_payload():
             "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
-            "active_positions": len(positions),
+            "active_positions": open_count,
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
@@ -2203,6 +2311,109 @@ def push_data_loop():
 
 # Start background thread
 socketio.start_background_task(push_data_loop)
+
+def _background_wallet_sync_loop():
+    """
+    Background thread yang berjalan di dashboard untuk menjaga sinkronisasi wallet Indodax
+    dengan database secara otomatis setiap 5 menit (hanya di mode LIVE).
+    """
+    import config as _cfg
+    from config import TP_PCT, SL_PCT, DB_PATH_LIVE
+    socketio.sleep(30)  # Tunggu 30 detik setelah startup sebelum sync pertama
+    while True:
+        try:
+            if _cfg.DRY_RUN:
+                socketio.sleep(60)
+                continue
+
+            user = db.get_user('admin')
+            api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
+            api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
+
+            if not api_key or not api_secret:
+                socketio.sleep(300)
+                continue
+
+            import ccxt as _ccxt
+            ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
+            balance = ex.fetch_balance()
+            total_bal = balance.get('total', {})
+
+            conn = get_db_connection()
+            try:
+                current_positions = {
+                    row['pair']: dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM positions WHERE dry_run = 0"
+                    ).fetchall()
+                }
+                blacklist = set(r['pair'] for r in conn.execute("SELECT pair FROM blacklist").fetchall())
+            finally:
+                conn.close()
+
+            ws_tickers = mws.get_tickers()
+            adopted_count = 0
+            removed_count = 0
+
+            # Ghost removal
+            for pair, pos in list(current_positions.items()):
+                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
+                amount_on_exchange = float(total_bal.get(coin, 0) or 0)
+                if amount_on_exchange < 1e-8:
+                    db.delete_position(pair)
+                    current_positions.pop(pair, None)
+                    removed_count += 1
+                    logging.info(f"[BgWalletSync] Ghost removed: {pair}")
+
+            # Orphan adoption
+            for coin, amount in total_bal.items():
+                if coin in ('IDR', 'info') or not amount or float(amount) <= 0:
+                    continue
+                pair = f"{coin.lower()}idr"
+                if pair in blacklist or pair in current_positions:
+                    continue
+
+                price = float(ws_tickers.get(pair, {}).get('last', 0))
+                if price <= 0:
+                    try:
+                        ticker = ex.fetch_ticker(f"{coin}/IDR")
+                        price = float(ticker.get('last', 0))
+                    except Exception:
+                        pass
+
+                amount_f = float(amount)
+                value_idr = amount_f * price
+                if value_idr < 1000:
+                    continue
+
+                adopt_data = {
+                    "entry_price": price,
+                    "amount": amount_f,
+                    "amount_crypto": amount_f,
+                    "amount_idr": value_idr,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "dry_run": False,
+                    "status": "OPEN",
+                    "entry_order_id": f"BG-SYNC-{int(time.time())}",
+                    "exit_order_id": None,
+                    "target_tp_pct": TP_PCT,
+                    "target_sl_pct": SL_PCT,
+                    "reason_backup": "BG_WALLET_SYNC"
+                }
+                db.upsert_position(pair, adopt_data)
+                current_positions[pair] = adopt_data
+                adopted_count += 1
+                logging.info(f"[BgWalletSync] Adopted: {pair} ({amount_f} @ Rp {price:,.0f})")
+
+            if adopted_count or removed_count:
+                logging.info(f"[BgWalletSync] Selesai — adopted: {adopted_count}, removed: {removed_count}")
+
+        except Exception as e:
+            logging.warning(f"[BgWalletSync] Error (akan retry dalam 5m): {e}")
+
+        socketio.sleep(300)  # 5 menit
+
+socketio.start_background_task(_background_wallet_sync_loop)
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=8080, debug=False)

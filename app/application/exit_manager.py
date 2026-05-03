@@ -722,12 +722,10 @@ class ExitManager:
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         mark_exit_requested(pair, order_id)
-        except Exception as e:
-            log_message(f"🚨 Error in monitor loop: {e}")
-            import traceback
-            log_message(traceback.format_exc())
-
-        self.save_positions(positions, modified_pairs)
+            except Exception as e:
+                log_message(f"🚨 Error in monitor loop: {e}")
+                import traceback
+                log_message(traceback.format_exc())
 
         self.save_positions(positions, modified_pairs)
 
@@ -1380,7 +1378,7 @@ class ExitManager:
             open_positions = db.get_open_positions()
             
             for pair, pos in open_positions.items():
-                coin = pair.replace('idr', '').upper()
+                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(balance['total'].get(coin, 0))
                 
                 # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
@@ -1513,6 +1511,7 @@ class ExitManager:
                         log_message(f"📝 Recorded best-effort trade for {pair} (RECONCILE_GHOST) pnl={_net:+,.0f} IDR")
                     
                     db.delete_position(pair)
+                    open_positions.pop(pair, None)  # Keep in-memory dict in sync so orphan adoption below can re-adopt this coin
                     if pair in self.jaring_orders:
                         del self.jaring_orders[pair]
                         db.delete_shadow_order(pair)
