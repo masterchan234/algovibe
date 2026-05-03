@@ -37,6 +37,11 @@ class ExitManager:
 
     def save_positions(self, positions, modified_pairs):
         for pair in modified_pairs:
+            # Guard against race condition: WS handler may have already deleted the
+            # position (e.g. instant TAKER fill) while monitor loop was still running.
+            if db.get_position(pair) is None:
+                positions.pop(pair, None)
+                continue
             db.upsert_position(pair, positions[pair])
 
     def _set_pair_cooldown(self, pair, minutes=20, reason="LOSS"):

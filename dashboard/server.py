@@ -164,16 +164,16 @@ try:
 except Exception as _e:
     print(f"⚠️ Failed to sync initial trade streams: {_e}")
 
-_REAL_BALANCE_CACHE = {"value": None, "last_check": 0}
+_REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 0}
 
-def _fetch_real_idr_balance():
-    """Fetch real IDR balance from Indodax via CCXT."""
+def _fetch_real_idr_balance_bundle():
+    """Fetch real IDR balance bundle from Indodax via CCXT (free/used/total)."""
     try:
         from app.infrastructure.database import db
         user = db.get_user('admin')
         if not user or not user['api_key'] or not user['api_secret']:
             return None
-        
+
         import ccxt
         ex = ccxt.indodax({
             'apiKey': user['api_key'],
@@ -181,22 +181,37 @@ def _fetch_real_idr_balance():
             'enableRateLimit': True
         })
         balance = ex.fetch_balance()
-        # return free (liquidity) instead of total to avoid double counting
-        return float(balance.get('IDR', {}).get('free', 0))
+        idr = balance.get('IDR', {})
+        return {
+            "free": float(idr.get('free', 0) or 0),
+            "used": float(idr.get('used', 0) or 0),
+            "total": float(idr.get('total', 0) or 0),
+        }
     except Exception as e:
         logging.error(f"❌ Error fetching real balance: {e}")
         return None
 
-def _get_cached_real_balance():
+def _get_cached_real_balance_bundle():
     now = time.time()
-    if _REAL_BALANCE_CACHE["value"] is not None and (now - _REAL_BALANCE_CACHE["last_check"]) < 60:
-        return _REAL_BALANCE_CACHE["value"]
-    
-    val = _fetch_real_idr_balance()
+    if _REAL_BALANCE_CACHE["free"] is not None and (now - _REAL_BALANCE_CACHE["last_check"]) < 60:
+        return {
+            "free": _REAL_BALANCE_CACHE["free"],
+            "used": _REAL_BALANCE_CACHE["used"],
+            "total": _REAL_BALANCE_CACHE["total"],
+        }
+
+    val = _fetch_real_idr_balance_bundle()
     if val is not None:
-        _REAL_BALANCE_CACHE["value"] = val
+        _REAL_BALANCE_CACHE["free"] = val.get("free", 0)
+        _REAL_BALANCE_CACHE["used"] = val.get("used", 0)
+        _REAL_BALANCE_CACHE["total"] = val.get("total", 0)
         _REAL_BALANCE_CACHE["last_check"] = now
     return val
+
+def _get_cached_real_balance():
+    """Backward-compatible helper returning only free IDR."""
+    val = _get_cached_real_balance_bundle()
+    return val.get("free") if val else None
 
 def _get_pair_technicals(pair):
     """Ambil histori harga dari JSON blob dan hitung technical summary."""
@@ -581,20 +596,23 @@ def get_stats():
         total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in positions])
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
-        
+
         if cfg.DRY_RUN:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
         else:
-            # LIVE MODE: Try to use real balance from exchange
-            real_bal = _get_cached_real_balance()
+            # LIVE MODE: Use cached real balance bundle from exchange
+            real_bal = _get_cached_real_balance_bundle()
             if real_bal is not None:
-                available_idr = real_bal
+                available_idr = float(real_bal.get("free", 0) or 0)
+                idr_used = float(real_bal.get("used", 0) or 0)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
             else:
-                available_idr = _real_balance_cache if _real_balance_cache > 0 else 0
+                available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
+                idr_used = float(_REAL_BALANCE_CACHE.get("used") or total_used_idr)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
             
@@ -623,6 +641,7 @@ def get_stats():
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "all_time_pnl_dry": realized_pnl_dry,
             "available_idr": round(available_idr, 0),
+            "idr_used": round(idr_used, 0),
             "total_equity": round(total_equity, 0),
             "utilization": round(utilization_pct, 1),
             "daily_pnl": active_pnl,
@@ -1440,20 +1459,23 @@ def _build_stats_payload():
 
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
-        
+
         if cfg.DRY_RUN:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
+            idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
         else:
-            # LIVE MODE: Try to use real balance from exchange
-            real_bal = _get_cached_real_balance()
+            # LIVE MODE: Use cached real balance bundle from exchange
+            real_bal = _get_cached_real_balance_bundle()
             if real_bal is not None:
-                available_idr = real_bal
+                available_idr = float(real_bal.get("free", 0) or 0)
+                idr_used = float(real_bal.get("used", 0) or 0)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
             else:
-                available_idr = _real_balance_cache if _real_balance_cache > 0 else 0
+                available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
+                idr_used = float(_REAL_BALANCE_CACHE.get("used") or total_used_idr)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
             
@@ -1647,6 +1669,7 @@ def _build_stats_payload():
 
         payload = {
             "available_idr": round(available_idr, 0),
+            "idr_used": round(idr_used, 0),
             "total_equity": round(total_equity, 0),
             "utilization": round(utilization_pct, 1),
             "recent_trades": recent_trades,

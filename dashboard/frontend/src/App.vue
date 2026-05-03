@@ -11,12 +11,16 @@
       
       <div class="header-center hide-mobile">
         <div class="stat-bubble">
-          <span class="bubble-label">Total Equity</span>
+          <span class="bubble-label">Exchange Equity (Est.)</span>
           <span class="bubble-value highlight">Rp {{ formatNumber(store.stats.total_equity) }}</span>
         </div>
         <div class="stat-bubble">
-          <span class="bubble-label">Liquidity</span>
+          <span class="bubble-label">IDR Free</span>
           <span class="bubble-value">Rp {{ formatNumber(store.stats.available_idr) }}</span>
+        </div>
+        <div class="stat-bubble">
+          <span class="bubble-label">IDR Used</span>
+          <span class="bubble-value">Rp {{ formatNumber(store.stats.idr_used) }}</span>
         </div>
         <div class="stat-bubble" v-if="store.stats.utilization !== undefined">
           <span class="bubble-label">Utilization</span>
