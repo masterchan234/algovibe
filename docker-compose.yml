@@ -9,8 +9,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/app/data:rw
-      - ./data/models:/app/models:rw   # auto_trainer butuh write untuk atomic swap model
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models   # auto_trainer butuh write untuk atomic swap model
     read_only: true
     tmpfs:
       - /tmp:exec,mode=777
@@ -27,3 +27,7 @@ services:
         max-buffer-size: "4m"
         max-size: "5m"
         max-file: "3"
+
+volumes:
+  algovibe_data:
+  algovibe_models:
