@@ -26,9 +26,10 @@ patch_*.py
 # Secrets — jangan pernah masuk image
 .env
 
-# Models — exclude cache files & subdirs (750MB+, regenerated at runtime)
-models/*.xnnpack_cache*
-models/cache/
+# Models — EXCLUDE SEMUA dari image (2.5GB, di-download saat deploy via docker-compose)
+# Diisi oleh 'model-downloader' service ke volume algovibe_models
+models/
+
 
 # Data
 data/

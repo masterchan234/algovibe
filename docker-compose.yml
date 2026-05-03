@@ -1,16 +1,71 @@
 services:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Init Service] Model Downloader
+  # Tugas satu kali: Download model AI ke volume algovibe_models.
+  # Bot hanya akan start SETELAH service ini selesai (condition: service_completed_successfully).
+  # Jika model sudah ada di volume, service ini langsung exit 0 tanpa download ulang.
+  # ─────────────────────────────────────────────────────────────────────────────
+  model-downloader:
+    image: curlimages/curl:8.7.1   # Image kecil (~18MB), hanya butuh curl
+    container_name: algovibe-model-init
+    restart: "no"                  # Hanya jalan sekali, tidak restart
+    volumes:
+      - algovibe_models:/models    # Share volume dengan service utama
+    environment:
+      - MODEL_FILE=/models/gemma-4-E2B-it.litertlm
+      - MODEL_URL=https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm
+      - MODEL_EXPECTED_SIZE=2583085056
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /models/cache
+        if [ -f "$$MODEL_FILE" ]; then
+          ACTUAL_SIZE=$$(stat -c%s "$$MODEL_FILE" 2>/dev/null || echo 0)
+          if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
+            echo "[model-init] ✅ Model sudah ada di volume ($$ACTUAL_SIZE bytes). Skip download."
+            exit 0
+          fi
+          echo "[model-init] ⚠️ Model ada tapi ukuran tidak valid ($$ACTUAL_SIZE). Re-download..."
+          rm -f "$$MODEL_FILE"
+        fi
+        echo "[model-init] ⬇️  Mulai download model AI (2.5GB)..."
+        MAX_ATTEMPTS=3
+        for i in 1 2 3; do
+          echo "[model-init] Attempt $$i/$$MAX_ATTEMPTS..."
+          curl -L --retry 3 --retry-delay 15 --connect-timeout 60 \
+               --progress-bar "$$MODEL_URL" -o "$$MODEL_FILE" && \
+          ACTUAL_SIZE=$$(stat -c%s "$$MODEL_FILE" 2>/dev/null || echo 0) && \
+          if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
+            echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
+            exit 0
+          fi
+          echo "[model-init] File tidak valid ($$ACTUAL_SIZE bytes). Retry..."
+          rm -f "$$MODEL_FILE"
+        done
+        echo "[model-init] ❌ Gagal download model setelah $$MAX_ATTEMPTS percobaan."
+        exit 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Main Service] Algovibe Bot + Dashboard
+  # ─────────────────────────────────────────────────────────────────────────────
   algovibe:
     image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
     container_name: algovibe
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully   # Wajib tunggu model tersedia
     env_file:
       - .env
     ports:
       - "8080:8080"
     volumes:
       - algovibe_data:/app/data
-      - algovibe_models:/app/models   # auto_trainer butuh write untuk atomic swap model
+      - algovibe_models:/app/models   # Sama volume dengan model-downloader
     read_only: true
     tmpfs:
       - /tmp:exec,mode=777
@@ -19,7 +74,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     logging:
       driver: "json-file"
       options:

@@ -8,40 +8,17 @@ if [ -z "$SECRET_KEY" ]; then
     exit 1
 fi
 
-MODEL_DIR="/app/models"
-MODEL_FILE="$MODEL_DIR/gemma-4-E2B-it.litertlm"
-MODEL_URL="https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
-MODEL_EXPECTED_SIZE=2583085056
-
-_download_model() {
-    mkdir -p "$MODEL_DIR"
-    local max_attempts=3
-    for attempt in $(seq 1 $max_attempts); do
-        echo "[algovibe] Download attempt $attempt/$max_attempts..."
-        curl -L --retry 3 --retry-delay 10 --connect-timeout 30 \
-            "$MODEL_URL" -o "$MODEL_FILE"
-
-        local actual_size
-        actual_size=$(stat -c%s "$MODEL_FILE" 2>/dev/null || echo 0)
-        if [ "$actual_size" -ge "$MODEL_EXPECTED_SIZE" ]; then
-            echo "[algovibe] Download model selesai! Size: ${actual_size} bytes."
-            return 0
-        fi
-
-        echo "[algovibe] File korup atau tidak lengkap (${actual_size}/${MODEL_EXPECTED_SIZE} bytes). Retry..."
-        rm -f "$MODEL_FILE"
-    done
-
-    echo "[algovibe] ERROR: Gagal download model setelah $max_attempts percobaan."
-    exit 1
-}
-
+# Model AI dijamin sudah ada di volume karena 'model-downloader' service
+# di docker-compose.yml selesai sebelum container ini dijalankan.
+MODEL_FILE="/app/models/gemma-4-E2B-it.litertlm"
 if [ ! -f "$MODEL_FILE" ]; then
-    echo "[algovibe] Model AI tidak ditemukan. Mulai download otomatis (2.5GB)..."
-    _download_model
-else
-    echo "[algovibe] Model AI ditemukan, siap digunakan."
+    echo "[algovibe] ⚠️  WARNING: Model tidak ditemukan di $MODEL_FILE"
+    echo "[algovibe] Pastikan 'model-downloader' service berhasil sebelum menjalankan bot."
+    echo "[algovibe] Jalankan: docker compose up model-downloader"
+    exit 1
 fi
+echo "[algovibe] ✅ Model AI ditemukan, siap digunakan."
+
 
 # --- [Shutdown Handler] Teruskan SIGTERM ke semua proses agar graceful ---
 _shutdown() {

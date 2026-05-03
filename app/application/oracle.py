@@ -255,11 +255,11 @@ class Oracle:
         """
         from app.domain.technicals import get_technical_summary, derive_trade_signal
         import sqlite3
-        from config import DB_PATH
         import json
 
         pair = pair.lower()
-        conn = sqlite3.connect(DB_PATH)
+        # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
+        conn = sqlite3.connect(db.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
             # 1. Ticker History
@@ -334,7 +334,6 @@ class Oracle:
 
         from app.domain.technicals import get_technical_summary, derive_trade_signal
         import sqlite3
-        from config import DB_PATH
 
         # Ambil top 5 koin dengan verdict BUY dan confidence tertinggi
         buy_candidates = sorted(
@@ -371,9 +370,9 @@ class Oracle:
             db.save_state("trigger_analysis_pair", None)
             try:
                 import sqlite3
-                from config import DB_PATH
                 from app.domain.technicals import get_technical_summary
-                conn = sqlite3.connect(DB_PATH)
+                # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
+                conn = sqlite3.connect(db.db_path, timeout=30)
                 conn.row_factory = sqlite3.Row
                 try:
                     row = conn.execute(

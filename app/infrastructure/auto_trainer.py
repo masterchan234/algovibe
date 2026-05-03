@@ -186,10 +186,13 @@ def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_sample
 
 def main():
     from config import (
-        DB_PATH, AUTO_TRAIN_ENABLED, AUTO_TRAIN_INTERVAL_HOURS,
+        AUTO_TRAIN_ENABLED, AUTO_TRAIN_INTERVAL_HOURS,
         AUTO_TRAIN_MIN_SAMPLES, AUTO_TRAIN_MIN_ACCURACY, AUTO_TRAIN_MIN_DELTA,
         AUTO_TRAIN_RF_MODEL_PATH, AUTO_TRAIN_RF_MODEL_TMP, AUTO_TRAIN_LOG_PATH
     )
+    # Gunakan path DB aktif dari router agar trainer baca data dari DB yang benar
+    from app.infrastructure.database import db as _db_router
+    _active_db_path = _db_router.db_path
 
     _setup_file_logger(AUTO_TRAIN_LOG_PATH)
 
@@ -203,7 +206,7 @@ def main():
     while True:
         logger.info("=== Memulai siklus training ===")
         result = run_training_cycle(
-            db_path=DB_PATH,
+            db_path=_active_db_path,
             model_path=AUTO_TRAIN_RF_MODEL_PATH,
             model_tmp=AUTO_TRAIN_RF_MODEL_TMP,
             min_samples=AUTO_TRAIN_MIN_SAMPLES,
