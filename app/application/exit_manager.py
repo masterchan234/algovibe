@@ -34,7 +34,8 @@ class ExitManager:
         self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
         self.last_balance_sync = 0 # Cooldown untuk auto-reconciliation
         # High-water-mark: tracks the peak combined net PnL seen across all open positions.
-        # Reset to 0 when all positions are closed.
+        # Updated each monitor tick when there are open positions; reset to 0 when no
+        # open positions are being evaluated (i.e., the basket is empty at evaluation time).
         self._portfolio_hwm: float = 0.0
         # Prevents concurrent execution from the background exit-monitor thread and
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
@@ -284,12 +285,13 @@ class ExitManager:
             )
             # Trigger (d): HIGH-WATER-MARK PULLBACK — combined PnL turun >X% dari peak.
             # Contoh: peak 80k, sekarang 56k (30% turun) → exit segera.
-            # Hanya aktif jika HWM >= harvest target agar tidak trigger pada fluktuasi kecil.
+            # Aktif jika HWM >= 50% dari BASKET_HARVEST_TARGET_IDR (bukan seluruhnya),
+            # agar pergerakan kecil pun dilindungi. Tidak ada syarat PnL >= 0 — jika
+            # harga sudah jatuh drastis dari peak, kita exit meski total masih negatif.
             trigger_hwm_pullback = (
                 len(open_pairs_for_basket) >= 1
-                and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR
+                and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
                 and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
-                and total_net_pnl >= 0  # Jangan exit saat masih merugi secara total
             )
 
             if trigger_normal or trigger_stagnant_rescue or trigger_harvest or trigger_hwm_pullback:

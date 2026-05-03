@@ -82,7 +82,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     # gradien probabilitas yang lebih halus: RSI=20→0.92, RSI=30→0.84, RSI=50→0.50,
     # RSI=70→0.16, RSI=80→0.08.
     rsi = calculate_rsi(prices)
-    rsi_score = float(1.0 / (1.0 + np.exp((rsi - 50.0) / 12.0)))
+    rsi_score = float(1.0 / (1.0 + np.exp((rsi - _RSI_SIGMOID_CENTER) / _RSI_SIGMOID_SCALE)))
     scores.append(max(0.05, min(0.95, rsi_score)))
     weights.append(3.0)
 
@@ -90,7 +90,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     # Normalisasi |hist| / harga menghilangkan scale-bias antar koin IDR.
     if n >= 35:
         _, _, macd_hist = calculate_macd(prices)
-        norm_mh = abs(macd_hist) / last_price * 1000
+        norm_mh = abs(macd_hist) / last_price * _MACD_NORM_FACTOR
         if macd_hist > 0:
             macd_score = min(0.95, 0.55 + norm_mh)
         else:

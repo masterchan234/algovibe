@@ -285,6 +285,7 @@ def calculate_williams_r(prices, period=14):
 def calculate_roc(prices, period=10):
     """
     Rate of Change (ROC): perubahan harga dalam persen selama N periode.
+    Formula: (prices[-1] - prices[-period-1]) / prices[-period-1] * 100
     Returns: ROC dalam % (positif = naik, negatif = turun).
 
     Berguna sebagai konfirmasi momentum:
@@ -430,7 +431,7 @@ def derive_trade_signal(tech):
     ema_cr  = str(tech.get('ema_cross', 'NEUTRAL'))
     wr      = float(tech.get('williams_r', -50))   # Williams %R
     roc     = float(tech.get('roc', 0))             # Rate of Change (10-period)
-    lp      = max(1.0, float(tech.get('last_price', 1.0)))  # harga terakhir untuk normalisasi MACD
+    last_price = max(1.0, float(tech.get('last_price', 1.0)))  # harga terakhir untuk normalisasi MACD
 
     buy_score  = 0.0
     sell_score = 0.0
@@ -460,11 +461,11 @@ def derive_trade_signal(tech):
     # Normalisasi price-relative: hindari scale bias antar koin IDR.
     # Menggunakan (|hist| / harga) * _MACD_NORM_FACTOR agar sinyal konsisten.
     if mh > 0:
-        strength = min(1.0, (abs(mh) / lp) * _MACD_NORM_FACTOR)
+        strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
         buy_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bullish({mh:+.4f})")
     elif mh < 0:
-        strength = min(1.0, (abs(mh) / lp) * _MACD_NORM_FACTOR)
+        strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
         sell_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bearish({mh:+.4f})")
 
