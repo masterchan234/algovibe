@@ -817,7 +817,7 @@ class ExitManager:
         [Senior Strategy] Menambah muatan (DCA) pada posisi yang sedang drawdown.
         Menghitung ulang harga rata-rata dan memperbarui state di DB.
         """
-        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, FEE_BUY_TAKER
+        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, FEE_BUY_TAKER, MIN_TRADE_IDR
         
         try:
             old_entry_price = float(data['entry_price'])
@@ -828,21 +828,41 @@ class ExitManager:
             # Default: Tambahkan nominal yang sama dengan muatan sebelumnya
             add_amount_idr = old_amount_idr * DCA_MULTIPLIER
             
+            # [Senior Fix] Guard: Pastikan nominal DCA memenuhi minimum order exchange
+            if add_amount_idr < MIN_TRADE_IDR:
+                log_message(
+                    f"⚠️ [DCA SKIP] {pair}: Nominal DCA Rp {add_amount_idr:,.0f} "
+                    f"di bawah minimum Rp {MIN_TRADE_IDR:,.0f}. Batalkan DCA."
+                )
+                return False
+            
+            # [Senior Fix] Konversi nominal IDR → jumlah koin SEBELUM kirim ke exchange.
+            # Indodax create_order market buy membutuhkan quantity koin (amount_crypto),
+            # bukan nilai IDR. Mengirim IDR langsung menyebabkan 'Minimum order X COIN' error.
+            add_amount_crypto = add_amount_idr / current_price
+            
             symbol = f"{pair[:-3].upper()}/IDR"
             
             if self.dry_run:
                 # Simulasi penambahan muatan
-                add_amount_crypto = add_amount_idr / current_price
-                log_message(f"🧪 [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR load at Rp {current_price:,.2f}")
+                log_message(
+                    f"🧪 [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR "
+                    f"= {add_amount_crypto:.8f} koin at Rp {current_price:,.2f}"
+                )
             else:
-                # Eksekusi Market Buy Riil
+                # [Senior Fix] Eksekusi Market Buy Riil: kirim quantity KOIN, bukan IDR
                 params = {'pair': pair.replace("idr", "_idr")}
-                # [Final Fix] Use explicit create_order for market buy (DCA)
-                order = self.exchange.create_order(symbol, 'market', 'buy', add_amount_idr, current_price, params)
-                # Gunakan harga eksekusi asli jika tersedia
+                order = self.exchange.create_order(
+                    symbol, 'market', 'buy', add_amount_crypto, current_price, params
+                )
+                # Gunakan nilai aktual dari order response jika tersedia
                 exec_price = float(order.get('price') or current_price)
-                add_amount_crypto = float(order.get('amount') or (add_amount_idr / exec_price))
-                current_price = exec_price # Update to real execution price
+                executed_qty = float(order.get('amount') or order.get('executedQty') or 0)
+                if executed_qty > 0:
+                    add_amount_crypto = executed_qty
+                # Rekonstruksi actual IDR spent berdasarkan harga & qty eksekusi asli
+                add_amount_idr = add_amount_crypto * exec_price
+                current_price = exec_price  # Update to real execution price
 
             # 2. Hitung Harga Rata-Rata Baru (Weighted Average)
             new_total_amount_idr = old_amount_idr + add_amount_idr
@@ -865,8 +885,9 @@ class ExitManager:
                 f"⚓ *DCA SUCCESS* ⚓\n"
                 f"Pair: `{pair}` (Tier {new_tier})\n"
                 f"Old Entry: Rp {old_entry_price:,.2f}\n"
+                f"DCA Price: Rp {current_price:,.2f}\n"
                 f"New Average: Rp {new_avg_entry_price:,.2f} 🔥\n"
-                f"Total Load: Rp {new_total_amount_idr:,.0f}"
+                f"Total Load: Rp {new_total_amount_idr:,.0f} ({new_total_amount_crypto:.8f} koin)"
             )
             send_telegram_message(msg)
             return True

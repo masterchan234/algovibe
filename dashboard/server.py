@@ -164,10 +164,10 @@ try:
 except Exception as _e:
     print(f"⚠️ Failed to sync initial trade streams: {_e}")
 
-_REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 0}
+_REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 0, "coins": {}}
 
 def _fetch_real_idr_balance_bundle():
-    """Fetch real IDR balance bundle from Indodax via CCXT (free/used/total)."""
+    """Fetch real IDR balance bundle from Indodax via CCXT (free/used/total) + all non-IDR coins."""
     try:
         from app.infrastructure.database import db
         user = db.get_user('admin')
@@ -182,10 +182,22 @@ def _fetch_real_idr_balance_bundle():
         })
         balance = ex.fetch_balance()
         idr = balance.get('IDR', {})
+
+        # Kumpulkan semua koin non-IDR yang memiliki saldo total > 0
+        coins = {}
+        total_all = balance.get('total', {})
+        for coin, val in total_all.items():
+            if coin == 'IDR':
+                continue
+            amount = float(val or 0)
+            if amount > 0:
+                coins[coin] = amount
+
         return {
             "free": float(idr.get('free', 0) or 0),
             "used": float(idr.get('used', 0) or 0),
             "total": float(idr.get('total', 0) or 0),
+            "coins": coins,  # {"AXL": 7.94, "DRX": 98.0, ...}
         }
     except Exception as e:
         logging.error(f"❌ Error fetching real balance: {e}")
@@ -198,6 +210,7 @@ def _get_cached_real_balance_bundle():
             "free": _REAL_BALANCE_CACHE["free"],
             "used": _REAL_BALANCE_CACHE["used"],
             "total": _REAL_BALANCE_CACHE["total"],
+            "coins": _REAL_BALANCE_CACHE.get("coins", {}),
         }
 
     val = _fetch_real_idr_balance_bundle()
@@ -205,6 +218,7 @@ def _get_cached_real_balance_bundle():
         _REAL_BALANCE_CACHE["free"] = val.get("free", 0)
         _REAL_BALANCE_CACHE["used"] = val.get("used", 0)
         _REAL_BALANCE_CACHE["total"] = val.get("total", 0)
+        _REAL_BALANCE_CACHE["coins"] = val.get("coins", {})
         _REAL_BALANCE_CACHE["last_check"] = now
     return val
 
@@ -212,6 +226,23 @@ def _get_cached_real_balance():
     """Backward-compatible helper returning only free IDR."""
     val = _get_cached_real_balance_bundle()
     return val.get("free") if val else None
+
+def _get_coin_equity_idr(coins: dict, tickers: dict) -> float:
+    """
+    Hitung total nilai IDR dari semua koin non-IDR yang dipegang di exchange.
+    coins: {"AXL": 7.94, "DRX": 98.0, ...}
+    tickers: hasil mws.get_tickers(), key = 'axlidr', 'drxidr', dst.
+    Mengembalikan estimasi nilai IDR dari seluruh koin tersebut.
+    """
+    total = 0.0
+    for coin, amount in coins.items():
+        pair_key = f"{coin.lower()}idr"
+        ticker = tickers.get(pair_key, {})
+        # Prioritas: last > buy > 0
+        price = float(ticker.get('last') or ticker.get('buy') or 0)
+        if price > 0:
+            total += amount * price
+    return total
 
 def _get_pair_technicals(pair):
     """Ambil histori harga dari JSON blob dan hitung technical summary."""
@@ -602,21 +633,36 @@ def get_stats():
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
+            coin_equity_idr = 0.0
         else:
             # LIVE MODE: Use cached real balance bundle from exchange
             real_bal = _get_cached_real_balance_bundle()
+            ws_tickers_for_equity = mws.get_tickers()
             if real_bal is not None:
                 available_idr = float(real_bal.get("free", 0) or 0)
                 idr_used = float(real_bal.get("used", 0) or 0)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
+                # [Senior Fix] Hitung nilai koin non-IDR yang dipegang di exchange
+                coin_equity_idr = _get_coin_equity_idr(
+                    real_bal.get("coins", {}), ws_tickers_for_equity
+                )
             else:
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
                 idr_used = float(_REAL_BALANCE_CACHE.get("used") or total_used_idr)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
+                coin_equity_idr = _get_coin_equity_idr(
+                    _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
+                )
             
-        total_equity = available_idr + total_used_idr + unrealized_pnl
+        # [Senior Fix] Total equity = IDR free + nilai koin non-IDR + unrealized PnL posisi aktif
+        # Tidak lagi menjumlahkan total_used_idr dari DB (ini sudah tercermin di coin_equity_idr
+        # untuk LIVE, atau di kalkulasi dry run).
+        if cfg.DRY_RUN:
+            total_equity = available_idr + total_used_idr + unrealized_pnl
+        else:
+            total_equity = available_idr + coin_equity_idr + unrealized_pnl
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         
         # Performance definitions
@@ -1465,19 +1511,28 @@ def _build_stats_payload():
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
+            coin_equity_idr = 0.0
         else:
             # LIVE MODE: Use cached real balance bundle from exchange
             real_bal = _get_cached_real_balance_bundle()
+            ws_tickers_for_equity = mws.get_tickers()
             if real_bal is not None:
                 available_idr = float(real_bal.get("free", 0) or 0)
                 idr_used = float(real_bal.get("used", 0) or 0)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
+                # [Senior Fix] Hitung nilai koin non-IDR yang dipegang di exchange
+                coin_equity_idr = _get_coin_equity_idr(
+                    real_bal.get("coins", {}), ws_tickers_for_equity
+                )
             else:
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
                 idr_used = float(_REAL_BALANCE_CACHE.get("used") or total_used_idr)
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
+                coin_equity_idr = _get_coin_equity_idr(
+                    _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
+                )
             
         # [Senior Audit] Calculate Unrealized PnL
         for pos in positions:
@@ -1510,7 +1565,11 @@ def _build_stats_payload():
             if last_price > 0:
                 unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
 
-        total_equity = available_idr + total_used_idr + unrealized_pnl
+        # [Senior Fix] Total equity = IDR free + nilai koin non-IDR + unrealized posisi aktif
+        if cfg.DRY_RUN:
+            total_equity = available_idr + total_used_idr + unrealized_pnl
+        else:
+            total_equity = available_idr + coin_equity_idr + unrealized_pnl
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         # Injeksi Harga Realtime (Prioritas: Trade Stream > Summary > DB)
         ws_tickers = mws.get_tickers()
