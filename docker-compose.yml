@@ -20,33 +20,41 @@ services:
       - /bin/sh
       - -c
       - |
-        set -e
         mkdir -p /models/cache
+
         if [ -f "$$MODEL_FILE" ]; then
-          ACTUAL_SIZE=$$(stat -c%s "$$MODEL_FILE" 2>/dev/null || echo 0)
+          ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
           if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
             echo "[model-init] ✅ Model sudah ada di volume ($$ACTUAL_SIZE bytes). Skip download."
             exit 0
           fi
-          echo "[model-init] ⚠️ Model ada tapi ukuran tidak valid ($$ACTUAL_SIZE). Re-download..."
+          echo "[model-init] ⚠️  Model ada tapi ukuran tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Re-download..."
           rm -f "$$MODEL_FILE"
         fi
+
         echo "[model-init] ⬇️  Mulai download model AI (2.5GB)..."
-        MAX_ATTEMPTS=3
-        for i in 1 2 3; do
-          echo "[model-init] Attempt $$i/$$MAX_ATTEMPTS..."
-          curl -L --retry 3 --retry-delay 15 --connect-timeout 60 \
-               --progress-bar "$$MODEL_URL" -o "$$MODEL_FILE" && \
-          ACTUAL_SIZE=$$(stat -c%s "$$MODEL_FILE" 2>/dev/null || echo 0) && \
-          if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
-            echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
-            exit 0
+        DOWNLOADED=0
+        for attempt in 1 2 3; do
+          echo "[model-init] Attempt $$attempt/3..."
+          if curl -L --retry 3 --retry-delay 15 --connect-timeout 60 \
+               --progress-bar "$$MODEL_URL" -o "$$MODEL_FILE"; then
+            ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
+            if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
+              echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
+              DOWNLOADED=1
+              break
+            fi
+            echo "[model-init] ⚠️  File tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Retry..."
+          else
+            echo "[model-init] ⚠️  curl gagal pada attempt $$attempt. Retry..."
           fi
-          echo "[model-init] File tidak valid ($$ACTUAL_SIZE bytes). Retry..."
           rm -f "$$MODEL_FILE"
         done
-        echo "[model-init] ❌ Gagal download model setelah $$MAX_ATTEMPTS percobaan."
-        exit 1
+
+        if [ "$$DOWNLOADED" -ne 1 ]; then
+          echo "[model-init] ❌ Gagal download model setelah 3 percobaan."
+          exit 1
+        fi
 
   # ─────────────────────────────────────────────────────────────────────────────
   # [Main Service] Algovibe Bot + Dashboard
