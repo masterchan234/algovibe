@@ -503,20 +503,30 @@ class ExitManager:
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
-                
+
+                # --- [Fee-Correct Break-Even Price] --- (dihitung di sini agar tersedia untuk trailing stop)
+                # Semua exit darurat (TRAILING_STOP, SL, BREAK_EVEN) menggunakan TAKER order.
+                # Formula harga jual agar net_pnl = 0:
+                #   (exit - entry) * amount = amount_idr * FEE_BUY_TAKER + exit * amount * FEE_SELL_TAKER
+                #   exit * (1 - FEE_SELL_TAKER) = entry * (1 + FEE_BUY_TAKER)
+                #   exit = entry * (1 + FEE_BUY_TAKER) / (1 - FEE_SELL_TAKER)  ≈ entry * 1.0124
+                _be_exact = entry_price * (1 + FEE_BUY_TAKER) / max(1e-9, 1.0 - FEE_SELL_TAKER)
+                break_even_price = _be_exact * 1.0015   # +0.15% buffer → net profit benar-benar positif
+                # Threshold aktivasi: profit harus melampaui break-even + 0.2% buffer
+                _fee_be_threshold = (break_even_price / entry_price - 1.0) + 0.002
+
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
-                # Untuk TP normal (non-emergency) kita gunakan asumsi maker agar target tidak terlalu tinggi.
+                # [Fee Fix] TP exits menggunakan taker → gunakan FEE_BUY_TAKER + FEE_SELL_TAKER
                 from config import FEE_SLIPPAGE_BUFFER
-                tp_sell_fee = FEE_SELL_MAKER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
-                denom_tp = amount * max(0.01, (1 - tp_sell_fee - tp_slippage))
+                denom_tp = amount * max(0.01, (1 - FEE_SELL_TAKER - tp_slippage))
                 # [Fix Fee-Trap] MIN_NET_PROFIT proporsional terhadap ukuran trade.
                 # Fixed Rp 2.000 menyebabkan exact_tp_price +18% pada trade kecil → TP mustahil.
                 # Formula: min(amount_idr × 1.5%, Rp 2.000) — cukup bermakna tanpa unreachable.
                 amount_idr_pos = float(data.get('amount_idr', 0))
                 dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * 0.015))
-                exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
-                
+                exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_TAKER))) / denom_tp
+
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
                 
@@ -571,6 +581,11 @@ class ExitManager:
     
                     if current_profit_pct >= _activation_pct:
                         new_trailing_sl = highest_price * (1 - dist_pct)
+                        # [Fee Fix] Floor trailing stop di break_even_price jika koin pernah melampaui
+                        # break-even. Ini mencegah trailing stop menyebabkan exit rugi ketika harga
+                        # turun dari puncak tapi masih di atas biaya round-trip.
+                        if highest_price >= break_even_price:
+                            new_trailing_sl = max(new_trailing_sl, break_even_price)
                         if new_trailing_sl > trailing_sl_price:
                             trailing_sl_price = new_trailing_sl
                             positions[pair]['trailing_sl_price'] = trailing_sl_price
@@ -586,20 +601,18 @@ class ExitManager:
                 active_sl_price = max(initial_sl_price, trailing_sl_price)
     
                 # --- [Defensive] Break-Even Stop Loss ---
-                # Pindahkan SL ke break-even (entry + round-trip fee + small buffer) segera setelah
-                # net profit sudah melampaui biaya fee beli+jual, bukan hanya saat profit >= 1%.
-                # Ini memastikan profit bersih selalu aman setelah fee diperhitungkan.
-                round_trip_fee = FEE_BUY_MAKER + FEE_SELL_MAKER  # 0.4322%, bukan 1.2322% (taker)
-                break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
-                # Aktifkan break-even saat profit sudah melampaui fee round-trip + 0.2% (safety buffer)
-                fee_breakeven_threshold = round_trip_fee + 0.002
-                
-                if current_profit_pct >= fee_breakeven_threshold and active_sl_price < break_even_price:
+                # Aktifkan ketika profit sudah melampaui threshold break-even (taker fees penuh).
+                # break_even_price dan _fee_be_threshold sudah dihitung di atas menggunakan
+                # formula taker yang benar: entry * (1+FEE_BUY_TAKER) / (1-FEE_SELL_TAKER).
+                if current_profit_pct >= _fee_be_threshold and active_sl_price < break_even_price:
                     active_sl_price = break_even_price
                     if positions[pair].get('trailing_sl_price', 0) < break_even_price:
                         positions[pair]['trailing_sl_price'] = break_even_price
                         modified_pairs.add(pair)
-                        log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
+                        log_message(
+                            f"🛡️ [Break-Even] {pair}: SL → Rp {break_even_price:,.2f} "
+                            f"(fee-correct taker break-even, threshold {_fee_be_threshold*100:.2f}%)"
+                        )
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
