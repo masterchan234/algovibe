@@ -88,6 +88,47 @@ class ExitManager:
         # Filter: Hanya pantau posisi yang sesuai dengan mode saat ini
         positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
         
+        modified_pairs = set()
+
+        # --- [ACTIVE DISCOVERY] ---
+        # [Senior Fix] Jalankan Discovery di LUAR cek 'if not positions'
+        # Agar koin yang ada di exchange tetap terdeteksi meskipun DB kosong.
+        if not self.dry_run and (time.time() - getattr(self, '_last_discovery_ts', 0) > 60):
+            try:
+                bal = self.exchange.fetch_balance()
+                total_bal = bal.get('total', {})
+                tickers = self.oracle.market_ws.get_tickers() if self.oracle else {}
+                
+                for coin, amount in total_bal.items():
+                    if coin == 'IDR' or coin == 'info': continue
+                    amount = float(amount)
+                    if amount <= 0: continue
+                    
+                    pair = f"{coin.lower()}idr"
+                    if pair not in all_positions:
+                        price = float(tickers.get(pair, {}).get('last', 0))
+                        log_message(f"🔍 [DISCOVERY] Adopting asset: {coin} ({amount})")
+                        recovery_data = {
+                            "pair": pair,
+                            "entry_price": price if price > 0 else 0,
+                            "amount_crypto": amount,
+                            "amount_idr": amount * price if price > 0 else 0,
+                            "status": "OPEN",
+                            "entry_order_id": f"RECOVERED-{int(time.time())}",
+                            "exit_order_id": None,
+                            "timestamp": datetime.now().isoformat(),
+                            "dry_run": False,
+                            "reason_backup": "DISCOVERY"
+                        }
+                        db.upsert_position(pair, recovery_data)
+                        all_positions[pair] = recovery_data
+                
+                self._last_discovery_ts = time.time()
+                # Update positions list after discovery
+                positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
+            except Exception as e:
+                log_message(f"⚠️ Discovery Error: {e}")
+
         if not positions:
             return
 
@@ -691,10 +732,12 @@ class ExitManager:
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         mark_exit_requested(pair, order_id)
-            except Exception as e:
-                log_message(f"🚨 Critical error in monitoring loop for {pair}: {e}")
-                import traceback
-                log_message(traceback.format_exc())
+        except Exception as e:
+            log_message(f"🚨 Error in monitor loop: {e}")
+            import traceback
+            log_message(traceback.format_exc())
+
+        self.save_positions(positions, modified_pairs)
 
         self.save_positions(positions, modified_pairs)
 

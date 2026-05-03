@@ -206,7 +206,7 @@ def _fetch_real_idr_balance_bundle():
             for asset, data in db_bal.items():
                 if asset == 'IDR': continue
                 total_val = float(data.get('total', 0))
-                if total_val > 1e-8:
+                if total_val > 0: # Tampilkan semua koin > 0
                     coins[asset] = total_val
             
             return {
@@ -239,7 +239,7 @@ def _fetch_real_idr_balance_bundle():
         for coin, val in total_data.items():
             if coin == 'IDR' or coin == 'info': continue
             amount = float(val or 0)
-            if amount > 1e-8:
+            if amount > 0: # Tampilkan semua koin > 0
                 coins[coin] = amount
                 
         return {
@@ -253,23 +253,19 @@ def _fetch_real_idr_balance_bundle():
         return None
 
 def _get_cached_real_balance_bundle():
-    now = time.time()
-    if _REAL_BALANCE_CACHE["free"] is not None and (now - _REAL_BALANCE_CACHE["last_check"]) < 60:
-        return {
-            "free": _REAL_BALANCE_CACHE["free"],
-            "used": _REAL_BALANCE_CACHE["used"],
-            "total": _REAL_BALANCE_CACHE["total"],
-            "coins": _REAL_BALANCE_CACHE.get("coins", {}),
-        }
-
+    """
+    [Senior No-Cache Policy] Selalu ambil data terbaru di mode Live.
+    Membaca dari Database (sync dari bot) atau REST API secara langsung.
+    """
     val = _fetch_real_idr_balance_bundle()
     if val is not None:
-        _REAL_BALANCE_CACHE["free"] = val.get("free", 0)
-        _REAL_BALANCE_CACHE["used"] = val.get("used", 0)
-        _REAL_BALANCE_CACHE["total"] = val.get("total", 0)
-        _REAL_BALANCE_CACHE["coins"] = val.get("coins", {})
-        _REAL_BALANCE_CACHE["last_check"] = now
-    return val
+        return {
+            "free": val.get("free", 0),
+            "used": val.get("used", 0),
+            "total": val.get("total", 0),
+            "coins": val.get("coins", {}),
+        }
+    return None
 
 def _get_cached_real_balance():
     """Backward-compatible helper returning only free IDR."""
