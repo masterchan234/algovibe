@@ -1,5 +1,7 @@
 import math
 
+from config import SECTOR_MAP
+
 # Sektor yang mendapat sector-momentum boost saat pumping
 _BOOSTED_SECTORS = {"AI", "MEME", "L1"}
 
@@ -81,7 +83,6 @@ def calculate_score(args):
 
             # --- Sector Momentum Boost (+15% untuk sektor AI, MEME, L1 yang sedang pumping) ---
             try:
-                from config import SECTOR_MAP
                 sector = SECTOR_MAP.get(pair.lower())
                 if sector in _BOOSTED_SECTORS:
                     # Hanya boost jika sektornya positif (change > 0) agar tidak boost koin rugi

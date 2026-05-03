@@ -513,7 +513,7 @@ class ExitManager:
                 _be_exact = entry_price * (1 + FEE_BUY_TAKER) / max(1e-9, 1.0 - FEE_SELL_TAKER)
                 break_even_price = _be_exact * 1.0015   # +0.15% buffer → net profit benar-benar positif
                 # Threshold aktivasi: profit harus melampaui break-even + 0.2% buffer
-                _fee_be_threshold = (break_even_price / entry_price - 1.0) + 0.002
+                break_even_activation_threshold = (break_even_price / entry_price - 1.0) + 0.002
 
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
                 # [Fee Fix] TP exits menggunakan taker → gunakan FEE_BUY_TAKER + FEE_SELL_TAKER
@@ -604,14 +604,14 @@ class ExitManager:
                 # Aktifkan ketika profit sudah melampaui threshold break-even (taker fees penuh).
                 # break_even_price dan _fee_be_threshold sudah dihitung di atas menggunakan
                 # formula taker yang benar: entry * (1+FEE_BUY_TAKER) / (1-FEE_SELL_TAKER).
-                if current_profit_pct >= _fee_be_threshold and active_sl_price < break_even_price:
+                if current_profit_pct >= break_even_activation_threshold and active_sl_price < break_even_price:
                     active_sl_price = break_even_price
                     if positions[pair].get('trailing_sl_price', 0) < break_even_price:
                         positions[pair]['trailing_sl_price'] = break_even_price
                         modified_pairs.add(pair)
                         log_message(
                             f"🛡️ [Break-Even] {pair}: SL → Rp {break_even_price:,.2f} "
-                            f"(fee-correct taker break-even, threshold {_fee_be_threshold*100:.2f}%)"
+                            f"(fee-correct taker break-even, threshold {break_even_activation_threshold*100:.2f}%)"
                         )
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
