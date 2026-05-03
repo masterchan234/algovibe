@@ -20,8 +20,6 @@ class Database:
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.row_factory = sqlite3.Row
         try:
-            # Mengaktifkan Write-Ahead Logging untuk konkurensi maksimal (penting karena diakses multiprocess)
-            conn.execute('PRAGMA journal_mode=WAL')
             yield conn
             conn.commit()
         except Exception as e:
@@ -365,10 +363,10 @@ class Database:
             params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id, ai_confidence]
             
             if created_at:
-                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 params.append(created_at)
             else:
-                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             
             try:
                 cursor.execute(sql, tuple(params))
@@ -477,15 +475,6 @@ class Database:
         import json
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            data = [
-                (
-                    json.dumps(h), p, h[0] if h else 0, # history_json, signal (dummy), trend (dummy)
-                    c5, c15, c1, 0.0, 0.0, # ch_5m, ch_15m, ch_1h, vol, score
-                    json.dumps(h), c5, c15, c1 # updates for conflict
-                )
-                for p, h, c5, c15, c1 in updates_list
-            ]
-            
             # Kita gunakan query yang lebih efisien untuk executemany
             cursor.executemany('''
                 INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,

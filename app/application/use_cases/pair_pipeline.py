@@ -69,9 +69,9 @@ def build_high_speed_candidates(bot, ranked, tickers):
     btc_history = db.get_ticker_history("BTC/IDR", limit=20)
     if btc_history and len(btc_history) >= 20 and not config.DRY_RUN_LOOSE_GATES:
         btc_prices = [h['last'] for h in btc_history]
-        btc_ema = sum(btc_prices) / 20
-        if btc_last < btc_ema:
-            log_message(f"⚠️ [BTC Filter] BTC sedang bearish ({btc_last} < {btc_ema:.0f}). Bot stand-by.")
+        btc_sma = sum(btc_prices) / 20
+        if btc_last < btc_sma:
+            log_message(f"⚠️ [BTC Filter] BTC sedang bearish ({btc_last} < {btc_sma:.0f}). Bot stand-by.")
             time.sleep(30)
             return None
 

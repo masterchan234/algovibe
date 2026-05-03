@@ -91,16 +91,8 @@ class ScalperBot:
         self.cached_balance = 0
         if not config.DRY_RUN:
             try:
-                now = time.time()
-                val = _fetch_real_idr_balance_bundle()
-                if val is not None:
-                    _REAL_BALANCE_CACHE["free"] = val.get("free", 0)
-                    _REAL_BALANCE_CACHE["used"] = val.get("used", 0)
-                    _REAL_BALANCE_CACHE["total"] = val.get("total", 0)
-                    _REAL_BALANCE_CACHE["coins"] = val.get("coins", {})
-                    _REAL_BALANCE_CACHE["last_check"] = now
-                    _REAL_BALANCE_CACHE["source"] = val.get("source", "REST")
-                    self.cached_balance = float(_REAL_BALANCE_CACHE["free"])
+                bal = self.exchange.fetch_balance()
+                self.cached_balance = float(bal.get('free', {}).get('IDR', 0))
             except Exception as e:
                 log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
 

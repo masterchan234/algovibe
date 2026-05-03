@@ -235,6 +235,7 @@ def execute_trade(
         data = {
             "entry_price": buy_price,
             "amount": amount_crypto,
+            "amount_crypto": amount_crypto,
             "amount_idr": amount_idr,
             "timestamp": datetime.now().isoformat(),
             "dry_run": config.DRY_RUN,
