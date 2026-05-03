@@ -90,6 +90,16 @@ services:
         max-buffer-size: "4m"
         max-size: "5m"
         max-file: "3"
+    networks:
+      - default
+      - npm_external
+
+networks:
+  default:
+    driver: bridge
+  npm_external:
+    external: true
+    name: npm_default
 
 volumes:
   algovibe_data:
