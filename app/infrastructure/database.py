@@ -894,7 +894,7 @@ class DatabaseRouter:
             return self._mode_cache
         try:
             import sqlite3 as _sq
-            conn = _sq.connect(self._live.db_path, timeout=5)
+            conn = _sq.connect(self._live.db_path, timeout=30)
             row = conn.execute("SELECT value FROM bot_state WHERE key='dry_run'").fetchone()
             conn.close()
             val = (row[0].lower() == "true") if row else True

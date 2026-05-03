@@ -53,6 +53,12 @@ _shutdown() {
 }
 trap _shutdown SIGTERM SIGINT
 
+# --- [Database Bootstrap] ---
+# Pastikan migrasi selesai sepenuhnya sebelum menjalankan proses paralel
+# Ini mencegah race condition "no such table" saat startup pertama kali
+echo "[algovibe] Initializing databases (Live & Dry) and running migrations..."
+python3 -c "from app.infrastructure.database import db; print('[algovibe] Database schema is up-to-date.')"
+
 echo "[algovibe] Starting bot engine (main.py)..."
 python -u main.py &
 BOT_PID=$!
