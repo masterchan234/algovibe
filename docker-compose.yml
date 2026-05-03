@@ -37,8 +37,7 @@ services:
         DOWNLOADED=0
         for attempt in 1 2 3; do
           echo "[model-init] Attempt $$attempt/3..."
-          if wget --tries=3 --timeout=60 --waitretry=15 \
-               -O "$$MODEL_FILE" "$$MODEL_URL"; then
+          if wget -q -T 60 -O "$$MODEL_FILE" "$$MODEL_URL"; then
             ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
             if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
               echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
