@@ -510,20 +510,41 @@ class ExitManager:
                 pos_ts = datetime.fromisoformat(data['timestamp'])
                 pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
                 duration_str = f"{int(pos_age_min)}m"
-                
+
+                # [Daily Target] Kencangkan trailing stop bila sudah dekat target profit harian
+                _target_status = None
+                try:
+                    if self.oracle:
+                        _target_status = self.oracle.get_daily_target_status()
+                except Exception:
+                    pass
+                _near_daily_target = _target_status.get("near", False) if _target_status else False
+
+                # [Regime-aware] Aktivasi trailing lebih cepat di pasar BEARISH/CHOPPY
+                _regime = db.get_state("market_regime") or "UNKNOWN"
+                _is_defensive_regime = _regime in ("BEARISH", "CHOPPY", "CRASH")
+                _activation_pct = (
+                    TRAILING_STOP_ACTIVATION_PCT * 0.6   # 40% lebih cepat saat pasar buruk
+                    if _is_defensive_regime
+                    else TRAILING_STOP_ACTIVATION_PCT
+                )
+
                 if current_price > highest_price:
                     highest_price = current_price
                     positions[pair]['highest_price'] = highest_price
                     
                     # Jarak trailing adaptif: Semakin untung, semakin ketat
                     # [Optimization] Mengunci profit lebih agresif saat harga melonjak
-                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.5%
-                    if current_profit_pct >= 0.04:   # Profit > 4%
+                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.4%
+                    if _near_daily_target:
+                        # Sudah dekat target harian → kunci profit lebih ketat
+                        dist_pct = min(dist_pct, 0.002)   # 0.2% — sangat ketat
+                    elif current_profit_pct >= 0.04:   # Profit > 4%
                         dist_pct = 0.002            # Jarak sangat ketat (0.2%)
                     elif current_profit_pct >= 0.02: # Profit > 2%
                         dist_pct = 0.0035           # Jarak ketat (0.35%)
     
-                    if current_profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                    if current_profit_pct >= _activation_pct:
                         new_trailing_sl = highest_price * (1 - dist_pct)
                         if new_trailing_sl > trailing_sl_price:
                             trailing_sl_price = new_trailing_sl

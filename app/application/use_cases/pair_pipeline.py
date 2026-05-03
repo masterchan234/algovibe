@@ -16,7 +16,7 @@ from config import (
 )
 import config
 from app.infrastructure.database import db
-from utils.logger import log_message
+from utils.logger import log_message, send_telegram_message
 
 from .candidate_enrichment import enrich_pair
 from .entry_dispatch import dispatch_entry
@@ -108,6 +108,38 @@ def build_high_speed_candidates(bot, ranked, tickers):
 
 def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg):
     open_positions = db.get_open_positions()
+
+    # ── [DAILY TARGET & LOSS LIMIT GATE] ──────────────────────────────────────
+    # Cek status progress target profit harian sebelum membuka posisi baru.
+    target_status = bot.oracle.get_daily_target_status()
+    target_idr = target_status["target_idr"]
+    current_pnl = target_status["current_pnl"]
+    progress_pct = target_status["progress_pct"]
+
+    if target_status["loss_limit_hit"]:
+        log_message(
+            f"🛑 [DAILY LOSS LIMIT] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
+            f"Bot stand-by sampai hari berikutnya — hanya memantau posisi terbuka."
+        )
+        return
+
+    if target_status["reached"]:
+        log_message(
+            f"🎯 [TARGET HIT] Target profit harian Rp {target_idr:,.0f} sudah tercapai "
+            f"(PnL hari ini: Rp {current_pnl:,.0f}). "
+            f"Bot stand-by untuk menjaga cuan — hanya memantau posisi terbuka."
+        )
+        return
+
+    # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan
+    if target_status["near"]:
+        original_threshold = adaptive_cfg.get("ai_threshold", 0.35)
+        adaptive_cfg["ai_threshold"] = min(0.85, original_threshold + 0.15)
+        log_message(
+            f"⚠️ [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
+            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['ai_threshold']*100:.0f}% untuk menjaga cuan."
+        )
+    # ── END GATE ──────────────────────────────────────────────────────────────
 
     for p in high_speed:
         pair = p.get('pair', 'UNKNOWN')

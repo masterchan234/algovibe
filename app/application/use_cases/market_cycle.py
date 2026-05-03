@@ -32,6 +32,8 @@ def run_market_cycle(bot):
 
     if int(time.time()) % 1800 < 10:
         bot.exit_manager.reconcile_with_exchange()
+        # Refresh AI-driven daily profit target setiap 30 menit
+        bot.oracle.refresh_daily_profit_target(balance=getattr(bot, 'cached_balance', 0))
 
     if db.get_state("trigger_sync_all") == "1":
         db.save_state("trigger_sync_all", "0")
@@ -114,10 +116,21 @@ def run_market_cycle(bot):
 
     bot.exit_manager.manage_shadow_jaring(ranked, tickers, balance=getattr(bot, 'cached_balance', 0))
 
+    # Tampilkan progress target profit harian di log utama
+    try:
+        target_status = bot.oracle.get_daily_target_status()
+        target_str = (
+            f"Target: Rp{target_status['target_idr']/1000:.0f}k | "
+            f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k ({target_status['progress_pct']:.0f}%)"
+        ) if target_status['target_idr'] > 0 else "Target: N/A"
+    except Exception:
+        target_str = "Target: N/A"
+
     log_message(
         f"Oracle Loop | Regime: {regime:8} | "
         f"AI_Thresh: {adaptive_cfg['ai_threshold']*100:.0f}% | "
-        f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M"
+        f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M | "
+        f"{target_str}"
     )
 
     db.save_state("heartbeat", time.time())
