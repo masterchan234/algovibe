@@ -3,6 +3,7 @@ import os
 import time
 import logging
 import re
+import threading
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -10,7 +11,8 @@ logger = logging.getLogger(__name__)
 from config import (
     TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
-    MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
+    MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
+    TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE
@@ -31,6 +33,12 @@ class ExitManager:
         self.last_jaring_update = {} # {pair: timestamp}
         self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
         self.last_balance_sync = 0 # Cooldown untuk auto-reconciliation
+        # High-water-mark: tracks the peak combined net PnL seen across all open positions.
+        # Reset to 0 when all positions are closed.
+        self._portfolio_hwm: float = 0.0
+        # Prevents concurrent execution from the background exit-monitor thread and
+        # any other caller (e.g. a manual reconcile triggered from the main cycle).
+        self._monitor_lock = threading.Lock()
         self._sync_jaring_from_db()
 
     @property
@@ -85,6 +93,15 @@ class ExitManager:
         return bool(self._order_id_variants(a) & self._order_id_variants(b))
 
     def monitor_and_execute(self, current_tickers, price_history=None, get_prediction_fn=None):
+        # Prevent concurrent execution from the background thread and any other caller.
+        if not self._monitor_lock.acquire(blocking=False):
+            return  # Previous call is still running; skip this tick.
+        try:
+            self._monitor_and_execute_inner(current_tickers, price_history, get_prediction_fn)
+        finally:
+            self._monitor_lock.release()
+
+    def _monitor_and_execute_inner(self, current_tickers, price_history=None, get_prediction_fn=None):
         all_positions = self.get_open_positions()
         current_dr_val = 1 if self.dry_run else 0
         
@@ -245,20 +262,54 @@ class ExitManager:
                     total_net_pnl += net_pnl_idr
                     open_pairs_for_basket.append((pair, data, current_price, amount))
 
+            # ── High-water-mark tracking ────────────────────────────────────────
+            # Update HWM jika profit gabungan saat ini lebih tinggi dari sebelumnya.
+            # Reset ke 0 ketika tidak ada posisi terbuka agar sesi berikutnya mulai bersih.
+            if open_pairs_for_basket:
+                if total_net_pnl > self._portfolio_hwm:
+                    self._portfolio_hwm = total_net_pnl
+            else:
+                self._portfolio_hwm = 0.0
+
             # Trigger (a): profit gabungan melampaui minimum DAN ada posisi rugi
             trigger_normal = len(open_pairs_for_basket) > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
             # Trigger (b): ada posisi stagnant, menutup semua setidaknya impas (>= 0)
             trigger_stagnant_rescue = len(open_pairs_for_basket) > 1 and has_stagnant and total_net_pnl >= 0
+            # Trigger (c): PROACTIVE HARVEST — combined PnL melebihi target bahkan tanpa ada yang rugi.
+            # Mencegah kasus "panen terlambat": posisi B masih bagus tapi posisi A sudah jatuh.
+            trigger_harvest = (
+                len(open_pairs_for_basket) >= 1
+                and BASKET_HARVEST_TARGET_IDR > 0
+                and total_net_pnl >= BASKET_HARVEST_TARGET_IDR
+            )
+            # Trigger (d): HIGH-WATER-MARK PULLBACK — combined PnL turun >X% dari peak.
+            # Contoh: peak 80k, sekarang 56k (30% turun) → exit segera.
+            # Hanya aktif jika HWM >= harvest target agar tidak trigger pada fluktuasi kecil.
+            trigger_hwm_pullback = (
+                len(open_pairs_for_basket) >= 1
+                and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR
+                and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
+                and total_net_pnl >= 0  # Jangan exit saat masih merugi secara total
+            )
 
-            if trigger_normal or trigger_stagnant_rescue:
-                trigger_label = "STAGNANT RESCUE" if trigger_stagnant_rescue and not trigger_normal else "PROFIT COVER"
+            if trigger_normal or trigger_stagnant_rescue or trigger_harvest or trigger_hwm_pullback:
+                if trigger_hwm_pullback and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest):
+                    trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
+                elif trigger_harvest and not (trigger_normal or trigger_stagnant_rescue):
+                    trigger_label = "PROACTIVE HARVEST"
+                elif trigger_stagnant_rescue and not trigger_normal:
+                    trigger_label = "STAGNANT RESCUE"
+                else:
+                    trigger_label = "PROFIT COVER"
                 msg = (
                     f"🧺 *PORTFOLIO BASKET EXIT [{trigger_label}]* 🧺\n"
-                    f"Menutup {len(open_pairs_for_basket)} posisi serentak untuk menutupi kerugian!\n"
+                    f"Menutup {len(open_pairs_for_basket)} posisi serentak!\n"
                     f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
                 )
                 print(msg.replace('*', '').replace('\n', ' | '))
                 send_telegram_message(msg)
+                # Reset HWM setelah semua posisi ditutup
+                self._portfolio_hwm = 0.0
                 
                 for pair, data, current_price, amount in open_pairs_for_basket:
                     reason = "BASKET_EXIT"

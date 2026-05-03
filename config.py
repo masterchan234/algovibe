@@ -49,6 +49,16 @@ TRAILING_STOP_DISTANCE_PCT = 0.004   # Jarak trailing lebih ketat: 0.4% (dari 0.
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
+
+# --- [Basket Exit: Proactive Profit Lock] ---
+# Trigger basket harvest segera ketika combined net PnL mencapai target ini,
+# bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
+# Set ke 0 untuk nonaktifkan.
+BASKET_HARVEST_TARGET_IDR = 20000  # Rp 20.000 combined net profit → panen serentak
+
+# Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
+# Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
+BASKET_HWM_PULLBACK_PCT   = 0.30   # 30% drawdown dari peak combined PnL
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
