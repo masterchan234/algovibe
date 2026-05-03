@@ -15,7 +15,7 @@ from datetime import datetime
 from app.domain.technicals import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
     calculate_stochastic_rsi, calculate_ema, calculate_volatility,
-    calculate_ema_slope,
+    calculate_ema_slope, calculate_williams_r, calculate_roc,
 )
 from utils.logger import log_message
 
@@ -58,35 +58,28 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     if n < 5:
         return 0.45  # Kurang data, netral
 
+    last_price = max(1.0, float(prices[-1]))  # Harga terakhir untuk normalisasi MACD
     scores = []
     weights = []
 
-    # ── 1. RSI (bobot 3.0) ───────────────────────────────────────────────────
+    # ── 1. RSI (bobot 3.0) — Sigmoid continuous scoring ─────────────────────
+    # Sigmoid menghilangkan quantization error dari step-function dan memberikan
+    # gradien probabilitas yang lebih halus: RSI=20→0.92, RSI=30→0.84, RSI=50→0.50,
+    # RSI=70→0.16, RSI=80→0.08.
     rsi = calculate_rsi(prices)
-    if rsi < 25:
-        scores.append(0.95)
-    elif rsi < 35:
-        scores.append(0.80)
-    elif rsi < 45:
-        scores.append(0.65)
-    elif rsi < 55:
-        scores.append(0.50)
-    elif rsi < 65:
-        scores.append(0.38)
-    elif rsi < 75:
-        scores.append(0.25)
-    else:
-        scores.append(0.10)
+    rsi_score = float(1.0 / (1.0 + np.exp((rsi - 50.0) / 12.0)))
+    scores.append(max(0.05, min(0.95, rsi_score)))
     weights.append(3.0)
 
-    # ── 2. MACD Histogram (bobot 2.5) ────────────────────────────────────────
+    # ── 2. MACD Histogram (bobot 2.5) — price-relative normalisasi ───────────
+    # Normalisasi |hist| / harga menghilangkan scale-bias antar koin IDR.
     if n >= 35:
         _, _, macd_hist = calculate_macd(prices)
-        # Normalisasi histogram ke 0-1 berdasarkan tanda dan kekuatan
+        norm_mh = abs(macd_hist) / last_price * 1000
         if macd_hist > 0:
-            macd_score = min(0.95, 0.55 + abs(macd_hist) * 5000)
+            macd_score = min(0.95, 0.55 + norm_mh)
         else:
-            macd_score = max(0.05, 0.45 - abs(macd_hist) * 5000)
+            macd_score = max(0.05, 0.45 - norm_mh)
         scores.append(macd_score)
         weights.append(2.5)
 
@@ -140,7 +133,16 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
             scores.append(max(0.10, 0.40 - gap_pct * 5))
         weights.append(1.5)
 
-    # ── 6. EMA Slope/Momentum (bobot 1.0) ────────────────────────────────────
+    # ── 6. Williams %R (bobot 1.5) ────────────────────────────────────────────
+    # Konfirmator oversold/overbought independen: -100=oversold(BUY), 0=overbought(SELL).
+    # Mapping: abs(wr)/100 → oversold=-100 memberi score 1.0, overbought=0 memberi 0.0.
+    if n >= 14:
+        wr = calculate_williams_r(prices)
+        wr_score = max(0.05, min(0.95, abs(wr) / 100.0))
+        scores.append(wr_score)
+        weights.append(1.5)
+
+    # ── 7. EMA Slope/Momentum (bobot 1.0) ────────────────────────────────────
     if n >= 25:
         slope = calculate_ema_slope(prices, ema_period=20, lookback=5)
         if slope > 0.5:
@@ -155,7 +157,16 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
             scores.append(0.18)
         weights.append(1.0)
 
-    # ── 7. Order Book Pressure (bobot 2.0) ───────────────────────────────────
+    # ── 8. Rate of Change / ROC-10 (bobot 1.0) ───────────────────────────────
+    # Interpretasi mean-reversion: ROC negatif = oversold → BUY probability tinggi.
+    if n >= 11:
+        roc = calculate_roc(prices)
+        roc_capped = max(-5.0, min(5.0, roc))
+        roc_score = max(0.05, min(0.95, 0.5 - roc_capped * 0.08))
+        scores.append(roc_score)
+        weights.append(1.0)
+
+    # ── 9. Order Book Pressure (bobot 2.0) ───────────────────────────────────
     if ticker_data:
         bid_depth = float(ticker_data.get("bid_depth", 0))
         ask_depth = float(ticker_data.get("ask_depth", 0))
