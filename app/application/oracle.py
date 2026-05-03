@@ -740,6 +740,7 @@ class Oracle:
                     balance = 0.0
 
             from config import INITIAL_CAPITAL
+            # Gunakan INITIAL_CAPITAL sebagai fallback aman jika saldo belum tersedia di DB
             effective_balance = balance if balance > 0 else INITIAL_CAPITAL
 
             # 1. Base rate: 1% dari saldo
