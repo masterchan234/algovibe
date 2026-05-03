@@ -207,14 +207,18 @@ def run_migrations(db_path):
     Menjalankan sistem migrasi otomatis untuk memastikan skema database 
     selalu up-to-date tanpa merusak data yang sudah ada.
     """
-    if not os.path.exists(db_path):
-        return
+    # Pastikan direktori ada
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
+    # Tambahkan timeout yang cukup besar untuk inisialisasi awal
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
     try:
+        # Enable WAL mode for better concurrency during migrations
+        conn.execute("PRAGMA journal_mode=WAL;")
+
         # 1. Pastikan tabel migrations ada terlebih dahulu (untuk bootstrap)
         cursor.execute(MIGRATIONS[0][1])
         conn.commit()

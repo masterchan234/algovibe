@@ -26,10 +26,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy model weights first (Heavy layer, cached separately)
-COPY models/ /app/models/
-
 # Copy everything else
+# NOTE: Model AI (~2.5GB) TIDAK dimasukkan ke image.
+# Model di-download saat deploy via 'model-downloader' service di docker-compose.yml.
 COPY . .
 
 # Copy built frontend assets from Stage 1

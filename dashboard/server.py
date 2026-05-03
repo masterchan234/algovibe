@@ -147,10 +147,24 @@ mws.subscribe_market_trades(CURRENT_WATCH_PAIR)
 
 _start_time = time.time()
 
+from app.infrastructure.migrations import run_migrations
+
+# Set untuk track DB path yang sudah dimigrasi di proses ini
+# Prevents redundant migration runs on every request
+_MIGRATED_DBS: set = set()
+
 def get_db_connection():
-    # Pilih DB sesuai mode aktif saat ini (live vs dryrun)
+    """Membuka koneksi SQLite ke DB aktif (live/dryrun).
+    
+    Memastikan migrasi skema sudah dijalankan untuk path ini sebelum
+    koneksi diberikan ke caller — mencegah 'no such table' secara permanen
+    meskipun dashboard start sebelum bot selesai inisialisasi.
+    """
     path = DB_PATH_DRYRUN if cfg.DRY_RUN else DB_PATH_LIVE
-    conn = sqlite3.connect(path)
+    if path not in _MIGRATED_DBS:
+        run_migrations(path)
+        _MIGRATED_DBS.add(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
