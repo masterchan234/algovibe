@@ -28,7 +28,7 @@ class ScalperBot:
 
         self.market_ws = MarketDataWS()
         self.oracle = Oracle(self.market_ws)
-        self.exit_manager = ExitManager(self.exchange, oracle=self.oracle)
+        self.exit_manager = ExitManager(self.exchange, oracle=self.oracle, bot=self)
 
         self.start_day = int(db.get_state("start_day", datetime.now().day))
         self.daily_trades = int(db.get_state("daily_trades", 0))
@@ -91,9 +91,16 @@ class ScalperBot:
         self.cached_balance = 0
         if not config.DRY_RUN:
             try:
-                bal = self.exchange.fetch_balance()
-                self.cached_balance = bal['free'].get('IDR', 0)
-                log_message(f"💰 INITIAL BALANCE: Rp {self.cached_balance:,.0f}")
+                now = time.time()
+                val = _fetch_real_idr_balance_bundle()
+                if val is not None:
+                    _REAL_BALANCE_CACHE["free"] = val.get("free", 0)
+                    _REAL_BALANCE_CACHE["used"] = val.get("used", 0)
+                    _REAL_BALANCE_CACHE["total"] = val.get("total", 0)
+                    _REAL_BALANCE_CACHE["coins"] = val.get("coins", {})
+                    _REAL_BALANCE_CACHE["last_check"] = now
+                    _REAL_BALANCE_CACHE["source"] = val.get("source", "REST")
+                    self.cached_balance = float(_REAL_BALANCE_CACHE["free"])
             except Exception as e:
                 log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
 

@@ -20,9 +20,10 @@ from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
-    def __init__(self, exchange_client, oracle=None):
+    def __init__(self, exchange_client, oracle=None, bot=None):
         self.exchange = exchange_client
         self.oracle = oracle
+        self.bot = bot
         self.jaring_orders = {} # {pair: {id, price, amount}}
         self.last_jaring_update = {} # {pair: timestamp}
         self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
@@ -967,6 +968,11 @@ class ExitManager:
             executed_qty = float(order.get('executedQty') or order.get('amount') or 0)
             is_terminal_fill = (status in done_statuses) or (status in fill_statuses and unfilled_qty <= 0)
             
+            # [Senior Reactive Sync] Trigger balance update on any significant order change
+            if not self.dry_run and self.bot and (status in done_statuses or status in fill_statuses or status in cancel_statuses):
+                # log_message(f"🔄 Re-syncing balance due to order event: {status}")
+                self.bot._sync_balances_to_db()
+
             # Event NEW tidak mengubah state lokal.
             if status not in done_statuses and status not in fill_statuses and status not in cancel_statuses:
                 return
