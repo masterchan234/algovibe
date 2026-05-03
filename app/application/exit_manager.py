@@ -12,7 +12,7 @@ from config import (
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
-    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS, MAX_HOLD_MINUTES,
+    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_AI_CONFIDENCE
 )
 from app.infrastructure.database import db
@@ -201,36 +201,56 @@ class ExitManager:
 
 
         # --- [PORTFOLIO BASKET EXIT / CROSS-ASSET HEDGING] ---
-        # Menutup serentak semua posisi ketika profit gabungan cukup untuk meng-cover posisi yang rugi
+        # Menutup serentak semua posisi ketika:
+        #   (a) profit gabungan cukup untuk meng-cover posisi yang rugi (DAN total >= MIN_NET_PROFIT_IDR), ATAU
+        #   (b) ada posisi "stagnant" (mandek >= STAGNANT_RESCUE_MINUTES & merugi) DAN
+        #       menutup semua bersama-sama setidaknya impas (total_net_pnl >= 0).
+        # Ini menggantikan TIME_STOP_EXIT individual yang membuang peluang profit.
+        STAGNANT_RESCUE_MINUTES = 20  # Ambang waktu mandek untuk trigger rescue basket
         try:
             open_pairs_for_basket = []
             total_net_pnl = 0
             has_losers = False
-            
+            has_stagnant = False
+
             for pair, data in positions.items():
                 if data.get('status') == "OPEN" and pair in current_tickers:
                     current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
                     entry_price = data.get('entry_price', 0)
                     amount = data.get('amount_crypto', 0)
                     amount_idr = data.get('amount_idr', 0)
-                    
+
                     sell_value = amount * current_price
                     fee_sell = sell_value * FEE_SELL_TAKER
                     fee_buy = amount_idr * FEE_BUY_TAKER
-                    
+
                     gross_pnl = (current_price - entry_price) * amount
                     net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-                    
+
                     if net_pnl_idr < 0:
                         has_losers = True
-                        
+
+                    # Deteksi posisi stagnant: mandek lama & masih merugi
+                    try:
+                        _pos_ts = datetime.fromisoformat(data['timestamp'])
+                        _pos_age = (datetime.now() - _pos_ts).total_seconds() / 60.0
+                        if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_idr < 0:
+                            has_stagnant = True
+                    except Exception:
+                        pass
+
                     total_net_pnl += net_pnl_idr
                     open_pairs_for_basket.append((pair, data, current_price, amount))
-            
-            # Eksekusi jika: >1 posisi, ada posisi yang rugi, dan total profit bersih melampaui MIN_NET_PROFIT_IDR
-            if len(open_pairs_for_basket) > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers:
+
+            # Trigger (a): profit gabungan melampaui minimum DAN ada posisi rugi
+            trigger_normal = len(open_pairs_for_basket) > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
+            # Trigger (b): ada posisi stagnant, menutup semua setidaknya impas (>= 0)
+            trigger_stagnant_rescue = len(open_pairs_for_basket) > 1 and has_stagnant and total_net_pnl >= 0
+
+            if trigger_normal or trigger_stagnant_rescue:
+                trigger_label = "STAGNANT RESCUE" if trigger_stagnant_rescue and not trigger_normal else "PROFIT COVER"
                 msg = (
-                    f"🧺 *PORTFOLIO BASKET EXIT* 🧺\n"
+                    f"🧺 *PORTFOLIO BASKET EXIT [{trigger_label}]* 🧺\n"
                     f"Menutup {len(open_pairs_for_basket)} posisi serentak untuk menutupi kerugian!\n"
                     f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
                 )
@@ -376,7 +396,7 @@ class ExitManager:
                             pair,
                             amount,
                             current_price,
-                            "HARD_STOP_LOSS",
+                            "EXIT_TIMEOUT",
                             entry_price=entry_price,
                             amount_idr=data.get('amount_idr', 0),
                             position_data=data
@@ -490,7 +510,12 @@ class ExitManager:
                 tp_sell_fee = FEE_SELL_MAKER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
                 denom_tp = amount * max(0.01, (1 - tp_sell_fee - tp_slippage))
-                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
+                # [Fix Fee-Trap] MIN_NET_PROFIT proporsional terhadap ukuran trade.
+                # Fixed Rp 2.000 menyebabkan exact_tp_price +18% pada trade kecil → TP mustahil.
+                # Formula: min(amount_idr × 1.5%, Rp 2.000) — cukup bermakna tanpa unreachable.
+                amount_idr_pos = float(data.get('amount_idr', 0))
+                dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * 0.015))
+                exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
                 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
@@ -510,20 +535,41 @@ class ExitManager:
                 pos_ts = datetime.fromisoformat(data['timestamp'])
                 pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
                 duration_str = f"{int(pos_age_min)}m"
-                
+
+                # [Daily Target] Kencangkan trailing stop bila sudah dekat target profit harian
+                _target_status = None
+                try:
+                    if self.oracle:
+                        _target_status = self.oracle.get_daily_target_status()
+                except Exception:
+                    pass
+                _near_daily_target = _target_status.get("near", False) if _target_status else False
+
+                # [Regime-aware] Aktivasi trailing lebih cepat di pasar BEARISH/CHOPPY
+                _regime = db.get_state("market_regime") or "UNKNOWN"
+                _is_defensive_regime = _regime in ("BEARISH", "CHOPPY", "CRASH")
+                _activation_pct = (
+                    TRAILING_STOP_ACTIVATION_PCT * 0.6   # 40% lebih cepat saat pasar buruk
+                    if _is_defensive_regime
+                    else TRAILING_STOP_ACTIVATION_PCT
+                )
+
                 if current_price > highest_price:
                     highest_price = current_price
                     positions[pair]['highest_price'] = highest_price
                     
                     # Jarak trailing adaptif: Semakin untung, semakin ketat
                     # [Optimization] Mengunci profit lebih agresif saat harga melonjak
-                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.5%
-                    if current_profit_pct >= 0.04:   # Profit > 4%
+                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default (lihat config TRAILING_STOP_DISTANCE_PCT)
+                    if _near_daily_target:
+                        # Sudah dekat target harian → kunci profit lebih ketat
+                        dist_pct = min(dist_pct, 0.002)   # 0.2% — sangat ketat
+                    elif current_profit_pct >= 0.04:   # Profit > 4%
                         dist_pct = 0.002            # Jarak sangat ketat (0.2%)
                     elif current_profit_pct >= 0.02: # Profit > 2%
                         dist_pct = 0.0035           # Jarak ketat (0.35%)
     
-                    if current_profit_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                    if current_profit_pct >= _activation_pct:
                         new_trailing_sl = highest_price * (1 - dist_pct)
                         if new_trailing_sl > trailing_sl_price:
                             trailing_sl_price = new_trailing_sl
@@ -551,16 +597,6 @@ class ExitManager:
                         positions[pair]['trailing_sl_price'] = break_even_price
                         modified_pairs.add(pair)
                         log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
-    
-                # --- [Safety] Time-Stop Exit ---
-                if pos_age_min >= MAX_HOLD_MINUTES:
-                    msg = f"⏳ *TIME-STOP EXPIRED* ({MAX_HOLD_MINUTES}m) | {pair} | PnL: {pnl_pct:+.2f}%"
-                    log_message(msg)
-                    order_id = self.execute_exit(pair, amount, current_price, "TIME_STOP_EXIT",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                    if order_id:
-                        mark_exit_requested(pair, order_id)
-                        continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -604,13 +640,6 @@ class ExitManager:
                         continue
 
                     # Logika Tier 1: NORMAL SCALP (Ikuti Trailing Stop / TP target standar)
-                    is_stagnant = pos_age_min > (MAX_HOLD_MINUTES * 0.7) and net_pnl_idr > 1000
-                    if is_stagnant:
-                        reason_tp = "STAGNANT_PROFIT_EXIT"
-                        order_id = self.execute_exit(pair, amount, current_price, reason_tp, 
-                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                        if order_id: mark_exit_requested(pair, order_id)
-                        continue
                 except Exception as e:
                     log_message(f"⚠️ Error in Global Tiered TP for {pair}: {e}")
                     continue
@@ -732,9 +761,9 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
-            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "TIME_STOP_EXIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
+            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
             symbol = f"{pair[:-3].upper()}/IDR"
 
             if is_emergency or is_tp_exit:

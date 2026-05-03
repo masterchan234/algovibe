@@ -93,15 +93,20 @@ class ScalperBot:
             try:
                 bal = self.exchange.fetch_balance()
                 self.cached_balance = float(bal.get('free', {}).get('IDR', 0))
+                db.save_state("cached_idr_balance", str(self.cached_balance))
             except Exception as e:
                 log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
 
         self._backfill_historical_data()
 
+        # Hitung target profit harian awal saat startup
+        initial_target = self.oracle.refresh_daily_profit_target(balance=self.cached_balance)
+
         init_msg = (
             f"🚀 *ALGOVIBE SCALPER v3.0* 🚀\n"
             f"Mode: {'DRY RUN' if config.DRY_RUN else 'LIVE'}\n"
-            f"Oracle: ONLINE | Backfill: SYNCING"
+            f"Oracle: ONLINE | Backfill: SYNCING\n"
+            f"Target Profit Hari Ini: Rp {initial_target:,.0f}"
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(init_msg)
@@ -212,6 +217,8 @@ class ScalperBot:
             db.save_balances(bal)
             if 'IDR' in bal:
                 self.cached_balance = float(bal['IDR'].get('free', 0))
+                # Cache saldo IDR ke bot_state agar Oracle bisa membacanya untuk target harian
+                db.save_state("cached_idr_balance", str(self.cached_balance))
             # log_message("🔄 Balances synced to DB for Dashboard.")
         except Exception as e:
             log_message(f"⚠️ Balance Sync Failed: {e}")

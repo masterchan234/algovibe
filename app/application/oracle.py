@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 import config
+from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
 from app.infrastructure.database import db
 from app.infrastructure.llm_worker import LLMWorker
 from utils.logger import log_message
@@ -700,6 +701,154 @@ class Oracle:
             return "ANALYZING", 0, "Analysis queued..."
             
         return "HOLD", 0, "Queue Failed"
+
+    # ── Daily Profit Target Engine ────────────────────────────────────────────
+
+    def calculate_daily_profit_target(self, balance: float = 0.0) -> float:
+        """
+        Kalkulasi target profit harian berbasis AI:
+        - Saldo tersedia (balance)
+        - Market regime real-time
+        - Win-rate dan P&L 24 jam terakhir
+        - Waktu sesi (Asia/Europe/US)
+
+        Formula:
+          base_target = balance * BASE_RATE (1%)
+          x regime_multiplier  (BULLISH=1.5, CHOPPY=0.7, BEARISH=0.5, RANGING=0.8)
+          x wr_multiplier      (WR>=60%=1.2, WR<40%=0.7, else=1.0)
+          x session_multiplier (Asia peak=1.2, US peak=1.1, off-hours=0.8)
+
+        Minimum: Rp 50.000 (agar selalu ada target bermakna)
+        Maximum: 5% dari balance
+
+        Returns:
+            float — target profit harian dalam IDR
+        """
+        try:
+            regime = self.get_market_regime()
+            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+
+            total_trades = stats.get('total_trades', 0)
+            win_count = stats.get('win_count', 0)
+            win_rate = (win_count / total_trades) if total_trades > 0 else 0.5
+
+            # Gunakan balance Rp 100 juta sebagai fallback aman jika tidak ada data
+            if balance <= 0:
+                try:
+                    balance_str = db.get_state("cached_idr_balance")
+                    balance = float(balance_str) if balance_str else 0.0
+                except Exception:
+                    balance = 0.0
+
+            # Gunakan INITIAL_CAPITAL sebagai fallback aman jika saldo belum tersedia di DB
+            effective_balance = balance if balance > 0 else INITIAL_CAPITAL
+
+            # 1. Base rate: 1% dari saldo
+            base_target = effective_balance * 0.01
+
+            # 2. Regime multiplier
+            regime_mult = {
+                MarketRegime.BULLISH: 1.5,
+                MarketRegime.CHOPPY:  0.7,
+                MarketRegime.BEARISH: 0.5,
+                MarketRegime.CRASH:   0.2,
+                MarketRegime.RANGING: 0.8,
+            }.get(regime, 1.0)
+
+            # 3. Win-rate multiplier
+            if win_rate >= 0.60:
+                wr_mult = 1.2
+            elif win_rate < 0.40:
+                wr_mult = 0.7
+            else:
+                wr_mult = 1.0
+
+            # 4. Session multiplier (Indodax peak liquidity windows)
+            hour = datetime.now().hour
+            if 0 <= hour < 8:       # Asia Session (Indodax peak, termasuk jam 0)
+                session_mult = 1.2
+            elif 16 <= hour < 24:   # US Session (high global volatility, termasuk jam 23)
+                session_mult = 1.1
+            else:                   # Europe Session (jam 8-15)
+                session_mult = 1.0
+
+            target = base_target * regime_mult * wr_mult * session_mult
+
+            # Clamp: minimum Rp 50.000, maksimum 5% dari saldo
+            target = max(50_000.0, min(effective_balance * 0.05, target))
+
+            logger.info(
+                f"[Oracle] Daily Target Calc: balance=Rp{effective_balance:,.0f}, "
+                f"regime={regime}(x{regime_mult}), WR={win_rate*100:.0f}%(x{wr_mult}), "
+                f"session=h{hour}(x{session_mult}) → Target=Rp{target:,.0f}"
+            )
+            return target
+
+        except Exception as e:
+            logger.error(f"[Oracle] calculate_daily_profit_target error: {e}")
+            return 100_000.0  # safe fallback
+
+    def refresh_daily_profit_target(self, balance: float = 0.0) -> float:
+        """
+        Hitung ulang dan simpan target profit harian ke DB.
+        Dipanggil setiap ~30 menit oleh market_cycle.
+
+        Returns:
+            float — target yang baru tersimpan
+        """
+        try:
+            target = self.calculate_daily_profit_target(balance=balance)
+            db.save_state("daily_profit_target", str(target))
+            db.save_state("daily_profit_target_ts", datetime.now().isoformat())
+            log_message(f"🎯 [TARGET] Profit harian diperbarui: Rp {target:,.0f}")
+            return target
+        except Exception as e:
+            logger.error(f"[Oracle] refresh_daily_profit_target error: {e}")
+            return 0.0
+
+    def get_daily_target_status(self) -> dict:
+        """
+        Kembalikan status progress terhadap target profit harian.
+
+        Returns dict:
+            target_idr   — target yang dihitung AI
+            current_pnl  — P&L hari ini
+            progress_pct — 0-100+% seberapa dekat ke target
+            reached      — True jika target sudah tercapai
+            near         — True jika sudah >= 80% dari target
+            loss_limit_hit — True jika daily loss limit sudah terlampaui
+        """
+        try:
+            target_raw = db.get_state("daily_profit_target")
+            target_idr = float(target_raw) if target_raw else 0.0
+
+            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            current_pnl = float(stats.get('total_pnl_idr', 0))
+
+            progress_pct = (current_pnl / target_idr * 100) if target_idr > 0 else 0.0
+
+            # Hitung loss limit dalam IDR berdasarkan saldo efektif
+            try:
+                balance_str = db.get_state("cached_idr_balance")
+                effective_balance = float(balance_str) if balance_str else INITIAL_CAPITAL
+            except Exception:
+                effective_balance = INITIAL_CAPITAL
+            daily_loss_limit_idr = -(effective_balance * DAILY_LOSS_LIMIT_PCT)
+
+            return {
+                "target_idr": target_idr,
+                "current_pnl": current_pnl,
+                "progress_pct": round(progress_pct, 1),
+                "reached": current_pnl >= target_idr and target_idr > 0,
+                "near": progress_pct >= 80.0 and target_idr > 0,
+                "loss_limit_hit": current_pnl <= daily_loss_limit_idr,
+            }
+        except Exception as e:
+            logger.error(f"[Oracle] get_daily_target_status error: {e}")
+            return {
+                "target_idr": 0.0, "current_pnl": 0.0, "progress_pct": 0.0,
+                "reached": False, "near": False, "loss_limit_hit": False,
+            }
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 
