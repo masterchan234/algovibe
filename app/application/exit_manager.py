@@ -26,6 +26,7 @@ class ExitManager:
         self.jaring_orders = {} # {pair: {id, price, amount}}
         self.last_jaring_update = {} # {pair: timestamp}
         self.consecutive_shadow_wins = 0 # In-memory streak untuk Shadow Recovery
+        self.last_balance_sync = 0 # Cooldown untuk auto-reconciliation
         self._sync_jaring_from_db()
 
     @property
@@ -90,6 +91,33 @@ class ExitManager:
             return
 
         modified_pairs = set()
+
+        # --- [AUTO-RECONCILIATION] ---
+        # Selalu sinkronkan dengan Indodax: Hapus posisi di DB jika koin sudah tidak ada di exchange.
+        # Dijalankan setiap 5 menit agar tidak membebani API rate limit.
+        if not self.dry_run and (time.time() - self.last_balance_sync > 300):
+            try:
+                bal = self.exchange.fetch_balance()
+                total_balances = bal.get('total', {})
+                
+                ghosts_removed = []
+                for pair in list(positions.keys()):
+                    coin = pair[:-3].upper() # Ambil simbol koin (e.g., 'AXL' dari 'axlidr')
+                    amount_on_exchange = float(total_balances.get(coin, 0) or 0)
+                    
+                    # Jika saldo di exchange sangat kecil (dust) atau nol, anggap sudah terjual
+                    if amount_on_exchange < 1e-8:
+                        log_message(f"👻 [AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange})")
+                        db.delete_position(pair)
+                        positions.pop(pair, None)
+                        ghosts_removed.append(pair)
+                
+                if ghosts_removed:
+                    log_message(f"✅ Auto-reconcile complete. Cleaned: {ghosts_removed}")
+                
+                self.last_balance_sync = time.time()
+            except Exception as e:
+                log_message(f"⚠️ Auto-reconcile failed: {e}")
 
         def mark_exit_requested(target_pair, order_id):
             """Sinkronkan state exit untuk DRY RUN vs LIVE agar tidak ada posisi ghost."""

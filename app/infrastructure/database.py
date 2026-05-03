@@ -236,6 +236,15 @@ class Database:
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
+            # 10. Realtime Account Balances (Dashboard Sync)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS account_balances (
+                asset TEXT PRIMARY KEY,
+                free REAL DEFAULT 0.0,
+                used REAL DEFAULT 0.0,
+                total REAL DEFAULT 0.0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
             # Initialize weights if empty
             cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
             cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
@@ -580,6 +589,36 @@ class Database:
             from config import DRY_RUN as DEFAULT_DRY_RUN
             return DEFAULT_DRY_RUN
         return val.lower() == "true"
+
+    # ── [Senior Logic] Realtime Balance Sync ──
+    
+    def save_balances(self, balances_dict: dict):
+        """
+        Simpan status wallet lengkap ke database.
+        Format balances_dict: { 'IDR': {'free': 100, 'used': 50, 'total': 150}, 'AXL': {...} }
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for asset, data in balances_dict.items():
+                if asset == 'info' or asset == 'timestamp' or asset == 'datetime':
+                    continue
+                cursor.execute('''
+                    INSERT INTO account_balances (asset, free, used, total, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(asset) DO UPDATE SET
+                        free=excluded.free,
+                        used=excluded.used,
+                        total=excluded.total,
+                        updated_at=excluded.updated_at
+                ''', (asset, float(data.get('free', 0)), float(data.get('used', 0)), float(data.get('total', 0))))
+
+    def get_balances(self):
+        """Ambil seluruh saldo koin dari database."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM account_balances")
+            rows = cursor.fetchall()
+            return {row['asset']: dict(row) for row in rows}
 
     # ── METODE UNTUK AUDIT LOG & BLACKLIST ──
 

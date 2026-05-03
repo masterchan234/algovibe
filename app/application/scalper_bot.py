@@ -204,6 +204,19 @@ class ScalperBot:
             log_message(f"⚠️ Backfill failed: {e}")
             db.save_state("backfill_status", "FAILED")
 
+    def _sync_balances_to_db(self):
+        """[Senior Logic] Sync real exchange balances to DB for Dashboard visibility."""
+        if config.DRY_RUN:
+            return
+        try:
+            bal = self.exchange.fetch_balance()
+            db.save_balances(bal)
+            if 'IDR' in bal:
+                self.cached_balance = float(bal['IDR'].get('free', 0))
+            # log_message("🔄 Balances synced to DB for Dashboard.")
+        except Exception as e:
+            log_message(f"⚠️ Balance Sync Failed: {e}")
+
     def get_tickers(self):
         tickers = self.market_ws.get_tickers()
         return tickers if tickers else None
@@ -317,4 +330,8 @@ class ScalperBot:
 
         while True:
             run_market_cycle(self)
+            # Sync balance ke DB setiap siklus (atau tiap 60 detik)
+            if not config.DRY_RUN and (time.time() - getattr(self, '_last_bal_sync_ts', 0) > 60):
+                self._sync_balances_to_db()
+                self._last_bal_sync_ts = time.time()
 

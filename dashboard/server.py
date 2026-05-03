@@ -165,11 +165,62 @@ except Exception as _e:
     print(f"⚠️ Failed to sync initial trade streams: {_e}")
 
 _REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 0, "coins": {}}
+_REST_TICKER_CACHE = {"data": {}, "last_check": 0}
+
+def _fetch_all_tickers_rest():
+    """Fetch all tickers from Indodax REST API as a fallback."""
+    global _REST_TICKER_CACHE
+    now = time.time()
+    if (now - _REST_TICKER_CACHE["last_check"]) < 60:
+        return _REST_TICKER_CACHE["data"]
+    
+    try:
+        # Gunakan public API summaries via CCXT
+        tickers = exchange.fetch_tickers()
+        # Transform ke format yang mudah dibaca: {'axlidr': 2500, ...}
+        transformed = {}
+        for symbol, data in tickers.items():
+            if '/IDR' in symbol:
+                key = symbol.replace('/IDR', '').lower() + 'idr'
+                transformed[key] = float(data.get('last') or 0)
+        
+        _REST_TICKER_CACHE["data"] = transformed
+        _REST_TICKER_CACHE["last_check"] = now
+        return transformed
+    except Exception as e:
+        logging.error(f"⚠️ Error fetching bulk tickers: {e}")
+        return _REST_TICKER_CACHE["data"]
 
 def _fetch_real_idr_balance_bundle():
-    """Fetch real IDR balance bundle from Indodax via CCXT (free/used/total) + all non-IDR coins."""
+    """
+    Fetch real IDR balance bundle (free/used/total) + all non-IDR coins.
+    [Senior Logic] PRIORITASKAN DATA DATABASE (yang didorong oleh bot via WebSocket).
+    Hanya lakukan REST pull jika data DB kosong.
+    """
+    # 1. Coba baca dari Database (Realtime Sync dari Engine)
     try:
-        from app.infrastructure.database import db
+        db_bal = db.get_balances()
+        if db_bal and 'IDR' in db_bal:
+            idr_data = db_bal['IDR']
+            coins = {}
+            for asset, data in db_bal.items():
+                if asset == 'IDR': continue
+                total_val = float(data.get('total', 0))
+                if total_val > 1e-8:
+                    coins[asset] = total_val
+            
+            return {
+                "free": float(idr_data.get('free', 0)),
+                "used": float(idr_data.get('used', 0)),
+                "total": float(idr_data.get('total', 0)),
+                "coins": coins,
+                "source": "DATABASE_SYNC"
+            }
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to read balances from DB: {e}")
+
+    # 2. Fallback ke REST API (Jika DB kosong atau gagal)
+    try:
         user = db.get_user('admin')
         if not user or not user['api_key'] or not user['api_secret']:
             return None
@@ -182,25 +233,23 @@ def _fetch_real_idr_balance_bundle():
         })
         balance = ex.fetch_balance()
         idr = balance.get('IDR', {})
-
-        # Kumpulkan semua koin non-IDR yang memiliki saldo total > 0
+        total_data = balance.get('total', {})
+        
         coins = {}
-        total_all = balance.get('total', {})
-        for coin, val in total_all.items():
-            if coin == 'IDR':
-                continue
+        for coin, val in total_data.items():
+            if coin == 'IDR' or coin == 'info': continue
             amount = float(val or 0)
-            if amount > 0:
+            if amount > 1e-8:
                 coins[coin] = amount
-
+                
         return {
             "free": float(idr.get('free', 0) or 0),
             "used": float(idr.get('used', 0) or 0),
             "total": float(idr.get('total', 0) or 0),
-            "coins": coins,  # {"AXL": 7.94, "DRX": 98.0, ...}
+            "coins": coins,
         }
     except Exception as e:
-        logging.error(f"❌ Error fetching real balance: {e}")
+        logging.error(f"❌ Error fetching real balance via REST fallback: {e}")
         return None
 
 def _get_cached_real_balance_bundle():
@@ -227,32 +276,33 @@ def _get_cached_real_balance():
     val = _get_cached_real_balance_bundle()
     return val.get("free") if val else None
 
-def _get_coin_equity_idr(coins: dict, tickers: dict) -> float:
+def _get_coin_equity_idr(coins: dict, ws_tickers: dict) -> float:
     """
     Hitung total nilai IDR dari semua koin non-IDR yang dipegang di exchange.
     coins: {"AXL": 7.94, "DRX": 98.0, ...}
-    tickers: hasil mws.get_tickers()
+    ws_tickers: hasil mws.get_tickers()
     """
     total = 0.0
+    rest_tickers = None
+    
     for coin, amount in coins.items():
         pair_key = f"{coin.lower()}idr"
-        ticker = tickers.get(pair_key, {})
         
         # 1. Coba ambil dari WebSocket (Paling cepat)
-        price = float(ticker.get('last') or ticker.get('buy') or 0)
+        price = 0
+        ticker = ws_tickers.get(pair_key, {})
+        if ticker:
+            price = float(ticker.get('last') or ticker.get('buy') or 0)
         
-        # 2. Fallback ke REST API jika WebSocket belum punya data (sering terjadi untuk koin pasif/dust)
+        # 2. Fallback ke Bulk REST Tickers (Jika koin tidak aktif di WS)
         if price <= 0:
-            try:
-                # Kita gunakan instance exchange global untuk fetch_ticker sesekali
-                # (Hanya jika WS miss, untuk meminimalkan rate limit)
-                t = exchange.fetch_ticker(f"{coin.upper()}/IDR")
-                price = float(t.get('last') or 0)
-            except:
-                pass
+            if rest_tickers is None:
+                rest_tickers = _fetch_all_tickers_rest()
+            price = rest_tickers.get(pair_key, 0)
                 
         if price > 0:
             total += amount * price
+            
     return total
 
 def _get_pair_technicals(pair):
@@ -644,7 +694,6 @@ def get_stats():
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
-            coin_equity_idr = 0.0
             # Dry Run Equity = Sisa Dana + Modal Terpakai + PnL Mengambang
             total_equity = available_idr + total_used_idr + unrealized_pnl
         else:
@@ -652,27 +701,23 @@ def get_stats():
             real_bal = _get_cached_real_balance_bundle()
             ws_tickers_for_equity = mws.get_tickers()
             if real_bal is not None:
-                # available_idr tetap menampilkan 'free' untuk info dana siap pakai
                 available_idr = float(real_bal.get("free", 0) or 0)
                 idr_used = float(real_bal.get("used", 0) or 0)
-                idr_total = float(real_bal.get("total", 0) or 0)
+                idr_total = available_idr + idr_used
                 
-                # Hitung nilai market semua koin non-IDR
                 coin_equity_idr = _get_coin_equity_idr(
                     real_bal.get("coins", {}), ws_tickers_for_equity
                 )
                 
-                # [Senior Fix] Total Equity LIVE = Total IDR (Free+Used) + Nilai Koin saat ini.
-                # Kita TIDAK menambahkan unrealized_pnl karena sudah include di harga koin.
+                # [Senior Fix] Total Equity LIVE = (Free IDR + Used IDR) + Market Value Seluruh Koin
                 total_equity = idr_total + coin_equity_idr
                 
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
             else:
-                # Fallback jika cache kosong
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
                 idr_used = float(_REAL_BALANCE_CACHE.get("used") or 0)
-                idr_total = float(_REAL_BALANCE_CACHE.get("total") or 0)
+                idr_total = available_idr + idr_used
                 coin_equity_idr = _get_coin_equity_idr(
                     _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
                 )
@@ -1527,7 +1572,6 @@ def _build_stats_payload():
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
             active_win_rate = dry_win_rate
-            coin_equity_idr = 0.0
             # Dry Run Equity = Sisa Dana + Modal Terpakai + PnL Mengambang
             total_equity_val = available_idr + total_used_idr + unrealized_pnl
         else:
@@ -1546,7 +1590,6 @@ def _build_stats_payload():
                 )
                 
                 # [Senior Fix] Total Equity LIVE = Total IDR (Free+Used) + Nilai Koin saat ini.
-                # Unrealized PnL sudah otomatis include dalam harga koin.
                 total_equity_val = idr_total + coin_equity_idr
                 
                 active_pnl = realized_pnl_live
