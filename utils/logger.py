@@ -15,16 +15,30 @@ file_handler = RotatingFileHandler(
     encoding="utf-8",
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        file_handler,
-    ]
-)
+# --- Logger Core Setup ---
+root_logger = logging.getLogger()
+# Hindari duplikasi jika module di-import ulang atau basicConfig sudah dipanggil di tempat lain
+if not root_logger.handlers:
+    # Setup awal jika root belum punya handler
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            file_handler,
+        ]
+    )
+else:
+    # Jika sudah ada handler (misal dari Flask/SocketIO), pastikan FileHandler kita masuk
+    has_file_handler = any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers)
+    if not has_file_handler:
+        file_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+        root_logger.addHandler(file_handler)
+    root_logger.setLevel(logging.INFO)
 
+# Logger khusus aplikasi
 logger = logging.getLogger("Predator")
+logger.propagate = True # Pastikan mengalir ke root yang sudah kita beri handler
 
 def log_message(message: str, telegram: bool = False):
     """

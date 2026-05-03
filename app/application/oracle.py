@@ -210,47 +210,116 @@ class Oracle:
     def _format_rich_prompt(self, pair: str, last_price: float, tech: dict,
                              ob_ctx: dict, ctx: dict, task_type: str) -> str:
         """
-        Merakit prompt akhir dari semua konteks yang telah dikumpulkan.
-        ob_ctx: {'imbalance': float, 'buy_pressure': float, 'bid_depth': float,
-                 'ask_depth': float, 'best_bid': float, 'best_ask': float, 'spread_pct': float,
-                 'trade_summary': str}
+        Merakit prompt akhir dari semua konteks yang telah dikumpulkan dengan format sederhana.
         """
         return (
             f"=== QUANTITATIVE SCALPING ANALYSIS: {pair.upper()} ===\n"
-            f"Price: Rp{last_price:,.2f} | VWAP: {ctx.get('vwap_signal', 'N/A')}\n"
+            f"Current Price: {last_price:.2f}\n"
+            f"VWAP Signal: {ctx.get('vwap_signal', 'N/A')}\n"
             f"Momentum: {ctx.get('momentum', 'N/A')}\n"
             f"24h Range Position: {ctx.get('range_position', 'N/A')}\n"
             f"\n[TECHNICAL INDICATORS]\n"
-            f"RSI={tech.get('rsi','N/A')} | Volatility={tech.get('volatility','N/A')}% | "
-            f"Signal={tech.get('signal', tech.get('verdict','N/A'))} | "
-            f"BuyPressure(OB)={ob_ctx.get('buy_pressure', 50):.1f}%\n"
+            f"RSI: {tech.get('rsi','N/A')}\n"
+            f"Volatility: {tech.get('volatility','N/A')} percent\n"
+            f"Technical Signal: {tech.get('signal', tech.get('verdict','N/A'))}\n"
+            f"Orderbook Buy Pressure: {ob_ctx.get('buy_pressure', 50):.1f} percent\n"
             f"\n[ORDER BOOK MICROSTRUCTURE]\n"
-            f"Bid/Ask Imbalance={ob_ctx.get('imbalance', 1.0):.2f}x (>1=bullish) | "
-            f"Spread={ob_ctx.get('spread_pct', 0):.3f}%\n"
-            f"Bid Depth=Rp{ob_ctx.get('bid_depth', 0):,.0f} | "
-            f"Ask Depth=Rp{ob_ctx.get('ask_depth', 0):,.0f}\n"
-            f"Best Bid=Rp{ob_ctx.get('best_bid', 0):,.2f} | "
-            f"Best Ask=Rp{ob_ctx.get('best_ask', 0):,.2f}\n"
-            f"\n[MARKET ACTIVITY & FLOW]\n"
-            f"Trade Flow (50 trades): {ctx.get('trade_flow', 'N/A')}\n"
+            f"Bid-Ask Imbalance: {ob_ctx.get('imbalance', 1.0):.2f} (ratio)\n"
+            f"Spread: {ob_ctx.get('spread_pct', 0):.3f} percent\n"
+            f"Bid Depth (IDR): {ob_ctx.get('bid_depth', 0):.0f}\n"
+            f"Ask Depth (IDR): {ob_ctx.get('ask_depth', 0):.0f}\n"
+            f"Best Bid: {ob_ctx.get('best_bid', 0):.2f}\n"
+            f"Best Ask: {ob_ctx.get('best_ask', 0):.2f}\n"
+            f"\n[MARKET ACTIVITY AND FLOW]\n"
+            f"Trade Flow Snapshot: {ctx.get('trade_flow', 'N/A')}\n"
             f"Whale Prints: {ctx.get('whale_prints', 'None')}\n"
             f"Volume Anomaly: {ctx.get('volume_anomaly', 'N/A')}\n"
-            f"Recent Trades: {ob_ctx.get('trade_summary', 'N/A')}\n"
+            f"Recent Trades History: {ob_ctx.get('trade_summary', 'N/A')}\n"
             f"\n[MARKET CONTEXT]\n"
             f"Market Regime: {ctx.get('market_regime', 'N/A')}\n"
-            f"Sector: {ctx.get('sector', 'N/A')}\n"
-            f"Session: {ctx.get('session', 'N/A')}\n"
-            f"\n[BOT MEMORY & HISTORY]\n"
-            f"This Pair History: {ctx.get('pair_history', 'N/A')}\n"
+            f"Sector Information: {ctx.get('sector', 'N/A')}\n"
+            f"Trading Session: {ctx.get('session', 'N/A')}\n"
+            f"\n[BOT MEMORY]\n"
+            f"Previous Analysis for this pair: {ctx.get('pair_history', 'N/A')}\n"
             f"Recent Lessons: {ctx.get('lessons', 'None')}\n"
             f"\n[TASK]\n"
             f"{'Confirm or reject this BUY signal.' if task_type == 'auto' else 'Provide a sharp tactical analysis.'} "
-            f"Using ALL data above — technicals, orderbook microstructure, flow, regime, and bot memory.\n"
-            f"Output: Verdict (BUY/HOLD/AVOID) + 1 concise sentence reasoning + "
-            f"Profit Target (Rp) + Stop Loss (Rp) + ETA (minutes).\n"
-            f"Be objective: issue AVOID if orderbook is thin, sell flow dominates, or price is at 24h high. "
-            f"Only suggest BUY if multiple signals align (RSI, flow, regime, history). Do not default to BUY."
+            f"Using ALL the data provided above. Output your verdict (BUY/HOLD/AVOID) followed by a short explanation, "
+            f"Profit Target, Stop Loss, and estimated time (ETA).\n"
         )
+
+    def _prepare_rich_prompt(self, pair: str, task_type: str = 'auto') -> str:
+        """
+        Helper untuk mengumpulkan data (History, OB, Tech, Context) dan
+        merakitnya menjadi prompt kaya untuk LLM.
+        """
+        from app.domain.technicals import get_technical_summary, derive_trade_signal
+        import sqlite3
+        from config import DB_PATH
+        import json
+
+        pair = pair.lower()
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            # 1. Ticker History
+            row = conn.execute(
+                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+            ).fetchone()
+            prices = json.loads(row['history_json']) if (row and row['history_json']) else []
+            
+            # 2. Technicals
+            tech = get_technical_summary(prices)
+            sig = derive_trade_signal(tech)
+            tech['signal'] = sig['verdict']
+            tech['reason'] = sig.get('reason', '')
+            tech['verdict'] = sig['verdict'] # Fallback
+            tech['tech_confidence'] = sig.get('confidence', 0)
+
+            # 3. Order Book Microstructure
+            depth_rows = conn.execute(
+                "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
+            ).fetchall()
+            bids = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 1]
+            asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
+            
+            total_bid = sum(v for _, v in bids)
+            total_ask = sum(v for _, v in asks)
+            total_ob  = total_bid + total_ask
+            best_bid  = max((p for p, _ in bids), default=0)
+            best_ask  = min((p for p, _ in asks), default=0)
+            spread_pct = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
+            
+            # 4. Recent Trades (Snapshot from WS)
+            ws_trades_snap = self.market_ws.get_trades(pair) or []
+            t_lines = []
+            for t in ws_trades_snap[:5]:
+                try:
+                    side  = str(t[3]).upper() if len(t) > 3 else '?'
+                    price = float(t[4]) if len(t) > 4 else 0
+                    vol   = float(t[6]) if len(t) > 6 else 0
+                    t_lines.append(f"{side}@Rp{price:,.0f}({vol:.4f})")
+                except Exception: continue
+            trade_summary = " | ".join(t_lines) if t_lines else "N/A"
+
+            ob_ctx = {
+                'buy_pressure': round(total_bid / total_ob * 100, 1) if total_ob > 0 else 50.0,
+                'imbalance':    round(total_bid / total_ask, 2) if total_ask > 0 else 1.0,
+                'bid_depth':    total_bid,
+                'ask_depth':    total_ask,
+                'best_bid':     best_bid,
+                'best_ask':     best_ask,
+                'spread_pct':   spread_pct,
+                'trade_summary': trade_summary,
+            }
+
+            # 5. Build context
+            ctx = self._build_rich_market_context(pair, prices, tech, conn)
+            last_price = float(prices[-1]) if prices else 0
+            
+            return self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type=task_type)
+        finally:
+            conn.close()
 
     def auto_queue_buy_candidates(self, ranked_signals):
         """
@@ -277,8 +346,6 @@ class Oracle:
         if not buy_candidates:
             return
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
         try:
             for candidate in buy_candidates:
                 pair = candidate['pair']
@@ -287,48 +354,13 @@ class Oracle:
                     if age < 300:
                         continue
 
-                row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
-                ).fetchone()
-                prices = json.loads(row['history_json']) if (row and row['history_json']) else []
-                tech   = get_technical_summary(prices)
-                sig    = derive_trade_signal(tech)
-
-                # Order Book dari DB
-                depth_rows = conn.execute(
-                    "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
-                ).fetchall()
-                bids = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 1]
-                asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
-                total_bid = sum(v for _, v in bids)
-                total_ask = sum(v for _, v in asks)
-                total_ob  = total_bid + total_ask
-                best_bid  = max((p for p, _ in bids), default=0)
-                best_ask  = min((p for p, _ in asks), default=0)
-                spread_pct = round(((best_ask - best_bid) / best_bid * 100), 3) if best_bid > 0 else 0
-                ob_ctx = {
-                    'buy_pressure': round(total_bid / total_ob * 100, 1) if total_ob > 0 else 50.0,
-                    'imbalance':    round(total_bid / total_ask, 2) if total_ask > 0 else 1.0,
-                    'bid_depth':    total_bid,
-                    'ask_depth':    total_ask,
-                    'best_bid':     best_bid,
-                    'best_ask':     best_ask,
-                    'spread_pct':   spread_pct,
-                    'trade_summary': 'see Market Activity section',
-                }
-
-                # Bangun rich context (9 tier)
-                tech['signal'] = sig['verdict']
-                tech['reason'] = sig.get('reason', '')
-                ctx = self._build_rich_market_context(pair, prices, tech, conn)
-
-                last_price = float(prices[-1]) if prices else 0
-                prompt = self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type='auto')
+                # Gunakan helper baru untuk membangun prompt kaya
+                prompt = self._prepare_rich_prompt(pair, task_type='auto')
                 self.llm_worker.query_structured(f"ANALYSIS:{pair}", prompt)
                 self.pump_cooldowns[pair] = now
-                logger.info(f"[AutoQueue] LLM rich-context queued for {pair} (BUY {sig.get('confidence',0)}%)")
+                logger.info(f"[AutoQueue] LLM rich-context queued for {pair}")
         finally:
-            conn.close()
+            pass
 
     def process_llm_insights(self):
         """Called periodically to fetch async LLM insights."""
@@ -1263,7 +1295,14 @@ class Oracle:
             if buy_wall_idr < (WHALE_THRESHOLD_IDR / 5): # Very thin buy support
                 db.save_state("latest_fake_pump", f"{pair}|{price_change_pct:.1f}")
                 
-                prompt = f"The cryptocurrency {pair} just jumped {price_change_pct:.1f}% in price, but the 'buy wall' (bids) is extremely thin ({buy_wall_idr:,.0f} IDR). Is this a 'fake pump' designed to trap buyers? Provide a 2-sentence analysis."
+                # Gunakan helper baru untuk konteks likuiditas yang lebih dalam
+                rich_context = self._prepare_rich_prompt(pair, task_type='fakepump')
+                prompt = (
+                    f"CRYPTO LIQUIDITY WARNING: The coin {pair.upper()} just jumped {price_change_pct:.1f}% in price, "
+                    f"but the 'buy wall' (bids) is extremely thin ({buy_wall_idr:,.0f} IDR). "
+                    "Is this a 'fake pump' designed to trap buyers? Analyze the data below and give a 2-sentence verdict.\n\n"
+                    f"{rich_context}"
+                )
                 self.llm_worker.query_async("FAKE_PUMP_ANALYSIS", prompt)
                 
                 return True
@@ -1303,11 +1342,13 @@ class Oracle:
             change = top_ticker.get('change_24h', 0)
             vol = 0 # Volatility info not in raw ticker
             
+        # Gunakan helper baru untuk membangun prompt kaya
+        rich_context = self._prepare_rich_prompt(target_pair, task_type='topmover')
         prompt = (
             f"As a Senior Quantitative Crypto Analyst, analyze the price action of {target_pair.upper()} "
             f"which has moved {change:.2f}% in the last 24 hours. "
-            "Give a sharp, professional market insight (risk & opportunity) in max 2 short sentences. "
-            "Do not use generic warnings; be specific."
+            "Give a sharp, professional market insight (risk & opportunity) in max 2 short sentences using the data below.\n\n"
+            f"{rich_context}"
         )
         self.llm_worker.query_async(f"TOP_MOVER:{target_pair}", prompt)
         self.last_top_mover_analysis = datetime.now()
@@ -1321,10 +1362,14 @@ class Oracle:
             return
             
         status = "PUMPING" if change > 0 else "CRASHING"
+        
+        # Gunakan helper baru untuk memberikan data Order Book asli ke AI
+        rich_context = self._prepare_rich_prompt(pair, task_type='pumpalert')
         prompt = (
             f"URGENT: The coin {pair.upper()} is {status} with a {change:.2f}% move! "
-            "Analyze the orderbook depth and price action. Is this a trap or a real breakout? "
-            "Give a 1-sentence warning or recommendation for scalpers."
+            "Analyze the orderbook depth and price action below. Is this a trap or a real breakout? "
+            "Give a 1-sentence warning or recommendation for scalpers.\n\n"
+            f"{rich_context}"
         )
         self.llm_worker.query_async(f"PUMP_ALERT:{pair}", prompt)
         self.pump_cooldowns[pair] = datetime.now()
