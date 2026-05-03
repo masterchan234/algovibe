@@ -9,7 +9,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/app/data:rw
+      #- ./data:/app/data:rw
       - ./data/models:/app/models:rw   # auto_trainer butuh write untuk atomic swap model
     read_only: true
     tmpfs:
