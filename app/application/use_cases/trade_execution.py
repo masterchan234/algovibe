@@ -96,6 +96,15 @@ def execute_trade(
                     
             amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
 
+        # [Recovery Mode] Kurangi ukuran posisi 50% saat bot dalam mode pemulihan setelah loss limit
+        recovery_factor = getattr(bot, '_recovery_size_factor', 1.0)
+        if recovery_factor < 1.0:
+            amount_idr *= recovery_factor
+            log_message(
+                f"🔻 [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
+                f"Rp {amount_idr:,.0f} ({recovery_factor*100:.0f}% dari normal)"
+            )
+
         # 2. Dynamic check (Participation Rate)
         # Kita tidak ingin trade kita > 1/Multiplier (e.g. 1/50 = 2%) dari volume harian
         required_vol = amount_idr * LIQUIDITY_MULTIPLIER

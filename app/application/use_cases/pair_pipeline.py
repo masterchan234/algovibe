@@ -116,12 +116,22 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
     current_pnl = target_status["current_pnl"]
     progress_pct = target_status["progress_pct"]
 
+    # Counter posisi baru yang berhasil dibuka dalam siklus recovery ini
+    _recovery_new_positions = 0
+
     if target_status["loss_limit_hit"]:
+        # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
+        # Kondisi wajib: AI confidence ≥80%, LLM verdict BUY ≥75%, max 1 posisi baru,
+        # ukuran posisi diperkecil 50%.
+        adaptive_cfg["ai_threshold"] = 0.80
+        adaptive_cfg["recovery_mode"] = True
+        # Simpan faktor sizing 50% ke bot agar trade_execution bisa membacanya
+        bot._recovery_size_factor = 0.5
         log_message(
-            f"🛑 [DAILY LOSS LIMIT] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
-            f"Bot stand-by sampai hari berikutnya — hanya memantau posisi terbuka."
+            f"⚡ [RECOVERY MODE] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
+            f"Threshold ultra-ketat (80%), max 1 posisi baru, ukuran -50%. "
+            f"Tetap scan peluang — tidak buta terhadap market."
         )
-        return
 
     if target_status["reached"]:
         log_message(
@@ -151,7 +161,25 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 continue
             if gate == _BREAK:
                 break
-            
+
+            # [RECOVERY MODE] Gate tambahan: hanya LLM BUY ≥75% yang lolos,
+            # dan maksimal 1 posisi baru selama sesi recovery ini.
+            if adaptive_cfg.get("recovery_mode"):
+                llm_v = gate.get("llm_v", "HOLD")
+                llm_c = float(gate.get("llm_c", 0))
+                if not (llm_v == "BUY" and llm_c >= 75.0):
+                    log_message(
+                        f"🔒 [RECOVERY GATE] {pair} ditolak — butuh LLM BUY ≥75%, "
+                        f"dapat: {llm_v} {llm_c:.0f}%"
+                    )
+                    continue
+                # Batasi ke 1 posisi baru dalam siklus recovery ini
+                if _recovery_new_positions >= 1:
+                    log_message(
+                        f"🔒 [RECOVERY GATE] {pair} ditolak — sudah ada posisi baru di sesi recovery."
+                    )
+                    continue
+
             target = calculate_entry_target(bot, p, enriched, gate, adaptive_cfg)
 
             # [Senior Fix] Shadow Recovery Path
@@ -165,9 +193,16 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             if dispatch_entry(bot, p, enriched, gate, target):
                 bot.daily_trades += 1
                 db.save_state("daily_trades", bot.daily_trades)
+                if adaptive_cfg.get("recovery_mode"):
+                    _recovery_new_positions += 1
 
         except Exception as e:
             log_message(f"⚠️ [Pair Loop Error] {pair}: {e}")
             continue
+
+    # Bersihkan recovery flag agar tidak bocor ke siklus berikutnya
+    if hasattr(bot, '_recovery_size_factor'):
+        del bot._recovery_size_factor
+    adaptive_cfg.pop("recovery_mode", None)
 
     time.sleep(5)
