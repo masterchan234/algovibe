@@ -30,9 +30,6 @@ def execute_trade(
     dynamic_tp=None,
     dynamic_sl=None,
     taker=False,
-    llm_verdict="HOLD",
-    llm_confidence=0.0,
-    llm_reason="",
 ):
     try:
         # --- [Risk Check: Max Positions] ---
@@ -62,13 +59,11 @@ def execute_trade(
             log_message(f"⚠️ SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
             return False
 
-        # Hitung estimasi modal yang akan dipakai dengan Profit Velocity Sizing
-        # tq_prob mewakili kecepatan/kekuatan tren teknikal
-        # llm_confidence mewakili keyakinan analisa AI
+        # Position sizing: velocity_score and confidence both derived from pure technical probability.
         multiplier = bot.oracle.get_sizing_multiplier(
             pair=pair, 
-            velocity_score=tq_prob, 
-            confidence=llm_confidence / 100.0  # Konversi dari 0-100 ke 0-1
+            velocity_score=tq_prob,
+            confidence=tq_prob,   # pure technical, no AI bias
         )
         
         if multiplier <= 0:
@@ -89,8 +84,8 @@ def execute_trade(
             # If the calculated size is too small for the exchange but the account can afford it,
             # we 'clamp' to the minimum trade amount to ensure the bot can actually execute.
             if is_small_account and target_amount < MIN_TRADE_IDR:
-                # Only elevate if AI confidence or tech probability is solid
-                if (tq_prob >= 0.45 or llm_confidence >= 55) and balance >= MIN_TRADE_IDR * 1.15:
+                # Only elevate if technical probability is solid (no AI bias)
+                if tq_prob >= 0.45 and balance >= MIN_TRADE_IDR * 1.15:
                     log_message(f"🧠 [Intelligent Sizing] Elevating {pair} to Min Trade (Rp {MIN_TRADE_IDR:,.0f}) for execution.")
                     target_amount = MIN_TRADE_IDR * 1.05 # Add 5% buffer for market volatility
                     
@@ -235,16 +230,12 @@ def execute_trade(
 
         dna_data = {
             "amount_crypto": amount_crypto,
-            "ai_prob": tq_prob * 100,
+            "tq_prob": tq_prob * 100,
             "whale_boost": whale_boost,
-            "sector_sentiment": bot.oracle.get_sector_sentiment_val(pair),
             "imbalance": imbalance,
             "volatility": volatility,
             "rsi": _rsi_dna,
             "ema_dist": _ema_dist_dna,
-            "llm_verdict": llm_verdict,
-            "llm_confidence": llm_confidence,
-            "llm_reason": llm_reason,
             "dry_run": config.DRY_RUN,
         }
         

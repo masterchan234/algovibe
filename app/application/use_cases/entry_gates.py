@@ -4,10 +4,13 @@ entry_gates.py
 All pre-entry gate checks for a candidate pair:
   - open position / blacklist guard
   - cooldown guard
-  - AI probability and imbalance threshold
   - trend / breakout requirement
-  - LLM verdict queue and policy
+  - multi-confluence technical gate
+  - technical probability threshold (pure, no AI bias)
   - K-NN pattern scoring and confidence threshold
+
+All AI/LLM influence has been removed from the decision path.
+Every gate is based exclusively on price-derived technical indicators.
 
 Returns a gate result dict when all gates pass, None to skip the pair,
 or the string "BREAK" to abort the entire candidate loop (consecutive-loss halt).
@@ -26,6 +29,7 @@ from app.infrastructure.database import db
 from app.domain.technicals import (
     calculate_rsi, derive_trade_signal, get_technical_summary,
     calculate_macd, calculate_bollinger_bands, calculate_stochastic_rsi, calculate_ema,
+    _MACD_NORM_FACTOR,
 )
 from utils.logger import log_message
 
@@ -101,14 +105,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
         return None
 
-    # ── 3. Learning-adjusted score + tracking log ──────────────────────────
-    features = {
-        "ai_prob": tq_prob,
-        "whale_boost": whale_boost - 1.0,
-        "sector_sentiment": bot.oracle.get_sector_sentiment_val(pair),
-        "imbalance": imbalance_ratio,
-    }
-    final_score = bot.oracle.apply_learning_to_score(p['score'], features)
+    # ── 3. Radar recommendation + tracking log ────────────────────────────
+    # Score berdasarkan ranking teknikal murni — tidak ada learning adjustment AI.
+    final_score = p['score']
 
     radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
     db.save_state(f"radar_reco_{pair}", radar_rec)
@@ -120,10 +119,6 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         boost_str += " 🐳"
     if sector_boost > 1.0:
         boost_str += " 🔥"
-    if final_score > p['score']:
-        boost_str += " 📈"
-    if final_score < p['score']:
-        boost_str += " 📉"
 
     log_message(
         f"Track: {pair:10} | Regime: {regime:8} | Trend: {trend:9} | "
@@ -225,9 +220,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         ema_dist = 0.0
 
     current_dna = {
-        "ai_prob": tq_prob,
-        "whale_boost": whale_boost,
-        "sector_sentiment": sector_boost,
+        "tq_prob": tq_prob,             # technical probability (pure)
+        "bb_pct": tech.get('bb_pct', 0.5),          # Bollinger %B (posisi harga di band)
+        "macd_norm": abs(tech.get('macd_hist', 0)) / max(1.0, float(p['last'])) * _MACD_NORM_FACTOR,
         "imbalance": imbalance_ratio,
         "volatility": current_vol,
         "rsi": rsi_val,
@@ -258,27 +253,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 12. LLM Advisory Gate (Veto-Only, Non-Amplifier) ─────────────────
-    # LLM hanya bisa MEMBLOKIR entry (veto), tidak bisa MENDORONG entry.
-    # Keputusan entry utama harus dari technical score, bukan opini LLM.
-    llm_v, llm_c, llm_r = bot.oracle.request_trade_verdict(pair, enriched)
-
-    llm_bonus = 0.0  # LLM tidak lagi memberikan bonus positif ke confidence
-    if llm_v == "ANALYZING":
-        log_message(f"⏳ LLM analyzing {pair}... Lanjut berdasarkan teknikal.")
-    elif llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
-        # LLM boleh veto hanya jika confidence sangat tinggi
-        msg = f"🚫 LLM ADVISORY VETO {llm_c:.0f}%: {llm_r[:60]}"
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
-    # LLM BUY hanya memberikan bonus sangat kecil (konfirmasi, bukan driver)
-    elif llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
-        llm_bonus = min(3.0, (llm_c - 60.0) * 0.1)  # Max +3% (sebelumnya +8%)
-
     # ── 13. Final Confidence threshold ────────────────────────────────────
     boost_credit = min(scalper_boost, 6.0)
-    total_confidence = base_confidence + boost_credit + llm_bonus
+    total_confidence = base_confidence + boost_credit
 
     effective_threshold = 0.0 if config.DRY_RUN_LOOSE_GATES else dynamic_threshold
     if total_confidence < effective_threshold:
@@ -289,17 +266,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     log_message(
         f"🚀 [Entry Ready] {pair}: Tech {base_confidence:.1f}% + Boost {boost_credit:.1f}% "
-        f"+ LLM {llm_bonus:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
+        f"= {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
     )
 
     return {
         "mode": "SHADOW" if is_shadow_mode else "LIVE",
         "radar_rec": radar_rec,
         "radar_reason": radar_reason,
-        "llm_v": llm_v,
-        "llm_c": llm_c,
-        "llm_r": llm_r,
-        "llm_bonus": llm_bonus,
         "rsi_val": rsi_val,
         "total_confidence": total_confidence,
         "dynamic_threshold": dynamic_threshold,

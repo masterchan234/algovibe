@@ -347,7 +347,7 @@ class ExitManager:
                             continue
 
                         momentum_signal = 'HOLD'
-                        live_ai_prob = -1.0
+                        live_tech_prob = -1.0
                         hist = []
                         if price_history and pair in price_history:
                             hist = list(price_history.get(pair, []))
@@ -366,11 +366,10 @@ class ExitManager:
                             momentum_signal = derive_trade_signal(tech).get('verdict', 'HOLD')
 
                             if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
-                                ai_boost = self.oracle.get_sentiment_boost(pair) if self.oracle else 0.0
-                                live_ai_prob = float(get_prediction_fn(hist, current_tickers.get(pair), ai_boost))
+                                live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
 
                         # Force fallback jika terlalu lama + momentum memburuk, atau sangat lama tanpa fill.
-                        is_momentum_bad = (momentum_signal == 'SELL') or (live_ai_prob >= 0 and live_ai_prob < 0.40)
+                        is_momentum_bad = (momentum_signal == 'SELL') or (live_tech_prob >= 0 and live_tech_prob < 0.40)
                         is_underwater = entry_price > 0 and current_price < entry_price * 0.995
                         should_fallback = (exiting_age_sec >= 180 and (is_momentum_bad or is_underwater)) or exiting_age_sec >= 360
 
@@ -392,7 +391,7 @@ class ExitManager:
 
                         log_message(
                             f"⚠️ [EXIT TIMEOUT FALLBACK] {pair}: {int(exiting_age_sec)}s, "
-                            f"Sig={momentum_signal}, AI={live_ai_prob:.2f}. Switching to emergency exit."
+                            f"Sig={momentum_signal}, TQ={live_tech_prob:.2f}. Switching to emergency exit."
                         )
 
                         new_order_id = self.execute_exit(
@@ -415,11 +414,12 @@ class ExitManager:
                 entry_price = data.get('entry_price', 0)
                 amount = data.get('amount_crypto', 0)
 
-                # [Inline Momentum Engine] Samakan basis BUY/SELL: technical + orderbook + AI live.
+                # [Inline Momentum Engine] Samakan basis BUY/SELL: technical + orderbook.
+                # Semua keputusan exit murni dari indikator teknikal — tidak ada AI bias.
                 momentum_signal = 'HOLD'
                 momentum_conf = 50
                 current_rsi = 50.0
-                live_ai_prob = -1.0
+                live_tech_prob = -1.0
 
                 hist = []
                 if price_history and pair in price_history:
@@ -450,10 +450,9 @@ class ExitManager:
 
                     if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
                         try:
-                            ai_boost = self.oracle.get_sentiment_boost(pair) if self.oracle else 0.0
-                            live_ai_prob = float(get_prediction_fn(hist, current_tickers.get(pair), ai_boost))
+                            live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
                         except Exception as e:
-                            log_message(f"⚠️ AI live-prob eval error for {pair}: {e}")
+                            log_message(f"⚠️ Tech live-prob eval error for {pair}: {e}")
                 
                 # Diagnostic: Log status for open positions
                 # log_message(f"Monitoring {pair}: Price={current_price:,.2f}, Entry={entry_price:,.2f}, Status={data.get('status')}")
@@ -675,37 +674,10 @@ class ExitManager:
                     log_message(f"⚠️ Error in Global Tiered TP for {pair}: {e}")
                     continue
     
-                # --- [AI-Adaptive] Emergency Exit via Oracle Veto ---
-                # Jika AI mendeteksi 'Fake Pump' atau tren berbalik jadi 'AVOID' saat kita HOLD, langsung EXIT.
-                ai_veto, veto_reason = False, ""
-                if self.oracle:
-                    ai_veto, veto_reason = self.oracle.check_llm_veto(pair)
-                
-                # 1. AI Emergency Exit (Highest Priority)
-                # [Fix Bug#2] Izinkan exit paksa pada kerugian dalam jika confidence veto sangat tinggi (>=80%)
-                # Ini mencegah bot terus hold posisi yang AI nilai akan semakin memburuk
-                veto_confidence = 0
-                if veto_reason:
-                    import re as _re
-                    _m = _re.search(r'(\d+)%', veto_reason)
-                    if _m: veto_confidence = int(_m.group(1))
-                allow_deep_cut = veto_confidence >= 80  # Veto sangat yakin → izinkan cut loss dalam
-                if ai_veto and (current_profit_pct > -0.005 or allow_deep_cut):
-                    msg = (
-                        f"🚨 *AI EMERGENCY EXIT* 🚨\n"
-                        f"Pair: `{pair}`\n"
-                        f"Alasan: `{veto_reason}`\n"
-                        f"Profit: {current_profit_pct*100:+.2f}% (Closing now)"
-                    )
-                    print(msg.replace('*', '').replace('\n', ' | '))
-                    send_telegram_message(msg)
-                    
-                    order_id = self.execute_exit(pair, amount, current_price, "AI_VETO_EXIT",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                    if order_id:
-                        mark_exit_requested(pair, order_id)
-                        continue
-    
+                # --- [AI-Free] Emergency exit signals are handled by Tier 2 technical exit
+                # (momentum SELL + tech weakness) and Tier 3 force-exit above. Any
+                # remaining position continues to trailing stop / hard SL below.
+
                 # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
                 if current_price >= tp_price:
                     msg = (
@@ -733,14 +705,14 @@ class ExitManager:
                     current_tier < DCA_MAX_TIERS and
                     current_profit_pct <= DCA_STEP_PCT and
                     current_price > active_sl_price and  # Belum kena hard SL
-                    live_ai_prob >= DCA_MIN_AI_CONFIDENCE
+                    live_tech_prob >= DCA_MIN_AI_CONFIDENCE  # Probabilitas teknikal cukup kuat
                 )
 
                 if can_dca:
                     reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
                     log_msg = (
                         f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
-                        f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, AI: {live_ai_prob:.2f})"
+                        f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, TQ: {live_tech_prob:.2f})"
                     )
                     log_message(log_msg)
                     db.log_system_event(pair, "DCA", log_msg, 'INFO')
@@ -753,7 +725,7 @@ class ExitManager:
                         continue
 
                 elif current_price <= active_sl_price:
-                    # Jika tidak bisa DCA (tier habis / AI tidak yakin / sudah kena hard SL), lakukan Stop Loss
+                    # Jika tidak bisa DCA (tier habis / TQ prob rendah / sudah kena hard SL), lakukan Stop Loss
                     is_trailing_hit = active_sl_price > break_even_price
                     is_be_hit = abs(active_sl_price - break_even_price) < 1.0  
                     
@@ -792,7 +764,7 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
             symbol = f"{pair[:-3].upper()}/IDR"

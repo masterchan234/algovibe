@@ -41,9 +41,11 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             # base_risk represents the natural breathing room of the coin
             base_risk_pct = (atr_val * 1.5) / p['last']
             
-            # 2. Conviction Scaling (Confidence & Probability)
-            # Higher confidence allows for 'stretching' the targets
-            conviction_factor = (tq_prob + (gate.get('llm_c', 50) / 100.0)) / 2.0
+            # 2. Conviction Scaling (pure technical)
+            # Menggunakan tq_prob (technical probability) dan K-NN total_confidence
+            # sebagai dua sumber keyakinan independen — tidak ada LLM di sini.
+            knn_conf_norm = gate['total_confidence'] / 100.0
+            conviction_factor = (tq_prob + knn_conf_norm) / 2.0
             # Stretch multiplier: 0.8x to 1.3x based on conviction
             stretch_mult = 0.8 + (conviction_factor * 0.5)
             
@@ -72,7 +74,8 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
 
             log_message(
                 f"🧠 [INTELLIGENT TARGET] {pair}: TP {final_dyn_tp * 100:.2f}%, "
-                f"SL {final_dyn_sl * 100:.2f}% | Conviction: {conviction_factor:.2f}, RSI: {rsi_val:.1f}"
+                f"SL {final_dyn_sl * 100:.2f}% | Conviction: {conviction_factor:.2f} "
+                f"(TQ={tq_prob:.2f}, KNN={knn_conf_norm:.2f}), RSI: {rsi_val:.1f}"
             )
         else:
             final_dyn_tp = knn_decision['target_tp']
