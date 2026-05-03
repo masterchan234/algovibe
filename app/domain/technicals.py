@@ -8,6 +8,11 @@ Setiap sinyal HARUS dikonfirmasi oleh minimal 2 indikator berbeda (multi-conflue
 
 import numpy as np
 
+# Faktor normalisasi MACD histogram terhadap harga.
+# Nilai 1000 dikalibrasi untuk scalping IDR: gerakan >= 0.1% harga dianggap sinyal kuat.
+# Contoh: hist=1 IDR pada koin 1000 IDR → 1/1000*1000 = 1.0 (jenuh = sinyal penuh).
+_MACD_NORM_FACTOR = 1000
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # INDICATOR CALCULATIONS
@@ -259,6 +264,9 @@ def calculate_williams_r(prices, period=14):
     Williams %R: mengukur posisi harga penutupan di dalam range (high-low) N periode.
     Returns: nilai antara -100 (oversold/potensi bounce) dan 0 (overbought/potensi koreksi).
 
+    Formula: W%R = (highest_high - close) / (highest_high - lowest_low) * -100
+    Karena close selalu dalam [lowest, highest] dari window yang sama, hasil selalu [-100, 0].
+
     Interpretasi scalping:
       W%R <= -80  → deep oversold, peluang rebound tinggi
       W%R >= -20  → overbought, hati-hati masuk posisi baru
@@ -450,13 +458,13 @@ def derive_trade_signal(tech):
 
     # ── 2. MACD Histogram (Bobot 2.5) ─────────────────────────────────────────
     # Normalisasi price-relative: hindari scale bias antar koin IDR.
-    # Menggunakan (|hist| / harga) * 1000 agar sinyal konsisten pada semua level harga.
+    # Menggunakan (|hist| / harga) * _MACD_NORM_FACTOR agar sinyal konsisten.
     if mh > 0:
-        strength = min(1.0, (abs(mh) / lp) * 1000)
+        strength = min(1.0, (abs(mh) / lp) * _MACD_NORM_FACTOR)
         buy_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bullish({mh:+.4f})")
     elif mh < 0:
-        strength = min(1.0, (abs(mh) / lp) * 1000)
+        strength = min(1.0, (abs(mh) / lp) * _MACD_NORM_FACTOR)
         sell_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bearish({mh:+.4f})")
 

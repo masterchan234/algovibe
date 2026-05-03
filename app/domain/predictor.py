@@ -16,8 +16,23 @@ from app.domain.technicals import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
     calculate_stochastic_rsi, calculate_ema, calculate_volatility,
     calculate_ema_slope, calculate_williams_r, calculate_roc,
+    _MACD_NORM_FACTOR,
 )
 from utils.logger import log_message
+
+# ── Sigmoid RSI parameters ────────────────────────────────────────────────────
+# Sigmoid: 1 / (1 + exp((rsi - RSI_SIGMOID_CENTER) / RSI_SIGMOID_SCALE))
+# Center=50 menjadikan RSI=50 sebagai titik netral (prob=0.50).
+# Scale=12 memberikan gradien: RSI=20→0.92, RSI=30→0.84, RSI=70→0.16, RSI=80→0.08.
+_RSI_SIGMOID_CENTER = 50.0
+_RSI_SIGMOID_SCALE  = 12.0
+
+# ── ROC scoring parameters ────────────────────────────────────────────────────
+# Cap pada ±5% agar outlier tidak mendominasi (scalping jarang > 5% dalam 10 tick).
+# Koefisien 0.08: setiap 1% ROC menggeser probabilitas ±0.08 dari titik netral 0.5.
+# Contoh: ROC=-5% → prob=0.90; ROC=+5% → prob=0.10.
+_ROC_CAP_PCT   = 5.0
+_ROC_COEFF     = 0.08
 
 # ── Global model cache ────────────────────────────────────────────────────────
 MODEL_PATH   = "models/scalper_v2.joblib"
