@@ -532,7 +532,8 @@ class ExitManager:
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
                     # [Senior Optimization] Hapus FORCE_PROFIT_EXIT kaku.
-                    # Kita biarkan koin 'bernafas' dan mengikuti Trailing Stop agar dapat harga terb                    # [Senior Global Strategy] Multi-Tiered Take Profit
+                    # Kita biarkan koin 'bernafas' dan mengikuti Trailing Stop agar dapat harga terbaik.
+                    # [Senior Global Strategy] Multi-Tiered Take Profit
                     # Tier 1: Small Profit (Ride the Trend)
                     # Tier 2: Good Profit (Fast Exit on any weakness)
                     # Tier 3: High Profit (FORCE EXIT NOW - Lock it in!)
@@ -623,46 +624,35 @@ class ExitManager:
                         mark_exit_requested(pair, order_id)
     
                 # 3. [Senior Strategy] Averaging Down (DCA) or Stop Loss
-                elif current_price <= active_sl_price:
-                    current_tier = data.get('dca_tier', 0)
-                    
-                    # Cek apakah kita bisa menambah muatan (DCA) daripada Cut Loss
-                    can_dca = (
-                        DCA_ENABLED and 
-                        current_tier < DCA_MAX_TIERS and 
-                        current_profit_pct <= DCA_STEP_PCT and
-                        live_ai_prob >= DCA_MIN_AI_CONFIDENCE
-                    )
-                    
-                    if can_dca:
-                        reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
-                        log_msg = (
-                            f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
-                            f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, AI: {live_ai_prob:.2f})"
-                        )
-                        log_message(log_msg)
-                        db.log_system_event(pair, "DCA", log_msg, 'INFO')
-                        
-                        # Eksekusi Tambah Muatan (Gunakan logic yang sama dengan entry awal)
-                        from app.application.use_cases.trade_execution import execute_trade
-                        # Ambil instance bot (diperlukan untuk eksekusi)
-                        # Di ExitManager, kita biasanya tidak punya akses langsung ke 'bot' object, 
-                        # tapi kita punya 'exchange' dan 'oracle'. 
-                        # Kita akan panggil execute_trade dengan parameter yang sesuai.
-                        
-                        # [Critical] Kita butuh mereferensikan bot object. 
-                        # Kita akan asumsikan ExitManager memiliki referensi bot jika kita tambahkan di __init__
-                        # Untuk saat ini, kita panggil via trigger event di DB agar bot main loop yang handle
-                        # ATAU kita langsung panggil exchange.
-                        
-                        success = self.execute_averaging_down(pair, data, current_price)
-                        if success:
-                            # Update dca_tier dan biarkan posisi tetap terbuka
-                            positions[pair]['dca_tier'] = current_tier + 1
-                            modified_pairs.add(pair)
-                            continue
+                # [Fix DCA Bug] Periksa DCA secara INDEPENDEN (sebelum SL), pada level DCA_STEP_PCT (-2.5%).
+                # Sebelumnya DCA diperiksa di dalam blok SL (-1%), sehingga kondisi -2.5% tidak pernah terpenuhi.
+                current_tier = data.get('dca_tier', 0)
+                can_dca = (
+                    DCA_ENABLED and
+                    current_tier < DCA_MAX_TIERS and
+                    current_profit_pct <= DCA_STEP_PCT and
+                    current_price > active_sl_price and  # Belum kena hard SL
+                    live_ai_prob >= DCA_MIN_AI_CONFIDENCE
+                )
 
-                    # Jika tidak bisa DCA, baru lakukan Stop Loss (Initial or Trailing)
+                if can_dca:
+                    reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
+                    log_msg = (
+                        f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
+                        f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, AI: {live_ai_prob:.2f})"
+                    )
+                    log_message(log_msg)
+                    db.log_system_event(pair, "DCA", log_msg, 'INFO')
+
+                    success = self.execute_averaging_down(pair, data, current_price)
+                    if success:
+                        # Update dca_tier dan biarkan posisi tetap terbuka
+                        positions[pair]['dca_tier'] = current_tier + 1
+                        modified_pairs.add(pair)
+                        continue
+
+                elif current_price <= active_sl_price:
+                    # Jika tidak bisa DCA (tier habis / AI tidak yakin / sudah kena hard SL), lakukan Stop Loss
                     is_trailing_hit = active_sl_price > break_even_price
                     is_be_hit = abs(active_sl_price - break_even_price) < 1.0  
                     
