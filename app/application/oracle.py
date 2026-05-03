@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 import config
+from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
 from app.infrastructure.database import db
 from app.infrastructure.llm_worker import LLMWorker
 from utils.logger import log_message
@@ -739,7 +740,6 @@ class Oracle:
                 except Exception:
                     balance = 0.0
 
-            from config import INITIAL_CAPITAL
             # Gunakan INITIAL_CAPITAL sebagai fallback aman jika saldo belum tersedia di DB
             effective_balance = balance if balance > 0 else INITIAL_CAPITAL
 
@@ -765,14 +765,14 @@ class Oracle:
 
             # 4. Session multiplier (Indodax peak liquidity windows)
             hour = datetime.now().hour
-            if 1 <= hour < 8:       # Asia Session (Indodax peak)
+            if 0 <= hour < 8:       # Asia Session (Indodax peak, termasuk jam 0)
                 session_mult = 1.2
-            elif 16 <= hour < 23:   # US Session (high global volatility)
+            elif 16 <= hour < 24:   # US Session (high global volatility, termasuk jam 23)
                 session_mult = 1.1
             elif 8 <= hour < 16:    # Europe Session
                 session_mult = 1.0
-            else:                   # Off-hours (thin liquidity)
-                session_mult = 0.8
+            else:
+                session_mult = 1.0
 
             target = base_target * regime_mult * wr_mult * session_mult
 
@@ -821,7 +821,6 @@ class Oracle:
             loss_limit_hit — True jika daily loss limit sudah terlampaui
         """
         try:
-            from config import DAILY_LOSS_LIMIT_PCT, INITIAL_CAPITAL
             target_raw = db.get_state("daily_profit_target")
             target_idr = float(target_raw) if target_raw else 0.0
 

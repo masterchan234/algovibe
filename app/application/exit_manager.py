@@ -376,7 +376,7 @@ class ExitManager:
                             pair,
                             amount,
                             current_price,
-                            "HARD_STOP_LOSS",
+                            "EXIT_TIMEOUT",
                             entry_price=entry_price,
                             amount_idr=data.get('amount_idr', 0),
                             position_data=data
@@ -490,7 +490,12 @@ class ExitManager:
                 tp_sell_fee = FEE_SELL_MAKER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
                 denom_tp = amount * max(0.01, (1 - tp_sell_fee - tp_slippage))
-                exact_tp_price = (MIN_NET_PROFIT_IDR + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
+                # [Fix Fee-Trap] MIN_NET_PROFIT proporsional terhadap ukuran trade.
+                # Fixed Rp 2.000 menyebabkan exact_tp_price +18% pada trade kecil → TP mustahil.
+                # Formula: min(amount_idr × 1.5%, Rp 2.000) — cukup bermakna tanpa unreachable.
+                amount_idr_pos = float(data.get('amount_idr', 0)) or 0.0
+                dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * 0.015))
+                exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
                 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
@@ -573,15 +578,30 @@ class ExitManager:
                         modified_pairs.add(pair)
                         log_message(f"🛡️ [Break-Even] {pair}: SL dipindahkan ke Entry + Fee (Rp {active_sl_price:,.2f})")
     
-                # --- [Safety] Time-Stop Exit ---
+                # --- [Safety] Smart Time-Stop Exit ---
+                # Jangan force exit jika posisi MASIH di atas break-even (floating profit).
+                # Beri extra 50% waktu agar trailing stop/TP sempat bekerja.
+                # Hanya force exit jika posisi di bawah break-even (uang nyata terjebak).
                 if pos_age_min >= MAX_HOLD_MINUTES:
-                    msg = f"⏳ *TIME-STOP EXPIRED* ({MAX_HOLD_MINUTES}m) | {pair} | PnL: {pnl_pct:+.2f}%"
-                    log_message(msg)
-                    order_id = self.execute_exit(pair, amount, current_price, "TIME_STOP_EXIT",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                    if order_id:
-                        mark_exit_requested(pair, order_id)
-                        continue
+                    is_above_breakeven = current_price >= break_even_price
+                    extended_hold_min = MAX_HOLD_MINUTES * 1.5
+                    if is_above_breakeven and pos_age_min < extended_hold_min:
+                        log_message(
+                            f"⏸️ [TIME-STOP EXTENDED] {pair}: Masih di atas break-even "
+                            f"({pnl_pct:+.2f}%), beri waktu tambahan s/d {extended_hold_min:.0f}m."
+                        )
+                    else:
+                        msg = (
+                            f"⏳ *TIME-STOP EXPIRED* ({pos_age_min:.0f}m) | "
+                            f"{pair} | PnL: {pnl_pct:+.2f}%"
+                            + (" [above BE, forced]" if is_above_breakeven else " [below BE]")
+                        )
+                        log_message(msg)
+                        order_id = self.execute_exit(pair, amount, current_price, "TIME_STOP_EXIT",
+                                          entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id:
+                            mark_exit_requested(pair, order_id)
+                            continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -753,7 +773,7 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "AI_VETO_EXIT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "TIME_STOP_EXIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
             symbol = f"{pair[:-3].upper()}/IDR"
