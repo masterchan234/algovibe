@@ -117,7 +117,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
     progress_pct = target_status["progress_pct"]
 
     # Counter posisi baru yang berhasil dibuka dalam siklus recovery ini
-    _recovery_new_positions = 0
+    recovery_new_positions = 0
 
     if target_status["loss_limit_hit"]:
         # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
@@ -174,7 +174,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                     )
                     continue
                 # Batasi ke 1 posisi baru dalam siklus recovery ini
-                if _recovery_new_positions >= 1:
+                if recovery_new_positions >= 1:
                     log_message(
                         f"🔒 [RECOVERY GATE] {pair} ditolak — sudah ada posisi baru di sesi recovery."
                     )
@@ -194,7 +194,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 bot.daily_trades += 1
                 db.save_state("daily_trades", bot.daily_trades)
                 if adaptive_cfg.get("recovery_mode"):
-                    _recovery_new_positions += 1
+                    recovery_new_positions += 1
 
         except Exception as e:
             log_message(f"⚠️ [Pair Loop Error] {pair}: {e}")

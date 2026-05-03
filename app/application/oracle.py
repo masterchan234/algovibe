@@ -769,9 +769,7 @@ class Oracle:
                 session_mult = 1.2
             elif 16 <= hour < 24:   # US Session (high global volatility, termasuk jam 23)
                 session_mult = 1.1
-            elif 8 <= hour < 16:    # Europe Session
-                session_mult = 1.0
-            else:
+            else:                   # Europe Session (jam 8-15)
                 session_mult = 1.0
 
             target = base_target * regime_mult * wr_mult * session_mult

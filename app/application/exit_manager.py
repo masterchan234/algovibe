@@ -493,7 +493,7 @@ class ExitManager:
                 # [Fix Fee-Trap] MIN_NET_PROFIT proporsional terhadap ukuran trade.
                 # Fixed Rp 2.000 menyebabkan exact_tp_price +18% pada trade kecil → TP mustahil.
                 # Formula: min(amount_idr × 1.5%, Rp 2.000) — cukup bermakna tanpa unreachable.
-                amount_idr_pos = float(data.get('amount_idr', 0)) or 0.0
+                amount_idr_pos = float(data.get('amount_idr', 0))
                 dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * 0.015))
                 exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_MAKER))) / denom_tp
                 
@@ -540,7 +540,7 @@ class ExitManager:
                     
                     # Jarak trailing adaptif: Semakin untung, semakin ketat
                     # [Optimization] Mengunci profit lebih agresif saat harga melonjak
-                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default 0.4%
+                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default (lihat config TRAILING_STOP_DISTANCE_PCT)
                     if _near_daily_target:
                         # Sudah dekat target harian → kunci profit lebih ketat
                         dist_pct = min(dist_pct, 0.002)   # 0.2% — sangat ketat
