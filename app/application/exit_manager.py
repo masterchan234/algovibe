@@ -13,7 +13,7 @@ from config import (
     MIN_NET_PROFIT_IDR, TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS,
-    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_AI_CONFIDENCE
+    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -705,7 +705,7 @@ class ExitManager:
                     current_tier < DCA_MAX_TIERS and
                     current_profit_pct <= DCA_STEP_PCT and
                     current_price > active_sl_price and  # Belum kena hard SL
-                    live_tech_prob >= DCA_MIN_AI_CONFIDENCE  # Probabilitas teknikal cukup kuat
+                    live_tech_prob >= DCA_MIN_TECH_CONFIDENCE  # Probabilitas teknikal cukup kuat
                 )
 
                 if can_dca:

@@ -68,7 +68,7 @@ DCA_ENABLED = True
 DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
 DCA_STEP_PCT = -0.025          # Tambah muatan setiap turun 2.5% (dari 3.5%) → DCA lebih cepat
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
-DCA_MIN_AI_CONFIDENCE = 0.35   # Hanya tambah muatan jika AI masih optimis > 35% (dari 40%)# Minimal data points sebelum AI aktif
+DCA_MIN_TECH_CONFIDENCE = 0.35   # Hanya tambah muatan jika probabilitas teknikal > 35%
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)

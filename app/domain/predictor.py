@@ -176,8 +176,8 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     # Interpretasi mean-reversion: ROC negatif = oversold → BUY probability tinggi.
     if n >= 11:
         roc = calculate_roc(prices)
-        roc_capped = max(-5.0, min(5.0, roc))
-        roc_score = max(0.05, min(0.95, 0.5 - roc_capped * 0.08))
+        roc_capped = max(-_ROC_CAP_PCT, min(_ROC_CAP_PCT, roc))
+        roc_score = max(0.05, min(0.95, 0.5 - roc_capped * _ROC_COEFF))
         scores.append(roc_score)
         weights.append(1.0)
 
