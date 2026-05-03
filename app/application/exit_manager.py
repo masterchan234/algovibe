@@ -586,12 +586,15 @@ class ExitManager:
                 active_sl_price = max(initial_sl_price, trailing_sl_price)
     
                 # --- [Defensive] Break-Even Stop Loss ---
-                # Jika profit sudah menyentuh 1.0%, pindahkan SL ke harga entry + fee (risk-free trade)
-                # Entry default adalah maker (antri EMA-9), bukan taker — gunakan fee maker agar break-even akurat
+                # Pindahkan SL ke break-even (entry + round-trip fee + small buffer) segera setelah
+                # net profit sudah melampaui biaya fee beli+jual, bukan hanya saat profit >= 1%.
+                # Ini memastikan profit bersih selalu aman setelah fee diperhitungkan.
                 round_trip_fee = FEE_BUY_MAKER + FEE_SELL_MAKER  # 0.4322%, bukan 1.2322% (taker)
                 break_even_price = entry_price * (1 + round_trip_fee + 0.001) # +0.1% extra buffer
+                # Aktifkan break-even saat profit sudah melampaui fee round-trip + 0.2% (safety buffer)
+                fee_breakeven_threshold = round_trip_fee + 0.002
                 
-                if current_profit_pct >= 0.01 and active_sl_price < break_even_price:
+                if current_profit_pct >= fee_breakeven_threshold and active_sl_price < break_even_price:
                     active_sl_price = break_even_price
                     if positions[pair].get('trailing_sl_price', 0) < break_even_price:
                         positions[pair]['trailing_sl_price'] = break_even_price

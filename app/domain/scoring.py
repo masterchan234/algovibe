@@ -1,9 +1,22 @@
 import math
 
+# Sektor yang mendapat sector-momentum boost saat pumping
+_BOOSTED_SECTORS = {"AI", "MEME", "L1"}
+
 
 def calculate_score(args):
-    """Fungsi pembantu untuk multiprocessing ranking."""
-    item, config_override = args
+    """Fungsi pembantu untuk multiprocessing ranking.
+
+    args dapat berupa (item, config_override) atau
+    (item, config_override, market_regime) untuk bobot dinamis berbasis regime.
+    """
+    if len(args) == 3:
+        item, config_override, market_regime = args
+    else:
+        item, config_override = args
+        market_regime = "UNKNOWN"
+
+    market_regime = (market_regime or "UNKNOWN").upper()
     pair, d = item
     try:
         last = float(d['last'])
@@ -43,8 +56,39 @@ def calculate_score(args):
             # 2. Spread Penalty (Makin besar spread, makin tidak likuid)
             penalty_spread = spread * 12
 
+            # --- Dynamic Regime Weights ---
+            # BULLISH: kejar momentum dan volume – spread lebih ditoleransi
+            # CHOPPY/BEARISH: prioritaskan likuiditas (spread tipis & bid depth kuat) untuk hindari jebakan
+            if market_regime == "BULLISH":
+                w_vol = 1.3       # Volume lebih penting (momentum market)
+                w_momentum = 14   # Momentum dikuatkan
+                w_spread = 8      # Spread diperlonggar sedikit
+                bid_depth_bonus = 0.0
+            elif market_regime in ("BEARISH", "CHOPPY", "CRASH"):
+                w_vol = 0.8       # Volume kurang relevan saat pasar bearish
+                w_momentum = 7    # Momentum dikurangi (banyak false breakout)
+                w_spread = 18     # Spread dihukum lebih keras (likuiditas sangat penting)
+                # Bid-depth bonus: apresiasi koin dengan buy wall kuat (ordebook menahan turun)
+                bid_depth_bonus = (imbalance - 1.0) * 3.0 if imbalance > 1.0 else 0.0
+            else:  # RANGING / UNKNOWN
+                w_vol = 1.0
+                w_momentum = 10
+                w_spread = 12
+                bid_depth_bonus = 0.0
+
             # Final Score (Normalized roughly to 0-100+)
-            score = score_vol + (rel_momentum * 10) - penalty_spread
+            score = (score_vol * w_vol) + (rel_momentum * w_momentum) - (penalty_spread * (w_spread / 12)) + bid_depth_bonus
+
+            # --- Sector Momentum Boost (+15% untuk sektor AI, MEME, L1 yang sedang pumping) ---
+            try:
+                from config import SECTOR_MAP
+                sector = SECTOR_MAP.get(pair.lower())
+                if sector in _BOOSTED_SECTORS:
+                    # Hanya boost jika sektornya positif (change > 0) agar tidak boost koin rugi
+                    if change_24h > 0:
+                        score *= 1.15
+            except Exception:
+                pass
 
             return {
                 'pair': pair,

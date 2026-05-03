@@ -73,7 +73,7 @@ def run_market_cycle(bot):
         time.sleep(5)
         return
 
-    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg) for item in tickers.items()]) if r]
+    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime) for item in tickers.items()]) if r]
     ranked.sort(key=lambda x: x['score'], reverse=True)
 
     bot.exit_manager.monitor_and_execute(
