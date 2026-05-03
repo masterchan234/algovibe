@@ -443,11 +443,17 @@ class Oracle:
             if t_type == "FAKE_PUMP_ANALYSIS":
                 log_message(f"🤖 [LiteRT Insight] Fake Pump: {t_res}")
                 db.save_state("latest_llm_insight", f"FAKE_PUMP|{t_res}")
+                hero_msg = f"**Market Alert**: {t_res}"
+                db.save_state("hero_ai_insight", hero_msg)
+                db.log_system_event("GLOBAL", "AI_INSIGHT", hero_msg, "WARNING")
                 # [Fix BUG #4] TIDAK apply sentiment ke pair manapun — konteks global, bukan pair spesifik
                 self.llm_worker.results.pop(task_id)
             elif t_type == "REGIME_ANALYSIS":
                 log_message(f"🤖 [LiteRT Insight] Regime Shift: {t_res}")
                 db.save_state("latest_llm_insight", f"REGIME|{t_res}")
+                hero_msg = f"**Regime Intelligence**: {t_res}"
+                db.save_state("hero_ai_insight", hero_msg)
+                db.log_system_event("GLOBAL", "AI_INSIGHT", hero_msg, "INFO")
                 # [Fix BUG #4] TIDAK apply sentiment — ini analisis market global, bukan pair spesifik
                 self.llm_worker.results.pop(task_id)
             elif t_type.startswith("TOP_MOVER:") or t_type.startswith("ANALYSIS:") or t_type.startswith("PUMP_ALERT:"):
@@ -470,9 +476,15 @@ class Oracle:
                         f"🤖 [LiteRT Insight] {label} {pair_name}: "
                         f"{structured['verdict']} ({structured['confidence']}%) — {structured['reason']}"
                     )
+                    # Narratif untuk Hero Section
+                    hero_msg = f"**{pair_name.upper()} Insight**: {structured['reason']}. **{structured['verdict']}**."
                 else:
                     log_message(f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}")
+                    hero_msg = f"**{pair_name.upper()} Analysis**: {t_res}"
+                
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
+                db.save_state("hero_ai_insight", hero_msg)
+                db.log_system_event(pair_name, "AI_INSIGHT", hero_msg, "INFO")
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
 
                 # ── [Senior Sync] Update Trade DNA Table ──────────────────
