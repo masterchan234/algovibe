@@ -740,6 +740,10 @@ def get_stats():
         ).fetchone()
         best_trade = float(best_trade_row[0] or 0)
 
+        # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
+        _dr_val = 1 if cfg.DRY_RUN else 0
+        active_positions_count = len([p for p in positions if int(p['dry_run'] or 0) == _dr_val])
+
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
             "all_time_pnl_dry": realized_pnl_dry,
@@ -758,7 +762,7 @@ def get_stats():
             "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
-            "active_positions": len([p for p in positions if int(p['dry_run'] or 0) == (1 if cfg.DRY_RUN else 0)]),
+            "active_positions": active_positions_count,
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
@@ -1010,7 +1014,7 @@ def sync_wallet():
         for pair, pos in list(current_positions.items()):
             if int(pos.get('dry_run') or 0) != 0:
                 continue
-            coin = pair[:-3].upper()
+            coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
             amount_on_exchange = float(total_bal.get(coin, 0) or 0)
             if amount_on_exchange < 1e-8:
                 db.delete_position(pair)
@@ -1073,7 +1077,7 @@ def sync_wallet():
         })
     except Exception as e:
         logging.error(f"[WalletSync] Error: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
+        return jsonify({"success": False, "message": "Wallet sync gagal. Cek log server untuk detail."}), 500
 
 
 def get_market_context(pair):
@@ -2353,7 +2357,7 @@ def _background_wallet_sync_loop():
 
             # Ghost removal
             for pair, pos in list(current_positions.items()):
-                coin = pair[:-3].upper()
+                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(total_bal.get(coin, 0) or 0)
                 if amount_on_exchange < 1e-8:
                     db.delete_position(pair)

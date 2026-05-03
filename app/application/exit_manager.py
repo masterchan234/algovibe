@@ -1378,7 +1378,7 @@ class ExitManager:
             open_positions = db.get_open_positions()
             
             for pair, pos in open_positions.items():
-                coin = pair[:-3].upper()
+                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(balance['total'].get(coin, 0))
                 
                 # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
