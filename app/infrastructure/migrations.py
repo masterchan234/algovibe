@@ -5,6 +5,7 @@ from utils.logger import log_message
 # Daftar migrasi terpusat
 # Format: (nama_unik, sql_query)
 MIGRATIONS = [
+    # --- 1. BOOTSTRAP (CREATE TABLES) ---
     ("create_migrations_table", """
         CREATE TABLE IF NOT EXISTS migrations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,25 +98,6 @@ MIGRATIONS = [
             status TEXT DEFAULT 'OPEN'
         )
     """),
-    ("add_updated_at_to_dynamic_weights", "ALTER TABLE dynamic_weights ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
-    ("add_target_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_tp_pct REAL DEFAULT 0.04"),
-    ("add_target_sl_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_sl_pct REAL DEFAULT -0.02"),
-    ("add_ai_confidence_to_trade_history", "ALTER TABLE trade_history ADD COLUMN ai_confidence REAL DEFAULT 0.0"),
-    ("add_signal_to_ticker_history", "ALTER TABLE ticker_history ADD COLUMN signal TEXT DEFAULT 'HOLD'"),
-    ("add_momentum_to_sector_history", "ALTER TABLE sector_history ADD COLUMN momentum_score REAL DEFAULT 0.0"),
-    ("add_leader_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_pair TEXT DEFAULT 'N/A'"),
-    ("add_leader_ch_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_change REAL DEFAULT 0.0"),
-    ("add_exec_type_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exec_type TEXT DEFAULT 'MAKER'"),
-    ("add_reason_backup_to_positions", "ALTER TABLE positions ADD COLUMN reason_backup TEXT"),
-    ("add_trade_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN trade_id TEXT UNIQUE"),
-    ("add_is_manual_to_trade_history", "ALTER TABLE trade_history ADD COLUMN is_manual INTEGER DEFAULT 0"),
-    ("add_exit_order_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exit_order_id TEXT"),
-    ("add_unique_idx_exit_order_id", "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_exit_order_id ON trade_history(exit_order_id) WHERE exit_order_id IS NOT NULL"),
-    ("add_eta_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15"),
-    ("add_verdict_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_verdict TEXT DEFAULT 'HOLD'"),
-    ("add_confidence_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_confidence REAL DEFAULT 0.0"),
-    ("add_reason_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_reason TEXT DEFAULT ''"),
-    ("add_dry_run_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN dry_run BOOLEAN DEFAULT 1"),
     ("create_order_logs", """
         CREATE TABLE IF NOT EXISTS order_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +176,27 @@ MIGRATIONS = [
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """),
+
+    # --- 2. EVOLUTION (ALTER TABLES & INDEXES) ---
+    ("add_updated_at_to_dynamic_weights", "ALTER TABLE dynamic_weights ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
+    ("add_target_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_tp_pct REAL DEFAULT 0.04"),
+    ("add_target_sl_pct_to_positions", "ALTER TABLE positions ADD COLUMN target_sl_pct REAL DEFAULT -0.02"),
+    ("add_ai_confidence_to_trade_history", "ALTER TABLE trade_history ADD COLUMN ai_confidence REAL DEFAULT 0.0"),
+    ("add_signal_to_ticker_history", "ALTER TABLE ticker_history ADD COLUMN signal TEXT DEFAULT 'HOLD'"),
+    ("add_momentum_to_sector_history", "ALTER TABLE sector_history ADD COLUMN momentum_score REAL DEFAULT 0.0"),
+    ("add_leader_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_pair TEXT DEFAULT 'N/A'"),
+    ("add_leader_ch_to_sector_history", "ALTER TABLE sector_history ADD COLUMN leader_change REAL DEFAULT 0.0"),
+    ("add_exec_type_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exec_type TEXT DEFAULT 'MAKER'"),
+    ("add_reason_backup_to_positions", "ALTER TABLE positions ADD COLUMN reason_backup TEXT"),
+    ("add_trade_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN trade_id TEXT UNIQUE"),
+    ("add_is_manual_to_trade_history", "ALTER TABLE trade_history ADD COLUMN is_manual INTEGER DEFAULT 0"),
+    ("add_exit_order_id_to_trade_history", "ALTER TABLE trade_history ADD COLUMN exit_order_id TEXT"),
+    ("add_unique_idx_exit_order_id", "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_exit_order_id ON trade_history(exit_order_id) WHERE exit_order_id IS NOT NULL"),
+    ("add_eta_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN eta_minutes INTEGER DEFAULT 15"),
+    ("add_verdict_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_verdict TEXT DEFAULT 'HOLD'"),
+    ("add_confidence_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_confidence REAL DEFAULT 0.0"),
+    ("add_reason_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN llm_reason TEXT DEFAULT ''"),
+    ("add_dry_run_to_analytics", "ALTER TABLE trade_analytics ADD COLUMN dry_run BOOLEAN DEFAULT 1"),
     ("create_idx_events_pair", "CREATE INDEX IF NOT EXISTS idx_events_pair ON system_events(pair)"),
     ("create_idx_events_time", "CREATE INDEX IF NOT EXISTS idx_events_time ON system_events(created_at)"),
     ("create_idx_depth_pair", "CREATE INDEX IF NOT EXISTS idx_depth_pair ON market_depth(pair)"),
