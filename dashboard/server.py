@@ -926,18 +926,34 @@ def manual_exit(pair):
     return jsonify({"status": "exit_requested", "pair": pair})
 
 @app.route('/api/bot/toggle-dry-run', methods=['POST'])
-@login_required
 def toggle_dry_run():
-    """Toggle antara mode DRY RUN dan LIVE secara dinamis."""
+    """Toggle mode dengan policy auth:
+    - DRY -> LIVE: wajib login
+    - LIVE -> DRY: auto logout + clear session
+    """
     import config as cfg
     # Baca nilai saat ini dari DB agar toggle akurat
     current_val = db.get_state("dry_run") == "true"
     new_val = not current_val
 
+    # Hanya izinkan mode LIVE jika user terautentikasi
+    if not new_val and 'user_id' not in session:
+        return jsonify({
+            "error": "Unauthorized",
+            "login_required": True,
+            "target_mode": "LIVE"
+        }), 401
+
     db.save_state("dry_run", str(new_val).lower())
     cfg.clear_dry_run_cache()    # Hapus cache config
     db._mode_cache = None        # Hapus cache DatabaseRouter langsung
     logging.info(f"🔄 [DYNAMIC MODE] User changed mode to: {'DRY RUN' if new_val else 'LIVE'}")
+
+    logged_out = False
+    # Saat balik ke DRY, paksa logout dan bersihkan session
+    if new_val:
+        session.clear()
+        logged_out = True
 
     # Push stats_update langsung agar frontend tidak tunggu 5s push loop
     try:
@@ -946,7 +962,7 @@ def toggle_dry_run():
     except Exception as _e:
         logging.warning(f"[toggle] immediate push failed: {_e}")
 
-    return jsonify({"success": True, "dry_run": new_val})
+    return jsonify({"success": True, "dry_run": new_val, "logged_out": logged_out})
 
 @app.route('/api/bot/toggle-loose-gates', methods=['POST'])
 def toggle_loose_gates():

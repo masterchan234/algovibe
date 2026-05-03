@@ -249,6 +249,44 @@ const showLoginModal = ref(false)
 const isLoggingIn = ref(false)
 const loginForm = reactive({ username: '', password: '' })
 const isToggling = ref(false)
+const pendingLiveSwitch = ref(false)
+
+async function applyModeToggle() {
+  const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'X-CSRFToken': getCookie('csrf_token') }
+  })
+
+  if (!res.ok) {
+    return { ok: false, status: res.status, data: null }
+  }
+
+  const data = await res.json()
+  // Update mode flag immediately (optimistic)
+  store.stats.dry_run = data.dry_run
+  // Clear stale mode-sensitive data (reactive-safe)
+  store.positions.splice(0)
+  store.pnlHistory.splice(0)
+  store.activityFeed.splice(0)
+  Object.assign(store.stats, {
+    recent_trades: [],
+    daily_pnl: 0,
+    unrealized_pnl: 0,
+    available_idr: 0,
+    total_equity: 0,
+    active_positions: 0,
+  })
+  if (data.logged_out) {
+    loginForm.username = ''
+    loginForm.password = ''
+    showLoginModal.value = false
+    alert('Switched to DRY mode. Session login telah dihapus (auto logout).')
+  }
+  // Backend already pushed fresh stats_update + trades_update via socket — no reload needed
+  return { ok: true, status: res.status, data }
+}
+
 async function handleLogin() {
   isLoggingIn.value = true
   try {
@@ -261,8 +299,21 @@ async function handleLogin() {
       body: JSON.stringify(loginForm)
     })
     if (res.ok) {
-      showLoginModal.value = false
-      alert('Login successful! You can now toggle the mode.')
+      if (pendingLiveSwitch.value) {
+        // User originally requested DRY -> LIVE before login; complete it automatically.
+        const toggleRes = await applyModeToggle()
+        pendingLiveSwitch.value = false
+        if (toggleRes.ok) {
+          showLoginModal.value = false
+          alert('Login successful. Mode langsung berpindah ke LIVE.')
+        } else {
+          showLoginModal.value = false
+          alert('Login berhasil, tapi auto-switch ke LIVE gagal. Silakan klik toggle sekali lagi.')
+        }
+      } else {
+        showLoginModal.value = false
+        alert('Login successful!')
+      }
     } else {
       const err = await res.json()
       alert(`Login failed: ${err.error || 'Invalid credentials'}`)
@@ -281,30 +332,12 @@ const isDryRun = computed(() => {
 async function toggleDryRun() {
   isToggling.value = true
   try {
-    const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'X-CSRFToken': getCookie('csrf_token') }
-    })
-    if (res.ok) {
-      const data = await res.json()
-      // Update mode flag immediately (optimistic)
-      store.stats.dry_run = data.dry_run
-      // Clear stale mode-sensitive data (reactive-safe)
-      store.positions.splice(0)
-      store.pnlHistory.splice(0)
-      store.activityFeed.splice(0)
-      Object.assign(store.stats, {
-        recent_trades: [],
-        daily_pnl: 0,
-        unrealized_pnl: 0,
-        available_idr: 0,
-        total_equity: 0,
-        active_positions: 0,
-      })
-      // Backend already pushed fresh stats_update + trades_update via socket — no reload needed
+    const result = await applyModeToggle()
+    if (result.ok) {
+      return
     } else {
-      if (res.status === 401) {
+      if (result.status === 401) {
+        pendingLiveSwitch.value = true
         showLoginModal.value = true
       } else {
         alert("Server rejected the request. Please login first if needed.")
