@@ -12,6 +12,7 @@ from config import (
     TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
+    AUTO_BASKET_HARVEST_MIN, BTC_CRASH_TRIGGER_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
@@ -37,6 +38,10 @@ class ExitManager:
         # Updated each monitor tick when there are open positions; reset to 0 when no
         # open positions are being evaluated (i.e., the basket is empty at evaluation time).
         self._portfolio_hwm: float = 0.0
+        # Rolling BTC price buffer: list of (unix_timestamp, price) for 5-min crash detection.
+        self._btc_price_history: list = []
+        # Throttle bypass log: timestamp of last "BASKET_EXIT Bypassed" log to avoid spam.
+        self._last_basket_bypass_log_ts: float = 0.0
         # Prevents concurrent execution from the background exit-monitor thread and
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
         self._monitor_lock = threading.Lock()
@@ -221,17 +226,53 @@ class ExitManager:
                         return # Exit early to process manual order
 
 
-        # --- [PORTFOLIO BASKET EXIT / CROSS-ASSET HEDGING] ---
-        # Menutup serentak semua posisi ketika:
-        #   (a) profit gabungan cukup untuk meng-cover posisi yang rugi (DAN total >= MIN_NET_PROFIT_IDR), ATAU
-        #   (b) ada posisi "stagnant" (mandek >= STAGNANT_RESCUE_MINUTES & merugi) DAN
-        #       menutup semua bersama-sama setidaknya impas (total_net_pnl >= 0).
-        # Ini menggantikan TIME_STOP_EXIT individual yang membuang peluang profit.
+        # --- [PORTFOLIO BASKET EXIT: GUARANTEED PROFIT HARVESTER] ---
+        # Automatic exits are gated by a strict net profit check so that every logged
+        # BASKET_EXIT results in a real net gain on the portfolio.
+        #   • All triggers require total_net_pnl > 0 (guaranteed profit after fees).
+        #   • Exception: BTC crash kill switch (> BTC_CRASH_TRIGGER_PCT in 5 min) bypasses the gate.
+        #   • Manual EXIT button handles cut-loss scenarios instead.
         STAGNANT_RESCUE_MINUTES = 20  # Ambang waktu mandek untuk trigger rescue basket
+
+        # ── BTC Price Tracking (for 5-minute crash detection) ────────────────────────────
+        btc_ticker_data = current_tickers.get('btcidr') or {}
+        btc_current = float(btc_ticker_data.get('last') or btc_ticker_data.get('buy') or 0)
+        _now_ts = time.time()
+        if btc_current > 0:
+            self._btc_price_history.append((_now_ts, btc_current))
+            # Trim buffer: keep only the last 10 minutes
+            self._btc_price_history = [
+                (ts, p) for ts, p in self._btc_price_history if _now_ts - ts <= 600
+            ]
+
+        # Detect BTC drop > BTC_CRASH_TRIGGER_PCT in the last 5 minutes (kill switch)
+        btc_crash_kill = False
+        btc_drop_5min_pct = 0.0
+        if btc_current > 0 and len(self._btc_price_history) >= 2:
+            old_btc = [p for ts, p in self._btc_price_history if ts <= _now_ts - 300]
+            if old_btc:
+                btc_5min_ago = old_btc[-1]
+                btc_drop_5min_pct = (btc_current - btc_5min_ago) / btc_5min_ago if btc_5min_ago > 0 else 0.0
+                btc_crash_kill = btc_drop_5min_pct < -BTC_CRASH_TRIGGER_PCT
+
+        # BTC momentum weakening: current price <= price from 1 min ago (or below short average)
+        btc_weakening = False
+        if self._btc_price_history and btc_current > 0:
+            btc_1min_ago = [p for ts, p in self._btc_price_history if ts <= _now_ts - 60]
+            if btc_1min_ago:
+                btc_weakening = btc_current <= btc_1min_ago[-1]
+            else:
+                # Not enough 1-min history yet: compare to short buffer average
+                all_btc_prices = [p for _, p in self._btc_price_history]
+                btc_weakening = btc_current <= (sum(all_btc_prices) / len(all_btc_prices))
+
         try:
             open_pairs_for_basket = []
-            total_net_pnl = 0
-            has_losers = False
+            total_net_pnl    = 0.0
+            total_gross_pnl  = 0.0
+            total_fees_idr   = 0.0
+            total_amount_idr = 0.0
+            has_losers  = False
             has_stagnant = False
 
             for pair, data in positions.items():
@@ -260,10 +301,13 @@ class ExitManager:
                     except Exception:
                         pass
 
-                    total_net_pnl += net_pnl_idr
+                    total_gross_pnl  += gross_pnl
+                    total_fees_idr   += fee_buy + fee_sell
+                    total_net_pnl    += net_pnl_idr
+                    total_amount_idr += amount_idr
                     open_pairs_for_basket.append((pair, data, current_price, amount))
 
-            # ── High-water-mark tracking ────────────────────────────────────────
+            # ── High-water-mark tracking ─────────────────────────────────────────────────
             # Update HWM jika profit gabungan saat ini lebih tinggi dari sebelumnya.
             # Reset ke 0 ketika tidak ada posisi terbuka agar sesi berikutnya mulai bersih.
             if open_pairs_for_basket:
@@ -272,64 +316,111 @@ class ExitManager:
             else:
                 self._portfolio_hwm = 0.0
 
-            # Trigger (a): profit gabungan melampaui minimum DAN ada posisi rugi
-            trigger_normal = len(open_pairs_for_basket) > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
-            # Trigger (b): ada posisi stagnant, menutup semua setidaknya impas (>= 0)
-            trigger_stagnant_rescue = len(open_pairs_for_basket) > 1 and has_stagnant and total_net_pnl >= 0
-            # Trigger (c): PROACTIVE HARVEST — combined PnL melebihi target bahkan tanpa ada yang rugi.
-            # Mencegah kasus "panen terlambat": posisi B masih bagus tapi posisi A sudah jatuh.
-            trigger_harvest = (
-                len(open_pairs_for_basket) >= 1
-                and BASKET_HARVEST_TARGET_IDR > 0
-                and total_net_pnl >= BASKET_HARVEST_TARGET_IDR
-            )
-            # Trigger (d): HIGH-WATER-MARK PULLBACK — combined PnL turun >X% dari peak.
-            # Contoh: peak 80k, sekarang 56k (30% turun) → exit segera.
-            # Aktif jika HWM >= 50% dari BASKET_HARVEST_TARGET_IDR (bukan seluruhnya),
-            # agar pergerakan kecil pun dilindungi. Tidak ada syarat PnL >= 0 — jika
-            # harga sudah jatuh drastis dari peak, kita exit meski total masih negatif.
-            trigger_hwm_pullback = (
-                len(open_pairs_for_basket) >= 1
-                and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
-                and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
-            )
+            if open_pairs_for_basket:
+                n = len(open_pairs_for_basket)
+                gross_pnl_pct = (total_gross_pnl  / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
+                fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
+                net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
 
-            if trigger_normal or trigger_stagnant_rescue or trigger_harvest or trigger_hwm_pullback:
-                if trigger_hwm_pullback and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest):
-                    trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
-                elif trigger_harvest and not (trigger_normal or trigger_stagnant_rescue):
-                    trigger_label = "PROACTIVE HARVEST"
-                elif trigger_stagnant_rescue and not trigger_normal:
-                    trigger_label = "STAGNANT RESCUE"
+                should_execute = False
+                trigger_label  = ""
+                action_label   = ""
+
+                # ── Exception: BTC Crash Kill Switch ─────────────────────────────────────
+                if btc_crash_kill:
+                    should_execute = True
+                    trigger_label  = f"BTC CRASH KILL SWITCH ({btc_drop_5min_pct*100:.2f}%)"
+                    action_label   = "EMERGENCY KILL SWITCH"
+
+                # ── Net Profit Gate: disable automatic exits when portfolio is net negative ──
+                elif total_net_pnl <= 0:
+                    if _now_ts - self._last_basket_bypass_log_ts >= 60:
+                        log_message(
+                            f"🔒 BASKET_EXIT Bypassed: Total Net PnL "
+                            f"({net_pnl_pct:+.4f}%) is not yet profitable."
+                        )
+                        self._last_basket_bypass_log_ts = _now_ts
+
                 else:
-                    trigger_label = "PROFIT COVER"
-                msg = (
-                    f"🧺 *PORTFOLIO BASKET EXIT [{trigger_label}]* 🧺\n"
-                    f"Menutup {len(open_pairs_for_basket)} posisi serentak!\n"
-                    f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
-                )
-                print(msg.replace('*', '').replace('\n', ' | '))
-                send_telegram_message(msg)
-                # Reset HWM setelah semua posisi ditutup
-                self._portfolio_hwm = 0.0
-                
-                for pair, data, current_price, amount in open_pairs_for_basket:
-                    reason = "BASKET_EXIT"
-                    log_msg = f"⚡ [BASKET_EXIT] {pair}: Liquidated as part of portfolio rescue."
-                    log_message(log_msg)
-                    db.log_system_event(pair, reason, log_msg, 'SUCCESS')
-                    
-                    order_id = self.execute_exit(
-                        pair, amount, current_price, reason,
-                        entry_price=data.get('entry_price', 0),
-                        amount_idr=data.get('amount_idr', 0),
-                        position_data=data
+                    # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
+                    # (a) profit gabungan melampaui minimum DAN ada posisi rugi
+                    trigger_normal = n > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
+                    # (b) ada posisi stagnant, menutup semua setidaknya impas
+                    trigger_stagnant_rescue = n > 1 and has_stagnant
+                    # (c) IDR-based proactive harvest — combined PnL melebihi target IDR
+                    trigger_harvest_idr = (
+                        n >= 1
+                        and BASKET_HARVEST_TARGET_IDR > 0
+                        and total_net_pnl >= BASKET_HARVEST_TARGET_IDR
                     )
-                    if order_id:
-                        mark_exit_requested(pair, order_id)
-                
-                self.save_positions(positions, modified_pairs)
-                return # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
+                    # (d) HIGH-WATER-MARK PULLBACK — combined PnL turun >X% dari peak
+                    trigger_hwm_pullback = (
+                        n >= 1
+                        and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
+                        and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
+                    )
+                    # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND BTC weakening
+                    trigger_harvest_pct = (
+                        n >= 1
+                        and net_pnl_pct >= AUTO_BASKET_HARVEST_MIN * 100
+                        and btc_weakening
+                    )
+
+                    if any([trigger_normal, trigger_stagnant_rescue, trigger_harvest_idr,
+                            trigger_hwm_pullback, trigger_harvest_pct]):
+                        should_execute = True
+                        if trigger_hwm_pullback and not any([trigger_normal, trigger_stagnant_rescue,
+                                                             trigger_harvest_idr, trigger_harvest_pct]):
+                            trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
+                            action_label  = "HWM PULLBACK"
+                        elif trigger_harvest_pct and not any([trigger_normal, trigger_stagnant_rescue,
+                                                              trigger_harvest_idr]):
+                            trigger_label = "GUARANTEED PROFIT HARVEST"
+                            action_label  = "EXECUTING HARVEST"
+                        elif trigger_harvest_idr and not any([trigger_normal, trigger_stagnant_rescue]):
+                            trigger_label = "PROACTIVE HARVEST"
+                            action_label  = "EXECUTING HARVEST"
+                        elif trigger_stagnant_rescue and not trigger_normal:
+                            trigger_label = "STAGNANT RESCUE"
+                            action_label  = "STAGNANT RESCUE"
+                        else:
+                            trigger_label = "PROFIT COVER"
+                            action_label  = "PROFIT COVER"
+
+                if should_execute:
+                    analysis = (
+                        f"BASKET_EXIT Analysis: Gross {gross_pnl_pct:+.4f}% | "
+                        f"Fees -{fees_pct:.4f}% | Net {net_pnl_pct:+.4f}% | "
+                        f"Action: {action_label}"
+                    )
+                    log_message(f"🧺 {analysis}")
+                    msg = (
+                        f"🧺 *PORTFOLIO BASKET EXIT [{trigger_label}]* 🧺\n"
+                        f"Menutup {n} posisi serentak!\n"
+                        f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
+                    )
+                    print(msg.replace('*', '').replace('\n', ' | '))
+                    send_telegram_message(msg)
+                    # Reset HWM setelah semua posisi ditutup
+                    self._portfolio_hwm = 0.0
+
+                    for pair, data, current_price, amount in open_pairs_for_basket:
+                        reason  = "BASKET_EXIT"
+                        log_msg = f"⚡ [BASKET_EXIT] {pair}: Liquidated as part of portfolio rescue."
+                        log_message(log_msg)
+                        db.log_system_event(pair, reason, log_msg, 'SUCCESS')
+
+                        order_id = self.execute_exit(
+                            pair, amount, current_price, reason,
+                            entry_price=data.get('entry_price', 0),
+                            amount_idr=data.get('amount_idr', 0),
+                            position_data=data
+                        )
+                        if order_id:
+                            mark_exit_requested(pair, order_id)
+
+                    self.save_positions(positions, modified_pairs)
+                    return  # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
         except Exception as e:
             log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
 

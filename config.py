@@ -48,7 +48,7 @@ MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat 
 
 MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
 
-# --- [Basket Exit: Proactive Profit Lock] ---
+# --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,
 # bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
 # Set ke 0 untuk nonaktifkan.
@@ -57,6 +57,14 @@ BASKET_HARVEST_TARGET_IDR = 20000  # Rp 20.000 combined net profit → panen ser
 # Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
 # Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
 BASKET_HWM_PULLBACK_PCT   = 0.30   # 30% drawdown dari peak combined PnL
+
+# Minimum portfolio net profit % (after fees) to trigger automatic harvest.
+# Requires BTC/Momentum to show weakening before firing.
+AUTO_BASKET_HARVEST_MIN = 0.01  # 1.0% net profit threshold for automatic harvest
+
+# BTC 5-minute price drop % that triggers emergency basket exit (kill switch).
+# Bypasses all profit-gate checks to protect capital from total market collapse.
+BTC_CRASH_TRIGGER_PCT = 0.02    # 2.0% BTC drop in 5 minutes activates kill switch
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
