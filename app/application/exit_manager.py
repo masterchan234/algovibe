@@ -381,11 +381,18 @@ class ExitManager:
                         and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
                         and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
                     )
-                    # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND BTC weakening
+                    # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND equity at/near peak
+                    # Focused on own-portfolio equity performance: harvest when we are at or near
+                    # the portfolio's High-Water-Mark (maximum equity achieved this session).
+                    # This avoids BTC-dependency and triggers purely on the portfolio's own curve.
+                    _equity_at_peak = (
+                        self._portfolio_hwm <= 0  # No HWM established yet — use pure threshold
+                        or total_net_pnl >= self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
+                    )
                     trigger_harvest_pct = (
                         n >= 1
                         and net_pnl_pct >= _harvest_min_pct
-                        and btc_weakening
+                        and _equity_at_peak
                     )
 
                     if trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
