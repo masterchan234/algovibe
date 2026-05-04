@@ -2,7 +2,7 @@
 candidate_enrichment.py
 
 Per-pair technical enrichment: update history, compute momentum changes,
-apply AI/whale/sector boosts, derive signal, and persist to DB.
+derive AI-free probability and technical signal, and persist to DB.
 Always completes (never skips) — gate filtering is done downstream.
 """
 
@@ -14,7 +14,12 @@ from utils.logger import log_message
 
 def enrich_pair(bot, p, tickers):
     """
-    Enriches a candidate pair with technical and AI data, then saves to DB.
+    Enriches a candidate pair with technical data, then saves to DB.
+
+    tq_prob (technical probability) is computed purely from price indicators —
+    no AI/LLM sentiment boost is applied. whale_boost and sector_boost are
+    retained in the return dict for dashboard display only and must NOT
+    be used to gate or adjust trade decisions.
 
     Returns a dict with all computed enrichment values. Never returns None —
     caller is responsible for gate filtering after enrichment.
@@ -23,8 +28,8 @@ def enrich_pair(bot, p, tickers):
     trend, breakout, history = bot.update_history_and_trend(pair, p['last'])
     imbalance_ratio = p.get('imbalance', 1.0)
 
-    ai_boost = bot.oracle.get_sentiment_boost(pair)
-    tq_prob = get_prediction(history, tickers.get(pair), ai_boost)
+    # Pure technical probability — no AI sentiment multiplier applied.
+    tq_prob = get_prediction(history, tickers.get(pair))
 
     ch_5m = ch_15m = ch_1h = 0.0
     if len(history) >= 2:
@@ -36,10 +41,10 @@ def enrich_pair(bot, p, tickers):
         ch_15m = ((curr - p_15) / p_15) * 100 if p_15 > 0 else 0.0
         ch_1h = ((curr - p_60) / p_60) * 100 if p_60 > 0 else 0.0
 
+    # whale_boost and sector_boost are informational only (dashboard display).
+    # They must NOT modify the probability used for trade decisions.
     whale_boost = bot.oracle.get_whale_boost(pair)
     sector_boost = bot.oracle.get_sector_boost(pair)
-    boost_adj = ((whale_boost - 1.0) * 0.1) + ((sector_boost - 1.0) * 0.1)
-    final_prob = max(0.0, min(0.99, tq_prob + boost_adj))
 
     tech = get_technical_summary(history)
     tech_sig = derive_trade_signal(tech)
@@ -48,7 +53,7 @@ def enrich_pair(bot, p, tickers):
     db.save_ticker_history(
         pair,
         history,
-        prediction_prob=final_prob,
+        prediction_prob=tq_prob,
         trend=trend,
         signal=signal_verdict,
         ch_5m=ch_5m,
@@ -64,9 +69,9 @@ def enrich_pair(bot, p, tickers):
         "history": history,
         "imbalance_ratio": imbalance_ratio,
         "tq_prob": tq_prob,
-        "whale_boost": whale_boost,
-        "sector_boost": sector_boost,
-        "final_prob": final_prob,
+        "whale_boost": whale_boost,       # display only
+        "sector_boost": sector_boost,     # display only
+        "final_prob": tq_prob,            # no AI adjustment
         "tech": tech,
         "tech_sig": tech_sig,
         "signal_verdict": signal_verdict,

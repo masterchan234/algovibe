@@ -31,9 +31,6 @@ def dispatch_entry(bot, p, enriched, gate, target):
             dynamic_tp=target['final_dyn_tp'],
             dynamic_sl=target['final_dyn_sl'],
             taker=target['use_taker'],
-            llm_verdict=gate['llm_v'],
-            llm_confidence=gate['llm_c'],
-            llm_reason=gate['llm_r'],
         )
         time.sleep(1)
         return bool(traded)

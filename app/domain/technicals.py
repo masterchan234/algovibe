@@ -8,6 +8,11 @@ Setiap sinyal HARUS dikonfirmasi oleh minimal 2 indikator berbeda (multi-conflue
 
 import numpy as np
 
+# Faktor normalisasi MACD histogram terhadap harga.
+# Nilai 1000 dikalibrasi untuk scalping IDR: gerakan >= 0.1% harga dianggap sinyal kuat.
+# Contoh: hist=1 IDR pada koin 1000 IDR → 1/1000*1000 = 1.0 (jenuh = sinyal penuh).
+_MACD_NORM_FACTOR = 1000
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # INDICATOR CALCULATIONS
@@ -254,6 +259,47 @@ def calculate_ema_slope(prices, ema_period=20, lookback=5):
     return float((ema_now - ema_prev) / ema_prev * 100)
 
 
+def calculate_williams_r(prices, period=14):
+    """
+    Williams %R: mengukur posisi harga penutupan di dalam range (high-low) N periode.
+    Returns: nilai antara -100 (oversold/potensi bounce) dan 0 (overbought/potensi koreksi).
+
+    Formula: W%R = (highest_high - close) / (highest_high - lowest_low) * -100
+    Karena close selalu dalam [lowest, highest] dari window yang sama, hasil selalu [-100, 0].
+
+    Interpretasi scalping:
+      W%R <= -80  → deep oversold, peluang rebound tinggi
+      W%R >= -20  → overbought, hati-hati masuk posisi baru
+    """
+    if len(prices) < period:
+        return -50.0
+    window = prices[-period:]
+    highest = max(window)
+    lowest = min(window)
+    denom = highest - lowest
+    if denom == 0:
+        return -50.0
+    return float((highest - float(prices[-1])) / denom * -100.0)
+
+
+def calculate_roc(prices, period=10):
+    """
+    Rate of Change (ROC): perubahan harga dalam persen selama N periode.
+    Formula: (prices[-1] - prices[-period-1]) / prices[-period-1] * 100
+    Returns: ROC dalam % (positif = naik, negatif = turun).
+
+    Berguna sebagai konfirmasi momentum:
+      ROC sangat negatif → oversold, potensi mean-reversion BUY
+      ROC sangat positif → overbought, potensi mean-reversion SELL
+    """
+    if len(prices) < period + 1:
+        return 0.0
+    prev = float(prices[-(period + 1)])
+    if prev <= 0:
+        return 0.0
+    return float((float(prices[-1]) - prev) / prev * 100.0)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MULTI-INDICATOR CONFLUENCE ENGINE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -262,12 +308,17 @@ def get_technical_summary(prices):
     """
     Kembalikan rangkuman teknikal lengkap dari semua indikator.
     Data ini dipakai oleh derive_trade_signal() untuk keputusan akhir.
+
+    Indikator:
+      RSI, MACD, Bollinger Bands, Stochastic RSI, EMA Crossover,
+      EMA Slope, Williams %R, Rate of Change (ROC).
     """
     if not prices or len(prices) < 2:
         return {
             "rsi": 50, "volatility": 0, "signal": "NEUTRAL", "slope": 0,
             "macd_hist": 0, "bb_pct": 0.5, "stoch_k": 50, "stoch_d": 50,
             "ema9": 0, "ema21": 0, "ema_cross": "NEUTRAL",
+            "last_price": 0, "williams_r": -50, "roc": 0,
         }
 
     prices_list = list(prices)
@@ -314,6 +365,12 @@ def get_technical_summary(prices):
     elif rsi < 50:
         signal = "BEARISH"
 
+    # Williams %R (14-period)
+    williams_r = calculate_williams_r(prices_list) if len(prices_list) >= 14 else -50.0
+
+    # Rate of Change (10-period)
+    roc = calculate_roc(prices_list) if len(prices_list) >= 11 else 0.0
+
     return {
         "rsi":        round(rsi, 1),
         "volatility": round(vol, 2),
@@ -328,6 +385,9 @@ def get_technical_summary(prices):
         "ema9":       round(ema9, 6),
         "ema21":      round(ema21, 6),
         "ema_cross":  ema_cross,
+        "last_price": round(float(prices_list[-1]), 6),
+        "williams_r": round(williams_r, 1),
+        "roc":        round(roc, 4),
     }
 
 
@@ -344,16 +404,18 @@ def derive_trade_signal(tech):
     - Confidence = fungsi dari kekuatan sinyal dan jumlah indikator yang agree.
 
     Indikator & Bobot:
-    1. RSI (w=3.0)        — momentum overbought/oversold klasik
-    2. MACD Histogram (w=2.5) — momentum crossover
-    3. Bollinger %B (w=2.0) — posisi harga relatif volatilitas
+    1. RSI (w=3.0)            — momentum overbought/oversold klasik
+    2. MACD Histogram (w=2.5) — momentum crossover (price-relative normalisasi)
+    3. Bollinger %B (w=2.0)   — posisi harga relatif volatilitas
     4. Stochastic RSI (w=2.0) — overbought/oversold sensitif
-    5. EMA Crossover (w=1.5) — konfirmasi tren jangka menengah
-    6. Slope/Momentum (w=1.0) — percepatan harga
-    7. Order Book Pressure (w=2.0) — permintaan nyata dari pasar
+    5. EMA Crossover (w=1.5)  — konfirmasi tren jangka menengah
+    6. Williams %R (w=1.5)    — konfirmasi oversold/overbought lintas-metode
+    7. Slope/Momentum (w=1.0) — percepatan harga
+    8. ROC-10 (w=1.0)         — momentum harga langsung (mean-reversion)
+    9. Order Book Pressure (w=2.0) — permintaan nyata dari pasar
 
-    Total max buy score  ≈ 14.0
-    Total max sell score ≈ 14.0
+    Total max buy score  ≈ 16.5
+    Total max sell score ≈ 16.5
 
     Syarat BUY : buy_score >= 6.0 DAN sell_score < 4.0
     Syarat SELL: sell_score >= 6.0 DAN buy_score < 4.0
@@ -367,6 +429,9 @@ def derive_trade_signal(tech):
     sk      = float(tech.get('stoch_k', 50))
     sd      = float(tech.get('stoch_d', 50))
     ema_cr  = str(tech.get('ema_cross', 'NEUTRAL'))
+    wr      = float(tech.get('williams_r', -50))   # Williams %R
+    roc     = float(tech.get('roc', 0))             # Rate of Change (10-period)
+    last_price = max(1.0, float(tech.get('last_price', 1.0)))  # harga terakhir untuk normalisasi MACD
 
     buy_score  = 0.0
     sell_score = 0.0
@@ -393,13 +458,14 @@ def derive_trade_signal(tech):
         signals.append(f"RSI high({rsi:.0f})")
 
     # ── 2. MACD Histogram (Bobot 2.5) ─────────────────────────────────────────
+    # Normalisasi price-relative: hindari scale bias antar koin IDR.
+    # Menggunakan (|hist| / harga) * _MACD_NORM_FACTOR agar sinyal konsisten.
     if mh > 0:
-        # Normalisasi: boost berdasarkan kekuatan histogram relatif vs harga
-        strength = min(1.0, abs(mh) * 10000)
+        strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
         buy_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bullish({mh:+.4f})")
     elif mh < 0:
-        strength = min(1.0, abs(mh) * 10000)
+        strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
         sell_score += min(2.5, 1.0 + strength * 1.5)
         signals.append(f"MACD bearish({mh:+.4f})")
 
@@ -448,7 +514,23 @@ def derive_trade_signal(tech):
         sell_score += 1.5
         signals.append("EMA9<EMA21 bearish")
 
-    # ── 6. Slope/Momentum (Bobot 1.0) ─────────────────────────────────────────
+    # ── 6. Williams %R (Bobot 1.5) ────────────────────────────────────────────
+    # Konfirmator oversold/overbought yang independen dari RSI — range -100 s/d 0.
+    # Oversold (<=-80) memperkuat sinyal BUY; overbought (>=-20) memperkuat SELL.
+    if wr <= -85:
+        buy_score += 1.5
+        signals.append(f"W%R deep-oversold({wr:.0f})")
+    elif wr <= -70:
+        buy_score += 1.0
+        signals.append(f"W%R oversold({wr:.0f})")
+    elif wr >= -15:
+        sell_score += 1.5
+        signals.append(f"W%R deep-overbought({wr:.0f})")
+    elif wr >= -30:
+        sell_score += 1.0
+        signals.append(f"W%R overbought({wr:.0f})")
+
+    # ── 7. Slope/Momentum (Bobot 1.0) ─────────────────────────────────────────
     if slope > 0.005:
         buy_score += 1.0
         signals.append(f"slope strong-up({slope:.4f})")
@@ -462,7 +544,23 @@ def derive_trade_signal(tech):
         sell_score += 0.5
         signals.append(f"slope down({slope:.4f})")
 
-    # ── 7. Order Book Buy Pressure (Bobot 2.0) ────────────────────────────────
+    # ── 8. Rate of Change / ROC-10 (Bobot 1.0) ────────────────────────────────
+    # Interpretasi mean-reversion: harga turun tajam = potensi bounce (BUY),
+    # harga naik tajam = potensi koreksi (SELL).
+    if roc < -3.0:
+        buy_score += 1.0
+        signals.append(f"ROC oversold({roc:.2f}%)")
+    elif roc < -1.0:
+        buy_score += 0.5
+        signals.append(f"ROC mild-down({roc:.2f}%)")
+    elif roc > 3.0:
+        sell_score += 1.0
+        signals.append(f"ROC overbought({roc:.2f}%)")
+    elif roc > 1.0:
+        sell_score += 0.5
+        signals.append(f"ROC mild-up({roc:.2f}%)")
+
+    # ── 9. Order Book Buy Pressure (Bobot 2.0) ────────────────────────────────
     # Hanya berlaku jika data OB tersedia (bp != 50.0 default)
     if bp != 50.0:
         if bp >= 65:

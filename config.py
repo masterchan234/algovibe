@@ -49,6 +49,16 @@ TRAILING_STOP_DISTANCE_PCT = 0.004   # Jarak trailing lebih ketat: 0.4% (dari 0.
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
+
+# --- [Basket Exit: Proactive Profit Lock] ---
+# Trigger basket harvest segera ketika combined net PnL mencapai target ini,
+# bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
+# Set ke 0 untuk nonaktifkan.
+BASKET_HARVEST_TARGET_IDR = 20000  # Rp 20.000 combined net profit → panen serentak
+
+# Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
+# Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
+BASKET_HWM_PULLBACK_PCT   = 0.30   # 30% drawdown dari peak combined PnL
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 
@@ -58,17 +68,17 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
 STRONG_IMBALANCE_RATIO  = 1.4  
 
-# --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
-AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
-AI_MIN_HISTORY_POINTS   = 30   
+# --- Technical Probability ---
+TECH_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
+TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
+TECH_MIN_HISTORY_POINTS   = 30   
 
 # --- [Senior Strategy: Averaging Down] ---
 DCA_ENABLED = True
-DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
-DCA_STEP_PCT = -0.025          # Tambah muatan setiap turun 2.5% (dari 3.5%) → DCA lebih cepat
+DCA_MAX_TIERS = 1              # Maksimal 1x tambah muatan (dari 2) — batasi exposure
+DCA_STEP_PCT = -0.015          # Tambah muatan setiap turun 1.5% (dari 2.5%) — trigger lebih cepat sebelum SL
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
-DCA_MIN_AI_CONFIDENCE = 0.35   # Hanya tambah muatan jika AI masih optimis > 35% (dari 40%)# Minimal data points sebelum AI aktif
+DCA_MIN_TECH_CONFIDENCE = 0.55   # Hanya tambah muatan jika probabilitas teknikal > 55% (dari 35%) — filter lebih ketat
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)

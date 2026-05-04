@@ -123,7 +123,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
         # Kondisi wajib: AI confidence ≥80%, LLM verdict BUY ≥75%, max 1 posisi baru,
         # ukuran posisi diperkecil 50%.
-        adaptive_cfg["ai_threshold"] = 0.80
+        adaptive_cfg["tech_threshold"] = 0.80
         adaptive_cfg["recovery_mode"] = True
         # Simpan faktor sizing 50% ke bot agar trade_execution bisa membacanya
         bot._recovery_size_factor = 0.5
@@ -143,11 +143,11 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
     # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan
     if target_status["near"]:
-        original_threshold = adaptive_cfg.get("ai_threshold", 0.35)
-        adaptive_cfg["ai_threshold"] = min(0.85, original_threshold + 0.15)
+        original_threshold = adaptive_cfg.get("tech_threshold", 0.35)
+        adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
         log_message(
             f"⚠️ [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
-            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['ai_threshold']*100:.0f}% untuk menjaga cuan."
+            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['tech_threshold']*100:.0f}% untuk menjaga cuan."
         )
     # ── END GATE ──────────────────────────────────────────────────────────────
 
@@ -162,15 +162,14 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             if gate == _BREAK:
                 break
 
-            # [RECOVERY MODE] Gate tambahan: hanya LLM BUY ≥75% yang lolos,
+            # [RECOVERY MODE] Gate tambahan: hanya entri dengan confidence teknikal sangat tinggi (≥75%),
             # dan maksimal 1 posisi baru selama sesi recovery ini.
             if adaptive_cfg.get("recovery_mode"):
-                llm_v = gate.get("llm_v", "HOLD")
-                llm_c = float(gate.get("llm_c", 0))
-                if not (llm_v == "BUY" and llm_c >= 75.0):
+                total_conf = float(gate.get("total_confidence", 0))
+                if total_conf < 75.0:
                     log_message(
-                        f"🔒 [RECOVERY GATE] {pair} ditolak — butuh LLM BUY ≥75%, "
-                        f"dapat: {llm_v} {llm_c:.0f}%"
+                        f"🔒 [RECOVERY GATE] {pair} ditolak — butuh confidence teknikal ≥75%, "
+                        f"dapat: {total_conf:.0f}%"
                     )
                     continue
                 # Batasi ke 1 posisi baru dalam siklus recovery ini
@@ -204,5 +203,3 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
     if hasattr(bot, '_recovery_size_factor'):
         del bot._recovery_size_factor
     adaptive_cfg.pop("recovery_mode", None)
-
-    time.sleep(5)
