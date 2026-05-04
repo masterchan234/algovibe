@@ -66,6 +66,7 @@ def run_market_cycle(bot):
         db.save_state("start_day", bot.start_day)
         db.save_state("session_mode", "NORMAL")
         db.save_state("session_buy_enabled", "true")
+        db.save_state("session_latched", "false")   # release latch on local calendar day rollover
         log_message("New day detected. Counters reset & Logs rotated. Session mode reset to NORMAL.")
 
     tickers = bot.get_tickers()

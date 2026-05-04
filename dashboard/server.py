@@ -2506,26 +2506,38 @@ def session_action():
     """
     Strategic Break user action endpoint.
 
-    Accepts JSON: { "action": "CONTINUE" | "STOP" }
+    Accepts JSON: { "action": "CONTINUE" | "STOP" | "RESET" }
 
-    CONTINUE — Recalculates next target as (current_equity + target_percentage) and
-               resets session_mode to NORMAL so buying is re-enabled.
-    STOP     — Keeps HARVEST_ONLY status; buy functions remain blocked.
+    CONTINUE — Recalculates next target as (equity × target_pct), clears the
+               HARVEST_ONLY latch, and resets session_mode to NORMAL.
+    STOP     — Keeps HARVEST_ONLY latch active for the rest of the day.
+    RESET    — Clears the HARVEST_ONLY latch and returns to NORMAL without
+               recalculating the target (keeps the current target in place).
     """
     data = request.get_json(silent=True) or {}
     action = data.get('action', '').upper()
 
-    if action not in ('CONTINUE', 'STOP'):
-        return jsonify({"error": "Invalid action. Use 'CONTINUE' or 'STOP'."}), 400
+    if action not in ('CONTINUE', 'STOP', 'RESET'):
+        return jsonify({"error": "Invalid action. Use 'CONTINUE', 'STOP', or 'RESET'."}), 400
 
     try:
         raw_sb = db.get_state("strategic_break_payload")
         if not raw_sb:
+            # Allow RESET even when there is no active strategic break payload
+            # (e.g. if the bot was restarted and the payload was cleared).
+            if action == 'RESET':
+                db.save_state("session_mode", "NORMAL")
+                db.save_state("session_buy_enabled", "true")
+                db.save_state("session_latched", "false")
+                db.save_state("strategic_break_payload", "")
+                socketio.emit('strategic_break_cleared', {"action": "RESET"})
+                logging.info("[StrategicBreak] RESET — latch cleared, session returned to NORMAL.")
+                return jsonify({"status": "ok", "action": "RESET"})
             return jsonify({"error": "No active strategic break."}), 404
         payload = json.loads(raw_sb)
 
         if action == 'CONTINUE':
-            # Recalculate next target: current total equity * target percentage.
+            # Recalculate next target: equity × same profit percentage.
             # Use the persisted daily_profit_target as the profit-pct reference.
             try:
                 balance_str = db.get_state("cached_idr_balance")
@@ -2540,27 +2552,41 @@ def session_action():
             except Exception:
                 target_pct = 0.01
 
-            # New profit target = equity * same percentage (profit amount, not equity amount)
+            # New profit target = equity × target_pct
             new_target = equity * target_pct
             db.save_state("daily_profit_target", str(new_target))
             db.save_state("daily_profit_target_ts", datetime.datetime.now(datetime.timezone.utc).isoformat())
             db.save_state("session_mode", "NORMAL")
             db.save_state("session_buy_enabled", "true")
+            db.save_state("session_latched", "false")   # release latch
 
             payload["status"] = "CONTINUE"
             db.save_state("strategic_break_payload", json.dumps(payload))
 
             # Notify frontend to dismiss the popup
             socketio.emit('strategic_break_cleared', {"action": "CONTINUE", "new_target": new_target})
-            logging.info(f"[StrategicBreak] CONTINUE — new target: Rp {new_target:,.0f}")
+            logging.info(f"[StrategicBreak] CONTINUE — latch cleared, new target: Rp {new_target:,.0f}")
             return jsonify({"status": "ok", "action": "CONTINUE", "new_target": new_target})
 
+        elif action == 'RESET':
+            # Release the latch and return to NORMAL without changing the target.
+            db.save_state("session_mode", "NORMAL")
+            db.save_state("session_buy_enabled", "true")
+            db.save_state("session_latched", "false")   # release latch
+
+            payload["status"] = "RESET"
+            db.save_state("strategic_break_payload", json.dumps(payload))
+
+            socketio.emit('strategic_break_cleared', {"action": "RESET"})
+            logging.info("[StrategicBreak] RESET — latch cleared, session returned to NORMAL.")
+            return jsonify({"status": "ok", "action": "RESET"})
+
         else:  # STOP
-            # Keep HARVEST_ONLY — do not change session_mode.
+            # Keep HARVEST_ONLY latch — do not change session_mode or latched flag.
             payload["status"] = "STOP"
             db.save_state("strategic_break_payload", json.dumps(payload))
             socketio.emit('strategic_break_cleared', {"action": "STOP"})
-            logging.info("[StrategicBreak] STOP — session remains HARVEST_ONLY.")
+            logging.info("[StrategicBreak] STOP — session remains HARVEST_ONLY (latched).")
             return jsonify({"status": "ok", "action": "STOP"})
 
     except Exception as e:

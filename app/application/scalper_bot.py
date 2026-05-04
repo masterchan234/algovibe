@@ -378,6 +378,7 @@ class ScalperBot:
         db.save_state("peak_pnl_today", "0")
         db.save_state("session_mode", "NORMAL")
         db.save_state("session_buy_enabled", "true")
+        db.save_state("session_latched", "false")   # release latch on new UTC day
         db.save_state("daily_trades", "0")
         db.save_state("consecutive_losses", "0")
         db.save_state("start_day", str(self.start_day))

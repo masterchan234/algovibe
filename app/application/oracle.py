@@ -991,7 +991,7 @@ class Oracle:
 
     def evaluate_and_update_session_mode(self, target_status: dict) -> dict:
         """
-        Smart Trailing & STOP BUY Protocol.
+        Smart Trailing & STOP BUY Protocol (v3.4 — Latched Trigger).
 
         Evaluates whether the daily NET target has been reached and decides the
         next session mode:
@@ -1003,14 +1003,11 @@ class Oracle:
         Net PnL = Realized PnL + Unrealized PnL (from get_daily_target_status).
         Trigger requires Net_PnL >= Target_PnL (not realized alone).
 
-        Smart Trailing conditions (all must hold):
-          • time_remaining_pct > 40  (enough of the day left)
-          • market regime == BULLISH
-          • market sentiment index >= 80  (strong bullish momentum)
-
-        Once HARVEST_ONLY is persisted to DB it stays until either:
-          • current_pnl drops back below target_idr (de-trigger: BUY re-enabled), or
-          • a new UTC trading day resets it (see _utc_reset_monitor_loop).
+        LATCH behaviour (v3.4):
+          Once HARVEST_ONLY is set, it remains locked regardless of subsequent Net PnL
+          fluctuations.  The latch is only released by:
+            • User pressing CONTINUE or RESET on the Strategic Break popup, or
+            • The automated UTC midnight reset.
 
         Returns dict:
             buy_enabled  — bool: whether new Entry Ready orders are allowed
@@ -1030,29 +1027,15 @@ class Oracle:
             time_remaining  = target_status.get("time_remaining_pct", 50.0)
             session_mode    = target_status.get("session_mode", "NORMAL")
 
-            # Already HARVEST_ONLY: re-evaluate the locking condition.
+            # ── LATCH: if already HARVEST_ONLY, stay locked unconditionally ──
+            # v3.4: market volatility causing Net PnL to dip below target does NOT
+            # release the latch.  Only CONTINUE / RESET user actions or the UTC
+            # midnight reset can return the session to NORMAL.
             if session_mode == "HARVEST_ONLY":
-                # De-trigger: if Net PnL has dropped back below target (e.g. via manual exit/loss),
-                # the original HARVEST_ONLY condition is no longer met → revert to NORMAL.
-                if target_idr > 0 and current_pnl < target_idr:
-                    db.save_state("session_mode", "NORMAL")
-                    db.save_state("session_buy_enabled", "true")
-                    msg = (
-                        f"🔓 [SESSION RESET] HARVEST_ONLY released. "
-                        f"Net PnL (Rp {current_pnl:,.0f}) dropped below Target (Rp {target_idr:,.0f}). "
-                        f"Peak was Rp {peak_pnl_today:,.0f}. BUY re-enabled."
-                    )
-                    log_message(msg)
-                    return {
-                        "buy_enabled": True,
-                        "session_mode": "NORMAL",
-                        "message": msg,
-                    }
-                # Net PnL still at/above target — stay locked
                 msg = (
                     f"Net PnL: Rp {current_pnl:,.0f} "
                     f"(Realized: Rp {realized_pnl:,.0f}, Unrealized: Rp {unrealized_pnl:,.0f}) | "
-                    f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY"
+                    f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY [LATCHED]"
                 )
                 return {
                     "buy_enabled": False,
@@ -1104,23 +1087,23 @@ class Oracle:
                         f"no longer bullish. Triggering HARVEST_ONLY."
                     )
 
-            # ── Trigger STOP BUY / HARVEST_ONLY ─────────────────────────────
+            # ── Trigger STOP BUY / HARVEST_ONLY (LATCH) ─────────────────────
             db.save_state("session_mode", "HARVEST_ONLY")
             db.save_state("session_buy_enabled", "false")
+            db.save_state("session_latched", "true")   # latch: persists until manual action or midnight reset
             msg = (
                 f"Net PnL: Rp {current_pnl:,.0f} "
                 f"(Realized: Rp {realized_pnl:,.0f}, Unrealized: Rp {unrealized_pnl:,.0f}) | "
-                f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY"
+                f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY [LATCHED]"
             )
-            log_message(f"🛑 [HARVEST ONLY] {msg}")
+            log_message(f"🛑 [HARVEST ONLY LATCHED] {msg}")
             send_telegram_message(
-                f"🛑 *SESSION MODE: HARVEST ONLY*\n"
+                f"🛑 *SESSION MODE: HARVEST ONLY (LATCHED)*\n"
                 f"Target Rp {target_idr:,.0f} tercapai.\n"
                 f"Net PnL: Rp {current_pnl:,.0f} "
                 f"(Realized: Rp {realized_pnl:,.0f} | Unrealized: Rp {unrealized_pnl:,.0f})\n"
                 f"Sisa Hari: {time_remaining:.0f}%\n"
-                f"🔒 Tidak ada pembelian baru. "
-                f"Memantau & memperketat TP posisi terbuka."
+                f"🔒 Latch aktif — tidak ada pembelian baru hingga CONTINUE/RESET."
             )
 
             # ── Strategic Break: compile session analytics and notify dashboard ──
