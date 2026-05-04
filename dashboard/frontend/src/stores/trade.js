@@ -47,6 +47,9 @@ export const useTradeStore = defineStore('trade', () => {
   // Open positions (trades)
   const positions = ref([])
 
+  // Approval gate: pending action waiting for Supreme Commander decision
+  const pendingAction = ref(null)
+
   // Activity feed (logs)
   const activityFeed = ref([])
   const MAX_FEED_ITEMS = 100
@@ -246,6 +249,17 @@ export const useTradeStore = defineStore('trade', () => {
       }
     })
 
+    // ── Supreme Commander Approval Gate events ───────────────────────────
+    s.on('pending_action', (data) => {
+      if (data && data.action_id) {
+        pendingAction.value = data
+      }
+    })
+
+    s.on('pending_action_cleared', () => {
+      pendingAction.value = null
+    })
+
     return s
   }
 
@@ -253,6 +267,7 @@ export const useTradeStore = defineStore('trade', () => {
     connected,
     stats,
     positions,
+    pendingAction,
     activityFeed,
     pnlHistory,
     radarPairs,

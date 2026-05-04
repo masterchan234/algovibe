@@ -2376,6 +2376,7 @@ def push_data_loop():
     Slow path (5s): stats, radar, trades history, logs (berat).
     """
     _slow_counter = 0
+    _last_pending_action_id = None  # Track last forwarded action_id to avoid spam
     while True:
         try:
             # Fast: data realtime sub-detik
@@ -2390,6 +2391,24 @@ def push_data_loop():
                 "trades": _build_market_trades_payload()
             })
 
+            # ── Supreme Commander: forward pending approval to frontend ──────────────
+            try:
+                raw_approval = db.get_state("pending_approval")
+                if raw_approval:
+                    pending = json.loads(raw_approval)
+                    if (
+                        pending.get("status") == "PENDING"
+                        and pending.get("action_id") != _last_pending_action_id
+                    ):
+                        _last_pending_action_id = pending.get("action_id")
+                        socketio.emit('pending_action', pending)
+                elif _last_pending_action_id is not None:
+                    # Approval resolved — tell frontend to dismiss
+                    socketio.emit('pending_action_cleared', {})
+                    _last_pending_action_id = None
+            except Exception as _ae:
+                logging.warning(f"[ApprovalGate] Error checking pending_approval: {_ae}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
@@ -2401,6 +2420,32 @@ def push_data_loop():
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)
+
+@socketio.on('approval_response')
+def handle_approval_response(data):
+    """Supreme Commander: receive user's approve/reject decision from the frontend."""
+    action_id = data.get('action_id', '')
+    decision  = data.get('decision', '')  # 'APPROVED' or 'REJECTED'
+
+    if not action_id or decision not in ('APPROVED', 'REJECTED'):
+        logging.warning(f"[ApprovalGate] Invalid approval_response payload: {data}")
+        return
+
+    try:
+        raw = db.get_state("pending_approval")
+        if not raw:
+            return
+        pending = json.loads(raw)
+        if pending.get("action_id") != action_id:
+            logging.warning(f"[ApprovalGate] action_id mismatch: got {action_id}, expected {pending.get('action_id')}")
+            return
+        if pending.get("status") != "PENDING":
+            return  # Already resolved
+        pending["status"] = decision
+        db.save_state("pending_approval", json.dumps(pending))
+        logging.info(f"[ApprovalGate] {decision} received for action {action_id} ({pending.get('action_type', '')})")
+    except Exception as e:
+        logging.error(f"[ApprovalGate] Error processing approval_response: {e}")
 
 # Start background thread
 socketio.start_background_task(push_data_loop)
