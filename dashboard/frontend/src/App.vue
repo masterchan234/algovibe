@@ -105,50 +105,6 @@
 
     <NotificationCenter />
 
-    <section class="hero-ai" v-if="insights.length">
-      <div class="hero-content">
-        <div class="hero-icon">
-          <div class="neural-core"></div>
-          <div class="neural-pulse"></div>
-        </div>
-        <div class="hero-body">
-          <div class="hero-label">
-            AI ANALYSIS
-            <span class="subject-badge" v-if="extractSubject(insights[currentInsightIndex]?.message)">
-              {{ extractSubject(insights[currentInsightIndex]?.message) }}
-            </span>
-          </div>
-          <div class="hero-text-container">
-            <Transition name="slide-fade" mode="out-in">
-              <div 
-                class="hero-text" 
-                :key="currentInsightIndex" 
-                v-html="formatHeroText(insights[currentInsightIndex]?.message)"
-              >
-              </div>
-            </Transition>
-          </div>
-          <div class="hero-footer" v-if="insights[currentInsightIndex]?.created_at">
-            {{ formatExpiryStatus(insights[currentInsightIndex]?.created_at) }}
-          </div>
-        </div>
-        <div class="hero-meta hide-mobile">
-          <span class="meta-tag">LITERT-LM ENGINE</span>
-        </div>
-      </div>
-      
-      <!-- Carousel Dots -->
-      <div class="hero-pager" v-if="insights.length > 1">
-        <div 
-          v-for="(n, i) in insights.length" 
-          :key="i" 
-          class="pager-dot" 
-          :class="{ active: i === currentInsightIndex }"
-          @click="currentInsightIndex = i"
-        ></div>
-      </div>
-    </section>
-
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
         <ActivityFeed />
@@ -243,30 +199,6 @@ import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 
 const store = useTradeStore()
-const insights = computed(() => {
-  const all = store.stats.hero_ai_insights || []
-  const now = new Date()
-  return all.filter(item => {
-    if (!item.created_at) return false
-    const created = new Date(item.created_at.replace(' ', 'T') + 'Z')
-    const ageMins = (now - created) / 60000
-    return ageMins < 20 // Only show insights less than 20 mins old
-  })
-})
-
-watch(insights, (newVal) => {
-  if (currentInsightIndex.value >= newVal.length) {
-    currentInsightIndex.value = 0
-  }
-}, { deep: true })
-
-const currentInsightIndex = ref(0)
-let carouselInterval = null
-
-function rotateCarousel() {
-  if (insights.value.length <= 1) return
-  currentInsightIndex.value = (currentInsightIndex.value + 1) % insights.value.length
-}
 
 const newsHeadlines = ref([])
 const tickerContent = ref(null)
@@ -476,41 +408,6 @@ function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
 }
 
-function formatHeroText(text) {
-  if (!text) return ''
-  let cleanText = text.replace(/^\*\*(.*?)\*\*[:\s-]*/, '')
-  let formatted = cleanText.replace(/\*\*(.*?)\*\*/g, '<span class="text-highlight">$1</span>')
-  // Highlight action words if they are not already bolded (standalone)
-  formatted = formatted.replace(/\b(BUY|HOLD|AVOID)\b/g, '<span class="text-highlight">$1</span>')
-  return formatted
-}
-
-function extractSubject(text) {
-  if (!text) return null
-  const match = text.match(/^\*\*(.*?)\*\*/)
-  return match ? match[1] : null
-}
-
-function formatExpiryStatus(createdAt) {
-  if (!createdAt) return ''
-  try {
-    const created = new Date(createdAt.replace(' ', 'T') + 'Z')
-    const now = new Date()
-    const ageMs = now - created
-    const expiryMs = 20 * 60000 // 20 min TTL
-    const remainingMs = expiryMs - ageMs
-    
-    if (remainingMs > 0) {
-      const remainingMins = Math.floor(remainingMs / 60000)
-      const remainingSecs = Math.floor((remainingMs % 60000) / 1000)
-      return remainingMins > 0 ? `Expires in ${remainingMins}m` : `Expires in ${remainingSecs}s`
-    }
-    return 'Expired'
-  } catch (e) {
-    return ''
-  }
-}
-
 // Pull-to-Refresh Logic
 const pullDistance = ref(0)
 const isRefreshing = ref(false)
@@ -590,7 +487,6 @@ onMounted(() => {
   fetchNews()
   setInterval(fetchNews, 5 * 60 * 1000)
   setInterval(() => { now.value = Date.now() }, 1000)
-  carouselInterval = setInterval(rotateCarousel, 8000) // 8 seconds per insight
   _startTicker()
 
   // Mobile Touch listeners
@@ -601,7 +497,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (_rafId) cancelAnimationFrame(_rafId)
-  if (carouselInterval) clearInterval(carouselInterval)
 })
 </script>
 
@@ -839,214 +734,7 @@ body {
   border-color: var(--accent-blue);
 }
 
-/* Hero AI Insight Section */
-.hero-ai {
-  margin: 12px 24px;
-  background: linear-gradient(90deg, rgba(163, 113, 247, 0.1) 0%, rgba(13, 17, 23, 0.4) 100%);
-  border: 1px solid rgba(163, 113, 247, 0.3);
-  border-radius: 12px;
-  padding: 16px 20px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(8px);
-  position: relative;
-}
-
-.hero-ai::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 4px;
-  height: 100%;
-  background: var(--accent-purple);
-}
-
-.hero-content {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-
-.hero-icon {
-  position: relative;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
-}
-
-.neural-core {
-  position: absolute;
-  inset: 10px;
-  background: var(--accent-purple);
-  border-radius: 50%;
-  z-index: 2;
-  box-shadow: 0 0 15px var(--accent-purple);
-}
-
-.neural-pulse {
-  position: absolute;
-  inset: 0;
-  border: 2px solid var(--accent-purple);
-  border-radius: 50%;
-  animation: neural-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-}
-
-@keyframes neural-ping {
-  75%, 100% {
-    transform: scale(1.8);
-    opacity: 0;
-  }
-}
-
-.hero-body {
-  flex-grow: 1;
-}
-
-.hero-label {
-  font-size: 10px;
-  font-weight: 900;
-  color: var(--accent-purple);
-  letter-spacing: 2px;
-  margin-bottom: 8px;
-  text-shadow: 0 0 8px rgba(163, 113, 247, 0.4);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.subject-badge {
-  background: var(--accent-purple);
-  color: #fff;
-  padding: 2px 10px;
-  border-radius: 4px;
-  font-size: 11px;
-  letter-spacing: 1px;
-  box-shadow: 0 0 10px rgba(163, 113, 247, 0.6);
-  animation: slide-in-left 0.4s ease-out;
-}
-
-@keyframes slide-in-left {
-  from { opacity: 0; transform: translateX(-10px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.hero-text {
-  font-size: 14px;
-  font-weight: 500;
-  color: #fff;
-  line-height: 1.5;
-  font-family: 'Inter', sans-serif;
-}
-
-.hero-footer {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-dim);
-  margin-top: 8px;
-  opacity: 0.8;
-  letter-spacing: 0.5px;
-}
-
-.hero-text-container {
-  min-height: 45px;
-  display: flex;
-  align-items: center;
-}
-
-.text-highlight {
-  color: var(--accent-blue);
-  font-weight: 800;
-  text-shadow: 0 0 10px rgba(88, 166, 255, 0.4);
-}
-
-@keyframes fade-in-up {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.hero-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: flex-end;
-}
-
-.hero-pager {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 8px;
-}
-
-.pager-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: rgba(163, 113, 247, 0.2);
-  cursor: pointer;
-  transition: all 0.3s;
-}
-
-.pager-dot.active {
-  background: var(--accent-purple);
-  transform: scale(1.3);
-  box-shadow: 0 0 8px var(--accent-purple);
-}
-
-/* Transitions */
-.slide-fade-enter-active {
-  transition: all 0.3s ease-out;
-}
-.slide-fade-leave-active {
-  transition: all 0.3s cubic-bezier(1, 0.5, 0.8, 1);
-}
-.slide-fade-enter-from,
-.slide-fade-leave-to {
-  transform: translateX(10px);
-  opacity: 0;
-}
-
-.meta-tag {
-  font-size: 8px;
-  font-weight: 800;
-  padding: 2px 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
 @media (max-width: 768px) {
-  .hero-ai {
-    margin: 8px 12px;
-    padding: 10px 14px;
-    border-radius: 8px;
-  }
-  .hero-content {
-    gap: 12px;
-  }
-  .hero-icon {
-    width: 30px;
-    height: 30px;
-  }
-  .hero-text {
-    font-size: 12px;
-    line-height: 1.4;
-  }
-  .hero-text-container {
-    min-height: 36px;
-  }
-  .hero-meta {
-    display: none;
-  }
-  .hero-label {
-    font-size: 8px;
-    letter-spacing: 1px;
-  }
-  
   /* Layout Fixes */
   .main-grid {
     grid-template-columns: 1fr;
