@@ -105,6 +105,9 @@
 
     <NotificationCenter />
 
+    <!-- Supreme Commander Approval Gate -->
+    <ApprovalGateModal />
+
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
         <ActivityFeed />
@@ -197,6 +200,7 @@ import { useTradeStore } from './stores/trade'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
+import ApprovalGateModal from './components/ApprovalGateModal.vue'
 
 const store = useTradeStore()
 

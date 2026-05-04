@@ -381,11 +381,21 @@ class ExitManager:
                         and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
                         and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
                     )
-                    # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND BTC weakening
+                    # (e) Guaranteed Profit Harvest — BTC weakening AND equity has started to feel the impact
+                    # Both signals must confirm together:
+                    #   • btc_weakening: external warning that the market is turning against us.
+                    #   • _equity_impacted: our portfolio equity has already begun to pull back from its
+                    #     session High-Water-Mark, confirming the BTC move is affecting us — not just noise.
+                    # If BTC dips but equity has NOT moved yet, do NOT harvest (wait for real confirmation).
+                    _equity_impacted = (
+                        self._portfolio_hwm > 0             # HWM must be established (≥1 tick of data)
+                        and total_net_pnl < self._portfolio_hwm  # any decline from peak = equity is feeling it
+                    )
                     trigger_harvest_pct = (
                         n >= 1
                         and net_pnl_pct >= _harvest_min_pct
-                        and btc_weakening
+                        and btc_weakening       # market signal: BTC turning
+                        and _equity_impacted    # portfolio signal: equity already declining
                     )
 
                     if trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
@@ -420,6 +430,37 @@ class ExitManager:
                     )
                     print(msg.replace('*', '').replace('\n', ' | '))
                     send_telegram_message(msg)
+
+                    # ── Supreme Commander Approval Gate ─────────────────────────────────
+                    # BTC crash kill switch is an emergency — bypass the gate.
+                    # All other basket exits (including harvest) require user approval.
+                    if not btc_crash_kill:
+                        # Harvest-type actions: AUTO-REJECT on timeout (preserve profits until user acts).
+                        # Safety/rescue exits: AUTO-APPROVE on timeout (default safe behaviour).
+                        _is_harvest = (
+                            trigger_harvest_idr or trigger_harvest_pct or trigger_hwm_pullback
+                        )
+                        _default_approve = not _is_harvest
+                        _reason_text = (
+                            f"Net PnL: Rp {total_net_pnl:,.0f} | "
+                            f"Net {net_pnl_pct:+.4f}% | Trigger: {trigger_label}"
+                        )
+                        _pairs_desc = ", ".join(
+                            p for p, _, _, _ in open_pairs_for_basket[:5]
+                        ) + (f" +{n-5} more" if n > 5 else "")
+                        _approved = self._request_approval(
+                            action_type=f"BASKET EXIT [{trigger_label}]",
+                            description=_pairs_desc,
+                            reason_text=_reason_text,
+                            impact_idr=total_net_pnl,
+                            default_approve=_default_approve,
+                        )
+                        if not _approved:
+                            log_message(
+                                f"🚫 [APPROVAL GATE] BASKET_EXIT [{trigger_label}] REJECTED — skipping execution"
+                            )
+                            return
+
                     # Reset HWM setelah semua posisi ditutup
                     self._portfolio_hwm = 0.0
 
@@ -835,6 +876,80 @@ class ExitManager:
                 log_message(traceback.format_exc())
 
         self.save_positions(positions, modified_pairs)
+
+    def _request_approval(self, action_type, description, reason_text, impact_idr, default_approve=True):
+        """Supreme Commander Approval Gate — blocks up to 30 s waiting for user response.
+
+        Writes a pending approval record to the DB (picked up by the dashboard via
+        push_data_loop and forwarded to the frontend as a 'pending_action' Socket.IO event).
+        Polls the DB for the user's decision every 0.5 s. On timeout, applies the
+        supplied default (AUTO-APPROVE for SL-type exits, AUTO-REJECT for harvest exits).
+
+        Returns True if approved, False if rejected.
+        """
+        import uuid
+        action_id = str(uuid.uuid4())[:8]
+
+        payload = {
+            "action_id": action_id,
+            "action_type": action_type,
+            "description": description,
+            "reason": reason_text,
+            "impact_idr": impact_idr,
+            "default_approve": default_approve,
+            "status": "PENDING",
+            "expires_at": time.time() + 30,
+            "created_at": time.time(),
+        }
+        db.save_state("pending_approval", json.dumps(payload))
+
+        log_msg = (
+            f"⏸️ [APPROVAL GATE] User Approval Requested for {action_type} | "
+            f"Waiting max 30s... (default: {'APPROVE' if default_approve else 'REJECT'})"
+        )
+        log_message(log_msg)
+        db.log_system_event(description, "APPROVAL_PENDING", log_msg, 'WARNING')
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.5)
+            raw = db.get_state("pending_approval")
+            if not raw:
+                break
+            try:
+                current = json.loads(raw)
+            except Exception:
+                break
+            if current.get("action_id") != action_id:
+                break  # A newer action replaced ours
+            status = current.get("status", "PENDING")
+            if status == "APPROVED":
+                log_msg = (
+                    f"✅ [APPROVAL GATE] User Approval Requested for {action_type} | Response: Approved"
+                )
+                log_message(log_msg)
+                db.log_system_event(description, "APPROVAL_APPROVED", log_msg, 'SUCCESS')
+                db.save_state("pending_approval", "")
+                return True
+            elif status == "REJECTED":
+                log_msg = (
+                    f"🚫 [APPROVAL GATE] User Approval Requested for {action_type} | Response: Rejected"
+                )
+                log_message(log_msg)
+                db.log_system_event(description, "APPROVAL_REJECTED", log_msg, 'WARNING')
+                db.save_state("pending_approval", "")
+                return False
+
+        # Timeout — apply the configured default
+        action_taken = "AUTO-APPROVED" if default_approve else "AUTO-REJECTED"
+        log_msg = (
+            f"⏰ [APPROVAL GATE] User Approval Requested for {action_type} | "
+            f"Response: Timeout → {action_taken}"
+        )
+        log_message(log_msg)
+        db.log_system_event(description, f"APPROVAL_{action_taken.replace('-', '_')}", log_msg, 'WARNING')
+        db.save_state("pending_approval", "")
+        return default_approve
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:

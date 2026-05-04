@@ -1982,6 +1982,24 @@ def _build_stats_payload():
             print(f"⚠️ History Fetch Error: {e}")
 
 
+        # ── BTC Condition (for Signal Radar UX) ─────────────────────────────
+        _btc_ticker = ws_tickers.get('btcidr', {}) or {}
+        btc_price = float(_btc_ticker.get('last', 0))
+        btc_change_24h = float(_btc_ticker.get('change_24h', 0))
+        try:
+            _btc_row = conn.execute(
+                "SELECT ch_5m, ch_15m, ch_1h, trend, score FROM ticker_history WHERE pair = 'btcidr'"
+            ).fetchone()
+        except Exception:
+            _btc_row = None
+        btc_ch_5m  = float(_btc_row['ch_5m']  or 0) if _btc_row else 0.0
+        btc_ch_15m = float(_btc_row['ch_15m'] or 0) if _btc_row else 0.0
+        btc_ch_1h  = float(_btc_row['ch_1h']  or 0) if _btc_row else 0.0
+        btc_trend  = str(_btc_row['trend'] or 'N/A') if _btc_row else 'N/A'
+        btc_score  = float(_btc_row['score']  or 50) if _btc_row else 50.0
+        btc_weakening_flag = btc_ch_5m < 0  # proxy: 5-min change negative = weakening
+        btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
+
         payload = {
             "available_idr": round(available_idr, 0),
             "idr_used": round(idr_used, 0),
@@ -2027,7 +2045,17 @@ def _build_stats_payload():
             "bot_running": True,
             "dry_run": bool(cfg.DRY_RUN),
             "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
-            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT
+            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT,
+            # BTC Condition — used by Signal Radar UX
+            "btc_price":      round(btc_price, 0),
+            "btc_change_24h": round(btc_change_24h, 2),
+            "btc_ch_5m":      round(btc_ch_5m, 2),
+            "btc_ch_15m":     round(btc_ch_15m, 2),
+            "btc_ch_1h":      round(btc_ch_1h, 2),
+            "btc_trend":      btc_trend,
+            "btc_score":      round(btc_score, 1),
+            "btc_weakening":  btc_weakening_flag,
+            "btc_crash":      btc_crash_flag,
         }
         return payload
     finally:
@@ -2376,6 +2404,7 @@ def push_data_loop():
     Slow path (5s): stats, radar, trades history, logs (berat).
     """
     _slow_counter = 0
+    _last_pending_action_id = None  # Track last forwarded action_id to avoid spam
     while True:
         try:
             # Fast: data realtime sub-detik
@@ -2390,6 +2419,24 @@ def push_data_loop():
                 "trades": _build_market_trades_payload()
             })
 
+            # ── Supreme Commander: forward pending approval to frontend ──────────────
+            try:
+                raw_approval = db.get_state("pending_approval")
+                if raw_approval:
+                    pending = json.loads(raw_approval)
+                    if (
+                        pending.get("status") == "PENDING"
+                        and pending.get("action_id") != _last_pending_action_id
+                    ):
+                        _last_pending_action_id = pending.get("action_id")
+                        socketio.emit('pending_action', pending)
+                elif _last_pending_action_id is not None:
+                    # Approval resolved — tell frontend to dismiss
+                    socketio.emit('pending_action_cleared', {})
+                    _last_pending_action_id = None
+            except Exception as _ae:
+                logging.warning(f"[ApprovalGate] Error checking pending_approval: {_ae}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
@@ -2401,6 +2448,32 @@ def push_data_loop():
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)
+
+@socketio.on('approval_response')
+def handle_approval_response(data):
+    """Supreme Commander: receive user's approve/reject decision from the frontend."""
+    action_id = data.get('action_id', '')
+    decision  = data.get('decision', '')  # 'APPROVED' or 'REJECTED'
+
+    if not action_id or decision not in ('APPROVED', 'REJECTED'):
+        logging.warning(f"[ApprovalGate] Invalid approval_response payload: {data}")
+        return
+
+    try:
+        raw = db.get_state("pending_approval")
+        if not raw:
+            return
+        pending = json.loads(raw)
+        if pending.get("action_id") != action_id:
+            logging.warning(f"[ApprovalGate] action_id mismatch: got {action_id}, expected {pending.get('action_id')}")
+            return
+        if pending.get("status") != "PENDING":
+            return  # Already resolved
+        pending["status"] = decision
+        db.save_state("pending_approval", json.dumps(pending))
+        logging.info(f"[ApprovalGate] {decision} received for action {action_id} ({pending.get('action_type', '')})")
+    except Exception as e:
+        logging.error(f"[ApprovalGate] Error processing approval_response: {e}")
 
 # Start background thread
 socketio.start_background_task(push_data_loop)
