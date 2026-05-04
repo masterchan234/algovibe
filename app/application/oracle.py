@@ -970,8 +970,9 @@ class Oracle:
           • market regime == BULLISH
           • market sentiment index >= 80  (strong bullish momentum)
 
-        Once HARVEST_ONLY is persisted to DB it stays until a new trading day
-        resets it (see market_cycle.py daily-reset block).
+        Once HARVEST_ONLY is persisted to DB it stays until either:
+          • current_pnl drops back below target_idr (de-trigger: BUY re-enabled), or
+          • a new UTC trading day resets it (see _utc_reset_monitor_loop).
 
         Returns dict:
             buy_enabled  — bool: whether new Entry Ready orders are allowed
@@ -989,22 +990,29 @@ class Oracle:
             time_remaining  = target_status.get("time_remaining_pct", 50.0)
             session_mode    = target_status.get("session_mode", "NORMAL")
 
-            # Already HARVEST_ONLY — remain locked (default: safety first)
+            # Already HARVEST_ONLY: re-evaluate the locking condition.
             if session_mode == "HARVEST_ONLY":
-                # Detect PnL-status mismatch: target was met at peak, but PnL has since dropped.
-                # Decision gate: stay HARVEST_ONLY for safety — do NOT revert to NORMAL.
-                if target_idr > 0 and current_pnl < (target_idr * 0.8) and peak_pnl_today > current_pnl:
+                # De-trigger: if PnL has dropped back below target (e.g. via manual exit/loss),
+                # the original HARVEST_ONLY condition is no longer met → revert to NORMAL.
+                if target_idr > 0 and current_pnl < target_idr:
+                    db.save_state("session_mode", "NORMAL")
+                    db.save_state("session_buy_enabled", "true")
                     msg = (
-                        f"🛑 [HARVEST_ONLY] Protection Active. "
-                        f"Current PnL (Rp {current_pnl:,.0f}) is below Target (Rp {target_idr:,.0f}) "
-                        f"after manual exit/loss. Peak was Rp {peak_pnl_today:,.0f}. "
-                        f"BUY remains blocked for safety."
+                        f"🔓 [SESSION RESET] HARVEST_ONLY released. "
+                        f"Current PnL (Rp {current_pnl:,.0f}) dropped below Target (Rp {target_idr:,.0f}). "
+                        f"Peak was Rp {peak_pnl_today:,.0f}. BUY re-enabled."
                     )
-                else:
-                    msg = (
-                        "Status: HARVEST_ONLY | BUY: Blocked | "
-                        "Strategy: Tightening TP positions"
-                    )
+                    log_message(msg)
+                    return {
+                        "buy_enabled": True,
+                        "session_mode": "NORMAL",
+                        "message": msg,
+                    }
+                # PnL still at/above target — stay locked
+                msg = (
+                    "Status: HARVEST_ONLY | BUY: Blocked | "
+                    "Strategy: Tightening TP positions"
+                )
                 return {
                     "buy_enabled": False,
                     "session_mode": "HARVEST_ONLY",
