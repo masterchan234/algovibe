@@ -134,14 +134,19 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         )
 
     # Evaluate Smart Trailing & STOP BUY protocol
+    # Snapshot session mode BEFORE evaluation so we can detect the HARVEST_ONLY transition.
+    _pre_eval_mode = target_status.get("session_mode", "NORMAL")
     session_info = bot.oracle.evaluate_and_update_session_mode(target_status)
     if not session_info["buy_enabled"]:
-        log_message(
-            f"🛑 [{session_info['session_mode']}] "
-            f"Target Rp {target_idr:,.0f} sudah tercapai "
-            f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
-            f"{session_info['message']}"
-        )
+        # Only log once — at the exact moment the session transitions into HARVEST_ONLY.
+        # If already latched, proceed silently to avoid spamming every 2-second cycle.
+        if _pre_eval_mode != "HARVEST_ONLY":
+            log_message(
+                f"🛑 [{session_info['session_mode']}] "
+                f"Target Rp {target_idr:,.0f} sudah tercapai "
+                f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
+                f"{session_info['message']}"
+            )
         return
 
     # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan

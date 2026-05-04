@@ -108,6 +108,9 @@
     <!-- Supreme Commander Approval Gate -->
     <ApprovalGateModal />
 
+    <!-- Strategic Break: full-screen popup when daily target is reached -->
+    <StrategicBreakModal />
+
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
         <ActivityFeed />
@@ -201,6 +204,7 @@ import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 import ApprovalGateModal from './components/ApprovalGateModal.vue'
+import StrategicBreakModal from './components/StrategicBreakModal.vue'
 
 const store = useTradeStore()
 
