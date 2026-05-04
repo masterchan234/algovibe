@@ -121,7 +121,7 @@ def run_market_cycle(bot):
 
     log_message(
         f"Oracle Loop | Regime: {regime:8} | "
-        f"AI_Thresh: {adaptive_cfg['ai_threshold']*100:.0f}% | "
+        f"Tech_Thresh: {adaptive_cfg['tech_threshold']*100:.0f}% | "
         f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M | "
         f"{target_str}"
     )

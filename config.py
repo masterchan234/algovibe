@@ -68,10 +68,10 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
 STRONG_IMBALANCE_RATIO  = 1.4  
 
-# --- AI & Probability ---
-AI_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
-AI_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
-AI_MIN_HISTORY_POINTS   = 30   
+# --- Technical Probability ---
+TECH_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
+TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
+TECH_MIN_HISTORY_POINTS   = 30   
 
 # --- [Senior Strategy: Averaging Down] ---
 DCA_ENABLED = True

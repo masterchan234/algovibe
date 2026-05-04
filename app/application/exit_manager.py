@@ -14,7 +14,7 @@ from config import (
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
     TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
-    INITIAL_CAPITAL, AI_MIN_HISTORY_POINTS,
+    INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE
 )
 from app.infrastructure.database import db
@@ -418,7 +418,7 @@ class ExitManager:
                                     tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
                             momentum_signal = derive_trade_signal(tech).get('verdict', 'HOLD')
 
-                            if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
+                            if get_prediction_fn and len(hist) >= TECH_MIN_HISTORY_POINTS:
                                 live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
 
                         # Force fallback jika terlalu lama + momentum memburuk, atau sangat lama tanpa fill.
@@ -501,7 +501,7 @@ class ExitManager:
                     except Exception as e:
                         log_message(f"⚠️ Momentum eval error for {pair}: {e}")
 
-                    if get_prediction_fn and len(hist) >= AI_MIN_HISTORY_POINTS:
+                    if get_prediction_fn and len(hist) >= TECH_MIN_HISTORY_POINTS:
                         try:
                             live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
                         except Exception as e:

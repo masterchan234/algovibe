@@ -43,14 +43,14 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     score = float(p.get('score', 0) or 0)
     tq_prob = float(enriched.get('tq_prob', 0) or 0)
     imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
-    ai_threshold = float(adaptive_cfg.get('ai_threshold', 0.6) or 0.6)
+    tech_threshold = float(adaptive_cfg.get('tech_threshold', 0.6) or 0.6)
 
     if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
         return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
 
     buy_ready = (
         signal_v == 'BUY' and (
-            tq_prob >= max(0.35, ai_threshold * 0.9)
+            tq_prob >= max(0.35, tech_threshold * 0.9)
             or score >= 60
             or (trend == 'UP' and imbalance_ratio >= 1.2)
         )
@@ -161,12 +161,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
+    tech_ready = tq_prob >= adaptive_cfg['tech_threshold']
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-    if not config.DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
+    if not config.DRY_RUN_LOOSE_GATES and not tech_ready and not has_strong_imb:
         msg = (
             f"SKIP: Tech prob {tq_prob * 100:.0f}% < threshold "
-            f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
+            f"{adaptive_cfg['tech_threshold'] * 100:.0f}% "
             f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
         )
         log_message(f"{msg} [{pair}]")

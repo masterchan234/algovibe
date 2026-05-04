@@ -123,7 +123,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
         # Kondisi wajib: AI confidence ≥80%, LLM verdict BUY ≥75%, max 1 posisi baru,
         # ukuran posisi diperkecil 50%.
-        adaptive_cfg["ai_threshold"] = 0.80
+        adaptive_cfg["tech_threshold"] = 0.80
         adaptive_cfg["recovery_mode"] = True
         # Simpan faktor sizing 50% ke bot agar trade_execution bisa membacanya
         bot._recovery_size_factor = 0.5
@@ -143,11 +143,11 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
     # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan
     if target_status["near"]:
-        original_threshold = adaptive_cfg.get("ai_threshold", 0.35)
-        adaptive_cfg["ai_threshold"] = min(0.85, original_threshold + 0.15)
+        original_threshold = adaptive_cfg.get("tech_threshold", 0.35)
+        adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
         log_message(
             f"⚠️ [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
-            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['ai_threshold']*100:.0f}% untuk menjaga cuan."
+            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['tech_threshold']*100:.0f}% untuk menjaga cuan."
         )
     # ── END GATE ──────────────────────────────────────────────────────────────
 

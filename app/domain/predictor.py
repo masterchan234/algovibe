@@ -222,10 +222,10 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
         -1.0  → Warming Up (data kurang dari minimum)
         0.0-0.99 → Probabilitas bullish saat ini
     """
-    from config import AI_MIN_HISTORY_POINTS
+    from config import TECH_MIN_HISTORY_POINTS
 
     n = len(price_history)
-    if n < AI_MIN_HISTORY_POINTS:
+    if n < TECH_MIN_HISTORY_POINTS:
         return -1.0  # Warming Up
 
     try:
