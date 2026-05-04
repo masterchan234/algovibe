@@ -279,6 +279,15 @@ export const useTradeStore = defineStore('trade', () => {
       pendingAction.value = null
     })
 
+    s.on('toast_notification', (data) => {
+      notify({
+        title: data.title || 'Notification',
+        message: data.message || '',
+        type: data.type || 'info',
+        duration: 6000,
+      })
+    })
+
     return s
   }
 

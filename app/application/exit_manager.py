@@ -432,34 +432,50 @@ class ExitManager:
                     send_telegram_message(msg)
 
                     # ── Supreme Commander Approval Gate ─────────────────────────────────
-                    # BTC crash kill switch is an emergency — bypass the gate.
-                    # All other basket exits (including harvest) require user approval.
+                    # BTC crash kill switch is an emergency — bypass the gate entirely.
+                    # For all other basket exits:
+                    #   • Profitable (net_pnl > 0): auto-execute without popup (profit path).
+                    #   • Loss/neutral (net_pnl <= 0): show gate and wait for user approval.
                     if not btc_crash_kill:
-                        # Harvest-type actions: AUTO-REJECT on timeout (preserve profits until user acts).
-                        # Safety/rescue exits: AUTO-APPROVE on timeout (default safe behaviour).
-                        _is_harvest = (
-                            trigger_harvest_idr or trigger_harvest_pct or trigger_hwm_pullback
-                        )
-                        _default_approve = not _is_harvest
-                        _reason_text = (
-                            f"Net PnL: Rp {total_net_pnl:,.0f} | "
-                            f"Net {net_pnl_pct:+.4f}% | Trigger: {trigger_label}"
-                        )
-                        _pairs_desc = ", ".join(
-                            p for p, _, _, _ in open_pairs_for_basket[:5]
-                        ) + (f" +{n-5} more" if n > 5 else "")
-                        _approved = self._request_approval(
-                            action_type=f"BASKET EXIT [{trigger_label}]",
-                            description=_pairs_desc,
-                            reason_text=_reason_text,
-                            impact_idr=total_net_pnl,
-                            default_approve=_default_approve,
-                        )
-                        if not _approved:
+                        if total_net_pnl > 0:
+                            # AUTO-HARVEST: bypass approval gate for profitable basket exits.
                             log_message(
-                                f"🚫 [APPROVAL GATE] BASKET_EXIT [{trigger_label}] REJECTED — skipping execution"
+                                f"🚀 [AUTO-HARVEST] Profitable Basket Exit executed without confirmation. "
+                                f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
                             )
-                            return
+                            # Queue a silent toast notification for the dashboard.
+                            db.save_state("auto_harvest_notification", json.dumps({
+                                "message": (
+                                    f"Basket Exit Completed (Profit Secured) — "
+                                    f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
+                                ),
+                                "ts": time.time(),
+                            }))
+                        else:
+                            # SAFETY-GATE: protection for loss/neutral exits — require user approval.
+                            log_message(
+                                f"⚠️ [SAFETY-GATE] Protection active for neutral/loss exit. "
+                                f"Awaiting user approval."
+                            )
+                            _reason_text = (
+                                f"Net PnL: Rp {total_net_pnl:,.0f} | "
+                                f"Net {net_pnl_pct:+.4f}% | Trigger: {trigger_label}"
+                            )
+                            _pairs_desc = ", ".join(
+                                p for p, _, _, _ in open_pairs_for_basket[:5]
+                            ) + (f" +{n-5} more" if n > 5 else "")
+                            _approved = self._request_approval(
+                                action_type=f"BASKET EXIT [{trigger_label}]",
+                                description=_pairs_desc,
+                                reason_text=_reason_text,
+                                impact_idr=total_net_pnl,
+                                default_approve=False,
+                            )
+                            if not _approved:
+                                log_message(
+                                    f"🚫 [APPROVAL GATE] BASKET_EXIT [{trigger_label}] REJECTED — skipping execution"
+                                )
+                                return
 
                     # Reset HWM setelah semua posisi ditutup
                     self._portfolio_hwm = 0.0

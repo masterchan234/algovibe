@@ -2437,6 +2437,20 @@ def push_data_loop():
             except Exception as _ae:
                 logging.warning(f"[ApprovalGate] Error checking pending_approval: {_ae}")
 
+            # ── Auto-harvest silent toast notification ────────────────────────────
+            try:
+                raw_notif = db.get_state("auto_harvest_notification")
+                if raw_notif:
+                    notif = json.loads(raw_notif)
+                    socketio.emit('toast_notification', {
+                        "title": "🚀 Auto-Harvest",
+                        "message": notif.get("message", "Basket Exit Completed (Profit Secured)"),
+                        "type": "success",
+                    })
+                    db.save_state("auto_harvest_notification", "")
+            except Exception as _ne:
+                logging.warning(f"[AutoHarvest] Error forwarding notification: {_ne}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
