@@ -38,6 +38,10 @@ CHANNEL_TRADE_PFX = "market:trade-activity-" # + pair
 OB_TOP_PAIRS     = 50
 # Filter volume minimum sebelum subscribe order book (hindari pair mati)
 OB_MIN_VOL_IDR   = 50_000_000  # 50 Juta IDR (diturunkan agar lebih banyak pair tercover)
+# Pair yang SELALU di-subscribe order book terlepas dari volume threshold.
+# btcidr wajib ada agar Oracle regime filter tidak mengalami error
+# "Data BTC tidak tersedia di WS/DB. Melewati filter regime."
+OB_HIGH_PRIORITY_PAIRS: frozenset = frozenset({"btcidr"})
 
 # Indeks kolom pada payload market:summary-24h
 # [pair, epoch, last, low, high, open, vol_idr, vol_coin]
@@ -400,12 +404,9 @@ class MarketDataWS:
     def _subscribe_top_orderbooks(self, summary_snapshot: dict):
         """Subscribe ke order-book channel untuk top N pairs bervolume tinggi.
         
-        btcidr selalu di-subscribe pertama (high-priority) agar Oracle regime
-        filter tidak mengalami error "Data BTC tidak tersedia di WS/DB".
+        OB_HIGH_PRIORITY_PAIRS (e.g. btcidr) selalu di-subscribe pertama agar
+        Oracle regime filter tidak mengalami error "Data BTC tidak tersedia".
         """
-        # btcidr selalu masuk daftar terlepas dari volume threshold
-        HIGH_PRIORITY_PAIRS = {"btcidr"}
-
         candidates = [
             (pair, d["vol_idr"])
             for pair, d in summary_snapshot.items()
@@ -416,7 +417,7 @@ class MarketDataWS:
         
         # Ambil sampai batas OB_TOP_PAIRS, lalu sisipkan high-priority di depan
         top_pairs = [p for p, _ in candidates[:OB_TOP_PAIRS]]
-        for hp in HIGH_PRIORITY_PAIRS:
+        for hp in OB_HIGH_PRIORITY_PAIRS:
             if hp not in top_pairs:
                 top_pairs.insert(0, hp)
 
