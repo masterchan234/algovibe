@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
+import jwt as pyjwt
 from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -118,13 +119,58 @@ def ui_emitter_thread():
 
 # socketio.start_background_task(ui_emitter_thread)
 # ── Authentication Middleware ──
-def login_required(f):
+def _get_jwt_secret():
+    return app.config['SECRET_KEY']
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", 24))
+
+def _decode_token(token: str):
+    """Decode and validate a JWT. Returns payload dict or None."""
+    try:
+        return pyjwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except pyjwt.ExpiredSignatureError:
+        return None
+    except pyjwt.InvalidTokenError:
+        return None
+
+def _issue_token(user: dict) -> str:
+    """Issue a signed JWT for a user record."""
+    payload = {
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": user.get("role", "USER"),
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=JWT_EXPIRY_HOURS),
+    }
+    return pyjwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def _get_current_user_payload():
+    """Return decoded JWT payload from request, or None if not authenticated.
+
+    Checks (in order):
+      1. Authorization: Bearer <token> header
+      2. Legacy Flask session (backward-compat for non-JWT clients)
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        return _decode_token(token)
+    # Legacy session fallback
+    if "user_id" in session:
+        return {"user_id": session["user_id"], "username": session.get("username", ""), "role": "USER"}
+    return None
+
+def token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
+        payload = _get_current_user_payload()
+        if not payload:
             return jsonify({"error": "Unauthorized", "login_required": True}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+# Keep legacy alias so existing call-sites compiled before this change still work
+login_required = token_required
 
 # ── Default User Initialization ──
 try:
@@ -147,7 +193,13 @@ mws.subscribe_market_trades(CURRENT_WATCH_PAIR)
 
 _start_time = time.time()
 
-from app.infrastructure.migrations import run_migrations
+from app.infrastructure.migrations import run_migrations, sync_schema_both_dbs
+
+# Ensure both live and dryrun databases have up-to-date schema on startup
+try:
+    sync_schema_both_dbs()
+except Exception as _sync_err:
+    logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
 
 # Set untuk track DB path yang sudah dimigrasi di proses ini
 # Prevents redundant migration runs on every request
@@ -590,9 +642,15 @@ def login():
     
     user = db.verify_user(username, password)
     if user:
+        token = _issue_token(user)
+        # Also set legacy session for WebSocket auth and backward-compat
         session['user_id'] = user['id']
         session['username'] = user['username']
-        return jsonify({"success": True, "user": {"username": user['username'], "role": user['role']}})
+        return jsonify({
+            "success": True,
+            "token": token,
+            "user": {"username": user['username'], "role": user['role']}
+        })
     
     return jsonify({"success": False, "message": "Invalid username or password"}), 401
 
@@ -603,9 +661,22 @@ def logout():
 
 @app.route('/api/check-auth')
 def check_auth():
-    if 'user_id' in session:
-        return jsonify({"authenticated": True, "username": session.get('username')})
+    payload = _get_current_user_payload()
+    if payload:
+        return jsonify({"authenticated": True, "username": payload.get("username", "")})
     return jsonify({"authenticated": False})
+
+@app.route('/api/refresh-token', methods=['POST'])
+def refresh_token():
+    """Issue a new JWT given a valid (non-expired) token."""
+    payload = _get_current_user_payload()
+    if not payload:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = db.get_user(payload.get("username", ""))
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    new_token = _issue_token(user)
+    return jsonify({"success": True, "token": new_token})
 
 @app.route('/api/view-token')
 def get_view_token():
@@ -1102,6 +1173,62 @@ def sync_wallet():
         return jsonify({"success": False, "message": "Wallet sync gagal. Cek log server untuk detail."}), 500
 
 
+@app.route('/api/orders')
+def get_orders():
+    """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
+    try:
+        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
+        live_conn.row_factory = sqlite3.Row
+        rows = live_conn.execute(
+            "SELECT order_id, pair, side, price, amount, status, created_at, updated_at "
+            "FROM order_book ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        live_conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        logging.warning(f"[/api/orders] {e}")
+        return jsonify([])
+
+
+@app.route('/api/live/state')
+def get_live_state():
+    """Return persistent live-engine state for dashboard state-recovery on page load.
+
+    Reads from the live database so the value reflects the most recent bot write
+    regardless of which mode the dashboard is currently displaying.
+    """
+    try:
+        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
+        live_conn.row_factory = sqlite3.Row
+        rows = live_conn.execute(
+            "SELECT key, value FROM bot_state WHERE key IN "
+            "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
+            "'session_mode', 'session_latched')"
+        ).fetchall()
+        live_conn.close()
+        state = {r['key']: r['value'] for r in rows}
+        return jsonify({
+            "target_protection_active": state.get("target_protection_active", "false") == "true",
+            "peak_net_pnl_session": float(state.get("peak_net_pnl_session") or 0),
+            "momentum_state": state.get("momentum_state", "STALLING"),
+            "session_mode": state.get("session_mode", "NORMAL"),
+            "is_latched": (
+                (state.get("session_latched", "false") == "true")
+                or (state.get("session_mode", "NORMAL") == "HARVEST_ONLY")
+            ),
+        })
+    except Exception as e:
+        logging.warning(f"[/api/live/state] {e}")
+        return jsonify({
+            "target_protection_active": False,
+            "peak_net_pnl_session": 0,
+            "momentum_state": "STALLING",
+            "session_mode": "NORMAL",
+            "is_latched": False,
+            "bot_offline": True,
+        })
+
+
 def get_market_context(pair):
     """
     Menyediakan konteks pasar lengkap untuk modal ORACLE:
@@ -1251,7 +1378,7 @@ def toggle_dry_run():
     new_val = not current_val
 
     # Hanya izinkan mode LIVE jika user terautentikasi
-    if not new_val and 'user_id' not in session:
+    if not new_val and _get_current_user_payload() is None:
         return jsonify({
             "error": "Unauthorized",
             "login_required": True,

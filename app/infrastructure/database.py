@@ -803,6 +803,27 @@ class Database:
                                (pair, a['price'], a['vol']))
         except Exception: pass
 
+    def upsert_order_book(self, order_id: str, pair: str, side: str, price: float,
+                          amount: float, status: str, raw_response: dict = None):
+        """Insert or update an entry in the order_book table."""
+        import json as _json
+        raw = _json.dumps(raw_response or {})
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO order_book (order_id, pair, side, price, amount, status, raw_response)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(order_id) DO UPDATE SET
+                        status = excluded.status,
+                        raw_response = excluded.raw_response,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (order_id, pair, side, price, amount, status, raw),
+                )
+        except Exception as e:
+            logging.warning(f"[DB] upsert_order_book error: {e}")
+
     def get_market_depth(self, pair):
         """Ambil Top 10 Bids & Asks dari DB."""
         try:

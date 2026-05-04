@@ -58,6 +58,10 @@ class ExitManager:
         # Latches True once the portfolio PnL has risen above the Safety Zone threshold,
         # activating the floor protection on any subsequent decline.
         self._was_above_safety_zone: bool = False
+        # Tracks session peak net PnL for dashboard state recovery.
+        self._peak_net_pnl_session: float = 0.0
+        # Guard set: ensures "Target Reached" log + Telegram fires only once per session.
+        self._target_fired_session: set = set()
         self._sync_jaring_from_db()
 
     @property
@@ -411,8 +415,32 @@ class ExitManager:
                     _safety_buffer *= (1.0 - MOMENTUM_HIGH_CORR_BUFFER_REDUCTION)
                 _safety_zone_upper = MOMENTUM_TARGET_PNL_IDR + _safety_buffer
 
+                # Track peak net PnL for the session
+                if total_net_pnl > self._peak_net_pnl_session:
+                    self._peak_net_pnl_session = total_net_pnl
+                    try:
+                        db.save_state("peak_net_pnl_session", str(round(self._peak_net_pnl_session, 2)))
+                    except Exception:
+                        pass
+
                 # Latch: once PnL climbs above the safety zone, protect it on any decline.
                 if _momentum_enabled and total_net_pnl >= _safety_zone_upper:
+                    if not self._was_above_safety_zone:
+                        # Fire "Target Reached" only once per session
+                        if "TARGET_REACHED" not in self._target_fired_session:
+                            self._target_fired_session.add("TARGET_REACHED")
+                            _tr_msg = (
+                                f"🎯 *TARGET REACHED* 🎯\n"
+                                f"Net PnL: Rp {total_net_pnl:,.0f} ≥ "
+                                f"Safety Zone Rp {_safety_zone_upper:,.0f}\n"
+                                f"Floor Protection: ACTIVE"
+                            )
+                            log_message(_tr_msg.replace('*', '').replace('\n', ' | '))
+                            send_telegram_message(_tr_msg)
+                            try:
+                                db.save_state("target_protection_active", "true")
+                            except Exception:
+                                pass
                     self._was_above_safety_zone = True
 
                 # True when PnL is in the warning range [Target, Target + buffer).
@@ -641,6 +669,13 @@ class ExitManager:
                     # Reset HWM setelah semua posisi ditutup
                     self._portfolio_hwm = 0.0
                     self._was_above_safety_zone = False  # reset floor protection
+                    self._peak_net_pnl_session = 0.0
+                    self._target_fired_session.discard("TARGET_REACHED")
+                    try:
+                        db.save_state("target_protection_active", "false")
+                        db.save_state("peak_net_pnl_session", "0")
+                    except Exception:
+                        pass
 
                     for pair, data, current_price, amount in open_pairs_for_basket:
                         reason  = "BASKET_EXIT"

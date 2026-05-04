@@ -60,6 +60,16 @@
           >
             🔓
           </button>
+
+          <!-- ENTER LIVE DASHBOARD: only visible when in Live mode and authenticated -->
+          <button
+            v-if="!store.stats.dry_run && isAuthenticated"
+            class="control-btn live-dash-btn"
+            @click="goToLiveDashboard"
+            title="Open Live Member Dashboard"
+          >
+            ⚡ LIVE DASH
+          </button>
         </div>
       </div>
     </header>
@@ -199,7 +209,9 @@
 
 <script setup>
 import { onMounted, onUnmounted, ref, reactive, computed, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { useTradeStore } from './stores/trade'
+import { useAuth } from './composables/useAuth'
 import ActivityFeed from './components/ActivityFeed.vue'
 import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
@@ -207,6 +219,8 @@ import ApprovalGateModal from './components/ApprovalGateModal.vue'
 import StrategicBreakModal from './components/StrategicBreakModal.vue'
 
 const store = useTradeStore()
+const router = useRouter()
+const { isAuthenticated, login: authLogin, logout: authLogout, getAuthHeaders } = useAuth()
 
 const newsHeadlines = ref([])
 const tickerContent = ref(null)
@@ -272,7 +286,7 @@ async function applyModeToggle() {
   const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'X-CSRFToken': getCookie('csrf_token') }
+    headers: { 'X-CSRFToken': getCookie('csrf_token'), ...getAuthHeaders() }
   })
 
   if (!res.ok) {
@@ -295,6 +309,7 @@ async function applyModeToggle() {
     active_positions: 0,
   })
   if (data.logged_out) {
+    await authLogout(backendUrl)
     loginForm.username = ''
     loginForm.password = ''
     showLoginModal.value = false
@@ -307,36 +322,24 @@ async function applyModeToggle() {
 async function handleLogin() {
   isLoggingIn.value = true
   try {
-    const res = await fetch(`${backendUrl}/api/login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRFToken': getCookie('csrf_token')
-      },
-      body: JSON.stringify(loginForm)
-    })
-    if (res.ok) {
-      if (pendingLiveSwitch.value) {
-        // User originally requested DRY -> LIVE before login; complete it automatically.
-        const toggleRes = await applyModeToggle()
-        pendingLiveSwitch.value = false
-        if (toggleRes.ok) {
-          showLoginModal.value = false
-          alert('Login successful. Mode langsung berpindah ke LIVE.')
-        } else {
-          showLoginModal.value = false
-          alert('Login berhasil, tapi auto-switch ke LIVE gagal. Silakan klik toggle sekali lagi.')
-        }
+    await authLogin(loginForm.username, loginForm.password, backendUrl)
+    if (pendingLiveSwitch.value) {
+      // User originally requested DRY -> LIVE before login; complete it automatically.
+      const toggleRes = await applyModeToggle()
+      pendingLiveSwitch.value = false
+      if (toggleRes.ok) {
+        showLoginModal.value = false
+        alert('Login successful. Mode langsung berpindah ke LIVE.')
       } else {
         showLoginModal.value = false
-        alert('Login successful!')
+        alert('Login berhasil, tapi auto-switch ke LIVE gagal. Silakan klik toggle sekali lagi.')
       }
     } else {
-      const err = await res.json()
-      alert(`Login failed: ${err.error || 'Invalid credentials'}`)
+      showLoginModal.value = false
+      alert('Login successful!')
     }
   } catch (e) {
-    alert('Login error')
+    alert(`Login failed: ${e.message || 'Invalid credentials'}`)
   } finally {
     isLoggingIn.value = false
   }
@@ -374,7 +377,8 @@ async function toggleLooseGates() {
       method: 'POST',
       credentials: 'include',
       headers: {
-        'X-CSRFToken': getCookie('csrf_token')
+        'X-CSRFToken': getCookie('csrf_token'),
+        ...getAuthHeaders(),
       }
     })
     if (res.ok) {
@@ -385,6 +389,10 @@ async function toggleLooseGates() {
   } catch (e) {
     console.error('Failed to toggle loose gates', e)
   }
+}
+
+function goToLiveDashboard() {
+  router.push('/dashboard-live')
 }
 
 const uptimeStr = computed(() => {
@@ -748,6 +756,18 @@ body {
   background: rgba(88, 166, 255, 0.1);
   color: var(--accent-blue);
   border-color: var(--accent-blue);
+}
+
+.live-dash-btn {
+  background: rgba(245, 166, 35, 0.1);
+  color: #f5a623;
+  border-color: rgba(245, 166, 35, 0.5);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.live-dash-btn:hover {
+  background: rgba(245, 166, 35, 0.2);
+  border-color: #f5a623;
 }
 
 @media (max-width: 768px) {
