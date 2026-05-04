@@ -52,6 +52,9 @@ export const useTradeStore = defineStore('trade', () => {
     btc_score: 50,
     btc_weakening: false,
     btc_crash: false,
+    // Momentum Equity Protection
+    momentum_state: 'STALLING',
+    net_pnl_velocity: 0,
   })
 
   // Open positions (trades)
@@ -217,6 +220,8 @@ export const useTradeStore = defineStore('trade', () => {
         btc_score: data.btc_score ?? 50,
         btc_weakening: data.btc_weakening ?? false,
         btc_crash: data.btc_crash ?? false,
+        momentum_state: data.momentum_state ?? 'STALLING',
+        net_pnl_velocity: data.net_pnl_velocity ?? 0,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

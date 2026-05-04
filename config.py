@@ -65,6 +65,34 @@ AUTO_BASKET_HARVEST_MIN = 0.01  # 1.0% net profit threshold for automatic harves
 # BTC 5-minute price drop % that triggers emergency basket exit (kill switch).
 # Bypasses all profit-gate checks to protect capital from total market collapse.
 BTC_CRASH_TRIGGER_PCT = 0.02    # 2.0% BTC drop in 5 minutes activates kill switch
+
+# ==========================================
+# MOMENTUM EQUITY PROTECTION
+# ==========================================
+# Daily profit floor — the IDR target that should never be given back once reached.
+# Defaults to BASKET_HARVEST_TARGET_IDR so the same harvest level becomes the floor.
+MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # Rp 20.000 combined net profit
+
+# Buffer above the floor that defines the "Safety Zone" range
+# [MOMENTUM_TARGET_PNL_IDR, MOMENTUM_TARGET_PNL_IDR + MOMENTUM_SAFETY_BUFFER_IDR].
+# When portfolio PnL drops into this range from above, momentum-gated logic activates.
+MOMENTUM_SAFETY_BUFFER_IDR = 5000   # Rp 5.000 warning cushion above the floor
+
+# Velocity threshold (IDR / second). Positive velocity exceeding this value means
+# the portfolio is recovering → enable Tight Trailing Stop instead of immediate exit.
+MOMENTUM_RECOVERY_THRESHOLD = 50    # Rp 50 / sec required to classify as "IMPROVING"
+
+# How often to capture a PnL snapshot for velocity measurement (seconds).
+MOMENTUM_VELOCITY_INTERVAL_SEC = 5
+
+# Trailing-stop tightness when inside the Safety Zone with positive (recovering) velocity.
+# Overrides BASKET_HWM_PULLBACK_PCT to a much tighter value so profits are locked sooner.
+MOMENTUM_TIGHT_TRAILING_PCT = 0.05  # 5% drawdown from session peak (vs default 30%)
+
+# When the majority of open positions are losing (high correlation risk), reduce the
+# safety buffer by this fraction to trigger an exit sooner.
+MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correlation
+# ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
 

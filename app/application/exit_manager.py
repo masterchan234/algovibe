@@ -16,7 +16,10 @@ from config import (
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
-    ROUND_TRIP_FEE_PCT, SMART_BREAK_EVEN_PCT
+    ROUND_TRIP_FEE_PCT, SMART_BREAK_EVEN_PCT,
+    MOMENTUM_TARGET_PNL_IDR, MOMENTUM_SAFETY_BUFFER_IDR, MOMENTUM_RECOVERY_THRESHOLD,
+    MOMENTUM_VELOCITY_INTERVAL_SEC, MOMENTUM_TIGHT_TRAILING_PCT,
+    MOMENTUM_HIGH_CORR_BUFFER_REDUCTION,
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -45,6 +48,16 @@ class ExitManager:
         # Prevents concurrent execution from the background exit-monitor thread and
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
         self._monitor_lock = threading.Lock()
+        # ─── Momentum Equity Protection ────────────────────────────────────────────
+        # Last PnL sample for velocity calculation: (unix_timestamp, pnl_idr).
+        self._last_pnl_sample: tuple = (0.0, 0.0)
+        # Rolling buffer of the last 5 velocity readings (IDR / second).
+        self._velocity_readings: list = []
+        # Current momentum state published to the dashboard.
+        self._momentum_state: str = "STALLING"
+        # Latches True once the portfolio PnL has risen above the Safety Zone threshold,
+        # activating the floor protection on any subsequent decline.
+        self._was_above_safety_zone: bool = False
         self._sync_jaring_from_db()
 
     @property
@@ -71,6 +84,57 @@ class ExitManager:
             log_message(f"⏸️ [PAIR COOLDOWN] {pair}: {minutes}m ({reason})")
         except Exception as e:
             log_message(f"⚠️ Failed set cooldown {pair}: {e}")
+
+    def _update_pnl_velocity(self, current_pnl: float, now_ts: float) -> None:
+        """Sample Net PnL velocity every MOMENTUM_VELOCITY_INTERVAL_SEC seconds.
+
+        Maintains a rolling buffer of the last 5 readings and derives the current
+        momentum state: IMPROVING / STALLING / DROPPING.
+        Publishes the state to DB so the dashboard can display it.
+        """
+        last_ts, last_pnl = self._last_pnl_sample
+        elapsed = now_ts - last_ts
+
+        if last_ts == 0.0:
+            # First call — just record the baseline, no velocity yet.
+            self._last_pnl_sample = (now_ts, current_pnl)
+            return
+
+        if elapsed < MOMENTUM_VELOCITY_INTERVAL_SEC:
+            return  # Not enough time since last sample.
+
+        if elapsed <= 0:
+            return  # Guard against floating-point edge case.
+
+        velocity = (current_pnl - last_pnl) / elapsed
+        self._velocity_readings.append(velocity)
+        if len(self._velocity_readings) > 5:
+            self._velocity_readings.pop(0)
+        self._last_pnl_sample = (now_ts, current_pnl)
+
+        if not self._velocity_readings:
+            return
+
+        avg_velocity = sum(self._velocity_readings) / len(self._velocity_readings)
+        if avg_velocity > MOMENTUM_RECOVERY_THRESHOLD:
+            new_state = "IMPROVING"
+        elif avg_velocity < -MOMENTUM_RECOVERY_THRESHOLD:
+            new_state = "DROPPING"
+        else:
+            new_state = "STALLING"
+
+        if new_state != self._momentum_state:
+            log_message(
+                f"📊 [MOMENTUM] State changed: {self._momentum_state} → {new_state} "
+                f"(velocity avg: {avg_velocity:+.1f} IDR/s)"
+            )
+        self._momentum_state = new_state
+
+        try:
+            db.save_state("momentum_state", self._momentum_state)
+            db.save_state("net_pnl_velocity", str(round(avg_velocity, 2)))
+        except Exception:
+            pass
 
     @staticmethod
     def _order_id_variants(order_id):
@@ -319,12 +383,57 @@ class ExitManager:
                     self._portfolio_hwm = total_net_pnl
             else:
                 self._portfolio_hwm = 0.0
+                self._was_above_safety_zone = False  # Reset when basket is empty.
+
+            # ── PnL Velocity ──────────────────────────────────────────────────────────────
+            self._update_pnl_velocity(total_net_pnl, _now_ts)
 
             if open_pairs_for_basket:
                 n = len(open_pairs_for_basket)
                 gross_pnl_pct = (total_gross_pnl  / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
+
+                # ── Position Correlation Check ────────────────────────────────────────────
+                # Count positions moving in the same negative direction.  If the majority
+                # are losing, it's High Correlation Risk — shrink the safety buffer so the
+                # exit fires sooner and capital is better protected.
+                _neg_count = sum(
+                    1 for _, data, cp, _ in open_pairs_for_basket
+                    if data.get('entry_price') is not None and cp < float(data['entry_price'])
+                )
+                _high_corr_risk = n > 0 and _neg_count > n / 2
+
+                # ── Momentum Safety Zone Setup ────────────────────────────────────────────
+                _momentum_enabled = MOMENTUM_TARGET_PNL_IDR > 0
+                _safety_buffer = MOMENTUM_SAFETY_BUFFER_IDR
+                if _high_corr_risk:
+                    _safety_buffer *= (1.0 - MOMENTUM_HIGH_CORR_BUFFER_REDUCTION)
+                _safety_zone_upper = MOMENTUM_TARGET_PNL_IDR + _safety_buffer
+
+                # Latch: once PnL climbs above the safety zone, protect it on any decline.
+                if _momentum_enabled and total_net_pnl >= _safety_zone_upper:
+                    self._was_above_safety_zone = True
+
+                # True when PnL is in the warning range [Target, Target + buffer).
+                _in_safety_zone = (
+                    _momentum_enabled
+                    and self._was_above_safety_zone
+                    and MOMENTUM_TARGET_PNL_IDR < total_net_pnl < _safety_zone_upper
+                )
+
+                # Hard floor: PnL has dropped to or below the protected target.
+                _at_floor = (
+                    _momentum_enabled
+                    and self._was_above_safety_zone
+                    and total_net_pnl <= MOMENTUM_TARGET_PNL_IDR
+                )
+
+                # Effective HWM pullback percentage — tightened inside the Safety Zone
+                # when velocity is still positive (recovery in progress).
+                _effective_hwm_pullback_pct = BASKET_HWM_PULLBACK_PCT
+                if _in_safety_zone and self._momentum_state == "IMPROVING":
+                    _effective_hwm_pullback_pct = MOMENTUM_TIGHT_TRAILING_PCT
 
                 # ── HARVEST_ONLY status log (throttled) ───────────────────────────────────
                 if harvest_only:
@@ -376,10 +485,11 @@ class ExitManager:
                         and total_net_pnl >= BASKET_HARVEST_TARGET_IDR
                     )
                     # (d) HIGH-WATER-MARK PULLBACK — combined PnL turun >X% dari peak
+                    #     Uses _effective_hwm_pullback_pct which tightens inside Safety Zone.
                     trigger_hwm_pullback = (
                         n >= 1
                         and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
-                        and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
+                        and total_net_pnl < self._portfolio_hwm * (1.0 - _effective_hwm_pullback_pct)
                     )
                     # (e) Guaranteed Profit Harvest — BTC weakening AND equity has started to feel the impact
                     # Both signals must confirm together:
@@ -397,8 +507,54 @@ class ExitManager:
                         and btc_weakening       # market signal: BTC turning
                         and _equity_impacted    # portfolio signal: equity already declining
                     )
+                    # (f) SAFETY ZONE EXIT — PnL in safety zone with momentum stalling/dropping
+                    trigger_safety_zone_exit = (
+                        _in_safety_zone
+                        and self._momentum_state in ("STALLING", "DROPPING")
+                    )
+                    # (g) EMERGENCY FLOOR — absolute hard-stop once the target has been achieved
+                    trigger_emergency_floor = _at_floor
 
-                    if trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
+                    # ── Priority cascade for trigger selection ────────────────────────────
+                    if trigger_emergency_floor:
+                        should_execute = True
+                        trigger_label  = (
+                            f"EMERGENCY FLOOR (Target Rp{MOMENTUM_TARGET_PNL_IDR:,.0f} reached)"
+                        )
+                        action_label   = "EMERGENCY FLOOR EXIT"
+
+                    elif trigger_safety_zone_exit:
+                        should_execute = True
+                        trigger_label  = (
+                            f"SAFETY ZONE EXIT (Momentum: {self._momentum_state} | "
+                            f"Corr: {'HIGH' if _high_corr_risk else 'LOW'})"
+                        )
+                        action_label   = "SAFETY ZONE EXIT"
+
+                    elif _in_safety_zone and self._momentum_state == "IMPROVING":
+                        # Recovery in Safety Zone: suppress triggers (a-e), allow only
+                        # the tight-trailing HWM pullback so a reversal still fires.
+                        if trigger_hwm_pullback:
+                            should_execute = True
+                            trigger_label  = (
+                                f"TIGHT TRAILING STOP (Safety Zone, "
+                                f"{_effective_hwm_pullback_pct*100:.0f}% from peak "
+                                f"Rp{self._portfolio_hwm:,.0f})"
+                            )
+                            action_label   = "TIGHT TRAILING STOP"
+                        else:
+                            # Log that tight trailing stop is standing by.
+                            if _now_ts - self._last_basket_bypass_log_ts >= _BYPASS_LOG_INTERVAL:
+                                _latest_vel = self._velocity_readings[-1] if self._velocity_readings else 0.0
+                                log_message(
+                                    f"🎯 [TIGHT TRAILING STOP] Safety Zone + Recovery detected. "
+                                    f"Net PnL: Rp {total_net_pnl:,.0f} | "
+                                    f"Velocity: {_latest_vel:+.1f} IDR/s | "
+                                    f"HWM Floor: Rp {self._portfolio_hwm * (1 - _effective_hwm_pullback_pct):,.0f}"
+                                )
+                                self._last_basket_bypass_log_ts = _now_ts
+
+                    elif trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
                         should_execute = True
                         if trigger_hwm_pullback and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_harvest_pct):
                             trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
@@ -484,6 +640,7 @@ class ExitManager:
 
                     # Reset HWM setelah semua posisi ditutup
                     self._portfolio_hwm = 0.0
+                    self._was_above_safety_zone = False  # reset floor protection
 
                     for pair, data, current_price, amount in open_pairs_for_basket:
                         reason  = "BASKET_EXIT"
