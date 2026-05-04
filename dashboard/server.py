@@ -2516,6 +2516,8 @@ def session_status():
     """
     try:
         session_mode = db.get_state("session_mode") or "NORMAL"
+        # is_latched combines both the explicit latch flag (which survives a brief
+        # session_mode write race) and the authoritative HARVEST_ONLY mode value.
         session_latched = (db.get_state("session_latched") or "false").lower() == "true"
         is_latched = session_latched or (session_mode == "HARVEST_ONLY")
 

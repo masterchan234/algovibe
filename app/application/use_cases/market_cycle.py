@@ -142,7 +142,7 @@ def run_market_cycle(bot):
     except Exception:
         target_str = "Target: N/A"
 
-    _loop_msg = (
+    loop_msg = (
         f"Oracle Loop | Regime: {regime:8} | "
         f"Tech_Thresh: {adaptive_cfg['tech_threshold']*100:.0f}% | "
         f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M | "
@@ -151,9 +151,9 @@ def run_market_cycle(bot):
     # Once HARVEST_ONLY is latched, downgrade the recurring status line to DEBUG
     # to keep the console clean — the initial INFO was already emitted at latch time.
     if session_mode == "HARVEST_ONLY":
-        logger.debug(_loop_msg)
+        logger.debug(loop_msg)
     else:
-        log_message(_loop_msg)
+        log_message(loop_msg)
 
     db.save_state("heartbeat", time.time())
 
