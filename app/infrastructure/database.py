@@ -524,7 +524,10 @@ class Database:
     def save_trade_dna(self, pair, dna_data):
         try:
             with self.get_connection() as conn:
-                # ai_prob may be stored under 'ai_prob' or legacy 'tq_prob' key
+                # 'ai_prob' is the canonical key (set in trade_execution.py).
+                # 'tq_prob' is the legacy key used before the rename; kept as fallback
+                # so backtest or external callers that still use the old key work correctly.
+                # 'sector_sentiment' is canonical; 'sector_boost' is the legacy parameter name.
                 ai_prob = dna_data.get('ai_prob', dna_data.get('tq_prob', 0.0))
                 sector_sentiment = dna_data.get('sector_sentiment', dna_data.get('sector_boost', 0.0))
                 conn.execute(

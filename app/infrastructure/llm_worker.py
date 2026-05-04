@@ -1,5 +1,6 @@
 import os
 import time
+import queue as _queue
 import logging
 from datetime import datetime
 import multiprocessing
@@ -111,8 +112,8 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
             try:
                 try:
                     task_id, task_type, prompt, mode = req_queue.get(timeout=5)
-                except Exception:
-                    # Queue empty or timeout — loop back to check for new tasks
+                except _queue.Empty:
+                    # Queue empty — loop back to check for new tasks
                     continue
                 
                 if task_type == _CONSCIOUSNESS_SIGNAL:
@@ -143,7 +144,10 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                     t.start()
                     t.join(timeout=_TASK_TIMEOUT_SEC)
                     if t.is_alive():
-                        # Inference timed out — treat as hanging task
+                        # Python does not provide a way to force-terminate threads, so a timed-out
+                        # inference thread will remain alive until the worker process is restarted.
+                        # The outer LLMWorker.check_results() watchdog handles process-level restart
+                        # when needed, bounding the total lifecycle of any leaked thread.
                         log_message(f"🧠 LLM Worker: Task {task_id} timed out after {_TASK_TIMEOUT_SEC}s. Aborting.")
                         last_error = TimeoutError(f"Inference timed out after {_TASK_TIMEOUT_SEC}s")
                         break
