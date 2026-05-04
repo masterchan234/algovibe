@@ -2408,6 +2408,7 @@ def push_data_loop():
     """
     _slow_counter = 0
     _last_pending_action_id = None  # Track last forwarded action_id to avoid spam
+    _last_strategic_break_ts = None  # Track last emitted strategic_break triggered_at to emit only once
     while True:
         try:
             # Fast: data realtime sub-detik
@@ -2460,7 +2461,10 @@ def push_data_loop():
                 if raw_sb:
                     sb = json.loads(raw_sb)
                     if sb.get("status") == "PENDING":
-                        socketio.emit('strategic_break', sb)
+                        ts = sb.get("triggered_at", "")
+                        if ts != _last_strategic_break_ts:
+                            socketio.emit('strategic_break', sb)
+                            _last_strategic_break_ts = ts
             except Exception as _sbe:
                 logging.warning(f"[StrategicBreak] Error forwarding payload: {_sbe}")
 
@@ -2590,7 +2594,7 @@ def session_action():
             payload["status"] = "STOP"
             db.save_state("strategic_break_payload", json.dumps(payload))
             socketio.emit('strategic_break_cleared', {"action": "STOP"})
-            logging.info("[StrategicBreak] STOP — session remains HARVEST_ONLY (latched).")
+            logging.debug("[StrategicBreak] STOP — session remains HARVEST_ONLY (latched).")
             return jsonify({"status": "ok", "action": "STOP"})
 
     except Exception as e:

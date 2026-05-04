@@ -63,6 +63,9 @@ export const useTradeStore = defineStore('trade', () => {
   // Approval gate: pending action waiting for Supreme Commander decision
   const pendingAction = ref(null)
 
+  // Strategic Break: full-screen blocking popup when daily target is reached
+  const strategicBreak = ref(null)
+
   // Activity feed (logs)
   const activityFeed = ref([])
   const MAX_FEED_ITEMS = 100
@@ -284,6 +287,19 @@ export const useTradeStore = defineStore('trade', () => {
       pendingAction.value = null
     })
 
+    // ── Strategic Break events ────────────────────────────────────────────
+    s.on('strategic_break', (data) => {
+      // Only update if popup is not already showing (prevent UI flickering from
+      // any duplicate emissions that slip through the server-side guard).
+      if (!strategicBreak.value && data && data.triggered_at) {
+        strategicBreak.value = data
+      }
+    })
+
+    s.on('strategic_break_cleared', () => {
+      strategicBreak.value = null
+    })
+
     s.on('toast_notification', (data) => {
       notify({
         title: data.title || 'Notification',
@@ -301,6 +317,7 @@ export const useTradeStore = defineStore('trade', () => {
     stats,
     positions,
     pendingAction,
+    strategicBreak,
     activityFeed,
     pnlHistory,
     radarPairs,
