@@ -107,7 +107,8 @@ class ScalperBot:
             f"🚀 *ALGOVIBE SCALPER v3.0* 🚀\n"
             f"Mode: {'DRY RUN' if config.DRY_RUN else 'LIVE'}\n"
             f"Oracle: ONLINE | Backfill: SYNCING\n"
-            f"Target Profit Hari Ini: Rp {initial_target:,.0f}"
+            f"Target Profit Hari Ini: Rp {initial_target:,.0f}\n"
+            f"⚙️ Manual Control Mode: Auto-SL Disabled"
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(init_msg)
@@ -146,6 +147,13 @@ class ScalperBot:
                     idr_pairs.append(symbol)
                 else:
                     skipped += 1
+
+            # [BTC Fix] Selalu sertakan BTC/IDR dalam backfill agar Oracle regime filter
+            # tidak mengalami error "Data BTC tidak tersedia di WS/DB".
+            btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == 'btcidr'), None)
+            if btc_symbol and btc_symbol not in idr_pairs:
+                idr_pairs.insert(0, btc_symbol)
+                log_message("📌 [BTC Fix] Forcing BTC/IDR into backfill for Oracle regime filter.")
 
             total_pairs = len(idr_pairs)
             log_message(f"📦 Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")

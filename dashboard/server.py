@@ -1172,6 +1172,29 @@ def manual_exit(pair):
     db.save_state("trigger_exit_pair", pair.lower())
     return jsonify({"status": "exit_requested", "pair": pair})
 
+@app.route('/api/trade/manual-exit', methods=['POST'])
+@login_required
+def trade_manual_exit():
+    """Instant manual exit for an active position.
+
+    Accepts JSON body: {"pair": "btcidr"} or form field 'pair'.
+    Validates that an open position exists for the pair, then sets the
+    trigger_exit_pair state so the bot's exit_manager executes a MARKET
+    sell on the next monitoring tick (within ~2 seconds).
+    """
+    data = request.get_json(silent=True) or {}
+    pair = (data.get('pair') or request.form.get('pair') or '').lower().strip()
+    if not pair:
+        return jsonify({"error": "pair is required"}), 400
+
+    pos = db.get_position(pair)
+    if not pos:
+        return jsonify({"error": f"No active position found for {pair}"}), 404
+
+    db.save_state("trigger_exit_pair", pair)
+    logging.info(f"[Manual Exit] Dashboard triggered instant exit for {pair}")
+    return jsonify({"status": "exit_requested", "pair": pair})
+
 @app.route('/api/bot/toggle-dry-run', methods=['POST'])
 def toggle_dry_run():
     """Toggle mode dengan policy auth:
