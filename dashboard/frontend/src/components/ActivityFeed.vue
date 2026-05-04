@@ -55,7 +55,7 @@
             v-for="pos in store.positions"
             :key="pos.pair"
             class="position-item"
-            :class="pos.pnl_idr >= 0 ? 'green' : 'red'"
+            :class="pos.pnl_net_idr >= 0 ? 'green' : 'red'"
           >
             <div class="col-pair">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
