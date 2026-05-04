@@ -15,7 +15,8 @@ from config import (
     TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
-    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE
+    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
+    BREAK_EVEN_SLIPPAGE_MARGIN
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -559,16 +560,16 @@ class ExitManager:
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
 
-                # --- [Fee-Correct Break-Even Price] --- (dihitung di sini agar tersedia untuk trailing stop)
-                # Semua exit darurat (TRAILING_STOP, SL, BREAK_EVEN) menggunakan TAKER order.
-                # Formula harga jual agar net_pnl = 0:
-                #   (exit - entry) * amount = amount_idr * FEE_BUY_TAKER + exit * amount * FEE_SELL_TAKER
-                #   exit * (1 - FEE_SELL_TAKER) = entry * (1 + FEE_BUY_TAKER)
-                #   exit = entry * (1 + FEE_BUY_TAKER) / (1 - FEE_SELL_TAKER)  ≈ entry * 1.0124
-                _be_exact = entry_price * (1 + FEE_BUY_TAKER) / max(1e-9, 1.0 - FEE_SELL_TAKER)
-                break_even_price = _be_exact * 1.0015   # +0.15% buffer → net profit benar-benar positif
-                # Threshold aktivasi: profit harus melampaui break-even + 0.2% buffer
-                break_even_activation_threshold = (break_even_price / entry_price - 1.0) + 0.002
+                # --- [Dynamic Safe Exit Price] ---
+                # Harga minimum exit agar net_pnl >= 0 setelah fee + slippage.
+                # total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER (fee round-trip dari config).
+                # BREAK_EVEN_SLIPPAGE_MARGIN (0.21%) ditambahkan sebagai buffer keamanan slippage.
+                # BREAK_EVEN hanya aktif jika current_price > safe_exit_price.
+                _total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER   # fee round-trip dari config
+                _slippage_margin = BREAK_EVEN_SLIPPAGE_MARGIN       # safety margin dari config
+                _be_buffer = _total_fee_pct + _slippage_margin
+                safe_exit_price = entry_price * (1.0 + _be_buffer)
+                break_even_price = safe_exit_price  # alias untuk kompatibilitas kode trailing stop
 
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
                 # [Fee Fix] TP exits menggunakan taker → gunakan FEE_BUY_TAKER + FEE_SELL_TAKER
@@ -656,18 +657,43 @@ class ExitManager:
                 active_sl_price = max(initial_sl_price, trailing_sl_price)
     
                 # --- [Defensive] Break-Even Stop Loss ---
-                # Aktifkan ketika profit sudah melampaui threshold break-even (taker fees penuh).
-                # break_even_price dan _fee_be_threshold sudah dihitung di atas menggunakan
-                # formula taker yang benar: entry * (1+FEE_BUY_TAKER) / (1-FEE_SELL_TAKER).
-                if current_profit_pct >= break_even_activation_threshold and active_sl_price < break_even_price:
-                    active_sl_price = break_even_price
-                    if positions[pair].get('trailing_sl_price', 0) < break_even_price:
-                        positions[pair]['trailing_sl_price'] = break_even_price
+                # Aktifkan HANYA jika current_price sudah melampaui safe_exit_price.
+                # Buffer _be_buffer = fee round-trip (~1.44%) + 0.21% slippage margin.
+                # Jika harga masih di bawah safe_exit_price, tahan posisi (hold zone).
+                if current_price > safe_exit_price and active_sl_price < safe_exit_price:
+                    active_sl_price = safe_exit_price
+                    if positions[pair].get('trailing_sl_price', 0) < safe_exit_price:
+                        positions[pair]['trailing_sl_price'] = safe_exit_price
                         modified_pairs.add(pair)
                         log_message(
-                            f"🛡️ [Break-Even] {pair}: SL → Rp {break_even_price:,.2f} "
-                            f"(fee-correct taker break-even, threshold {break_even_activation_threshold*100:.2f}%)"
+                            f"🛡️ [Break-Even] {pair}: SL → Rp {safe_exit_price:,.2f} "
+                            f"(dynamic buffer {_be_buffer*100:.2f}%: fee {_total_fee_pct*100:.2f}% + slippage {_slippage_margin*100:.2f}%)"
                         )
+
+                # --- [Hold Zone] Harga antara entry dan safe_exit_price → tahan posisi ---
+                # Zona 1.0x – safe_exit_price: jangan terapkan break-even SL (menunggu harga naik lebih).
+                # KECUALI GEMMA-4 mendeteksi trend reversal → exit sekarang untuk lindungi modal.
+                elif entry_price <= current_price <= safe_exit_price:
+                    _gemma_reversal = False
+                    _veto_reason = ""
+                    if self.oracle:
+                        try:
+                            _gemma_reversal, _veto_reason = self.oracle.check_llm_veto(pair)
+                        except Exception as _e:
+                            log_message(f"⚠️ [Hold Zone] Oracle check error for {pair}: {_e}")
+                    if _gemma_reversal:
+                        log_message(
+                            f"🔄 [Hold Zone Reversal] {pair}: GEMMA-4 sinyal trend reversal "
+                            f"di hold zone ({current_profit_pct*100:.2f}%). "
+                            f"Menutup posisi untuk lindungi modal. Reason: {_veto_reason}"
+                        )
+                        order_id = self.execute_exit(
+                            pair, amount, current_price, "BREAK_EVEN",
+                            entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data
+                        )
+                        if order_id:
+                            mark_exit_requested(pair, order_id)
+                        continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
