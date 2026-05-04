@@ -111,21 +111,20 @@ def execute_trade(
             log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
             return False
 
-        from config import TP_PCT, SL_PCT, FEE_BUY_TAKER, FEE_SELL_TAKER, FEE_SLIPPAGE_BUFFER
+        from config import TP_PCT, SL_PCT, ROUND_TRIP_FEE_PCT
 
         final_tp = dynamic_tp if dynamic_tp is not None else TP_PCT
         final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
 
-        # [Fee-Viability Guard] Pastikan bahkan pada skenario TP terbaik,
-        # net profit masih cukup berarti setelah dipotong fee round-trip.
-        # Jika tidak, trade ini akan SELALU rugi (fee melebihi semua potensi profit).
-        _fee_rt = FEE_BUY_TAKER + FEE_SELL_TAKER + FEE_SLIPPAGE_BUFFER
+        # [Fee-Viability Guard] Gunakan ROUND_TRIP_FEE_PCT (0.6322%) sebagai baseline.
+        # Contoh: TP 1.0% → net profit 1.0% - 0.63% = +0.37% → VALID.
+        _fee_rt = ROUND_TRIP_FEE_PCT
         _max_net_profit = amount_idr * (final_tp - _fee_rt)
         _min_viable_net = max(300.0, amount_idr * 0.005)  # Minimal Rp 300 atau 0.5% dari trade
         if _max_net_profit < _min_viable_net:
             log_message(
                 f"⚠️ SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
-                f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.2f}%, TP={final_tp*100:.1f}%). "
+                f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
                 f"Perlu trade lebih besar atau TP lebih tinggi."
             )
             return False

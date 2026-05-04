@@ -1183,10 +1183,9 @@ def trade_manual_exit():
     """Instant manual exit for an active position.
 
     Accepts JSON body: {"pair": "btcidr"} or form field 'pair'.
-    Validates that an open position exists for the pair AND that the position
-    is currently at a net loss (after buy + sell taker fees). Only loss-making
-    positions may be force-exited via this endpoint to prevent premature exits
-    of profitable trades. Execution is always a MARKET (taker) sell.
+    Validates that an open position exists for the pair AND that Net PnL < 0.1%.
+    Only positions below the 0.1% net profit threshold may be force-exited to prevent
+    premature exits of profitable trades. Execution is always a MARKET (taker) sell.
     """
     data = request.get_json(silent=True) or {}
     pair = (data.get('pair') or request.form.get('pair') or '').lower().strip()
@@ -1197,7 +1196,7 @@ def trade_manual_exit():
     if not pos:
         return jsonify({"error": f"No active position found for {pair}"}), 404
 
-    # --- Guard: hanya izinkan exit saat rugi (setelah fee) ---
+    # --- Guard: hanya izinkan exit saat Net PnL < 0.1% ---
     entry_price  = float(pos.get('entry_price') or 0)
     amount_crypto = float(pos.get('amount_crypto') or 0)
     amount_idr   = float(pos.get('amount_idr') or 0)
@@ -1225,11 +1224,15 @@ def trade_manual_exit():
     fee_sell  = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
     pnl_net   = raw_pnl - fee_buy - fee_sell
 
-    if pnl_net >= 0:
+    # Hanya izinkan manual exit jika Net PnL < MANUAL_EXIT_MAX_NET_PCT (0.1%).
+    # Ini mencegah exit prematur di posisi yang masih menguntungkan.
+    pnl_net_pct = pnl_net / amount_idr if amount_idr > 0 else 0
+    if pnl_net_pct >= cfg.MANUAL_EXIT_MAX_NET_PCT:
         return jsonify({
-            "error": "Manual exit hanya diizinkan saat posisi rugi (setelah fee). "
+            "error": f"Manual exit hanya diizinkan saat Net PnL < {cfg.MANUAL_EXIT_MAX_NET_PCT*100:.1f}%. "
                      "Biarkan bot mengelola exit saat posisi untung.",
-            "pnl_net_idr": round(pnl_net, 0)
+            "pnl_net_idr": round(pnl_net, 0),
+            "pnl_net_pct": round(pnl_net_pct * 100, 4)
         }), 400
 
     db.save_state("trigger_exit_pair", pair)
@@ -2023,7 +2026,8 @@ def _build_stats_payload():
             "new_listings": db.get_new_listings(),
             "bot_running": True,
             "dry_run": bool(cfg.DRY_RUN),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
+            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
+            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT
         }
         return payload
     finally:

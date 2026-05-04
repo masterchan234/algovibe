@@ -91,17 +91,17 @@
             </div>
 
             <div class="col-pnl">
-              <div class="pnl-val">{{ formatIdr(pos.pnl_idr) }}</div>
+              <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
               <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
             </div>
 
             <div class="col-exit">
               <button
-                v-if="pos.pnl_net_idr < 0"
+                v-if="(pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
-                title="Manual EXIT — closes position at market price (loss-cut only)"
+                title="Manual EXIT — closes position at market price (Net PnL &lt; 0.1% only)"
               >
                 {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
               </button>
@@ -200,6 +200,9 @@ import { useTradeStore } from '../stores/trade'
 const store = useTradeStore()
 const filterMode = ref('all')
 const activeStreamTab = ref('analisa') 
+
+// Threshold from server config — EXIT allowed only when Net PnL < this value
+const manualExitMaxNetPct = computed(() => store.stats.manual_exit_max_net_pct ?? 0.001)
 
 // Track pairs currently being exited to disable the button during processing
 const exitingPairs = ref(new Set())

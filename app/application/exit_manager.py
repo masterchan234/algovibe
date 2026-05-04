@@ -15,7 +15,7 @@ from config import (
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
-    ROUND_TRIP_FEE_PCT
+    ROUND_TRIP_FEE_PCT, SMART_BREAK_EVEN_PCT
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -564,11 +564,10 @@ class ExitManager:
                 from config import FEE_SLIPPAGE_BUFFER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
                 denom_tp = amount * max(0.01, (1 - FEE_SELL_TAKER - tp_slippage))
-                # [Fix Fee-Trap] MIN_NET_PROFIT proporsional terhadap ukuran trade.
-                # Fixed Rp 2.000 menyebabkan exact_tp_price +18% pada trade kecil → TP mustahil.
-                # Formula: min(amount_idr × 1.5%, Rp 2.000) — cukup bermakna tanpa unreachable.
+                # [SMART_BREAK_EVEN] Minimum net profit agar trade masuk zona REAL_PROFIT (> 0.85% gross).
+                # 0.85% = 0.6322% round-trip taker fee + 0.21% slippage buffer.
                 amount_idr_pos = float(data.get('amount_idr', 0))
-                dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * 0.015))
+                dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * SMART_BREAK_EVEN_PCT))
                 exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_TAKER))) / denom_tp
 
                 # Target TP minimal agar tidak rugi fee
