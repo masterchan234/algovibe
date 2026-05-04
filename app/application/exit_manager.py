@@ -12,11 +12,10 @@ from config import (
     TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
-    TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
-    BREAK_EVEN_SLIPPAGE_MARGIN, ROUND_TRIP_FEE_PCT
+    ROUND_TRIP_FEE_PCT
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -560,19 +559,6 @@ class ExitManager:
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
 
-                # --- [Dynamic Safe Exit Price] ---
-                # Harga minimum exit agar net_pnl >= 0 setelah fee + slippage.
-                # ROUND_TRIP_FEE_PCT = 1.44% (0.72% buy + 0.72% sell, termasuk tax kedua arah).
-                # BREAK_EVEN_SLIPPAGE_MARGIN (0.21%) ditambahkan sebagai buffer keamanan slippage.
-                # BREAK_EVEN threshold = 1.44% + 0.21% = 1.65%.
-                # Posisi HANYA mendapat status BREAK_EVEN jika current_price >= 1.65% di atas entry.
-                # Jika harga masih di bawah safe_exit_price, posisi tetap HOLD.
-                _total_fee_pct = ROUND_TRIP_FEE_PCT                # 1.44% mandatory round-trip
-                _slippage_margin = BREAK_EVEN_SLIPPAGE_MARGIN       # 0.21% safety margin dari config
-                _be_buffer = _total_fee_pct + _slippage_margin      # 1.65% total threshold
-                safe_exit_price = entry_price * (1.0 + _be_buffer)
-                break_even_price = safe_exit_price  # alias untuk kompatibilitas kode trailing stop
-
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
                 # [Fee Fix] TP exits menggunakan taker → gunakan FEE_BUY_TAKER + FEE_SELL_TAKER
                 from config import FEE_SLIPPAGE_BUFFER
@@ -592,10 +578,6 @@ class ExitManager:
                 dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
                 initial_sl_price = entry_price * (1 + dynamic_sl_pct)
                 
-                # --- [Advanced] Adaptive Trailing Stop Logic ---
-                highest_price = data.get('highest_price', entry_price)
-                trailing_sl_price = data.get('trailing_sl_price', initial_sl_price)
-                
                 current_profit_pct = (current_price - entry_price) / entry_price
                 pnl_pct = current_profit_pct * 100
                 
@@ -604,98 +586,7 @@ class ExitManager:
                 pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
                 duration_str = f"{int(pos_age_min)}m"
 
-                # [Daily Target] Kencangkan trailing stop bila sudah dekat target profit harian
-                _target_status = None
-                try:
-                    if self.oracle:
-                        _target_status = self.oracle.get_daily_target_status()
-                except Exception:
-                    pass
-                _near_daily_target = _target_status.get("near", False) if _target_status else False
-
-                # [Regime-aware] Aktivasi trailing lebih cepat di pasar BEARISH/CHOPPY
-                _regime = db.get_state("market_regime") or "UNKNOWN"
-                _is_defensive_regime = _regime in ("BEARISH", "CHOPPY", "CRASH")
-                _activation_pct = (
-                    TRAILING_STOP_ACTIVATION_PCT * 0.6   # 40% lebih cepat saat pasar buruk
-                    if _is_defensive_regime
-                    else TRAILING_STOP_ACTIVATION_PCT
-                )
-
-                if current_price > highest_price:
-                    highest_price = current_price
-                    positions[pair]['highest_price'] = highest_price
-                    
-                    # Jarak trailing adaptif: Semakin untung, semakin ketat
-                    # [Optimization] Mengunci profit lebih agresif saat harga melonjak
-                    dist_pct = TRAILING_STOP_DISTANCE_PCT # Default (lihat config TRAILING_STOP_DISTANCE_PCT)
-                    if _near_daily_target:
-                        # Sudah dekat target harian → kunci profit lebih ketat
-                        dist_pct = min(dist_pct, 0.002)   # 0.2% — sangat ketat
-                    elif current_profit_pct >= 0.04:   # Profit > 4%
-                        dist_pct = 0.002            # Jarak sangat ketat (0.2%)
-                    elif current_profit_pct >= 0.02: # Profit > 2%
-                        dist_pct = 0.0035           # Jarak ketat (0.35%)
-    
-                    if current_profit_pct >= _activation_pct:
-                        new_trailing_sl = highest_price * (1 - dist_pct)
-                        # [Fee Fix] Floor trailing stop di break_even_price jika koin pernah melampaui
-                        # break-even. Ini mencegah trailing stop menyebabkan exit rugi ketika harga
-                        # turun dari puncak tapi masih di atas biaya round-trip.
-                        if highest_price >= break_even_price:
-                            new_trailing_sl = max(new_trailing_sl, break_even_price)
-                        if new_trailing_sl > trailing_sl_price:
-                            trailing_sl_price = new_trailing_sl
-                            positions[pair]['trailing_sl_price'] = trailing_sl_price
-                    
-                    # [Senior Sync] Debounce DB update to reduce I/O
-                    last_saved_highest = data.get('last_saved_highest_price', 0)
-                    last_saved_trailing = data.get('last_saved_trailing_sl', 0)
-                    if highest_price > last_saved_highest * 1.002 or trailing_sl_price > last_saved_trailing * 1.002:
-                        positions[pair]['last_saved_highest_price'] = highest_price
-                        positions[pair]['last_saved_trailing_sl'] = trailing_sl_price
-                        modified_pairs.add(pair)
-                
-                active_sl_price = max(initial_sl_price, trailing_sl_price)
-    
-                # --- [Defensive] Break-Even Stop Loss ---
-                # Aktifkan HANYA jika current_price sudah melampaui safe_exit_price.
-                # Buffer _be_buffer = fee round-trip (~1.44%) + 0.21% slippage margin.
-                # Jika harga masih di bawah safe_exit_price, tahan posisi (hold zone).
-                if current_price > safe_exit_price and active_sl_price < safe_exit_price:
-                    active_sl_price = safe_exit_price
-                    if positions[pair].get('trailing_sl_price', 0) < safe_exit_price:
-                        positions[pair]['trailing_sl_price'] = safe_exit_price
-                        modified_pairs.add(pair)
-                        log_message(
-                            f"🛡️ [Break-Even] {pair}: SL → Rp {safe_exit_price:,.2f} "
-                            f"(dynamic buffer {_be_buffer*100:.2f}%: fee {_total_fee_pct*100:.2f}% + slippage {_slippage_margin*100:.2f}%)"
-                        )
-
-                # --- [Hold Zone] Harga antara entry dan safe_exit_price → tahan posisi ---
-                # Zona 1.0x – safe_exit_price: jangan terapkan break-even SL (menunggu harga naik lebih).
-                # KECUALI GEMMA-4 mendeteksi trend reversal → exit sekarang untuk lindungi modal.
-                elif entry_price <= current_price <= safe_exit_price:
-                    _gemma_reversal = False
-                    _veto_reason = ""
-                    if self.oracle:
-                        try:
-                            _gemma_reversal, _veto_reason = self.oracle.check_llm_veto(pair)
-                        except Exception as _e:
-                            log_message(f"⚠️ [Hold Zone] Oracle check error for {pair}: {_e}")
-                    if _gemma_reversal:
-                        log_message(
-                            f"🔄 [Hold Zone Reversal] {pair}: GEMMA-4 sinyal trend reversal "
-                            f"di hold zone ({current_profit_pct*100:.2f}%). "
-                            f"Menutup posisi untuk lindungi modal. Reason: {_veto_reason}"
-                        )
-                        order_id = self.execute_exit(
-                            pair, amount, current_price, "BREAK_EVEN",
-                            entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data
-                        )
-                        if order_id:
-                            mark_exit_requested(pair, order_id)
-                        continue
+                active_sl_price = initial_sl_price
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -757,9 +648,9 @@ class ExitManager:
     
                 # --- [AI-Free] Emergency exit signals are handled by Tier 2 technical exit
                 # (momentum SELL + tech weakness) and Tier 3 force-exit above. Any
-                # remaining position continues to trailing stop / hard SL below.
+                # remaining position continues to hard SL / manual exit below.
 
-                # 2. Take Profit (Hard TP) - Opsional, bisa dihapus jika murni trailing, tapi tetap dipakai sbg target final.
+                # 2. Take Profit (Hard TP)
                 if current_price >= tp_price:
                     msg = (
                         f"🎯 *TAKE PROFIT* 🎯\n"
@@ -807,42 +698,12 @@ class ExitManager:
 
                 elif current_price <= active_sl_price:
                     # [Manual Control Mode] Automatic STOP_LOSS is DISABLED.
-                    # Only SMART_BREAK_EVEN (1.65% round-trip fee threshold) and
-                    # TRAILING_STOP (profit-locking mechanism) are allowed to exit automatically.
-                    # Raw negative-PnL STOP_LOSS exits are skipped — positions must be
-                    # closed manually via the dashboard EXIT button.
-                    is_trailing_hit = active_sl_price > break_even_price
-                    is_be_hit = abs(active_sl_price - break_even_price) < 1.0  
-                    
-                    if is_be_hit:
-                        reason_str = "BREAK-EVEN SL"
-                        log_reason = "BREAK_EVEN"
-                    elif is_trailing_hit:
-                        reason_str = "TRAILING STOP"
-                        log_reason = "TRAILING_STOP"
-                    else:
-                        # Auto STOP_LOSS disabled — log and hold position
-                        log_message(
-                            f"🚫 [AUTO-SL DISABLED] {pair}: Price {current_price:,.2f} below SL {active_sl_price:,.2f} "
-                            f"({pnl_pct:+.2f}%). Holding — use dashboard EXIT button to close manually."
-                        )
-                        continue
-                    
-                    msg = (
-                        f"⚠️ *{reason_str}* ⚠️\n"
-                        f"Pair: `{pair}`\n"
-                        f"Entry: Rp {entry_price:,.2f}\n"
-                        f"Exit: Rp {current_price:,.2f}\n"
-                        f"PnL: {pnl_pct:+.2f}%\n"
-                        f"Hold: {duration_str}"
+                    # Posisi rugi harus ditutup manual via dashboard EXIT button.
+                    log_message(
+                        f"🚫 [AUTO-SL DISABLED] {pair}: Price {current_price:,.2f} below SL {active_sl_price:,.2f} "
+                        f"({pnl_pct:+.2f}%). Holding — use dashboard EXIT button to close manually."
                     )
-                    print(msg.replace('*', '').replace('\n', ' | '))
-                    send_telegram_message(msg)
-                    
-                    order_id = self.execute_exit(pair, amount, current_price, log_reason,
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                    if order_id:
-                        mark_exit_requested(pair, order_id)
+                    continue
             except Exception as e:
                 log_message(f"🚨 Error in monitor loop: {e}")
                 import traceback
@@ -853,7 +714,7 @@ class ExitManager:
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
-            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "TRAILING_STOP", "BREAK_EVEN", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
+            is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
             is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
             symbol = f"{pair[:-3].upper()}/IDR"

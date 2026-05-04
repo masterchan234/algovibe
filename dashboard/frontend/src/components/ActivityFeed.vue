@@ -97,10 +97,11 @@
 
             <div class="col-exit">
               <button
+                v-if="pos.pnl_net_idr < 0"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
-                title="Manual EXIT — closes position at market price"
+                title="Manual EXIT — closes position at market price (loss-cut only)"
               >
                 {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
               </button>
@@ -203,6 +204,12 @@ const activeStreamTab = ref('analisa')
 // Track pairs currently being exited to disable the button during processing
 const exitingPairs = ref(new Set())
 
+function getCookie(name) {
+  const value = `; ${document.cookie}`
+  const parts = value.split(`; ${name}=`)
+  if (parts.length === 2) return parts.pop().split(';').shift()
+}
+
 async function handleManualExit(pair) {
   if (exitingPairs.value.has(pair)) return
   if (!confirm(`Exit position for ${pair.replace(/idr$/i, '').toUpperCase()} at market price?`)) return
@@ -215,7 +222,10 @@ async function handleManualExit(pair) {
     const res = await fetch(`${backendUrl}/api/trade/manual-exit`, {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': getCookie('csrf_token'),
+      },
       body: JSON.stringify({ pair }),
     })
     if (!res.ok) {
