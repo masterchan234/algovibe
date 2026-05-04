@@ -2525,14 +2525,13 @@ def session_action():
         payload = json.loads(raw_sb)
 
         if action == 'CONTINUE':
-            # Recalculate next target: current total equity * (1 + target percentage).
-            # Use the persisted daily_profit_target as the target pct reference.
+            # Recalculate next target: current total equity * target percentage.
+            # Use the persisted daily_profit_target as the profit-pct reference.
+            from config import INITIAL_CAPITAL as _IC
             try:
                 balance_str = db.get_state("cached_idr_balance")
-                from config import INITIAL_CAPITAL as _IC
                 equity = float(balance_str) if balance_str else float(_IC)
             except Exception:
-                from config import INITIAL_CAPITAL as _IC
                 equity = float(_IC)
 
             # Derive target_pct from the original target vs equity ratio (fallback 1%)
@@ -2542,7 +2541,8 @@ def session_action():
             except Exception:
                 target_pct = 0.01
 
-            new_target = equity * (1 + target_pct)
+            # New profit target = equity * same percentage (profit amount, not equity amount)
+            new_target = equity * target_pct
             db.save_state("daily_profit_target", str(new_target))
             db.save_state("daily_profit_target_ts", datetime.datetime.now().isoformat())
             db.save_state("session_mode", "NORMAL")
@@ -2566,7 +2566,7 @@ def session_action():
 
     except Exception as e:
         logging.error(f"[StrategicBreak] session_action error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error processing session action."}), 500
 
 # Start background thread
 socketio.start_background_task(push_data_loop)

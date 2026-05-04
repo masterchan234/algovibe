@@ -1160,8 +1160,13 @@ class Oracle:
             # Win Rate
             win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
 
-            # Profit Factor = Gross Profit / |Gross Loss|
-            profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else 0.0
+            # Profit Factor = Gross Profit / |Gross Loss|; ∞ when no losses recorded
+            if gross_loss < 0:
+                profit_factor = gross_profit / abs(gross_loss)
+            elif gross_profit > 0:
+                profit_factor = float('inf')
+            else:
+                profit_factor = 0.0
 
             # Max Session Drawdown = Peak Equity - Current Net PnL
             max_drawdown = max(0.0, peak_pnl_today - current_pnl)
@@ -1178,7 +1183,7 @@ class Oracle:
                 "win_rate": round(win_rate, 2),
                 "win_count": win_count,
                 "total_trades": total_trades,
-                "profit_factor": round(profit_factor, 4),
+                "profit_factor": profit_factor if profit_factor != float('inf') else 9999.0,
                 "gross_profit": gross_profit,
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
@@ -1187,8 +1192,7 @@ class Oracle:
                 "triggered_at": datetime.now().isoformat(),
                 "status": "PENDING",  # PENDING → CONTINUE or STOP after user action
             }
-            import json as _json
-            db.save_state("strategic_break_payload", _json.dumps(payload))
+            db.save_state("strategic_break_payload", json.dumps(payload))
             logger.info(
                 f"[Oracle] Strategic Break emitted — Net PnL: Rp {current_pnl:,.0f}, "
                 f"Win Rate: {win_rate:.1f}%, Profit Factor: {profit_factor:.4f}"
