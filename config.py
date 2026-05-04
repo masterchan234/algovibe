@@ -98,9 +98,7 @@ FEE_BUY_TAKER  = 0.005111  # 0.5111% (0.5% Service + 0.0111% CFX)
 FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
 FEE_SELL_TAKER = 0.007211  # 0.7211% (0.5% Service + 0.21% Tax + 0.0111% CFX)
 FEE_SLIPPAGE_BUFFER = 0.0005 # 0.05% extra buffer for market impact
-BREAK_EVEN_SLIPPAGE_MARGIN = 0.0021 # 0.21% safety margin for slippage added on top of round-trip fee
 # Mandatory round-trip cost: 0.72% buy (0.51% taker + 0.21% tax) + 0.72% sell (0.51% taker + 0.21% tax) = 1.44%
-# BREAK_EVEN threshold = ROUND_TRIP_FEE_PCT + BREAK_EVEN_SLIPPAGE_MARGIN = 1.44% + 0.21% = 1.65%
 ROUND_TRIP_FEE_PCT = 0.0144
 
 # --- Predator Strategy Parameters ---
