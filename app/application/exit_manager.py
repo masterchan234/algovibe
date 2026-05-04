@@ -806,7 +806,11 @@ class ExitManager:
                         continue
 
                 elif current_price <= active_sl_price:
-                    # Jika tidak bisa DCA (tier habis / TQ prob rendah / sudah kena hard SL), lakukan Stop Loss
+                    # [Manual Control Mode] Automatic STOP_LOSS is DISABLED.
+                    # Only SMART_BREAK_EVEN (1.65% round-trip fee threshold) and
+                    # TRAILING_STOP (profit-locking mechanism) are allowed to exit automatically.
+                    # Raw negative-PnL STOP_LOSS exits are skipped — positions must be
+                    # closed manually via the dashboard EXIT button.
                     is_trailing_hit = active_sl_price > break_even_price
                     is_be_hit = abs(active_sl_price - break_even_price) < 1.0  
                     
@@ -817,8 +821,12 @@ class ExitManager:
                         reason_str = "TRAILING STOP"
                         log_reason = "TRAILING_STOP"
                     else:
-                        reason_str = "STOP LOSS"
-                        log_reason = "STOP_LOSS"
+                        # Auto STOP_LOSS disabled — log and hold position
+                        log_message(
+                            f"🚫 [AUTO-SL DISABLED] {pair}: Price {current_price:,.2f} below SL {active_sl_price:,.2f} "
+                            f"({pnl_pct:+.2f}%). Holding — use dashboard EXIT button to close manually."
+                        )
+                        continue
                     
                     msg = (
                         f"⚠️ *{reason_str}* ⚠️\n"

@@ -48,6 +48,7 @@
           <div class="col-price">ENTRY/MARK</div>
           <div class="col-target">TARGETS</div>
           <div class="col-pnl">PnL</div>
+          <div class="col-exit">ACTION</div>
         </div>
         <div class="positions-list">
           <div
@@ -92,6 +93,17 @@
             <div class="col-pnl">
               <div class="pnl-val">{{ formatIdr(pos.pnl_idr) }}</div>
               <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
+            </div>
+
+            <div class="col-exit">
+              <button
+                class="btn-manual-exit"
+                :disabled="exitingPairs.has(pos.pair)"
+                @click.stop="handleManualExit(pos.pair)"
+                title="Manual EXIT — closes position at market price"
+              >
+                {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
+              </button>
             </div>
           </div>
           <div v-if="filterMode === 'active' && store.positions.length === 0" class="empty-state">
@@ -187,6 +199,40 @@ import { useTradeStore } from '../stores/trade'
 const store = useTradeStore()
 const filterMode = ref('all')
 const activeStreamTab = ref('analisa') 
+
+// Track pairs currently being exited to disable the button during processing
+const exitingPairs = ref(new Set())
+
+async function handleManualExit(pair) {
+  if (exitingPairs.value.has(pair)) return
+  if (!confirm(`Exit position for ${pair.replace(/idr$/i, '').toUpperCase()} at market price?`)) return
+
+  exitingPairs.value = new Set([...exitingPairs.value, pair])
+  try {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    const res = await fetch(`${backendUrl}/api/trade/manual-exit`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pair }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      alert(`Exit failed: ${err.error || res.statusText}`)
+    }
+  } catch (e) {
+    alert(`Exit request error: ${e.message}`)
+  } finally {
+    // Keep button disabled for 5s to avoid double-fire while bot processes
+    setTimeout(() => {
+      const next = new Set(exitingPairs.value)
+      next.delete(pair)
+      exitingPairs.value = next
+    }, 5000)
+  }
+}
 
 const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
 
@@ -328,6 +374,7 @@ function formatIdr(val) {
 .col-size { flex: 1; text-align: right; padding-right: 15px; }
 .col-price-progress { flex: 3; padding: 0 10px; }
 .col-pnl { flex: 1.2; text-align: right; }
+.col-exit { flex: 0 0 56px; text-align: center; }
 
 .position-item, .history-item {
   display: flex;
@@ -490,4 +537,20 @@ function formatIdr(val) {
   color: #8b949e;
   font-style: italic;
 }
+
+.btn-manual-exit {
+  background: #da3633;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+.btn-manual-exit:hover:not(:disabled) { background: #f85149; }
+.btn-manual-exit:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>
