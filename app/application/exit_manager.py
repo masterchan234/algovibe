@@ -236,13 +236,14 @@ class ExitManager:
 
         # ── BTC Price Tracking (for 5-minute crash detection) ────────────────────────────
         btc_ticker_data = current_tickers.get('btcidr') or {}
-        btc_current = float(btc_ticker_data.get('last') or btc_ticker_data.get('buy') or 0)
+        _btc_raw = btc_ticker_data.get('last') or btc_ticker_data.get('buy')
+        btc_current = float(_btc_raw) if _btc_raw not in (None, '', 0, '0') else 0.0
         _now_ts = time.time()
         if btc_current > 0:
             self._btc_price_history.append((_now_ts, btc_current))
-            # Trim buffer: keep only the last 10 minutes
+            # Trim buffer: keep only entries needed for the longest window used (5 min + buffer)
             self._btc_price_history = [
-                (ts, p) for ts, p in self._btc_price_history if _now_ts - ts <= 600
+                (ts, p) for ts, p in self._btc_price_history if _now_ts - ts <= 360
             ]
 
         # Detect BTC drop > BTC_CRASH_TRIGGER_PCT in the last 5 minutes (kill switch)
@@ -325,6 +326,7 @@ class ExitManager:
                 should_execute = False
                 trigger_label  = ""
                 action_label   = ""
+                _BYPASS_LOG_INTERVAL = 60  # seconds between repeated bypass log messages
 
                 # ── Exception: BTC Crash Kill Switch ─────────────────────────────────────
                 if btc_crash_kill:
@@ -334,7 +336,7 @@ class ExitManager:
 
                 # ── Net Profit Gate: disable automatic exits when portfolio is net negative ──
                 elif total_net_pnl <= 0:
-                    if _now_ts - self._last_basket_bypass_log_ts >= 60:
+                    if _now_ts - self._last_basket_bypass_log_ts >= _BYPASS_LOG_INTERVAL:
                         log_message(
                             f"🔒 BASKET_EXIT Bypassed: Total Net PnL "
                             f"({net_pnl_pct:+.4f}%) is not yet profitable."
@@ -343,6 +345,7 @@ class ExitManager:
 
                 else:
                     # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
+                    _harvest_min_pct = AUTO_BASKET_HARVEST_MIN * 100  # precomputed once
                     # (a) profit gabungan melampaui minimum DAN ada posisi rugi
                     trigger_normal = n > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
                     # (b) ada posisi stagnant, menutup semua setidaknya impas
@@ -362,22 +365,19 @@ class ExitManager:
                     # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND BTC weakening
                     trigger_harvest_pct = (
                         n >= 1
-                        and net_pnl_pct >= AUTO_BASKET_HARVEST_MIN * 100
+                        and net_pnl_pct >= _harvest_min_pct
                         and btc_weakening
                     )
 
-                    if any([trigger_normal, trigger_stagnant_rescue, trigger_harvest_idr,
-                            trigger_hwm_pullback, trigger_harvest_pct]):
+                    if trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
                         should_execute = True
-                        if trigger_hwm_pullback and not any([trigger_normal, trigger_stagnant_rescue,
-                                                             trigger_harvest_idr, trigger_harvest_pct]):
+                        if trigger_hwm_pullback and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_harvest_pct):
                             trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
                             action_label  = "HWM PULLBACK"
-                        elif trigger_harvest_pct and not any([trigger_normal, trigger_stagnant_rescue,
-                                                              trigger_harvest_idr]):
+                        elif trigger_harvest_pct and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr):
                             trigger_label = "GUARANTEED PROFIT HARVEST"
                             action_label  = "EXECUTING HARVEST"
-                        elif trigger_harvest_idr and not any([trigger_normal, trigger_stagnant_rescue]):
+                        elif trigger_harvest_idr and not (trigger_normal or trigger_stagnant_rescue):
                             trigger_label = "PROACTIVE HARVEST"
                             action_label  = "EXECUTING HARVEST"
                         elif trigger_stagnant_rescue and not trigger_normal:
