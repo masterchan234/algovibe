@@ -6,7 +6,7 @@ import config
 from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
 from app.infrastructure.database import db
 from app.infrastructure.llm_worker import LLMWorker
-from utils.logger import log_message
+from utils.logger import log_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
 
@@ -878,6 +878,17 @@ class Oracle:
                 effective_balance = INITIAL_CAPITAL
             daily_loss_limit_idr = -(effective_balance * DAILY_LOSS_LIMIT_PCT)
 
+            # Compute time remaining in the current trading day (0–100%).
+            # 0 = midnight (start of day, 100% remains); 86400 = end of day (0% remains).
+            now = datetime.now()
+            seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+            time_remaining_pct = max(0.0, round((1 - seconds_since_midnight / 86400) * 100, 1))
+
+            # Read persisted session mode (written by evaluate_and_update_session_mode)
+            session_mode = db.get_state("session_mode") or "NORMAL"
+            # Explicit safe check: treat None/unset as True (buy enabled by default)
+            session_buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
+
             return {
                 "target_idr": target_idr,
                 "current_pnl": current_pnl,
@@ -885,13 +896,132 @@ class Oracle:
                 "reached": current_pnl >= target_idr and target_idr > 0,
                 "near": progress_pct >= 80.0 and target_idr > 0,
                 "loss_limit_hit": current_pnl <= daily_loss_limit_idr,
+                "time_remaining_pct": time_remaining_pct,
+                "session_mode": session_mode,
+                "session_buy_enabled": session_buy_enabled,
             }
         except Exception as e:
             logger.error(f"[Oracle] get_daily_target_status error: {e}")
             return {
                 "target_idr": 0.0, "current_pnl": 0.0, "progress_pct": 0.0,
                 "reached": False, "near": False, "loss_limit_hit": False,
+                "time_remaining_pct": 50.0, "session_mode": "NORMAL",
+                "session_buy_enabled": True,
             }
+
+    def evaluate_and_update_session_mode(self, target_status: dict) -> dict:
+        """
+        Smart Trailing & STOP BUY Protocol.
+
+        Evaluates whether the daily target has been reached and decides the
+        next session mode:
+
+          NORMAL       — target not yet reached; normal operation.
+          TRAILING     — target reached but conditions allow extending the goal.
+          HARVEST_ONLY — buy blocked; only existing positions are monitored.
+
+        Smart Trailing conditions (all must hold):
+          • time_remaining_pct > 40  (enough of the day left)
+          • market regime == BULLISH
+          • market sentiment index >= 80  (strong bullish momentum)
+
+        Once HARVEST_ONLY is persisted to DB it stays until a new trading day
+        resets it (see market_cycle.py daily-reset block).
+
+        Returns dict:
+            buy_enabled  — bool: whether new Entry Ready orders are allowed
+            session_mode — str: NORMAL | TRAILING | HARVEST_ONLY
+            message      — str: human-readable status for logging
+        """
+        _TRAILING_EXTRA_PCT   = 0.15   # Extend target by +15% of current PnL
+        _TIME_THRESHOLD_PCT   = 40.0   # Stop trailing when < 40% of day remains
+        _SENTIMENT_THRESHOLD  = 80     # sentiment >= 80 = "strong bullish" (~at 100)
+
+        try:
+            target_idr      = target_status.get("target_idr", 0)
+            current_pnl     = target_status.get("current_pnl", 0)
+            time_remaining  = target_status.get("time_remaining_pct", 50.0)
+            session_mode    = target_status.get("session_mode", "NORMAL")
+
+            # Already HARVEST_ONLY — remain locked
+            if session_mode == "HARVEST_ONLY":
+                return {
+                    "buy_enabled": False,
+                    "session_mode": "HARVEST_ONLY",
+                    "message": (
+                        "Status: HARVEST_ONLY | BUY: Blocked | "
+                        "Strategy: Tightening TP positions"
+                    ),
+                }
+
+            # Target not yet reached — normal or previous trailing mode continues
+            if target_idr <= 0 or current_pnl < target_idr:
+                return {
+                    "buy_enabled": True,
+                    "session_mode": session_mode,
+                    "message": "",
+                }
+
+            # ── Target reached: decide TRAILING or HARVEST_ONLY ──────────────
+            if time_remaining > _TIME_THRESHOLD_PCT:
+                regime = self.get_market_regime()
+                try:
+                    sentiment = int(float(db.get_state("market_sentiment_index") or "50"))
+                except (ValueError, TypeError):
+                    sentiment = 50
+
+                if regime == MarketRegime.BULLISH and sentiment >= _SENTIMENT_THRESHOLD:
+                    # Set new target to 115% of current PnL (current_pnl × 1.15).
+                    # Equivalent to: new_target = current_pnl + 15% of current_pnl.
+                    new_target = current_pnl * (1 + _TRAILING_EXTRA_PCT)
+                    db.save_state("daily_profit_target", str(new_target))
+                    db.save_state("daily_profit_target_ts", datetime.now().isoformat())
+                    db.save_state("session_mode", "TRAILING")
+                    db.save_state("session_buy_enabled", "true")
+                    msg = (
+                        f"📈 [SMART TRAILING] Target extended: "
+                        f"Rp {target_idr:,.0f} → Rp {new_target:,.0f} "
+                        f"(+{_TRAILING_EXTRA_PCT*100:.0f}% of current PnL). "
+                        f"Regime={regime}, Sentiment={sentiment}/100, "
+                        f"Time Left={time_remaining:.0f}%. SESSION_BUY_ENABLED=True."
+                    )
+                    log_message(msg)
+                    return {
+                        "buy_enabled": True,
+                        "session_mode": "TRAILING",
+                        "message": msg,
+                    }
+                else:
+                    # Conditions degraded while target was exceeded — stop buying
+                    log_message(
+                        f"⛔ [STOP BUY] Regime={regime}, Sentiment={sentiment}/100 — "
+                        f"no longer bullish. Triggering HARVEST_ONLY."
+                    )
+
+            # ── Trigger STOP BUY / HARVEST_ONLY ─────────────────────────────
+            db.save_state("session_mode", "HARVEST_ONLY")
+            db.save_state("session_buy_enabled", "false")
+            msg = (
+                "Status: HARVEST_ONLY | BUY: Blocked | "
+                "Strategy: Tightening TP positions"
+            )
+            log_message(f"🛑 [HARVEST ONLY] {msg}")
+            send_telegram_message(
+                f"🛑 *SESSION MODE: HARVEST ONLY*\n"
+                f"Target Rp {target_idr:,.0f} tercapai.\n"
+                f"PnL: Rp {current_pnl:,.0f} | Sisa Hari: {time_remaining:.0f}%\n"
+                f"🔒 Tidak ada pembelian baru. "
+                f"Memantau & memperketat TP posisi terbuka."
+            )
+            return {
+                "buy_enabled": False,
+                "session_mode": "HARVEST_ONLY",
+                "message": msg,
+            }
+
+        except Exception as e:
+            logger.error(f"[Oracle] evaluate_and_update_session_mode error: {e}")
+            return {"buy_enabled": True, "session_mode": "NORMAL", "message": ""}
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 

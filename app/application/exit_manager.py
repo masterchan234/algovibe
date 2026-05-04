@@ -267,6 +267,9 @@ class ExitManager:
                 all_btc_prices = [p for _, p in self._btc_price_history]
                 btc_weakening = btc_current <= (sum(all_btc_prices) / len(all_btc_prices))
 
+        # Read HARVEST_ONLY flag once — used in basket evaluation AND per-position TP tightening.
+        harvest_only = (db.get_state("session_mode") == "HARVEST_ONLY")
+
         try:
             open_pairs_for_basket = []
             total_net_pnl    = 0.0
@@ -323,6 +326,17 @@ class ExitManager:
                 fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
 
+                # ── HARVEST_ONLY status log (throttled) ───────────────────────────────────
+                if harvest_only:
+                    if _now_ts - self._last_basket_bypass_log_ts >= 60:
+                        log_message(
+                            f"🌾 [HARVEST_ONLY] Status: HARVEST_ONLY | BUY: Blocked | "
+                            f"Strategy: Tightening TP positions | "
+                            f"Net Unrealized: Rp {total_net_pnl:,.0f} | "
+                            f"Target Floor: 0.85% (Net)"
+                        )
+                        self._last_basket_bypass_log_ts = _now_ts
+
                 should_execute = False
                 trigger_label  = ""
                 action_label   = ""
@@ -342,6 +356,11 @@ class ExitManager:
                             f"({net_pnl_pct:+.4f}%) is not yet profitable."
                         )
                         self._last_basket_bypass_log_ts = _now_ts
+
+                elif harvest_only:
+                    # HARVEST_ONLY: all basket triggers suppressed.
+                    # Individual TPs are tightened in the per-position loop below.
+                    pass
 
                 else:
                     # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
@@ -648,6 +667,22 @@ class ExitManager:
     
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
+
+                # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%) as day-end approaches.
+                # Formula: floor + (original - floor) * time_remaining_fraction
+                # time_remaining_frac: 1.0 at midnight (full day ahead) → 0.0 at end of day.
+                # This lowers the TP trigger so the market reaches it more easily, without ever
+                # dropping below the 0.85% Net Profit Floor (covering round-trip fee + slippage).
+                if harvest_only:
+                    _now = datetime.now()
+                    _seconds_since_midnight = _now.hour * 3600 + _now.minute * 60 + _now.second
+                    # Fraction of day REMAINING (1.0 = day just started, 0.0 = end of day)
+                    _time_remaining_frac = max(0.0, 1.0 - _seconds_since_midnight / 86400)
+                    dynamic_tp_pct = max(
+                        SMART_BREAK_EVEN_PCT,
+                        SMART_BREAK_EVEN_PCT + (dynamic_tp_pct - SMART_BREAK_EVEN_PCT) * _time_remaining_frac,
+                    )
+
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
 
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))

@@ -64,7 +64,9 @@ def run_market_cycle(bot):
         db.save_state("daily_trades", 0)
         db.save_state("consecutive_losses", 0)
         db.save_state("start_day", bot.start_day)
-        log_message("New day detected. Counters reset & Logs rotated.")
+        db.save_state("session_mode", "NORMAL")
+        db.save_state("session_buy_enabled", "true")
+        log_message("New day detected. Counters reset & Logs rotated. Session mode reset to NORMAL.")
 
     tickers = bot.get_tickers()
     if not tickers:
@@ -112,10 +114,23 @@ def run_market_cycle(bot):
     # Tampilkan progress target profit harian di log utama
     try:
         target_status = bot.oracle.get_daily_target_status()
-        target_str = (
-            f"Target: Rp{target_status['target_idr']/1000:.0f}k | "
-            f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k ({target_status['progress_pct']:.0f}%)"
-        ) if target_status['target_idr'] > 0 else "Target: N/A"
+        session_mode = target_status.get("session_mode", "NORMAL")
+        if session_mode == "HARVEST_ONLY":
+            target_str = (
+                f"Status: HARVEST_ONLY | BUY: Blocked | "
+                f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k | "
+                f"Target Floor: 0.85% (Net)"
+            )
+        elif target_status['target_idr'] > 0:
+            target_str = (
+                f"Target: Rp{target_status['target_idr']/1000:.0f}k | "
+                f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k "
+                f"({target_status['progress_pct']:.0f}%)"
+            )
+            if session_mode == "TRAILING":
+                target_str += " | TRAILING"
+        else:
+            target_str = "Target: N/A"
     except Exception:
         target_str = "Target: N/A"
 
