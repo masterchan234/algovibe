@@ -369,6 +369,7 @@ class ScalperBot:
           - session_buy_enabled → true
           - Daily trade counters reset
           - last_reset_date updated to today (UTC)
+          - strategic_break_payload cleared
         """
         today_utc = datetime.now(timezone.utc).date().isoformat()
         self.daily_trades = 0
@@ -381,6 +382,8 @@ class ScalperBot:
         db.save_state("consecutive_losses", "0")
         db.save_state("start_day", str(self.start_day))
         db.save_state("last_reset_date", today_utc)
+        # Clear any pending strategic break so a stale popup doesn't reappear
+        db.save_state("strategic_break_payload", "")
         msg = "📅 [SYSTEM] New UTC Day Detected. Session Reset Successful. Returning to NORMAL mode."
         log_message(msg)
         send_telegram_message(msg)

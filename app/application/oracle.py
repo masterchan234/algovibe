@@ -889,23 +889,54 @@ class Oracle:
         Kembalikan status progress terhadap target profit harian.
 
         Returns dict:
-            target_idr    — target yang dihitung AI
-            current_pnl   — P&L hari ini (realized)
-            peak_pnl_today — PnL tertinggi yang dicapai hari ini
-            progress_pct  — 0-100+% seberapa dekat ke target
-            reached       — True jika target sudah tercapai
-            near          — True jika sudah >= 80% dari target
-            loss_limit_hit — True jika daily loss limit sudah terlampaui
+            target_idr      — target yang dihitung AI
+            current_pnl     — Net P&L hari ini (Realized + Unrealized)
+            realized_pnl    — Realized P&L saja (dari trade_history)
+            unrealized_pnl  — Unrealized P&L dari open positions
+            peak_pnl_today  — Net PnL tertinggi yang dicapai hari ini
+            progress_pct    — 0-100+% seberapa dekat ke target
+            reached         — True jika target sudah tercapai
+            near            — True jika sudah >= 80% dari target
+            loss_limit_hit  — True jika daily loss limit sudah terlampaui
         """
         try:
             target_raw = db.get_state("daily_profit_target")
             target_idr = float(target_raw) if target_raw else 0.0
 
             stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
-            current_pnl = float(stats.get('total_pnl_idr', 0))
+            realized_pnl = float(stats.get('total_pnl_idr', 0))
+
+            # ── Unrealized PnL from open positions ───────────────────────────
+            # Compute unrealized PnL using current market prices so HARVEST_ONLY
+            # is triggered only when Net PnL (realized + unrealized) >= target.
+            from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+            unrealized_pnl = 0.0
+            try:
+                tickers = self.market_ws.get_tickers() or {}
+                open_positions = db.get_open_positions()
+                for pair, pos_data in open_positions.items():
+                    ticker_data = tickers.get(pair, {})
+                    raw_price = ticker_data.get('last') or ticker_data.get('buy')
+                    if not raw_price:
+                        continue
+                    current_price = float(raw_price)
+                    entry_price = float(pos_data.get('entry_price', 0))
+                    amount = float(pos_data.get('amount_crypto', 0))
+                    amount_idr = float(pos_data.get('amount_idr', 0))
+                    if entry_price <= 0 or amount <= 0:
+                        continue
+                    gross_pnl = (current_price - entry_price) * amount
+                    fee_buy = amount_idr * FEE_BUY_TAKER
+                    fee_sell = current_price * amount * FEE_SELL_TAKER
+                    unrealized_pnl += gross_pnl - (fee_buy + fee_sell)
+            except Exception as _ue:
+                logger.warning(f"[Oracle] Unrealized PnL calc error: {_ue}")
+
+            # Net PnL = Realized + Unrealized
+            current_pnl = realized_pnl + unrealized_pnl
 
             # ── Peak PnL Tracking ────────────────────────────────────────────
-            # Perbarui peak_pnl_today hanya jika realized PnL saat ini lebih tinggi.
+            # Track peak using Net PnL so drawdown logic also uses the true net value.
             peak_raw = db.get_state("peak_pnl_today")
             peak_pnl_today = float(peak_raw) if peak_raw else 0.0
             if current_pnl > peak_pnl_today:
@@ -936,6 +967,8 @@ class Oracle:
             return {
                 "target_idr": target_idr,
                 "current_pnl": current_pnl,
+                "realized_pnl": realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
                 "peak_pnl_today": peak_pnl_today,
                 "progress_pct": round(progress_pct, 1),
                 "reached": current_pnl >= target_idr and target_idr > 0,
@@ -948,7 +981,9 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] get_daily_target_status error: {e}")
             return {
-                "target_idr": 0.0, "current_pnl": 0.0, "peak_pnl_today": 0.0,
+                "target_idr": 0.0, "current_pnl": 0.0,
+                "realized_pnl": 0.0, "unrealized_pnl": 0.0,
+                "peak_pnl_today": 0.0,
                 "progress_pct": 0.0, "reached": False, "near": False,
                 "loss_limit_hit": False, "time_remaining_pct": 50.0,
                 "session_mode": "NORMAL", "session_buy_enabled": True,
@@ -958,12 +993,15 @@ class Oracle:
         """
         Smart Trailing & STOP BUY Protocol.
 
-        Evaluates whether the daily target has been reached and decides the
+        Evaluates whether the daily NET target has been reached and decides the
         next session mode:
 
           NORMAL       — target not yet reached; normal operation.
           TRAILING     — target reached but conditions allow extending the goal.
           HARVEST_ONLY — buy blocked; only existing positions are monitored.
+
+        Net PnL = Realized PnL + Unrealized PnL (from get_daily_target_status).
+        Trigger requires Net_PnL >= Target_PnL (not realized alone).
 
         Smart Trailing conditions (all must hold):
           • time_remaining_pct > 40  (enough of the day left)
@@ -985,21 +1023,23 @@ class Oracle:
 
         try:
             target_idr      = target_status.get("target_idr", 0)
-            current_pnl     = target_status.get("current_pnl", 0)
+            current_pnl     = target_status.get("current_pnl", 0)   # Net PnL
+            realized_pnl    = target_status.get("realized_pnl", current_pnl)
+            unrealized_pnl  = target_status.get("unrealized_pnl", 0.0)
             peak_pnl_today  = target_status.get("peak_pnl_today", 0)
             time_remaining  = target_status.get("time_remaining_pct", 50.0)
             session_mode    = target_status.get("session_mode", "NORMAL")
 
             # Already HARVEST_ONLY: re-evaluate the locking condition.
             if session_mode == "HARVEST_ONLY":
-                # De-trigger: if PnL has dropped back below target (e.g. via manual exit/loss),
+                # De-trigger: if Net PnL has dropped back below target (e.g. via manual exit/loss),
                 # the original HARVEST_ONLY condition is no longer met → revert to NORMAL.
                 if target_idr > 0 and current_pnl < target_idr:
                     db.save_state("session_mode", "NORMAL")
                     db.save_state("session_buy_enabled", "true")
                     msg = (
                         f"🔓 [SESSION RESET] HARVEST_ONLY released. "
-                        f"Current PnL (Rp {current_pnl:,.0f}) dropped below Target (Rp {target_idr:,.0f}). "
+                        f"Net PnL (Rp {current_pnl:,.0f}) dropped below Target (Rp {target_idr:,.0f}). "
                         f"Peak was Rp {peak_pnl_today:,.0f}. BUY re-enabled."
                     )
                     log_message(msg)
@@ -1008,10 +1048,11 @@ class Oracle:
                         "session_mode": "NORMAL",
                         "message": msg,
                     }
-                # PnL still at/above target — stay locked
+                # Net PnL still at/above target — stay locked
                 msg = (
-                    "Status: HARVEST_ONLY | BUY: Blocked | "
-                    "Strategy: Tightening TP positions"
+                    f"Net PnL: Rp {current_pnl:,.0f} "
+                    f"(Realized: Rp {realized_pnl:,.0f}, Unrealized: Rp {unrealized_pnl:,.0f}) | "
+                    f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY"
                 )
                 return {
                     "buy_enabled": False,
@@ -1067,17 +1108,30 @@ class Oracle:
             db.save_state("session_mode", "HARVEST_ONLY")
             db.save_state("session_buy_enabled", "false")
             msg = (
-                "Status: HARVEST_ONLY | BUY: Blocked | "
-                "Strategy: Tightening TP positions"
+                f"Net PnL: Rp {current_pnl:,.0f} "
+                f"(Realized: Rp {realized_pnl:,.0f}, Unrealized: Rp {unrealized_pnl:,.0f}) | "
+                f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY"
             )
             log_message(f"🛑 [HARVEST ONLY] {msg}")
             send_telegram_message(
                 f"🛑 *SESSION MODE: HARVEST ONLY*\n"
                 f"Target Rp {target_idr:,.0f} tercapai.\n"
-                f"PnL: Rp {current_pnl:,.0f} | Sisa Hari: {time_remaining:.0f}%\n"
+                f"Net PnL: Rp {current_pnl:,.0f} "
+                f"(Realized: Rp {realized_pnl:,.0f} | Unrealized: Rp {unrealized_pnl:,.0f})\n"
+                f"Sisa Hari: {time_remaining:.0f}%\n"
                 f"🔒 Tidak ada pembelian baru. "
                 f"Memantau & memperketat TP posisi terbuka."
             )
+
+            # ── Strategic Break: compile session analytics and notify dashboard ──
+            self._emit_strategic_break(
+                target_idr=target_idr,
+                current_pnl=current_pnl,
+                realized_pnl=realized_pnl,
+                unrealized_pnl=unrealized_pnl,
+                peak_pnl_today=peak_pnl_today,
+            )
+
             return {
                 "buy_enabled": False,
                 "session_mode": "HARVEST_ONLY",
@@ -1087,6 +1141,60 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] evaluate_and_update_session_mode error: {e}")
             return {"buy_enabled": True, "session_mode": "NORMAL", "message": ""}
+
+    def _emit_strategic_break(self, target_idr, current_pnl, realized_pnl, unrealized_pnl, peak_pnl_today):
+        """
+        Compile session analytics and persist a strategic_break_payload to DB.
+        The dashboard push_data_loop picks this up and forwards it as a
+        'strategic_break' Socket.IO event to the frontend.
+        """
+        try:
+            from config import ROUND_TRIP_FEE_PCT
+            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            total_trades    = stats.get('total_trades', 0)
+            win_count       = stats.get('win_count', 0)
+            gross_profit    = float(stats.get('gross_profit', 0))
+            gross_loss      = float(stats.get('gross_loss', 0))      # negative value
+            total_volume    = float(stats.get('total_volume_idr', 0))
+
+            # Win Rate
+            win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
+
+            # Profit Factor = Gross Profit / |Gross Loss|
+            profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else 0.0
+
+            # Max Session Drawdown = Peak Equity - Current Net PnL
+            max_drawdown = max(0.0, peak_pnl_today - current_pnl)
+
+            # Estimated total fees
+            estimated_fees = total_volume * ROUND_TRIP_FEE_PCT
+
+            payload = {
+                "target_idr": target_idr,
+                "net_pnl": current_pnl,
+                "realized_pnl": realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "peak_pnl_today": peak_pnl_today,
+                "win_rate": round(win_rate, 2),
+                "win_count": win_count,
+                "total_trades": total_trades,
+                "profit_factor": round(profit_factor, 4),
+                "gross_profit": gross_profit,
+                "gross_loss": gross_loss,
+                "max_drawdown": max_drawdown,
+                "estimated_fees": round(estimated_fees, 2),
+                "total_volume_idr": total_volume,
+                "triggered_at": datetime.now().isoformat(),
+                "status": "PENDING",  # PENDING → CONTINUE or STOP after user action
+            }
+            import json as _json
+            db.save_state("strategic_break_payload", _json.dumps(payload))
+            logger.info(
+                f"[Oracle] Strategic Break emitted — Net PnL: Rp {current_pnl:,.0f}, "
+                f"Win Rate: {win_rate:.1f}%, Profit Factor: {profit_factor:.4f}"
+            )
+        except Exception as e:
+            logger.error(f"[Oracle] _emit_strategic_break error: {e}")
 
     # ── Consciousness & Self-Learning ─────────────────────────────────────────
 

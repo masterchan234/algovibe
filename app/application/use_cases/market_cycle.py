@@ -116,10 +116,14 @@ def run_market_cycle(bot):
         target_status = bot.oracle.get_daily_target_status()
         session_mode = target_status.get("session_mode", "NORMAL")
         if session_mode == "HARVEST_ONLY":
+            _r = target_status.get('realized_pnl', target_status['current_pnl'])
+            _u = target_status.get('unrealized_pnl', 0.0)
+            _net = target_status['current_pnl']
+            _t = target_status['target_idr']
             target_str = (
-                f"Status: HARVEST_ONLY | BUY: Blocked | "
-                f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k | "
-                f"Target Floor: 0.85% (Net)"
+                f"Net PnL: Rp{_net:+,.0f} "
+                f"(Realized: Rp{_r:+,.0f}, Unrealized: Rp{_u:+,.0f}) | "
+                f"Target: Rp{_t:,.0f} | Status: HARVEST_ONLY"
             )
         elif target_status['target_idr'] > 0:
             target_str = (

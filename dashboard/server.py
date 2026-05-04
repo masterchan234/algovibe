@@ -2451,6 +2451,16 @@ def push_data_loop():
             except Exception as _ne:
                 logging.warning(f"[AutoHarvest] Error forwarding notification: {_ne}")
 
+            # ── Strategic Break: forward full-screen blocking popup to frontend ──
+            try:
+                raw_sb = db.get_state("strategic_break_payload")
+                if raw_sb:
+                    sb = json.loads(raw_sb)
+                    if sb.get("status") == "PENDING":
+                        socketio.emit('strategic_break', sb)
+            except Exception as _sbe:
+                logging.warning(f"[StrategicBreak] Error forwarding payload: {_sbe}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
@@ -2488,6 +2498,75 @@ def handle_approval_response(data):
         logging.info(f"[ApprovalGate] {decision} received for action {action_id} ({pending.get('action_type', '')})")
     except Exception as e:
         logging.error(f"[ApprovalGate] Error processing approval_response: {e}")
+
+
+@app.route('/api/session/action', methods=['POST'])
+@login_required
+def session_action():
+    """
+    Strategic Break user action endpoint.
+
+    Accepts JSON: { "action": "CONTINUE" | "STOP" }
+
+    CONTINUE — Recalculates next target as (current_equity + target_percentage) and
+               resets session_mode to NORMAL so buying is re-enabled.
+    STOP     — Keeps HARVEST_ONLY status; buy functions remain blocked.
+    """
+    data = request.get_json(silent=True) or {}
+    action = data.get('action', '').upper()
+
+    if action not in ('CONTINUE', 'STOP'):
+        return jsonify({"error": "Invalid action. Use 'CONTINUE' or 'STOP'."}), 400
+
+    try:
+        raw_sb = db.get_state("strategic_break_payload")
+        if not raw_sb:
+            return jsonify({"error": "No active strategic break."}), 404
+        payload = json.loads(raw_sb)
+
+        if action == 'CONTINUE':
+            # Recalculate next target: current total equity * (1 + target percentage).
+            # Use the persisted daily_profit_target as the target pct reference.
+            try:
+                balance_str = db.get_state("cached_idr_balance")
+                from config import INITIAL_CAPITAL as _IC
+                equity = float(balance_str) if balance_str else float(_IC)
+            except Exception:
+                from config import INITIAL_CAPITAL as _IC
+                equity = float(_IC)
+
+            # Derive target_pct from the original target vs equity ratio (fallback 1%)
+            try:
+                orig_target = float(db.get_state("daily_profit_target") or 0)
+                target_pct = (orig_target / equity) if equity > 0 else 0.01
+            except Exception:
+                target_pct = 0.01
+
+            new_target = equity * (1 + target_pct)
+            db.save_state("daily_profit_target", str(new_target))
+            db.save_state("daily_profit_target_ts", datetime.datetime.now().isoformat())
+            db.save_state("session_mode", "NORMAL")
+            db.save_state("session_buy_enabled", "true")
+
+            payload["status"] = "CONTINUE"
+            db.save_state("strategic_break_payload", json.dumps(payload))
+
+            # Notify frontend to dismiss the popup
+            socketio.emit('strategic_break_cleared', {"action": "CONTINUE", "new_target": new_target})
+            logging.info(f"[StrategicBreak] CONTINUE — new target: Rp {new_target:,.0f}")
+            return jsonify({"status": "ok", "action": "CONTINUE", "new_target": new_target})
+
+        else:  # STOP
+            # Keep HARVEST_ONLY — do not change session_mode.
+            payload["status"] = "STOP"
+            db.save_state("strategic_break_payload", json.dumps(payload))
+            socketio.emit('strategic_break_cleared', {"action": "STOP"})
+            logging.info("[StrategicBreak] STOP — session remains HARVEST_ONLY.")
+            return jsonify({"status": "ok", "action": "STOP"})
+
+    except Exception as e:
+        logging.error(f"[StrategicBreak] session_action error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # Start background thread
 socketio.start_background_task(push_data_loop)

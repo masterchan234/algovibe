@@ -245,7 +245,10 @@ class Database:
                     SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
                     SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as loss_count,
                     SUM(pnl_idr) as total_pnl_idr,
-                    AVG(pnl_pct) as avg_pnl_pct
+                    AVG(pnl_pct) as avg_pnl_pct,
+                    SUM(CASE WHEN pnl_idr > 0 THEN pnl_idr ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
+                    SUM(amount_idr) as total_volume_idr
                 FROM trade_history
                 WHERE {date_filter} AND dry_run = ?
             '''
@@ -259,6 +262,9 @@ class Database:
             stats['loss_count'] = stats.get('loss_count') or 0
             stats['total_pnl_idr'] = stats.get('total_pnl_idr') or 0.0
             stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
+            stats['gross_profit'] = stats.get('gross_profit') or 0.0
+            stats['gross_loss'] = stats.get('gross_loss') or 0.0
+            stats['total_volume_idr'] = stats.get('total_volume_idr') or 0.0
             
             return stats
 

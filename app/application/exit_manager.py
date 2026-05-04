@@ -919,19 +919,19 @@ class ExitManager:
             "impact_idr": impact_idr,
             "default_approve": default_approve,
             "status": "PENDING",
-            "expires_at": time.time() + 30,
+            "expires_at": time.time() + 10,
             "created_at": time.time(),
         }
         db.save_state("pending_approval", json.dumps(payload))
 
         log_msg = (
             f"⏸️ [APPROVAL GATE] User Approval Requested for {action_type} | "
-            f"Waiting max 30s... (default: {'APPROVE' if default_approve else 'REJECT'})"
+            f"Waiting max 10s... (default: {'APPROVE' if default_approve else 'REJECT'})"
         )
         log_message(log_msg)
         db.log_system_event(description, "APPROVAL_PENDING", log_msg, 'WARNING')
 
-        deadline = time.time() + 30
+        deadline = time.time() + 10
         while time.time() < deadline:
             time.sleep(0.5)
             raw = db.get_state("pending_approval")
