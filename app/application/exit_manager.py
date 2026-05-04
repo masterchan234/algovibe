@@ -15,7 +15,8 @@ from config import (
     TRAILING_STOP_ACTIVATION_PCT, TRAILING_STOP_DISTANCE_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
-    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE
+    DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
+    BREAK_EVEN_SLIPPAGE_MARGIN
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -561,12 +562,11 @@ class ExitManager:
 
                 # --- [Dynamic Safe Exit Price] ---
                 # Harga minimum exit agar net_pnl >= 0 setelah fee + slippage.
-                # total_fee_pct diambil langsung dari config (FEE_BUY_TAKER + FEE_SELL_TAKER).
-                # Dengan nilai config saat ini: 0.5111% + 0.7211% ≈ 1.23% round-trip fee.
-                # + 0.21% slippage margin → buffer total ≈ 1.44%.
-                # BREAK_EVEN hanya aktif jika current_price > safe_exit_price (entry * ~1.0144).
+                # total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER (fee round-trip dari config).
+                # BREAK_EVEN_SLIPPAGE_MARGIN (0.21%) ditambahkan sebagai buffer keamanan slippage.
+                # BREAK_EVEN hanya aktif jika current_price > safe_exit_price.
                 _total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER   # fee round-trip dari config
-                _slippage_margin = 0.0021                            # 0.21% safety margin for slippage
+                _slippage_margin = BREAK_EVEN_SLIPPAGE_MARGIN       # safety margin dari config
                 _be_buffer = _total_fee_pct + _slippage_margin
                 safe_exit_price = entry_price * (1.0 + _be_buffer)
                 break_even_price = safe_exit_price  # alias untuk kompatibilitas kode trailing stop
@@ -679,8 +679,8 @@ class ExitManager:
                     if self.oracle:
                         try:
                             _gemma_reversal, _veto_reason = self.oracle.check_llm_veto(pair)
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            log_message(f"⚠️ [Hold Zone] Oracle check error for {pair}: {_e}")
                     if _gemma_reversal:
                         log_message(
                             f"🔄 [Hold Zone Reversal] {pair}: GEMMA-4 sinyal trend reversal "
