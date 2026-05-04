@@ -75,10 +75,10 @@ TECH_MIN_HISTORY_POINTS   = 30
 
 # --- [Senior Strategy: Averaging Down] ---
 DCA_ENABLED = True
-DCA_MAX_TIERS = 2              # Maksimal 2x tambah muatan
-DCA_STEP_PCT = -0.025          # Tambah muatan setiap turun 2.5% (dari 3.5%) → DCA lebih cepat
+DCA_MAX_TIERS = 1              # Maksimal 1x tambah muatan (dari 2) — batasi exposure
+DCA_STEP_PCT = -0.015          # Tambah muatan setiap turun 1.5% (dari 2.5%) — trigger lebih cepat sebelum SL
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
-DCA_MIN_TECH_CONFIDENCE = 0.35   # Hanya tambah muatan jika probabilitas teknikal > 35%
+DCA_MIN_TECH_CONFIDENCE = 0.55   # Hanya tambah muatan jika probabilitas teknikal > 55% (dari 35%) — filter lebih ketat
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
