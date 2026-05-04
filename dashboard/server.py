@@ -134,7 +134,7 @@ try:
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
-from config import DB_PATH_LIVE, DB_PATH_DRYRUN
+from config import DB_PATH_LIVE, DB_PATH_DRYRUN, INITIAL_CAPITAL as _IC
 # NOTE: cfg.DRY_RUN is imported dynamically inside functions to always read current value
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
@@ -2527,7 +2527,6 @@ def session_action():
         if action == 'CONTINUE':
             # Recalculate next target: current total equity * target percentage.
             # Use the persisted daily_profit_target as the profit-pct reference.
-            from config import INITIAL_CAPITAL as _IC
             try:
                 balance_str = db.get_state("cached_idr_balance")
                 equity = float(balance_str) if balance_str else float(_IC)
@@ -2544,7 +2543,7 @@ def session_action():
             # New profit target = equity * same percentage (profit amount, not equity amount)
             new_target = equity * target_pct
             db.save_state("daily_profit_target", str(new_target))
-            db.save_state("daily_profit_target_ts", datetime.datetime.now().isoformat())
+            db.save_state("daily_profit_target_ts", datetime.datetime.now(datetime.timezone.utc).isoformat())
             db.save_state("session_mode", "NORMAL")
             db.save_state("session_buy_enabled", "true")
 

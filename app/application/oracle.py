@@ -1183,7 +1183,7 @@ class Oracle:
                 "win_rate": round(win_rate, 2),
                 "win_count": win_count,
                 "total_trades": total_trades,
-                "profit_factor": profit_factor if profit_factor != float('inf') else 9999.0,
+                "profit_factor": profit_factor if profit_factor != float('inf') else 9999.0,  # cap ∞ for JSON serialisation
                 "gross_profit": gross_profit,
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
