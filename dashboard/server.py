@@ -840,6 +840,10 @@ def get_positions():
             except Exception:
                 pass
 
+            fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
+            fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
+            pnl_net_idr = pnl_idr - fee_buy - fee_sell
+
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
             duration_sec = 0
             try:
@@ -857,6 +861,7 @@ def get_positions():
                 "amount_crypto": amount_crypto,
                 "amount_idr": amount_idr,
                 "pnl_idr": round(pnl_idr, 0),
+                "pnl_net_idr": round(pnl_net_idr, 0),
                 "pnl_pct": round(pnl_pct, 3),
                 "status": pos['status'],
                 "duration_sec": duration_sec,
@@ -1178,9 +1183,10 @@ def trade_manual_exit():
     """Instant manual exit for an active position.
 
     Accepts JSON body: {"pair": "btcidr"} or form field 'pair'.
-    Validates that an open position exists for the pair, then sets the
-    trigger_exit_pair state so the bot's exit_manager executes a MARKET
-    sell on the next monitoring tick (within ~2 seconds).
+    Validates that an open position exists for the pair AND that the position
+    is currently at a net loss (after buy + sell taker fees). Only loss-making
+    positions may be force-exited via this endpoint to prevent premature exits
+    of profitable trades. Execution is always a MARKET (taker) sell.
     """
     data = request.get_json(silent=True) or {}
     pair = (data.get('pair') or request.form.get('pair') or '').lower().strip()
@@ -1191,8 +1197,43 @@ def trade_manual_exit():
     if not pos:
         return jsonify({"error": f"No active position found for {pair}"}), 404
 
+    # --- Guard: hanya izinkan exit saat rugi (setelah fee) ---
+    entry_price  = float(pos.get('entry_price') or 0)
+    amount_crypto = float(pos.get('amount_crypto') or 0)
+    amount_idr   = float(pos.get('amount_idr') or 0)
+
+    # Ambil harga terakhir: WS > ticker_history > entry_price
+    last_price = float(mws.get_tickers().get(pair, {}).get('last', 0))
+    if last_price <= 0:
+        try:
+            conn = get_db_connection()
+            row = conn.execute(
+                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+            ).fetchone()
+            conn.close()
+            if row and row['history_json']:
+                history = json.loads(row['history_json'])
+                if history:
+                    last_price = float(history[-1])
+        except Exception:
+            pass
+    if last_price <= 0:
+        last_price = entry_price
+
+    raw_pnl   = (last_price - entry_price) * amount_crypto
+    fee_buy   = amount_idr * cfg.FEE_BUY_TAKER
+    fee_sell  = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
+    pnl_net   = raw_pnl - fee_buy - fee_sell
+
+    if pnl_net >= 0:
+        return jsonify({
+            "error": "Manual exit hanya diizinkan saat posisi rugi (setelah fee). "
+                     "Biarkan bot mengelola exit saat posisi untung.",
+            "pnl_net_idr": round(pnl_net, 0)
+        }), 400
+
     db.save_state("trigger_exit_pair", pair)
-    logging.info(f"[Manual Exit] Dashboard triggered instant exit for {pair}")
+    logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net,0)} IDR)")
     return jsonify({"status": "exit_requested", "pair": pair})
 
 @app.route('/api/bot/toggle-dry-run', methods=['POST'])
@@ -2192,24 +2233,30 @@ def _build_trades_payload():
 
                 current_tp_pct = stored_tp_pct
 
+                _amount_idr = float(p.get('amount_idr') or 0)
+                _fee_buy  = _amount_idr * cfg.FEE_BUY_TAKER
+                _fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
+                pnl_net_idr = pnl_idr - _fee_buy - _fee_sell
+
                 results.append({
-                    "id":          f"pos_{pair}",
-                    "pair":        pair,
-                    "reason":      display_reason,
-                    "pnl_idr":     round(pnl_idr, 0),
-                    "pnl_pct":     round(pnl_pct, 2),
-                    "entry_price": entry_price,
-                    "exit_price":  last_price,
-                    "target_tp":   current_tp_pct * 100,
-                    "target_sl":   current_sl_pct * 100,
-                    "confidence":  int(p.get('ai_confidence') or 0),
-                    "amount_idr":  float(p.get('amount_idr') or 0),
-                    "amount_coin": amount_crypto,
-                    "duration":    0,
-                    "created_at":  str(p.get('timestamp') or ''),
-                    "status":      "OPEN",
-                    "pos_status":  pos_status,
-                    "is_manual":   0
+                    "id":           f"pos_{pair}",
+                    "pair":         pair,
+                    "reason":       display_reason,
+                    "pnl_idr":      round(pnl_idr, 0),
+                    "pnl_net_idr":  round(pnl_net_idr, 0),
+                    "pnl_pct":      round(pnl_pct, 2),
+                    "entry_price":  entry_price,
+                    "exit_price":   last_price,
+                    "target_tp":    current_tp_pct * 100,
+                    "target_sl":    current_sl_pct * 100,
+                    "confidence":   int(p.get('ai_confidence') or 0),
+                    "amount_idr":   _amount_idr,
+                    "amount_coin":  amount_crypto,
+                    "duration":     0,
+                    "created_at":   str(p.get('timestamp') or ''),
+                    "status":       "OPEN",
+                    "pos_status":   pos_status,
+                    "is_manual":    0
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")

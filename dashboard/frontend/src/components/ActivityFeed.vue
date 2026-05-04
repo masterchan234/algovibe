@@ -97,10 +97,11 @@
 
             <div class="col-exit">
               <button
+                v-if="pos.pnl_net_idr < 0"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
-                title="Manual EXIT — closes position at market price"
+                title="Manual EXIT — closes position at market price (loss-cut only)"
               >
                 {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
               </button>
