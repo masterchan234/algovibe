@@ -43,7 +43,7 @@ MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (
 
 # --- [Scalping Targets] ---
 TP_PCT = 0.030                  # [TRAILING DOMINANT] Fallback TP 3.0% — biarkan trailing stop yang lock profit
-SL_PCT = -0.010                 # [KETAT] Stop Loss -1.0% (dari -1.5%) → kurangi avg loss ~37%
+SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
 TRAILING_STOP_ACTIVATION_PCT = 0.008 # Aktifkan trailing lebih cepat: +0.8% (dari +1.2%)
 TRAILING_STOP_DISTANCE_PCT = 0.004   # Jarak trailing lebih ketat: 0.4% (dari 0.5%) → lock profit
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
@@ -99,6 +99,9 @@ FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
 FEE_SELL_TAKER = 0.007211  # 0.7211% (0.5% Service + 0.21% Tax + 0.0111% CFX)
 FEE_SLIPPAGE_BUFFER = 0.0005 # 0.05% extra buffer for market impact
 BREAK_EVEN_SLIPPAGE_MARGIN = 0.0021 # 0.21% safety margin for slippage added on top of round-trip fee
+# Mandatory round-trip cost: 0.72% buy (0.51% taker + 0.21% tax) + 0.72% sell (0.51% taker + 0.21% tax) = 1.44%
+# BREAK_EVEN threshold = ROUND_TRIP_FEE_PCT + BREAK_EVEN_SLIPPAGE_MARGIN = 1.44% + 0.21% = 1.65%
+ROUND_TRIP_FEE_PCT = 0.0144
 
 # --- Predator Strategy Parameters ---
 WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"
