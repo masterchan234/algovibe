@@ -57,11 +57,11 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     )
     if buy_ready:
         return "BUY", (
-            f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
+            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
             f"imbalance={imbalance_ratio:.2f}x"
         )
 
-    return "HOLD", f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}"
+    return "HOLD", f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}"
 
 
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
@@ -152,9 +152,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
         )
 
-    # ── 5. AI probability + imbalance threshold ────────────────────────────
+    # ── 5. Technical probability + imbalance threshold ────────────────────────
     if tq_prob < 0:
-        msg = "WARMUP: belum cukup data untuk prediksi AI."
+        msg = "WARMUP: belum cukup data untuk prediksi teknikal."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -163,7 +163,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
     if not config.DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
         msg = (
-            f"SKIP: AI prob {tq_prob * 100:.0f}% < threshold "
+            f"SKIP: Tech prob {tq_prob * 100:.0f}% < threshold "
             f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
             f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
         )

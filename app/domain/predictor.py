@@ -209,15 +209,14 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     return float(round(max(0.0, min(0.99, prob)), 4))
 
 
-def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: float = 0.0) -> float:
+def get_prediction(price_history: list, ticker_data: dict = None) -> float:
     """
     Probabilitas eksekusi trade — PURE TECHNICAL (v2.0).
 
     Perubahan dari v1:
-    - llm_boost TIDAK lagi mempengaruhi keputusan entry langsung.
-      llm_boost disimpan untuk backward-compat tapi dibatasi kontribusinya.
-    - Base score sekarang 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, OB).
-    - Model ML (RF) tetap digunakan sebagai refinement dengan bobot lebih kecil.
+    - Semua pengaruh LLM/AI dihapus sepenuhnya.
+    - Base score 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, WilliamsR, ROC, OB).
+    - Model ML (RF) tetap digunakan sebagai refinement dengan bobot lebih kecil (40%).
 
     Returns:
         -1.0  → Warming Up (data kurang dari minimum)
@@ -254,7 +253,7 @@ def get_prediction(price_history: list, ticker_data: dict = None, llm_boost: flo
                     imbalance_val = bd / (bd + ad)
 
             features_df = pd.DataFrame([{
-                "ai_prob":          tech_prob,      # Ganti llm_boost dengan tech_prob
+                "ai_prob":          tech_prob,      # Nama kolom dipertahankan untuk kompatibilitas model ML yang sudah dilatih
                 "whale_boost":      1.0,            # Neutral default
                 "sector_sentiment": 50.0,           # Neutral default
                 "imbalance":        imbalance_val,
