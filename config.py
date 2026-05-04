@@ -88,16 +88,19 @@ DEADMAN_SWITCH_ENABLED = True
 DEADMAN_INTERVAL_SEC = 30
 DEADMAN_TIMEOUT_MS = 120000 # 120 seconds
 
-# --- Indodax Pro Fee Structure (Image Reference) ---
-# [Senior Audit] Fee diupdate ke angka konservatif (Standard Taker 0.5% + Tax + CFX)
-# Jika user memiliki VIP level, bot akan otomatis menyesuaikan lewat PrivateWS fillInformation.
+# --- Indodax IDR Market PRO Mode Fee Structure ---
+# Taker-taker round-trip: Buy 0.2111% + Sell 0.4211% = 0.6322%
+# SMART_BREAK_EVEN: 0.6322% fee + 0.21% slippage buffer = 0.85% gross threshold.
+# Any trade yielding > 0.85% gross is considered REAL_PROFIT.
 FEE_BUY_MAKER  = 0.001111  # 0.1111% (0.1% Service + 0.0111% CFX)
-FEE_BUY_TAKER  = 0.005111  # 0.5111% (0.5% Service + 0.0111% CFX)
+FEE_BUY_TAKER  = 0.002111  # 0.2111% (0.2% Service + 0.0111% CFX)
 FEE_SELL_MAKER = 0.003211  # 0.3211% (0.1% Service + 0.21% Tax + 0.0111% CFX)
-FEE_SELL_TAKER = 0.007211  # 0.7211% (0.5% Service + 0.21% Tax + 0.0111% CFX)
-FEE_SLIPPAGE_BUFFER = 0.0005 # 0.05% extra buffer for market impact
-# Mandatory round-trip cost: 0.72% buy (0.51% taker + 0.21% tax) + 0.72% sell (0.51% taker + 0.21% tax) = 1.44%
-ROUND_TRIP_FEE_PCT = 0.0144
+FEE_SELL_TAKER = 0.004211  # 0.4211% (0.2% Service + 0.21% Tax + 0.0111% CFX)
+FEE_SLIPPAGE_BUFFER = 0.0021 # 0.21% slippage buffer for market impact
+# Taker-taker round-trip: 0.2111% buy + 0.4211% sell = 0.6322%
+ROUND_TRIP_FEE_PCT = 0.006322
+# Break-even threshold: ROUND_TRIP_FEE_PCT + FEE_SLIPPAGE_BUFFER = 0.85%
+SMART_BREAK_EVEN_PCT = 0.0085  # 0.85% gross → REAL_PROFIT zone
 
 # --- Predator Strategy Parameters ---
 WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"

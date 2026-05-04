@@ -91,17 +91,17 @@
             </div>
 
             <div class="col-pnl">
-              <div class="pnl-val">{{ formatIdr(pos.pnl_idr) }}</div>
+              <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
               <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
             </div>
 
             <div class="col-exit">
               <button
-                v-if="pos.pnl_net_idr < 0"
+                v-if="(pos.pnl_net_idr / (pos.amount_idr || 1)) < 0.001"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
-                title="Manual EXIT — closes position at market price (loss-cut only)"
+                title="Manual EXIT — closes position at market price (Net PnL &lt; 0.1% only)"
               >
                 {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
               </button>
