@@ -42,10 +42,8 @@ MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
 # --- [Scalping Targets] ---
-TP_PCT = 0.030                  # [TRAILING DOMINANT] Fallback TP 3.0% — biarkan trailing stop yang lock profit
+TP_PCT = 0.030                  # Target TP 3.0% (net profit dihitung setelah fee)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
-TRAILING_STOP_ACTIVATION_PCT = 0.008 # Aktifkan trailing lebih cepat: +0.8% (dari +1.2%)
-TRAILING_STOP_DISTANCE_PCT = 0.004   # Jarak trailing lebih ketat: 0.4% (dari 0.5%) → lock profit
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
