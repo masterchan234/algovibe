@@ -137,10 +137,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
     tech_sig = derive_trade_signal(tech)
 
-    # Block jika sinyal SELL dengan skor tinggi (multi-confluence, bukan hanya RSI)
-    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 8.0:
+    # Block jika sinyal SELL dengan skor cukup (multi-confluence, bukan hanya RSI).
+    # Threshold diturunkan dari 8.0 → 5.0: skor 5/16.5 sudah cukup membuktikan tekanan jual.
+    # Sebelumnya sell_score 7.9 hanya memicu warning dan bot tetap masuk; ini sudah diperbaiki.
+    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
         msg = (
-            f"⛔ STRONG SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
+            f"⛔ SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
             f"— {tech_sig['reason'][:80]}"
         )
         log_message(f"{msg} [{pair}]")
@@ -187,11 +189,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 9. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
-    dynamic_threshold = 50.0 # [SCALP] Lowered from 57.0
+    # Threshold dinaikkan (50→55, 60→65) agar bot hanya masuk dengan confidence tinggi.
+    # Dasar: break-even memerlukan win rate ≥ 65%, threshold harus mencerminkan ini.
+    dynamic_threshold = 55.0 # [PROFIT-FOCUS] Dinaikkan dari 50.0
     if current_vol > 2.0:
-        dynamic_threshold = 60.0 # [SCALP] Lowered from 68.0
+        dynamic_threshold = 65.0 # [PROFIT-FOCUS] Dinaikkan dari 60.0
     elif current_vol < 0.6:
-        dynamic_threshold = 45.0 # [SCALP] Lowered from 54.0
+        dynamic_threshold = 50.0 # Volatilitas sangat rendah: threshold moderat
     if trend != "UP":
         dynamic_threshold += 4.0
 
@@ -243,7 +247,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 
+    # Floor dinaikkan: 35%/40% → 50%/55%.
+    # Break-even memerlukan win rate ≥ 65%; floor 50% adalah batas minimum aman.
+    min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
     if config.DRY_RUN_LOOSE_GATES:
         min_base_conf = 0.0  
 
