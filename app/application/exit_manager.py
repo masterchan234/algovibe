@@ -1373,6 +1373,29 @@ class ExitManager:
                         
                         db.delete_position(p_pair)
                         send_telegram_message(f"💰 *EXIT FILLED* 💰\nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_idr:,.2f}")
+
+                        # [Manual Exit Post-Processing] Re-evaluate session status with post-exit PnL
+                        if reason == "MANUAL_DASHBOARD_EXIT" and self.oracle:
+                            try:
+                                updated_status = self.oracle.get_daily_target_status()
+                                session_info = self.oracle.evaluate_and_update_session_mode(updated_status)
+                                log_message(
+                                    f"🔄 [Manual Exit] Post-exit session re-eval: "
+                                    f"mode={session_info.get('session_mode', 'NORMAL')} | "
+                                    f"PnL Rp {updated_status.get('current_pnl', 0):,.0f} | "
+                                    f"Peak Rp {updated_status.get('peak_pnl_today', 0):,.0f}"
+                                )
+                                # Flag for dashboard: all positions cleared — session reset is available
+                                current_dr_val = 1 if self.dry_run else 0
+                                remaining = {
+                                    p: d for p, d in db.get_open_positions().items()
+                                    if int(d.get('dry_run', 0)) == current_dr_val
+                                }
+                                if not remaining:
+                                    db.save_state("session_reset_available", "true")
+                                    log_message("📭 [Manual Exit] All positions cleared. Session reset available.")
+                            except Exception as ex:
+                                log_message(f"⚠️ [Manual Exit] Post-exit session re-eval error: {ex}")
                     except Exception as ex:
                         log_message(f"Error calculating final PnL for {p_pair}: {ex}")
                     return

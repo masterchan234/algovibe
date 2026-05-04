@@ -889,11 +889,12 @@ class Oracle:
         Kembalikan status progress terhadap target profit harian.
 
         Returns dict:
-            target_idr   — target yang dihitung AI
-            current_pnl  — P&L hari ini
-            progress_pct — 0-100+% seberapa dekat ke target
-            reached      — True jika target sudah tercapai
-            near         — True jika sudah >= 80% dari target
+            target_idr    — target yang dihitung AI
+            current_pnl   — P&L hari ini (realized)
+            peak_pnl_today — PnL tertinggi yang dicapai hari ini
+            progress_pct  — 0-100+% seberapa dekat ke target
+            reached       — True jika target sudah tercapai
+            near          — True jika sudah >= 80% dari target
             loss_limit_hit — True jika daily loss limit sudah terlampaui
         """
         try:
@@ -902,6 +903,14 @@ class Oracle:
 
             stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
             current_pnl = float(stats.get('total_pnl_idr', 0))
+
+            # ── Peak PnL Tracking ────────────────────────────────────────────
+            # Perbarui peak_pnl_today hanya jika realized PnL saat ini lebih tinggi.
+            peak_raw = db.get_state("peak_pnl_today")
+            peak_pnl_today = float(peak_raw) if peak_raw else 0.0
+            if current_pnl > peak_pnl_today:
+                peak_pnl_today = current_pnl
+                db.save_state("peak_pnl_today", str(peak_pnl_today))
 
             progress_pct = (current_pnl / target_idr * 100) if target_idr > 0 else 0.0
 
@@ -927,6 +936,7 @@ class Oracle:
             return {
                 "target_idr": target_idr,
                 "current_pnl": current_pnl,
+                "peak_pnl_today": peak_pnl_today,
                 "progress_pct": round(progress_pct, 1),
                 "reached": current_pnl >= target_idr and target_idr > 0,
                 "near": progress_pct >= 80.0 and target_idr > 0,
@@ -938,10 +948,10 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] get_daily_target_status error: {e}")
             return {
-                "target_idr": 0.0, "current_pnl": 0.0, "progress_pct": 0.0,
-                "reached": False, "near": False, "loss_limit_hit": False,
-                "time_remaining_pct": 50.0, "session_mode": "NORMAL",
-                "session_buy_enabled": True,
+                "target_idr": 0.0, "current_pnl": 0.0, "peak_pnl_today": 0.0,
+                "progress_pct": 0.0, "reached": False, "near": False,
+                "loss_limit_hit": False, "time_remaining_pct": 50.0,
+                "session_mode": "NORMAL", "session_buy_enabled": True,
             }
 
     def evaluate_and_update_session_mode(self, target_status: dict) -> dict:
@@ -975,18 +985,30 @@ class Oracle:
         try:
             target_idr      = target_status.get("target_idr", 0)
             current_pnl     = target_status.get("current_pnl", 0)
+            peak_pnl_today  = target_status.get("peak_pnl_today", 0)
             time_remaining  = target_status.get("time_remaining_pct", 50.0)
             session_mode    = target_status.get("session_mode", "NORMAL")
 
-            # Already HARVEST_ONLY — remain locked
+            # Already HARVEST_ONLY — remain locked (default: safety first)
             if session_mode == "HARVEST_ONLY":
+                # Detect PnL-status mismatch: target was met at peak, but PnL has since dropped.
+                # Decision gate: stay HARVEST_ONLY for safety — do NOT revert to NORMAL.
+                if target_idr > 0 and current_pnl < (target_idr * 0.8) and peak_pnl_today > current_pnl:
+                    msg = (
+                        f"🛑 [HARVEST_ONLY] Protection Active. "
+                        f"Current PnL (Rp {current_pnl:,.0f}) is below Target (Rp {target_idr:,.0f}) "
+                        f"after manual exit/loss. Peak was Rp {peak_pnl_today:,.0f}. "
+                        f"BUY remains blocked for safety."
+                    )
+                else:
+                    msg = (
+                        "Status: HARVEST_ONLY | BUY: Blocked | "
+                        "Strategy: Tightening TP positions"
+                    )
                 return {
                     "buy_enabled": False,
                     "session_mode": "HARVEST_ONLY",
-                    "message": (
-                        "Status: HARVEST_ONLY | BUY: Blocked | "
-                        "Strategy: Tightening TP positions"
-                    ),
+                    "message": msg,
                 }
 
             # Target not yet reached — normal or previous trailing mode continues

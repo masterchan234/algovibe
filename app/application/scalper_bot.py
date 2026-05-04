@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict, deque
 from multiprocessing.pool import ThreadPool
 
@@ -68,6 +68,19 @@ class ScalperBot:
 
         self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
         self.exit_monitor_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True)
+        self.utc_reset_thread = threading.Thread(target=self._utc_reset_monitor_loop, daemon=True)
+
+        # ── UTC Reset Persistence: check on startup ──────────────────────────
+        # If the bot/server restarts on a new UTC day, trigger reset before trade logic.
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        last_reset = db.get_state("last_reset_date")
+        if not last_reset:
+            # First run — initialize LAST_RESET_DATE without resetting anything
+            db.save_state("last_reset_date", today_utc)
+            log_message(f"📅 [SYSTEM] LAST_RESET_DATE initialized: {today_utc}")
+        elif today_utc > last_reset:
+            log_message(f"📅 [STARTUP] New UTC day detected ({last_reset} → {today_utc}). Triggering session reset...")
+            self._perform_utc_day_reset()
 
         self.private_ws = PrivateWS(
             api_key=os.getenv('INDODAX_API_KEY', ''),
@@ -346,6 +359,48 @@ class ScalperBot:
                 log_message(f"Error in _insight_loop: {e}")
             time.sleep(2)
 
+    def _perform_utc_day_reset(self):
+        """
+        Execute NEW_DAY_RESET sequence when UTC date advances.
+
+        Resets all session-specific state so the bot starts fresh on the new UTC day:
+          - peak_pnl_today → 0
+          - session_mode   → NORMAL  (releases HARVEST_ONLY lock)
+          - session_buy_enabled → true
+          - Daily trade counters reset
+          - last_reset_date updated to today (UTC)
+        """
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        self.daily_trades = 0
+        self.consecutive_losses = 0
+        self.start_day = datetime.now(timezone.utc).day
+        db.save_state("peak_pnl_today", "0")
+        db.save_state("session_mode", "NORMAL")
+        db.save_state("session_buy_enabled", "true")
+        db.save_state("daily_trades", "0")
+        db.save_state("consecutive_losses", "0")
+        db.save_state("start_day", str(self.start_day))
+        db.save_state("last_reset_date", today_utc)
+        msg = "📅 [SYSTEM] New UTC Day Detected. Session Reset Successful. Returning to NORMAL mode."
+        log_message(msg)
+        send_telegram_message(msg)
+
+    def _utc_reset_monitor_loop(self):
+        """
+        High-priority background daemon: checks for UTC midnight every 60 seconds.
+        Triggers _perform_utc_day_reset() when the UTC date advances.
+        """
+        while True:
+            try:
+                today_utc = datetime.now(timezone.utc).date().isoformat()
+                last_reset = db.get_state("last_reset_date")
+                if last_reset and today_utc > last_reset:
+                    log_message(f"📅 [UTC MONITOR] New UTC day detected ({last_reset} → {today_utc}). Triggering reset...")
+                    self._perform_utc_day_reset()
+            except Exception as e:
+                log_message(f"⚠️ UTC Reset Monitor Error: {e}")
+            time.sleep(60)
+
     def run(self):
         log_message("Starting Market Data WebSocket…")
         self.market_ws.start()
@@ -359,6 +414,7 @@ class ScalperBot:
         log_message("WebSocket clients running. Starting background threads…")
         self.insight_thread.start()
         self.exit_monitor_thread.start()
+        self.utc_reset_thread.start()
         log_message("Starting main loop…")
 
         while True:
