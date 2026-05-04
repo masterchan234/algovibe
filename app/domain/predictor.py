@@ -216,7 +216,8 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
     Perubahan dari v1:
     - Semua pengaruh LLM/AI dihapus sepenuhnya.
     - Base score 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, WilliamsR, ROC, OB).
-    - Model ML (RF) tetap digunakan sebagai refinement dengan bobot lebih kecil (40%).
+    - Model ML (HistGradientBoosting) tetap digunakan sebagai refinement.
+    - Bobot blend dinamis berdasarkan tingkat kecocokan tech vs ML.
 
     Returns:
         -1.0  → Warming Up (data kurang dari minimum)
@@ -252,21 +253,35 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
                 if (bd + ad) > 0:
                     imbalance_val = bd / (bd + ad)
 
+            hour = datetime.now().hour
+
             features_df = pd.DataFrame([{
-                "ai_prob":          tech_prob,      # Nama kolom dipertahankan untuk kompatibilitas model ML yang sudah dilatih
-                "whale_boost":      1.0,            # Neutral default
-                "sector_sentiment": 50.0,           # Neutral default
+                "ai_prob":          tech_prob,
                 "imbalance":        imbalance_val,
                 "volatility":       vol,
                 "rsi":              rsi,
                 "ema_dist":         ema_dist,
-                "hour":             datetime.now().hour,
+                "ema_dist_abs":     abs(ema_dist),
+                "rsi_oversold":     max(0.0, (30.0 - rsi) / 30.0),
+                "rsi_overbought":   max(0.0, (rsi - 70.0) / 30.0),
+                "hour_sin":         np.sin(2 * np.pi * hour / 24.0),
+                "hour_cos":         np.cos(2 * np.pi * hour / 24.0),
             }])
 
             ml_prob = model.predict_proba(features_df)[0][1]
 
-            # Blend: Technical 60% + ML 40% (ML sebagai refinement, bukan driver)
-            final_prob = (tech_prob * 0.60) + (ml_prob * 0.40)
+            # Blend dinamis: ketika tech dan ML sepakat, kita bisa percaya lebih;
+            # ketika mereka berbeda jauh, kita tetap dominankan sinyal teknikal.
+            divergence = abs(tech_prob - ml_prob)
+            if divergence < 0.10:
+                # Keduanya sepakat — 55% tech, 45% ML
+                final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
+            elif divergence < 0.25:
+                # Perbedaan moderat — 65% tech, 35% ML
+                final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+            else:
+                # Divergensi tinggi — percayai sinyal teknikal lebih (75% tech, 25% ML)
+                final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
         else:
             # Tanpa model ML — murni teknikal
             final_prob = tech_prob
