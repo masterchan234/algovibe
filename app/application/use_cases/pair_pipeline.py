@@ -133,11 +133,14 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             f"Tetap scan peluang — tidak buta terhadap market."
         )
 
-    if target_status["reached"]:
+    # Evaluate Smart Trailing & STOP BUY protocol
+    session_info = bot.oracle.evaluate_and_update_session_mode(target_status)
+    if not session_info["buy_enabled"]:
         log_message(
-            f"🎯 [TARGET HIT] Target profit harian Rp {target_idr:,.0f} sudah tercapai "
+            f"🛑 [{session_info['session_mode']}] "
+            f"Target Rp {target_idr:,.0f} sudah tercapai "
             f"(PnL hari ini: Rp {current_pnl:,.0f}). "
-            f"Bot stand-by untuk menjaga cuan — hanya memantau posisi terbuka."
+            f"{session_info['message']}"
         )
         return
 
