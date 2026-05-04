@@ -497,6 +497,7 @@ function stopResize() {
 
 onMounted(() => {
   store.connect()
+  store.checkSessionStatus()
   fetchNews()
   setInterval(fetchNews, 5 * 60 * 1000)
   setInterval(() => { now.value = Date.now() }, 1000)

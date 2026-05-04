@@ -289,6 +289,7 @@ export const useTradeStore = defineStore('trade', () => {
 
     // ── Strategic Break events ────────────────────────────────────────────
     s.on('strategic_break', (data) => {
+      console.log("Strategic Break Data Received:", data)
       // Only update if popup is not already showing (prevent UI flickering from
       // any duplicate emissions that slip through the server-side guard).
       if (!strategicBreak.value && data && data.triggered_at) {
@@ -312,6 +313,35 @@ export const useTradeStore = defineStore('trade', () => {
     return s
   }
 
+  /**
+   * Checks the backend for an active HARVEST_ONLY latch on page load/refresh.
+   * If the session is already latched and a PENDING strategic_break payload
+   * exists, the modal is restored immediately without waiting for a socket event.
+   */
+  async function checkSessionStatus() {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    try {
+      const res = await fetch(`${backendUrl}/api/session/status`, {
+        method: 'GET',
+        credentials: 'include',
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      if (
+        (data.session_status === 'HARVEST_ONLY' || data.is_latched) &&
+        data.strategic_break &&
+        data.strategic_break.triggered_at &&
+        !strategicBreak.value
+      ) {
+        strategicBreak.value = data.strategic_break
+      }
+    } catch {
+      // Silently ignore — the socket will deliver the event once connected.
+    }
+  }
+
   return {
     connected,
     stats,
@@ -322,6 +352,7 @@ export const useTradeStore = defineStore('trade', () => {
     pnlHistory,
     radarPairs,
     connect,
+    checkSessionStatus,
     socket,
   }
 })
