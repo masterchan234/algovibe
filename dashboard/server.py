@@ -1224,12 +1224,12 @@ def trade_manual_exit():
     fee_sell  = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
     pnl_net   = raw_pnl - fee_buy - fee_sell
 
-    # Hanya izinkan manual exit jika Net PnL < 0.1% (posisi belum profitabel secara signifikan).
+    # Hanya izinkan manual exit jika Net PnL < MANUAL_EXIT_MAX_NET_PCT (0.1%).
     # Ini mencegah exit prematur di posisi yang masih menguntungkan.
     pnl_net_pct = pnl_net / amount_idr if amount_idr > 0 else 0
-    if pnl_net_pct >= 0.001:  # >= 0.1%
+    if pnl_net_pct >= cfg.MANUAL_EXIT_MAX_NET_PCT:
         return jsonify({
-            "error": "Manual exit hanya diizinkan saat Net PnL < 0.1%. "
+            "error": f"Manual exit hanya diizinkan saat Net PnL < {cfg.MANUAL_EXIT_MAX_NET_PCT*100:.1f}%. "
                      "Biarkan bot mengelola exit saat posisi untung.",
             "pnl_net_idr": round(pnl_net, 0),
             "pnl_net_pct": round(pnl_net_pct * 100, 4)
@@ -2026,7 +2026,8 @@ def _build_stats_payload():
             "new_listings": db.get_new_listings(),
             "bot_running": True,
             "dry_run": bool(cfg.DRY_RUN),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
+            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
+            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT
         }
         return payload
     finally:

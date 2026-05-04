@@ -41,6 +41,7 @@ export const useTradeStore = defineStore('trade', () => {
     open_count: 0,
     dry_run: true,
     dry_run_loose_gates: false,
+    manual_exit_max_net_pct: 0.001,
   })
 
   // Open positions (trades)
@@ -193,6 +194,7 @@ export const useTradeStore = defineStore('trade', () => {
         open_count: data.open_count ?? 0,
         dry_run: data.dry_run ?? true,
         dry_run_loose_gates: data.dry_run_loose_gates ?? false,
+        manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

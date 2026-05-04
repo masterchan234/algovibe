@@ -97,7 +97,7 @@
 
             <div class="col-exit">
               <button
-                v-if="(pos.pnl_net_idr / (pos.amount_idr || 1)) < 0.001"
+                v-if="(pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
@@ -200,6 +200,9 @@ import { useTradeStore } from '../stores/trade'
 const store = useTradeStore()
 const filterMode = ref('all')
 const activeStreamTab = ref('analisa') 
+
+// Threshold from server config — EXIT allowed only when Net PnL < this value
+const manualExitMaxNetPct = computed(() => store.stats.manual_exit_max_net_pct ?? 0.001)
 
 // Track pairs currently being exited to disable the button during processing
 const exitingPairs = ref(new Set())

@@ -101,6 +101,8 @@ FEE_SLIPPAGE_BUFFER = 0.0021 # 0.21% slippage buffer for market impact
 ROUND_TRIP_FEE_PCT = 0.006322
 # Break-even threshold: ROUND_TRIP_FEE_PCT + FEE_SLIPPAGE_BUFFER = 0.85%
 SMART_BREAK_EVEN_PCT = 0.0085  # 0.85% gross → REAL_PROFIT zone
+# Manual exit via dashboard only allowed when Net PnL is below this threshold (< 0.1%).
+MANUAL_EXIT_MAX_NET_PCT = 0.001  # 0.1%
 
 # --- Predator Strategy Parameters ---
 WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"
