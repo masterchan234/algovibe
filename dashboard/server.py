@@ -2507,6 +2507,38 @@ def handle_approval_response(data):
         logging.error(f"[ApprovalGate] Error processing approval_response: {e}")
 
 
+@app.route('/api/session/status', methods=['GET'])
+@login_required
+def session_status():
+    """
+    Returns the current session mode and strategic break payload so the frontend
+    can recover its state on page refresh.
+    """
+    try:
+        session_mode = db.get_state("session_mode") or "NORMAL"
+        session_latched = (db.get_state("session_latched") or "false").lower() == "true"
+        is_latched = session_latched or (session_mode == "HARVEST_ONLY")
+
+        strategic_break_data = None
+        raw_sb = db.get_state("strategic_break_payload")
+        if raw_sb:
+            try:
+                sb = json.loads(raw_sb)
+                if sb.get("status") == "PENDING":
+                    strategic_break_data = sb
+            except Exception:
+                pass
+
+        return jsonify({
+            "session_status": session_mode,
+            "is_latched": is_latched,
+            "strategic_break": strategic_break_data,
+        })
+    except Exception as e:
+        logging.error(f"[SessionStatus] Error: {e}")
+        return jsonify({"error": "Internal server error."}), 500
+
+
 @app.route('/api/session/action', methods=['POST'])
 @login_required
 def session_action():
