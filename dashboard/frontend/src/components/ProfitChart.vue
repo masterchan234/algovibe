@@ -115,6 +115,32 @@
         <span>Signal Radar</span>
         <span class="radar-total">{{ radarDisplayPairs.length }}/{{ sortedRadarPairs.length }} Coins</span>
       </div>
+
+      <!-- BTC Condition Bar -->
+      <div class="btc-condition-bar" :class="btcBarClass">
+        <div class="btc-bar-left">
+          <span class="btc-icon">₿</span>
+          <span class="btc-label">BTC/IDR</span>
+          <span class="btc-price">{{ formatPrice(stats.btc_price) }}</span>
+        </div>
+        <div class="btc-bar-mid">
+          <span class="btc-delta" :class="stats.btc_ch_5m >= 0 ? 'delta-up' : 'delta-dn'">
+            5m {{ stats.btc_ch_5m >= 0 ? '+' : '' }}{{ stats.btc_ch_5m.toFixed(2) }}%
+          </span>
+          <span class="btc-delta" :class="stats.btc_ch_1h >= 0 ? 'delta-up' : 'delta-dn'">
+            1h {{ stats.btc_ch_1h >= 0 ? '+' : '' }}{{ stats.btc_ch_1h.toFixed(2) }}%
+          </span>
+          <span class="btc-delta" :class="stats.btc_change_24h >= 0 ? 'delta-up' : 'delta-dn'">
+            24h {{ stats.btc_change_24h >= 0 ? '+' : '' }}{{ stats.btc_change_24h.toFixed(2) }}%
+          </span>
+          <span class="btc-trend-chip" :class="btcTrendChipClass">{{ stats.btc_trend }}</span>
+        </div>
+        <div class="btc-bar-right">
+          <span class="btc-status-badge" :class="btcStatusBadgeClass">{{ btcStatusLabel }}</span>
+          <span class="btc-score-val">S{{ stats.btc_score.toFixed(0) }}</span>
+        </div>
+      </div>
+
       <div class="radar-toolbar">
         <div class="radar-filters">
           <button class="radar-filter-btn" :class="{ active: radarFilter === 'all' }" @click="radarFilter = 'all'">All {{ radarCounts.all }}</button>
@@ -463,6 +489,40 @@ function formatPair(pair) {
   if (!pair) return ''
   return pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
 }
+
+function formatPrice(val) {
+  const n = Number(val) || 0
+  if (n >= 1_000_000_000) return `Rp ${(n / 1_000_000_000).toFixed(2)}M`
+  if (n >= 1_000_000) return `Rp ${(n / 1_000_000).toFixed(2)}jt`
+  if (n >= 1_000) return `Rp ${(n / 1_000).toFixed(1)}k`
+  return `Rp ${n.toFixed(0)}`
+}
+
+// BTC Condition computed helpers
+const btcStatusLabel = computed(() => {
+  if (store.stats.btc_crash)    return '🔴 CRASH'
+  if (store.stats.btc_weakening) return '🟡 WEAKENING'
+  return '🟢 STRONG'
+})
+
+const btcBarClass = computed(() => {
+  if (store.stats.btc_crash)    return 'btc-bar-crash'
+  if (store.stats.btc_weakening) return 'btc-bar-weak'
+  return 'btc-bar-strong'
+})
+
+const btcStatusBadgeClass = computed(() => {
+  if (store.stats.btc_crash)    return 'badge-crash'
+  if (store.stats.btc_weakening) return 'badge-weak'
+  return 'badge-strong'
+})
+
+const btcTrendChipClass = computed(() => {
+  const t = (store.stats.btc_trend || '').toUpperCase()
+  if (t === 'UP' || t === 'BULLISH') return 'chip-up'
+  if (t === 'DOWN' || t === 'BEARISH') return 'chip-dn'
+  return 'chip-neutral'
+})
 
 function formatIdr(val) {
   const n = Number(val) || 0
@@ -1069,6 +1129,103 @@ onUnmounted(() => {
   border-top: 1px solid #30363d;
   background: #0d1117;
   padding-bottom: 8px;
+}
+
+/* BTC Condition Bar */
+.btc-condition-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 14px 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  font-size: 10px;
+  font-weight: 700;
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+.btc-bar-strong {
+  border-color: rgba(63, 185, 80, 0.4);
+  background: linear-gradient(90deg, rgba(63, 185, 80, 0.06) 0%, #161b22 100%);
+}
+.btc-bar-weak {
+  border-color: rgba(210, 153, 34, 0.4);
+  background: linear-gradient(90deg, rgba(210, 153, 34, 0.06) 0%, #161b22 100%);
+}
+.btc-bar-crash {
+  border-color: rgba(248, 81, 73, 0.5);
+  background: linear-gradient(90deg, rgba(248, 81, 73, 0.08) 0%, #161b22 100%);
+  animation: btc-crash-pulse 1.5s ease-in-out infinite alternate;
+}
+@keyframes btc-crash-pulse {
+  from { border-color: rgba(248, 81, 73, 0.5); }
+  to   { border-color: rgba(248, 81, 73, 0.9); }
+}
+.btc-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.btc-icon {
+  font-size: 12px;
+  color: #f0a500;
+}
+.btc-label {
+  color: #8b949e;
+  letter-spacing: 0.5px;
+}
+.btc-price {
+  color: #e6edf3;
+  font-size: 11px;
+}
+.btc-bar-mid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btc-delta {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+}
+.delta-up { color: #3fb950; background: rgba(63, 185, 80, 0.1); }
+.delta-dn { color: #f85149; background: rgba(248, 81, 73, 0.1); }
+.btc-trend-chip {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+}
+.chip-up      { color: #3fb950; background: rgba(63, 185, 80, 0.12); }
+.chip-dn      { color: #f85149; background: rgba(248, 81, 73, 0.12); }
+.chip-neutral { color: #8b949e; background: rgba(139, 148, 158, 0.1); }
+.btc-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.btc-status-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.badge-strong { background: rgba(63, 185, 80, 0.15);  color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3);  }
+.badge-weak   { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
+.badge-crash  { background: rgba(248, 81, 73, 0.15);  color: #f85149; border: 1px solid rgba(248, 81, 73, 0.5);  }
+.btc-score-val {
+  font-size: 9px;
+  color: #8b949e;
+  font-weight: 800;
 }
 .section-label {
   padding: 10px 16px 6px;

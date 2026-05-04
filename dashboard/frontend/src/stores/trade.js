@@ -42,6 +42,16 @@ export const useTradeStore = defineStore('trade', () => {
     dry_run: true,
     dry_run_loose_gates: false,
     manual_exit_max_net_pct: 0.001,
+    // BTC Condition
+    btc_price: 0,
+    btc_change_24h: 0,
+    btc_ch_5m: 0,
+    btc_ch_15m: 0,
+    btc_ch_1h: 0,
+    btc_trend: 'N/A',
+    btc_score: 50,
+    btc_weakening: false,
+    btc_crash: false,
   })
 
   // Open positions (trades)
@@ -198,6 +208,15 @@ export const useTradeStore = defineStore('trade', () => {
         dry_run: data.dry_run ?? true,
         dry_run_loose_gates: data.dry_run_loose_gates ?? false,
         manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
+        btc_price: data.btc_price ?? 0,
+        btc_change_24h: data.btc_change_24h ?? 0,
+        btc_ch_5m: data.btc_ch_5m ?? 0,
+        btc_ch_15m: data.btc_ch_15m ?? 0,
+        btc_ch_1h: data.btc_ch_1h ?? 0,
+        btc_trend: data.btc_trend ?? 'N/A',
+        btc_score: data.btc_score ?? 50,
+        btc_weakening: data.btc_weakening ?? false,
+        btc_crash: data.btc_crash ?? false,
       })
       _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })

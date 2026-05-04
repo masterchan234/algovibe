@@ -1982,6 +1982,24 @@ def _build_stats_payload():
             print(f"⚠️ History Fetch Error: {e}")
 
 
+        # ── BTC Condition (for Signal Radar UX) ─────────────────────────────
+        _btc_ticker = ws_tickers.get('btcidr', {}) or {}
+        btc_price = float(_btc_ticker.get('last', 0))
+        btc_change_24h = float(_btc_ticker.get('change_24h', 0))
+        try:
+            _btc_row = conn.execute(
+                "SELECT ch_5m, ch_15m, ch_1h, trend, score FROM ticker_history WHERE pair = 'btcidr'"
+            ).fetchone()
+        except Exception:
+            _btc_row = None
+        btc_ch_5m  = float(_btc_row['ch_5m']  or 0) if _btc_row else 0.0
+        btc_ch_15m = float(_btc_row['ch_15m'] or 0) if _btc_row else 0.0
+        btc_ch_1h  = float(_btc_row['ch_1h']  or 0) if _btc_row else 0.0
+        btc_trend  = str(_btc_row['trend'] or 'N/A') if _btc_row else 'N/A'
+        btc_score  = float(_btc_row['score']  or 50) if _btc_row else 50.0
+        btc_weakening_flag = btc_ch_5m < 0  # proxy: 5-min change negative = weakening
+        btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
+
         payload = {
             "available_idr": round(available_idr, 0),
             "idr_used": round(idr_used, 0),
@@ -2027,7 +2045,17 @@ def _build_stats_payload():
             "bot_running": True,
             "dry_run": bool(cfg.DRY_RUN),
             "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
-            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT
+            "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT,
+            # BTC Condition — used by Signal Radar UX
+            "btc_price":      round(btc_price, 0),
+            "btc_change_24h": round(btc_change_24h, 2),
+            "btc_ch_5m":      round(btc_ch_5m, 2),
+            "btc_ch_15m":     round(btc_ch_15m, 2),
+            "btc_ch_1h":      round(btc_ch_1h, 2),
+            "btc_trend":      btc_trend,
+            "btc_score":      round(btc_score, 1),
+            "btc_weakening":  btc_weakening_flag,
+            "btc_crash":      btc_crash_flag,
         }
         return payload
     finally:
