@@ -878,14 +878,16 @@ class Oracle:
                 effective_balance = INITIAL_CAPITAL
             daily_loss_limit_idr = -(effective_balance * DAILY_LOSS_LIMIT_PCT)
 
-            # Compute time remaining in the current trading day (0–100%)
+            # Compute time remaining in the current trading day (0–100%).
+            # 0 = midnight (start of day, 100% remains); 86400 = end of day (0% remains).
             now = datetime.now()
             seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
             time_remaining_pct = max(0.0, round((1 - seconds_since_midnight / 86400) * 100, 1))
 
             # Read persisted session mode (written by evaluate_and_update_session_mode)
             session_mode = db.get_state("session_mode") or "NORMAL"
-            session_buy_enabled = db.get_state("session_buy_enabled") != "false"
+            # Explicit safe check: treat None/unset as True (buy enabled by default)
+            session_buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
 
             return {
                 "target_idr": target_idr,
@@ -969,7 +971,8 @@ class Oracle:
                     sentiment = 50
 
                 if regime == MarketRegime.BULLISH and sentiment >= _SENTIMENT_THRESHOLD:
-                    # Extend target by +15% of current realised PnL
+                    # Set new target to 115% of current PnL (current_pnl × 1.15).
+                    # Equivalent to: new_target = current_pnl + 15% of current_pnl.
                     new_target = current_pnl * (1 + _TRAILING_EXTRA_PCT)
                     db.save_state("daily_profit_target", str(new_target))
                     db.save_state("daily_profit_target_ts", datetime.now().isoformat())

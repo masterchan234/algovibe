@@ -668,13 +668,15 @@ class ExitManager:
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
 
-                # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT as day-end approaches.
+                # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%) as day-end approaches.
                 # Formula: floor + (original - floor) * time_remaining_fraction
+                # time_remaining_frac: 1.0 at midnight (full day ahead) → 0.0 at end of day.
                 # This lowers the TP trigger so the market reaches it more easily, without ever
                 # dropping below the 0.85% Net Profit Floor (covering round-trip fee + slippage).
                 if harvest_only:
                     _now = datetime.now()
                     _seconds_since_midnight = _now.hour * 3600 + _now.minute * 60 + _now.second
+                    # Fraction of day REMAINING (1.0 = day just started, 0.0 = end of day)
                     _time_remaining_frac = max(0.0, 1.0 - _seconds_since_midnight / 86400)
                     dynamic_tp_pct = max(
                         SMART_BREAK_EVEN_PCT,
