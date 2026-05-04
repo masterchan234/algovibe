@@ -524,12 +524,15 @@ class Database:
     def save_trade_dna(self, pair, dna_data):
         try:
             with self.get_connection() as conn:
+                # ai_prob may be stored under 'ai_prob' or legacy 'tq_prob' key
+                ai_prob = dna_data.get('ai_prob', dna_data.get('tq_prob', 0.0))
+                sector_sentiment = dna_data.get('sector_sentiment', dna_data.get('sector_boost', 0.0))
                 conn.execute(
                     """INSERT INTO trade_analytics 
                     (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run) 
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (pair, datetime.now().isoformat(), dna_data['ai_prob'], dna_data['whale_boost'], 
-                     dna_data['sector_sentiment'], dna_data['imbalance'], dna_data['volatility'],
+                    (pair, datetime.now().isoformat(), ai_prob, dna_data.get('whale_boost', 0.0),
+                     sector_sentiment, dna_data.get('imbalance', 0.0), dna_data.get('volatility', 0.0),
                      dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
                      dna_data.get('llm_verdict', 'HOLD'), dna_data.get('llm_confidence', 0.0),
                      dna_data.get('llm_reason', ''), 1 if dna_data.get('dry_run', True) else 0)

@@ -230,8 +230,10 @@ def execute_trade(
 
         dna_data = {
             "amount_crypto": amount_crypto,
+            "ai_prob": tq_prob,           # technical probability stored as ai_prob
             "tq_prob": tq_prob * 100,
             "whale_boost": whale_boost,
+            "sector_sentiment": sector_boost,
             "imbalance": imbalance,
             "volatility": volatility,
             "rsi": _rsi_dna,

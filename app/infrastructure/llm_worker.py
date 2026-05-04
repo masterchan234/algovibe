@@ -86,6 +86,14 @@ def _parse_engine_response(response):
 
 def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
     try:
+        import warnings
+        import logging as _logging
+        # Suppress unnecessary mel_filterbank warnings from Gemma4DataProcessor
+        # (not needed for text-based analysis)
+        warnings.filterwarnings("ignore", message=".*mel_filterbank.*")
+        _logging.getLogger("Gemma4DataProcessor").setLevel(_logging.ERROR)
+        _logging.getLogger("litert_lm").setLevel(_logging.WARNING)
+
         from utils.logger import log_message
         from litert_lm import Engine
         
@@ -95,11 +103,17 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
         _consciousness_messages = []
         log_message("🧠 LLM Worker: Engine initialized.")
 
+        _TASK_TIMEOUT_SEC = 90  # Per-task hard timeout to prevent hanging
+
         while True:
             task_id = None
             task_type = None
             try:
-                task_id, task_type, prompt, mode = req_queue.get()
+                try:
+                    task_id, task_type, prompt, mode = req_queue.get(timeout=5)
+                except Exception:
+                    # Queue empty or timeout — loop back to check for new tasks
+                    continue
                 
                 if task_type == _CONSCIOUSNESS_SIGNAL:
                     _consciousness_messages = [{"role": "user", "content": prompt}]
@@ -108,20 +122,39 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                 # Retry otomatis 1x jika session conflict transient muncul.
                 last_error = None
                 result = None
-                for attempt in range(2):
+                import threading as _threading
+                _inference_result = [None]
+                _inference_error = [None]
+
+                def _run_inference(attempt_num):
                     try:
                         conv_messages = list(_consciousness_messages) if _consciousness_messages else []
                         with engine.create_conversation(messages=conv_messages) as conv:
-                            log_message(f"🧠 LLM Worker: Starting {mode} inference for {task_id} (attempt {attempt + 1}/2)")
+                            log_message(f"🧠 LLM Worker: Starting {mode} inference for {task_id} (attempt {attempt_num}/2)")
                             response = conv.send_message(prompt)
-                            result = _parse_engine_response(response)
+                            _inference_result[0] = _parse_engine_response(response)
+                    except Exception as _ie:
+                        _inference_error[0] = _ie
+
+                for attempt in range(2):
+                    _inference_result[0] = None
+                    _inference_error[0] = None
+                    t = _threading.Thread(target=_run_inference, args=(attempt + 1,), daemon=True)
+                    t.start()
+                    t.join(timeout=_TASK_TIMEOUT_SEC)
+                    if t.is_alive():
+                        # Inference timed out — treat as hanging task
+                        log_message(f"🧠 LLM Worker: Task {task_id} timed out after {_TASK_TIMEOUT_SEC}s. Aborting.")
+                        last_error = TimeoutError(f"Inference timed out after {_TASK_TIMEOUT_SEC}s")
                         break
-                    except Exception as inner_e:
-                        last_error = inner_e
-                        if _is_session_conflict(inner_e) and attempt == 0:
+                    if _inference_error[0] is not None:
+                        last_error = _inference_error[0]
+                        if _is_session_conflict(_inference_error[0]) and attempt == 0:
                             log_message("🧠 LLM Worker: Session conflict detected, retrying task once...")
                             continue
-                        raise
+                        break
+                    result = _inference_result[0]
+                    break
 
                 if result is None and last_error is not None:
                     raise last_error
@@ -248,7 +281,8 @@ class LLMWorker:
             return json.loads(result_str)
         except:
             raw = str(result_str).upper()
-            if "BUY" in raw: defaults.update({"verdict": "BUY", "confidence": 60})
+            if "PUMPALERT" in raw or "PUMP_ALERT" in raw: defaults.update({"verdict": "PUMPALERT", "confidence": 75})
+            elif "BUY" in raw: defaults.update({"verdict": "BUY", "confidence": 60})
             elif "AVOID" in raw: defaults.update({"verdict": "AVOID", "confidence": 70})
             elif "HOLD" in raw: defaults.update({"verdict": "HOLD", "confidence": 50})
             return defaults

@@ -200,6 +200,12 @@ MIGRATIONS = [
     ("create_idx_events_pair", "CREATE INDEX IF NOT EXISTS idx_events_pair ON system_events(pair)"),
     ("create_idx_events_time", "CREATE INDEX IF NOT EXISTS idx_events_time ON system_events(created_at)"),
     ("create_idx_depth_pair", "CREATE INDEX IF NOT EXISTS idx_depth_pair ON market_depth(pair)"),
+    # --- 3. TRADE_ANALYTICS SCHEMA EVOLUTION ---
+    # Add columns used by save_trade_dna that were not in the original CREATE TABLE.
+    # These migrations ensure both Dry and Live databases stay in sync.
+    ("add_ai_prob_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN ai_prob REAL DEFAULT 0.0"),
+    ("add_rsi_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN rsi REAL DEFAULT 0.0"),
+    ("add_ema_dist_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN ema_dist REAL DEFAULT 0.0"),
 ]
 
 def run_migrations(db_path):

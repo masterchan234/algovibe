@@ -16,7 +16,7 @@ from config import (
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
     INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
-    BREAK_EVEN_SLIPPAGE_MARGIN
+    BREAK_EVEN_SLIPPAGE_MARGIN, ROUND_TRIP_FEE_PCT
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -562,12 +562,14 @@ class ExitManager:
 
                 # --- [Dynamic Safe Exit Price] ---
                 # Harga minimum exit agar net_pnl >= 0 setelah fee + slippage.
-                # total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER (fee round-trip dari config).
+                # ROUND_TRIP_FEE_PCT = 1.44% (0.72% buy + 0.72% sell, termasuk tax kedua arah).
                 # BREAK_EVEN_SLIPPAGE_MARGIN (0.21%) ditambahkan sebagai buffer keamanan slippage.
-                # BREAK_EVEN hanya aktif jika current_price > safe_exit_price.
-                _total_fee_pct = FEE_BUY_TAKER + FEE_SELL_TAKER   # fee round-trip dari config
-                _slippage_margin = BREAK_EVEN_SLIPPAGE_MARGIN       # safety margin dari config
-                _be_buffer = _total_fee_pct + _slippage_margin
+                # BREAK_EVEN threshold = 1.44% + 0.21% = 1.65%.
+                # Posisi HANYA mendapat status BREAK_EVEN jika current_price >= 1.65% di atas entry.
+                # Jika harga masih di bawah safe_exit_price, posisi tetap HOLD.
+                _total_fee_pct = ROUND_TRIP_FEE_PCT                # 1.44% mandatory round-trip
+                _slippage_margin = BREAK_EVEN_SLIPPAGE_MARGIN       # 0.21% safety margin dari config
+                _be_buffer = _total_fee_pct + _slippage_margin      # 1.65% total threshold
                 safe_exit_price = entry_price * (1.0 + _be_buffer)
                 break_even_price = safe_exit_price  # alias untuk kompatibilitas kode trailing stop
 
