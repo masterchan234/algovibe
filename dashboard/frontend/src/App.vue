@@ -255,6 +255,11 @@ const loginForm = reactive({ username: '', password: '' })
 const isToggling = ref(false)
 const pendingLiveSwitch = ref(false)
 
+function handleRequireLogin() {
+  pendingLiveSwitch.value = false
+  showLoginModal.value = true
+}
+
 async function applyModeToggle() {
   const res = await fetch(`${backendUrl}/api/bot/toggle-dry-run`, {
     method: 'POST',
@@ -488,6 +493,7 @@ onMounted(() => {
   setInterval(fetchNews, 5 * 60 * 1000)
   setInterval(() => { now.value = Date.now() }, 1000)
   _startTicker()
+  window.addEventListener('algovibe:require-login', handleRequireLogin)
 
   // Mobile Touch listeners
   window.addEventListener('touchstart', handleTouchStart, { passive: true })
@@ -497,6 +503,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (_rafId) cancelAnimationFrame(_rafId)
+  window.removeEventListener('algovibe:require-login', handleRequireLogin)
 })
 </script>
 

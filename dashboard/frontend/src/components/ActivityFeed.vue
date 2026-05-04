@@ -233,7 +233,14 @@ async function handleManualExit(pair) {
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      alert(`Exit failed: ${err.error || res.statusText}`)
+      if (res.status === 401 || err.login_required) {
+        window.dispatchEvent(new CustomEvent('algovibe:require-login', {
+          detail: { source: 'manual-exit', pair }
+        }))
+        alert('Sesi login diperlukan untuk manual EXIT. Silakan login terlebih dahulu.')
+      } else {
+        alert(`Exit failed: ${err.error || res.statusText}`)
+      }
     }
   } catch (e) {
     alert(`Exit request error: ${e.message}`)
