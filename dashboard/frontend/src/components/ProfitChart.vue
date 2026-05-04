@@ -8,6 +8,14 @@
           {{ formatIdr(stats.daily_pnl) }}
         </div>
       </div>
+      <div class="kpi-item momentum-kpi" :class="`momentum-${momentumStateClass}`" :title="`Velocity: ${stats.net_pnl_velocity >= 0 ? '+' : ''}${(stats.net_pnl_velocity || 0).toFixed(1)} IDR/s`">
+        <div class="kpi-label">Momentum</div>
+        <div class="kpi-value momentum-value" :class="`momentum-${momentumStateClass}`">
+          <span class="momentum-arrow">{{ momentumIcon }}</span>
+          <span class="momentum-label">{{ stats.momentum_state || 'STALLING' }}</span>
+        </div>
+        <div class="momentum-velocity">{{ stats.net_pnl_velocity >= 0 ? '+' : '' }}{{ (stats.net_pnl_velocity || 0).toFixed(1) }} IDR/s</div>
+      </div>
       <div class="kpi-item">
         <div class="kpi-label">Unrealized</div>
         <div class="kpi-value" :class="stats.unrealized_pnl >= 0 ? 'positive' : 'negative'">
@@ -342,6 +350,22 @@ const regimeClass = computed(() => {
   if (r.includes('bull')) return 'regime-bull'
   if (r.includes('bear')) return 'regime-bear'
   return 'regime-choppy'
+})
+
+const momentumStateClass = computed(() => {
+  switch (stats.momentum_state) {
+    case 'IMPROVING': return 'improving'
+    case 'DROPPING':  return 'dropping'
+    default:          return 'stalling'
+  }
+})
+
+const momentumIcon = computed(() => {
+  switch (stats.momentum_state) {
+    case 'IMPROVING': return '▲'
+    case 'DROPPING':  return '▼'
+    default:          return '—'
+  }
 })
 
 function itemClass(pair) {
@@ -726,6 +750,42 @@ onUnmounted(() => {
 }
 .kpi-value.positive { color: #3fb950; text-shadow: 0 0 10px rgba(63, 185, 80, 0.3); }
 .kpi-value.negative { color: #f85149; text-shadow: 0 0 10px rgba(248, 81, 73, 0.3); }
+
+/* Momentum Indicator */
+.momentum-kpi {
+  position: relative;
+}
+.momentum-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.momentum-arrow {
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+.momentum-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.momentum-velocity {
+  font-size: 10px;
+  color: #8b949e;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.momentum-value.momentum-improving,
+.momentum-improving .momentum-arrow { color: #3fb950; text-shadow: 0 0 10px rgba(63, 185, 80, 0.4); }
+.momentum-value.momentum-dropping,
+.momentum-dropping .momentum-arrow  { color: #f85149; text-shadow: 0 0 10px rgba(248, 81, 73, 0.4); }
+.momentum-value.momentum-stalling,
+.momentum-stalling .momentum-arrow  { color: #d29922; text-shadow: 0 0 8px rgba(210, 153, 34, 0.3); }
+.momentum-kpi.momentum-improving { background: rgba(63, 185, 80, 0.04); }
+.momentum-kpi.momentum-dropping  { background: rgba(248, 81, 73, 0.04); }
+.momentum-kpi.momentum-stalling  { background: rgba(210, 153, 34, 0.04); }
 
 .regime-badge {
   font-size: 10px;

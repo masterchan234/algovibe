@@ -2056,6 +2056,9 @@ def _build_stats_payload():
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
+            # Momentum Equity Protection indicators
+            "momentum_state":    db.get_state("momentum_state") or "STALLING",
+            "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
         }
         return payload
     finally:
