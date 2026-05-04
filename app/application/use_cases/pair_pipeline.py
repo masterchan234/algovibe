@@ -139,7 +139,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         log_message(
             f"🛑 [{session_info['session_mode']}] "
             f"Target Rp {target_idr:,.0f} sudah tercapai "
-            f"(PnL hari ini: Rp {current_pnl:,.0f}). "
+            f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
             f"{session_info['message']}"
         )
         return
