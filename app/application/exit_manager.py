@@ -988,7 +988,7 @@ class ExitManager:
         [Senior Strategy] Menambah muatan (DCA) pada posisi yang sedang drawdown.
         Menghitung ulang harga rata-rata dan memperbarui state di DB.
         """
-        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, FEE_BUY_TAKER, MIN_TRADE_IDR
+        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, FEE_BUY_MAKER, MIN_TRADE_IDR
         
         try:
             old_entry_price = float(data['entry_price'])
@@ -1021,10 +1021,10 @@ class ExitManager:
                     f"= {add_amount_crypto:.8f} koin at Rp {current_price:,.2f}"
                 )
             else:
-                # [Senior Fix] Eksekusi Market Buy Riil: kirim quantity KOIN, bukan IDR
-                params = {'pair': pair.replace("idr", "_idr")}
+                # Eksekusi Limit Buy (Maker) untuk hemat fee: 0.1% vs 0.51% taker
+                params = {'pair': pair.replace("idr", "_idr"), 'post_only': True}
                 order = self.exchange.create_order(
-                    symbol, 'market', 'buy', add_amount_crypto, current_price, params
+                    symbol, 'limit', 'buy', add_amount_crypto, current_price, params
                 )
                 # Gunakan nilai aktual dari order response jika tersedia
                 exec_price = float(order.get('price') or current_price)

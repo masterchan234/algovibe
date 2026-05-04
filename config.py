@@ -78,7 +78,7 @@ DCA_ENABLED = True
 DCA_MAX_TIERS = 1              # Maksimal 1x tambah muatan (dari 2) — batasi exposure
 DCA_STEP_PCT = -0.015          # Tambah muatan setiap turun 1.5% (dari 2.5%) — trigger lebih cepat sebelum SL
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)
-DCA_MIN_TECH_CONFIDENCE = 0.55   # Hanya tambah muatan jika probabilitas teknikal > 55% (dari 35%) — filter lebih ketat
+DCA_MIN_TECH_CONFIDENCE = 0.65   # Hanya tambah muatan jika probabilitas teknikal > 65% (dari 55%) — filter lebih ketat
 
 # --- Execution Offsets ---
 BUY_MAKER_OFFSET = 0.002 # (Tidak terpakai di limit order EMA-20)
