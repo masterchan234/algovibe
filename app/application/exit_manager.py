@@ -381,18 +381,21 @@ class ExitManager:
                         and self._portfolio_hwm >= BASKET_HARVEST_TARGET_IDR * 0.5
                         and total_net_pnl < self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
                     )
-                    # (e) Guaranteed Profit Harvest — net PnL >= AUTO_BASKET_HARVEST_MIN AND equity at/near peak
-                    # Focused on own-portfolio equity performance: harvest when we are at or near
-                    # the portfolio's High-Water-Mark (maximum equity achieved this session).
-                    # This avoids BTC-dependency and triggers purely on the portfolio's own curve.
-                    _equity_at_peak = (
-                        self._portfolio_hwm <= 0  # No HWM established yet — use pure threshold
-                        or total_net_pnl >= self._portfolio_hwm * (1.0 - BASKET_HWM_PULLBACK_PCT)
+                    # (e) Guaranteed Profit Harvest — BTC weakening AND equity has started to feel the impact
+                    # Both signals must confirm together:
+                    #   • btc_weakening: external warning that the market is turning against us.
+                    #   • _equity_impacted: our portfolio equity has already begun to pull back from its
+                    #     session High-Water-Mark, confirming the BTC move is affecting us — not just noise.
+                    # If BTC dips but equity has NOT moved yet, do NOT harvest (wait for real confirmation).
+                    _equity_impacted = (
+                        self._portfolio_hwm > 0             # HWM must be established (≥1 tick of data)
+                        and total_net_pnl < self._portfolio_hwm  # any decline from peak = equity is feeling it
                     )
                     trigger_harvest_pct = (
                         n >= 1
                         and net_pnl_pct >= _harvest_min_pct
-                        and _equity_at_peak
+                        and btc_weakening       # market signal: BTC turning
+                        and _equity_impacted    # portfolio signal: equity already declining
                     )
 
                     if trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
