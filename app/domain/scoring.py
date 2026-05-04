@@ -1,6 +1,7 @@
 import math
 
 from config import SECTOR_MAP
+from app.domain.technicals import calculate_rsi, calculate_macd
 
 # Sektor yang mendapat sector-momentum boost saat pumping
 _BOOSTED_SECTORS = {"AI", "MEME", "L1"}
@@ -81,13 +82,53 @@ def calculate_score(args):
             # Final Score (Normalized roughly to 0-100+)
             score = (score_vol * w_vol) + (rel_momentum * w_momentum) - (penalty_spread * (w_spread / 12)) + bid_depth_bonus
 
-            # --- Sector Momentum Boost (+15% untuk sektor AI, MEME, L1 yang sedang pumping) ---
+            # [Technical Confirmation] Tambahkan RSI + MACD sebagai penyesuaian skor
+            # Ini memastikan koin dengan teknikal kuat mendapat skor lebih tinggi,
+            # dan koin yang sudah overbought tidak salah masuk.
+            tech_adj = 0.0
+            try:
+                from app.infrastructure.database import db as _db
+                import json
+                row_h = None
+                try:
+                    import sqlite3
+                    with _db.get_connection() as _conn:
+                        row_h = _conn.execute(
+                            "SELECT history_json FROM ticker_history WHERE pair = ?", (pair.lower(),)
+                        ).fetchone()
+                except Exception:
+                    pass
+                if row_h and row_h['history_json']:
+                    _prices = json.loads(row_h['history_json'])
+                    if len(_prices) >= 14:
+                        _rsi = calculate_rsi(_prices)
+                        # RSI oversold = bonus, RSI overbought = penalti
+                        if _rsi < 30:
+                            tech_adj += 8.0   # Bonus besar: peluang mean reversion
+                        elif _rsi < 45:
+                            tech_adj += 4.0
+                        elif _rsi > 70:
+                            tech_adj -= 6.0   # Penalti: sudah mahal
+                        elif _rsi > 60:
+                            tech_adj -= 2.0
+                    if len(_prices) >= 35:
+                        _, _, _mh = calculate_macd(_prices)
+                        if _mh > 0:
+                            tech_adj += 3.0   # MACD bullish momentum
+                        elif _mh < 0:
+                            tech_adj -= 3.0   # MACD bearish momentum
+            except Exception:
+                pass
+
+            score += tech_adj
+
+            # --- Sector Momentum Boost (+10% untuk sektor AI, MEME, L1 yang sedang pumping) ---
+            # [Dibatasi dari 15% ke 10%] — sector boost dikurangi agar teknikal tetap dominan.
             try:
                 sector = SECTOR_MAP.get(pair.lower())
                 if sector in _BOOSTED_SECTORS:
-                    # Hanya boost jika sektornya positif (change > 0) agar tidak boost koin rugi
                     if change_24h > 0:
-                        score *= 1.15
+                        score *= 1.10  # Dikurangi dari 1.15 ke 1.10
             except Exception:
                 pass
 

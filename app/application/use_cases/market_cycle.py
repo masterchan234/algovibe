@@ -13,7 +13,6 @@ from config import (
 )
 import config
 from app.infrastructure.database import db
-from app.domain.predictor import get_prediction
 from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message, run_performance_report
 
@@ -76,12 +75,6 @@ def run_market_cycle(bot):
     ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime) for item in tickers.items()]) if r]
     ranked.sort(key=lambda x: x['score'], reverse=True)
 
-    bot.exit_manager.monitor_and_execute(
-        current_tickers=tickers,
-        price_history=bot.price_history,
-        get_prediction_fn=get_prediction,
-    )
-
     bot.oracle.request_periodic_analysis(ranked)
 
     for r in ranked[:5]:
@@ -128,7 +121,7 @@ def run_market_cycle(bot):
 
     log_message(
         f"Oracle Loop | Regime: {regime:8} | "
-        f"AI_Thresh: {adaptive_cfg['ai_threshold']*100:.0f}% | "
+        f"Tech_Thresh: {adaptive_cfg['tech_threshold']*100:.0f}% | "
         f"MinVol: {adaptive_cfg['min_vol']/1_000_000:.0f}M | "
         f"{target_str}"
     )

@@ -1095,27 +1095,27 @@ class Oracle:
         Return configuration overrides based on the current market regime.
         """
         regime = self.get_market_regime()
-        from config import AI_CONFIDENCE_THRESHOLD, MIN_VOLUME_FILTER, MAX_ALLOWED_SPREAD_PCT, MIN_PRICE_FILTER
+        from config import TECH_CONFIDENCE_THRESHOLD, MIN_VOLUME_FILTER, MAX_ALLOWED_SPREAD_PCT, MIN_PRICE_FILTER
         
         overrides = {
-            "ai_threshold": AI_CONFIDENCE_THRESHOLD,
+            "tech_threshold": TECH_CONFIDENCE_THRESHOLD,
             "min_vol": MIN_VOLUME_FILTER,
             "max_spread": MAX_ALLOWED_SPREAD_PCT,
             "min_price": MIN_PRICE_FILTER
         }
         
         if regime == MarketRegime.BULLISH:
-            overrides["ai_threshold"] -= 0.05 # Loloskan lebih banyak di pasar Bullish
+            overrides["tech_threshold"] -= 0.05 # Loloskan lebih banyak di pasar Bullish
         elif regime == MarketRegime.BEARISH:
-            overrides["ai_threshold"] += 0.10 # Lebih ketat di pasar Bearish
+            overrides["tech_threshold"] += 0.10 # Lebih ketat di pasar Bearish
             overrides["min_vol"] *= 2.0       # Hanya ambil koin volume besar
         elif regime == MarketRegime.CRASH:
-            overrides["ai_threshold"] = 0.95  # Hampir tidak beli apapun
+            overrides["tech_threshold"] = 0.95  # Hampir tidak beli apapun
             overrides["max_spread"] /= 2.0    # Spread harus sangat tipis
             
         # Self-Tuning based on recent performance
         performance_penalty = self.learn_from_history()
-        overrides["ai_threshold"] += performance_penalty
+        overrides["tech_threshold"] += performance_penalty
 
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
@@ -1126,13 +1126,13 @@ class Oracle:
             # Jika sudah profit > 5% dari modal harian (misal > 5jt), naikkan threshold sangat tinggi
             if daily_pnl > 5_000_000:
                 logger.info(f"[Oracle] Equity-Shield: Profit Harian Tinggi (Rp {daily_pnl:,.0f}). Mengetatkan entry.")
-                overrides["ai_threshold"] += 0.20 # Sangat selektif
+                overrides["tech_threshold"] += 0.20 # Sangat selektif
             
             # 2. Recovery-Mode (Balikkan Keadaan)
             # Jika sedang merugi (red), turunkan threshold sedikit agar lebih agresif mencari peluang rebound
             elif daily_pnl < -2_000_000:
                 logger.info(f"[Oracle] Recovery-Mode: Drawdown terdeteksi (Rp {daily_pnl:,.0f}). Melonggarkan entry.")
-                overrides["ai_threshold"] -= 0.05 # Lebih agresif
+                overrides["tech_threshold"] -= 0.05 # Lebih agresif
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
         
@@ -1612,30 +1612,33 @@ class Oracle:
         current_rsi = current_dna.get('rsi', 50)
         current_ema_dist = current_dna.get('ema_dist', 0)
         
-        # Is the technical setup very strong?
-        is_strong_setup = current_rsi < 40 or current_ema_dist > 0.10
+        # "Strong setup" hanya untuk oversold dalam (RSI < 35), bukan sekadar dip biasa.
+        # RSI < 35 lebih jarang terjadi sehingga lebih selektif dan lebih andal sebagai sinyal.
+        is_strong_setup = current_rsi < 35 or current_ema_dist > 0.10
         
         verdict = "BUY" # Hard Veto removed: Always allow technical evaluation
         
         # Base confidence from k-NN historical win rate
         base_confidence = win_rate_knn * 100
         
-        # [Fix] Jika K-NN history terlalu sedikit (< 10 records) atau 
-        # top_matches semua dari pasangan yang berbeda (rsi/ema_dist semua NULL),
-        # gunakan floor lebih tinggi agar tidak memblokir semua trade.
-        # Threshold 50% dipakai karena win rate historis keseluruhan sekitar 67%.
+        # Gunakan K-NN win rate mentah tanpa floor artifisial.
+        # Floor artifisial (52%/65%) sebelumnya menyebabkan bot over-confident
+        # pada setup buruk dan masuk ke trade yang berakhir SL.
+        # Break-even bot memerlukan win rate >= 65%; confidence floor harus
+        # mencerminkan data historis nyata, bukan angka yang dimanipulasi.
         n_valid = sum(1 for t in top_matches if t.get('rsi') is not None or t.get('ema_dist') is not None)
         has_quality_features = n_valid >= 3
         
-        if not has_quality_features and not is_strong_setup:
-            # Feature-blind K-NN — tidak bisa dipercaya, pakai floor sedang
-            confidence = max(base_confidence, 52.0)
-            reason = f"K-NN Feature-Blind Fallback (floor 52%, raw={base_confidence:.0f}%)"
+        if not has_quality_features:
+            # Feature-blind K-NN — tidak bisa dipercaya.
+            # Gunakan nilai netral (50%) agar gate downstream memutuskan berdasarkan indikator lain.
+            confidence = min(base_confidence, 50.0) if base_confidence > 0 else 50.0
+            reason = f"K-NN Feature-Blind Fallback (netral 50%, raw={base_confidence:.0f}%)"
         elif is_strong_setup:
-            # Jika setup teknikal kuat, kita boost confidence-nya agar tidak terhalang histori buruk
-            # Memberikan bot 'keberanian' untuk mencoba pattern baru yang potensial
-            confidence = max(base_confidence, 65.0) 
-            reason = f"Momentum-First Mode (RSI {current_rsi:.0f} > k-NN History)"
+            # Deep oversold (RSI < 35): bisa sedikit boost karena mean-reversion lebih kuat,
+            # tapi tetap tidak melebihi 70% agar gate downstream masih efektif.
+            confidence = min(max(base_confidence, 55.0), 70.0)
+            reason = f"Deep-Oversold Mode (RSI {current_rsi:.0f}, k-NN WinRate: {win_rate_knn*100:.0f}%)"
         else:
             confidence = base_confidence
             reason = f"Historical Weighted (k-NN WinRate: {win_rate_knn*100:.0f}%)"

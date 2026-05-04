@@ -4,10 +4,13 @@ entry_gates.py
 All pre-entry gate checks for a candidate pair:
   - open position / blacklist guard
   - cooldown guard
-  - AI probability and imbalance threshold
   - trend / breakout requirement
-  - LLM verdict queue and policy
+  - multi-confluence technical gate
+  - technical probability threshold (pure, no AI bias)
   - K-NN pattern scoring and confidence threshold
+
+All AI/LLM influence has been removed from the decision path.
+Every gate is based exclusively on price-derived technical indicators.
 
 Returns a gate result dict when all gates pass, None to skip the pair,
 or the string "BREAK" to abort the entire candidate loop (consecutive-loss halt).
@@ -23,7 +26,11 @@ from config import (
 )
 import config
 from app.infrastructure.database import db
-from app.domain.technicals import calculate_rsi, derive_trade_signal, get_technical_summary
+from app.domain.technicals import (
+    calculate_rsi, derive_trade_signal, get_technical_summary,
+    calculate_macd, calculate_bollinger_bands, calculate_stochastic_rsi, calculate_ema,
+    _MACD_NORM_FACTOR,
+)
 from utils.logger import log_message
 
 _BREAK = "BREAK"  # sentinel value returned to caller
@@ -36,25 +43,25 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     score = float(p.get('score', 0) or 0)
     tq_prob = float(enriched.get('tq_prob', 0) or 0)
     imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
-    ai_threshold = float(adaptive_cfg.get('ai_threshold', 0.6) or 0.6)
+    tech_threshold = float(adaptive_cfg.get('tech_threshold', 0.6) or 0.6)
 
     if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
         return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
 
     buy_ready = (
         signal_v == 'BUY' and (
-            tq_prob >= max(0.35, ai_threshold * 0.9)
+            tq_prob >= max(0.35, tech_threshold * 0.9)
             or score >= 60
             or (trend == 'UP' and imbalance_ratio >= 1.2)
         )
     )
     if buy_ready:
         return "BUY", (
-            f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
+            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
             f"imbalance={imbalance_ratio:.2f}x"
         )
 
-    return "HOLD", f"signal={signal_v}, ai_prob={tq_prob * 100:.0f}%, score={score:.0f}"
+    return "HOLD", f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}"
 
 
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
@@ -98,14 +105,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
         return None
 
-    # ── 3. Learning-adjusted score + tracking log ──────────────────────────
-    features = {
-        "ai_prob": tq_prob,
-        "whale_boost": whale_boost - 1.0,
-        "sector_sentiment": bot.oracle.get_sector_sentiment_val(pair),
-        "imbalance": imbalance_ratio,
-    }
-    final_score = bot.oracle.apply_learning_to_score(p['score'], features)
+    # ── 3. Radar recommendation + tracking log ────────────────────────────
+    # Score berdasarkan ranking teknikal murni — tidak ada learning adjustment AI.
+    final_score = p['score']
 
     radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
     db.save_state(f"radar_reco_{pair}", radar_rec)
@@ -117,17 +119,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         boost_str += " 🐳"
     if sector_boost > 1.0:
         boost_str += " 🔥"
-    if final_score > p['score']:
-        boost_str += " 📈"
-    if final_score < p['score']:
-        boost_str += " 📉"
 
     log_message(
         f"Track: {pair:10} | Regime: {regime:8} | Trend: {trend:9} | "
         f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
     )
 
-    # ── 4. Overbought / sell-signal block ──────────────────────────────────
+    # ── 4. Multi-Confluence Technical Gate ────────────────────────────────
+    # Kita tidak hanya cek RSI — harus ada konfirmasi multi-indikator.
     tech = get_technical_summary(history)
     depth_data = db.get_market_depth(pair)
     if depth_data['bids'] and depth_data['asks']:
@@ -138,27 +137,36 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
     tech_sig = derive_trade_signal(tech)
 
-    if tech_sig['verdict'] == 'SELL' and tech.get('rsi', 50) > 72:
-        msg = f"⛔ OVERBOUGHT BLOCK: RSI={tech.get('rsi'):.0f} — {tech_sig['reason']}"
+    # Block jika sinyal SELL dengan skor cukup (multi-confluence, bukan hanya RSI).
+    # Threshold diturunkan dari 8.0 → 5.0: skor 5/16.5 sudah cukup membuktikan tekanan jual.
+    # Sebelumnya sell_score 7.9 hanya memicu warning dan bot tetap masuk; ini sudah diperbaiki.
+    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
+        msg = (
+            f"⛔ SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
+            f"— {tech_sig['reason'][:80]}"
+        )
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
     elif tech_sig['verdict'] == 'SELL':
-        log_message(f"⚠️  SELL-WARN [{pair}]: {tech_sig['reason']} — tetap evaluasi K-NN.")
+        log_message(
+            f"⚠️  SELL-WARN [{pair}]: sell_score={tech_sig.get('sell_score',0):.1f} "
+            f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
+        )
 
-    # ── 5. AI probability + imbalance threshold ────────────────────────────
+    # ── 5. Technical probability + imbalance threshold ────────────────────────
     if tq_prob < 0:
-        msg = "WARMUP: belum cukup data untuk prediksi AI."
+        msg = "WARMUP: belum cukup data untuk prediksi teknikal."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
 
-    ai_ready = tq_prob >= adaptive_cfg['ai_threshold']
+    tech_ready = tq_prob >= adaptive_cfg['tech_threshold']
     has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-    if not config.DRY_RUN_LOOSE_GATES and not ai_ready and not has_strong_imb:
+    if not config.DRY_RUN_LOOSE_GATES and not tech_ready and not has_strong_imb:
         msg = (
-            f"SKIP: AI prob {tq_prob * 100:.0f}% < threshold "
-            f"{adaptive_cfg['ai_threshold'] * 100:.0f}% "
+            f"SKIP: Tech prob {tq_prob * 100:.0f}% < threshold "
+            f"{adaptive_cfg['tech_threshold'] * 100:.0f}% "
             f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
         )
         log_message(f"{msg} [{pair}]")
@@ -181,11 +189,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 9. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
-    dynamic_threshold = 50.0 # [SCALP] Lowered from 57.0
+    # Threshold dinaikkan (50→55, 60→65) agar bot hanya masuk dengan confidence tinggi.
+    # Dasar: break-even memerlukan win rate ≥ 65%, threshold harus mencerminkan ini.
+    dynamic_threshold = 55.0 # [PROFIT-FOCUS] Dinaikkan dari 50.0
     if current_vol > 2.0:
-        dynamic_threshold = 60.0 # [SCALP] Lowered from 68.0
+        dynamic_threshold = 65.0 # [PROFIT-FOCUS] Dinaikkan dari 60.0
     elif current_vol < 0.6:
-        dynamic_threshold = 45.0 # [SCALP] Lowered from 54.0
+        dynamic_threshold = 50.0 # Volatilitas sangat rendah: threshold moderat
     if trend != "UP":
         dynamic_threshold += 4.0
 
@@ -214,9 +224,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         ema_dist = 0.0
 
     current_dna = {
-        "ai_prob": tq_prob,
-        "whale_boost": whale_boost,
-        "sector_sentiment": sector_boost,
+        "tq_prob": tq_prob,             # technical probability (pure)
+        "bb_pct": tech.get('bb_pct', 0.5),          # Bollinger %B (posisi harga di band)
+        "macd_norm": abs(tech.get('macd_hist', 0)) / max(1.0, float(p['last'])) * _MACD_NORM_FACTOR,
         "imbalance": imbalance_ratio,
         "volatility": current_vol,
         "rsi": rsi_val,
@@ -237,7 +247,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    min_base_conf = 35.0 if current_vol <= 2.0 else 40.0 
+    # Floor dinaikkan: 35%/40% → 50%/55%.
+    # Break-even memerlukan win rate ≥ 65%; floor 50% adalah batas minimum aman.
+    min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
     if config.DRY_RUN_LOOSE_GATES:
         min_base_conf = 0.0  
 
@@ -247,24 +259,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 12. [Senior Fix] Non-Blocking LLM Verdict ─────────────────────────
-    # Meminta opini LLM secara asinkron. Jika belum ada, bot tetap lanjut (Technical Priority).
-    llm_v, llm_c, llm_r = bot.oracle.request_trade_verdict(pair, enriched)
-    
-    llm_bonus = 0.0
-    if llm_v == "ANALYZING":
-        log_message(f"⏳ LLM analyzing {pair}... Proceeding on technicals.")
-    elif llm_v == 'AVOID' and llm_c >= entry_policy['llm_avoid_block_conf']:
-        msg = f"🚫 LLM VETO {llm_c:.0f}%: {llm_r}"
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
-    elif llm_v == 'BUY' and llm_c >= entry_policy['llm_buy_min_conf']:
-        llm_bonus = min(8.0, (llm_c - 55.0) * 0.2)
-
     # ── 13. Final Confidence threshold ────────────────────────────────────
     boost_credit = min(scalper_boost, 6.0)
-    total_confidence = base_confidence + boost_credit + llm_bonus
+    total_confidence = base_confidence + boost_credit
 
     effective_threshold = 0.0 if config.DRY_RUN_LOOSE_GATES else dynamic_threshold
     if total_confidence < effective_threshold:
@@ -275,17 +272,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     log_message(
         f"🚀 [Entry Ready] {pair}: Tech {base_confidence:.1f}% + Boost {boost_credit:.1f}% "
-        f"+ LLM {llm_bonus:.1f}% = {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
+        f"= {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
     )
 
     return {
         "mode": "SHADOW" if is_shadow_mode else "LIVE",
         "radar_rec": radar_rec,
         "radar_reason": radar_reason,
-        "llm_v": llm_v,
-        "llm_c": llm_c,
-        "llm_r": llm_r,
-        "llm_bonus": llm_bonus,
         "rsi_val": rsi_val,
         "total_confidence": total_confidence,
         "dynamic_threshold": dynamic_threshold,

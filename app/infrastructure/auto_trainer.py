@@ -21,8 +21,8 @@ import joblib
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.metrics import accuracy_score
 
 # Pastikan project root ada di path agar 'config' dan 'utils' bisa di-import
@@ -94,6 +94,45 @@ def _load_training_data(db_path: str) -> pd.DataFrame:
     return df
 
 
+def _engineer_features(df: pd.DataFrame) -> tuple:
+    """
+    Membangun feature matrix dari data trade_analytics.
+    Mengembalikan (X, y, feature_names).
+    """
+    df = df.copy()
+    df["entry_timestamp"] = pd.to_datetime(df["entry_timestamp"])
+    df["hour"] = df["entry_timestamp"].dt.hour
+    df["target"] = (df["pnl_idr"] > 0).astype(int)
+
+    # Cyclical time encoding — jam merepresentasikan siklus 24 jam, bukan angka linier
+    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24.0)
+    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24.0)
+
+    # Seberapa oversold (RSI < 30) atau overbought (RSI > 70) posisi entry
+    df["rsi_oversold"]   = np.maximum(0.0, (30.0 - df["rsi"]) / 30.0)
+    df["rsi_overbought"] = np.maximum(0.0, (df["rsi"] - 70.0) / 30.0)
+
+    # Magnitude jarak harga dari EMA — semakin jauh, semakin mungkin mean-reversion
+    df["ema_dist_abs"] = df["ema_dist"].abs()
+
+    features = [
+        "ai_prob",        # probabilitas teknikal saat entry
+        "imbalance",      # rasio bid/ask depth
+        "volatility",     # volatilitas harga historis
+        "rsi",            # RSI saat entry
+        "ema_dist",       # jarak harga ke EMA (arah)
+        "ema_dist_abs",   # magnitude jarak ke EMA
+        "rsi_oversold",   # seberapa oversold saat entry
+        "rsi_overbought", # seberapa overbought saat entry
+        "hour_sin",       # waktu entry — komponen sinus
+        "hour_cos",       # waktu entry — komponen cosinus
+    ]
+
+    X = df[features].fillna(0)
+    y = df["target"]
+    return X, y, features
+
+
 def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_samples: int,
                        min_accuracy: float, min_delta: float) -> dict:
     """
@@ -127,39 +166,52 @@ def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_sample
         return result
 
     # 3. Feature engineering
-    df["entry_timestamp"] = pd.to_datetime(df["entry_timestamp"])
-    df["hour"] = df["entry_timestamp"].dt.hour
-    df["target"] = (df["pnl_idr"] > 0).astype(int)
+    X, y, feature_names = _engineer_features(df)
 
-    features = ["ai_prob", "whale_boost", "sector_sentiment", "imbalance",
-                "volatility", "rsi", "ema_dist", "hour"]
-    X = df[features].fillna(0)
-    y = df["target"]
-
-    # 4. Split — gunakan test set yang sama untuk eval model lama & baru
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # 4. Split stratified — pertahankan proporsi kelas di train/test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
     # 5. Eval model lama (pada test set yang sama)
     old_acc = _get_current_model_accuracy(model_path, X_test, y_test)
     result["old_accuracy"] = round(old_acc, 4)
 
-    # 6. Train model baru
-    logger.info(f"Training RF dengan {len(X_train)} samples...")
-    new_model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1)
+    # 6. Train model baru — HistGradientBoosting: lebih akurat, tangani imbalance,
+    #    dan lebih tahan overfitting dibanding RandomForest pada dataset kecil-menengah
+    logger.info(f"Training HistGradientBoosting dengan {len(X_train)} samples...")
+    new_model = HistGradientBoostingClassifier(
+        max_iter=300,
+        max_depth=4,
+        learning_rate=0.05,
+        min_samples_leaf=20,
+        l2_regularization=0.1,
+        class_weight="balanced",
+        random_state=42,
+    )
     new_model.fit(X_train, y_train)
+
+    # 7. Cross-validation score sebagai ukuran generalisasi
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(new_model, X, y, cv=cv, scoring="accuracy", n_jobs=-1)
+    cv_mean = float(cv_scores.mean())
+    cv_std  = float(cv_scores.std())
+    logger.info(f"CV accuracy: {cv_mean:.4f} ± {cv_std:.4f}")
+
+    # Gunakan hold-out test set sebagai angka resmi untuk deployment guard
     new_acc = accuracy_score(y_test, new_model.predict(X_test))
     result["new_accuracy"] = round(new_acc, 4)
 
     logger.info(f"Accuracy → Lama: {old_acc:.4f} | Baru: {new_acc:.4f} | Min floor: {min_accuracy}")
 
-    # 7. Guard: accuracy floor
+    # 8. Guard: accuracy floor
     if new_acc < min_accuracy:
         result["status"] = "rejected"
         result["reason"] = f"Accuracy baru {new_acc:.4f} di bawah floor {min_accuracy}. Model lama dipertahankan."
         logger.warning(result["reason"])
         return result
 
-    # 8. Guard: harus lebih baik dari model lama + delta
+    # 9. Guard: harus lebih baik dari model lama + delta
     if new_acc < old_acc + min_delta:
         result["status"] = "rejected"
         result["reason"] = (
@@ -169,7 +221,7 @@ def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_sample
         logger.warning(result["reason"])
         return result
 
-    # 9. Atomic swap — simpan ke .tmp lalu rename agar tidak corrupt mid-read
+    # 10. Atomic swap — simpan ke .tmp lalu rename agar tidak corrupt mid-read
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     joblib.dump(new_model, model_tmp)
     os.replace(model_tmp, model_path)  # atomic pada POSIX
@@ -178,7 +230,7 @@ def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_sample
     result["deployed"] = True
     result["reason"] = (
         f"Model baru di-deploy: accuracy {new_acc:.4f} "
-        f"(+{new_acc - old_acc:.4f} dari lama {old_acc:.4f})"
+        f"(CV {cv_mean:.4f}±{cv_std:.4f}, +{new_acc - old_acc:.4f} dari lama {old_acc:.4f})"
     )
     logger.info(f"✅ {result['reason']}")
     return result

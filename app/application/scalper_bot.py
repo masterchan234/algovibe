@@ -67,6 +67,7 @@ class ScalperBot:
         import threading
 
         self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
+        self.exit_monitor_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True)
 
         self.private_ws = PrivateWS(
             api_key=os.getenv('INDODAX_API_KEY', ''),
@@ -253,9 +254,6 @@ class ScalperBot:
         dynamic_tp=None,
         dynamic_sl=None,
         taker=False,
-        llm_verdict="HOLD",
-        llm_confidence=0.0,
-        llm_reason="",
     ):
         return execute_trade_use_case(
             self,
@@ -270,9 +268,6 @@ class ScalperBot:
             dynamic_tp=dynamic_tp,
             dynamic_sl=dynamic_sl,
             taker=taker,
-            llm_verdict=llm_verdict,
-            llm_confidence=llm_confidence,
-            llm_reason=llm_reason,
         )
 
     def execute_shadow_trade(self, pair, price, gate, target):
@@ -312,6 +307,29 @@ class ScalperBot:
         except Exception as e:
             log_message(f"⚠️ Shadow Execution Error: {e}")
 
+    def _exit_monitor_loop(self):
+        """
+        Dedicated background thread — evaluates open positions every 2 seconds.
+
+        Decouples exit latency from the main market cycle (which scores 499 pairs
+        and takes 10-15 seconds per iteration).  The 2-second interval ensures Tier 3
+        force-exits and HWM pullback basket-exits fire within one full candle tick of
+        the price reversal rather than being delayed by the ranking/sleep pipeline.
+        """
+        from app.domain.predictor import get_prediction
+        while True:
+            try:
+                tickers = self.market_ws.get_tickers()
+                if tickers:
+                    self.exit_manager.monitor_and_execute(
+                        current_tickers=tickers,
+                        price_history=self.price_history,
+                        get_prediction_fn=get_prediction,
+                    )
+            except Exception as e:
+                log_message(f"Error in _exit_monitor_loop: {e}")
+            time.sleep(2)
+
     def _insight_loop(self):
         while True:
             try:
@@ -332,6 +350,7 @@ class ScalperBot:
 
         log_message("WebSocket clients running. Starting background threads…")
         self.insight_thread.start()
+        self.exit_monitor_thread.start()
         log_message("Starting main loop…")
 
         while True:
