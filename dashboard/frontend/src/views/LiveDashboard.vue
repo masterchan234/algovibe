@@ -179,6 +179,8 @@ const backendUrl = import.meta.env.DEV
   ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
   : window.location.origin
 
+const ORDER_POLL_INTERVAL_MS = 10_000
+
 // ── Live State (target protection, peak PnL, session) ─────────────────────
 const liveState = ref({
   target_protection_active: false,
@@ -283,8 +285,8 @@ onMounted(async () => {
   // Seed state before first socket push
   await fetchLiveState()
   await fetchOrders()
-  // Poll orders every 10 seconds
-  _pollInterval = setInterval(fetchOrders, 10_000)
+  // Poll orders every ORDER_POLL_INTERVAL_MS
+  _pollInterval = setInterval(fetchOrders, ORDER_POLL_INTERVAL_MS)
 })
 
 onUnmounted(() => {

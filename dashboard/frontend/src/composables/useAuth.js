@@ -8,7 +8,9 @@ const userInfo = ref(null)
 function _parseToken(t) {
   if (!t) return null
   try {
-    const payload = JSON.parse(atob(t.split('.')[1]))
+    const parts = t.split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(atob(parts[1]))
     // Check expiry
     if (payload.exp && Date.now() / 1000 > payload.exp) {
       return null

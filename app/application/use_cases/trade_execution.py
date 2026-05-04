@@ -296,12 +296,19 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
             return {"pair": pair, "ok": False, "error": "invalid position data"}
 
         symbol = pair.upper().replace("IDR", "/IDR")
+        # Build Indodax param: ensure suffix is exactly '_idr', not mid-string
+        _pair_param = pair.lower()
+        if _pair_param.endswith("idr"):
+            _pair_param = _pair_param[:-3] + "_idr"
         try:
             order = exchange_client.create_order(
                 symbol, "market", "sell", amount_crypto, None,
-                {"pair": pair.replace("idr", "_idr")}
+                {"pair": _pair_param}
             )
-            order_id = order.get("id") or f"LIVE-SELL-{int(time.time())}"
+            import random as _random
+            order_id = order.get("id") or (
+                f"LIVE-SELL-{pair}-{int(time.time())}-{_random.randint(1000, 9999)}"
+            )
             fill_price = float(order.get("price") or entry_price)
 
             # Record in order_book

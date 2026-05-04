@@ -425,22 +425,21 @@ class ExitManager:
 
                 # Latch: once PnL climbs above the safety zone, protect it on any decline.
                 if _momentum_enabled and total_net_pnl >= _safety_zone_upper:
-                    if not self._was_above_safety_zone:
-                        # Fire "Target Reached" only once per session
-                        if "TARGET_REACHED" not in self._target_fired_session:
-                            self._target_fired_session.add("TARGET_REACHED")
-                            _tr_msg = (
-                                f"🎯 *TARGET REACHED* 🎯\n"
-                                f"Net PnL: Rp {total_net_pnl:,.0f} ≥ "
-                                f"Safety Zone Rp {_safety_zone_upper:,.0f}\n"
-                                f"Floor Protection: ACTIVE"
-                            )
-                            log_message(_tr_msg.replace('*', '').replace('\n', ' | '))
-                            send_telegram_message(_tr_msg)
-                            try:
-                                db.save_state("target_protection_active", "true")
-                            except Exception:
-                                pass
+                    # Fire "Target Reached" exactly once per session (guarded by _target_fired_session)
+                    if "TARGET_REACHED" not in self._target_fired_session:
+                        self._target_fired_session.add("TARGET_REACHED")
+                        _tr_msg = (
+                            f"🎯 *TARGET REACHED* 🎯\n"
+                            f"Net PnL: Rp {total_net_pnl:,.0f} ≥ "
+                            f"Safety Zone Rp {_safety_zone_upper:,.0f}\n"
+                            f"Floor Protection: ACTIVE"
+                        )
+                        log_message(_tr_msg.replace('*', '').replace('\n', ' | '))
+                        send_telegram_message(_tr_msg)
+                        try:
+                            db.save_state("target_protection_active", "true")
+                        except Exception:
+                            pass
                     self._was_above_safety_zone = True
 
                 # True when PnL is in the warning range [Target, Target + buffer).
