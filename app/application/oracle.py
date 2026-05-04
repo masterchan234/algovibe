@@ -258,10 +258,12 @@ class Oracle:
         import json
 
         pair = pair.lower()
-        # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
-        conn = sqlite3.connect(db.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
+        conn = None
         try:
+            # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
+            conn = sqlite3.connect(db.db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+
             # 1. Ticker History
             row = conn.execute(
                 "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
@@ -318,8 +320,41 @@ class Oracle:
             last_price = float(prices[-1]) if prices else 0
             
             return self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type=task_type)
+        except sqlite3.DatabaseError as e:
+            # Fail-safe: jika SQLite korup/malformed, jangan matikan bot.
+            err = str(e).lower()
+            if "malformed" in err or "database disk image is malformed" in err:
+                log_message(
+                    f"⚠️ [Oracle] SQLite malformed on {db.db_path}. Rich prompt fallback aktif untuk {pair}."
+                )
+            else:
+                log_message(f"⚠️ [Oracle] SQLite error in rich prompt for {pair}: {e}")
+
+            ws_ticker = self.market_ws.get_tickers().get(pair, {}) if self.market_ws else {}
+            ws_last = float(ws_ticker.get('last', 0) or 0)
+            tech = {
+                'rsi': 'N/A',
+                'volatility': 'N/A',
+                'signal': 'HOLD',
+                'reason': 'fallback_no_db',
+                'verdict': 'HOLD',
+                'tech_confidence': 0,
+            }
+            ob_ctx = {
+                'buy_pressure': 50.0,
+                'imbalance': 1.0,
+                'bid_depth': 0,
+                'ask_depth': 0,
+                'best_bid': 0,
+                'best_ask': 0,
+                'spread_pct': 0,
+                'trade_summary': 'N/A (db unavailable)',
+            }
+            ctx = self._build_rich_market_context(pair, [], tech, None)
+            return self._format_rich_prompt(pair, ws_last, tech, ob_ctx, ctx, task_type=task_type)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def auto_queue_buy_candidates(self, ranked_signals):
         """
