@@ -449,14 +449,19 @@ class ExitManager:
                                     f"Basket Exit Completed (Profit Secured) — "
                                     f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
                                 ),
-                                "ts": time.time(),
                             }))
                         else:
                             # SAFETY-GATE: protection for loss/neutral exits — require user approval.
+                            # Preserve original timeout defaults: harvest-type → auto-reject;
+                            # safety/rescue exits → auto-approve (consistent with prior behaviour).
                             log_message(
                                 f"⚠️ [SAFETY-GATE] Protection active for neutral/loss exit. "
                                 f"Awaiting user approval."
                             )
+                            _is_harvest = (
+                                trigger_harvest_idr or trigger_harvest_pct or trigger_hwm_pullback
+                            )
+                            _default_approve = not _is_harvest
                             _reason_text = (
                                 f"Net PnL: Rp {total_net_pnl:,.0f} | "
                                 f"Net {net_pnl_pct:+.4f}% | Trigger: {trigger_label}"
@@ -469,7 +474,7 @@ class ExitManager:
                                 description=_pairs_desc,
                                 reason_text=_reason_text,
                                 impact_idr=total_net_pnl,
-                                default_approve=False,
+                                default_approve=_default_approve,
                             )
                             if not _approved:
                                 log_message(
