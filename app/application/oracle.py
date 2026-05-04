@@ -1,7 +1,7 @@
 import time
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import config
 from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
 from app.infrastructure.database import db
@@ -1143,11 +1143,12 @@ class Oracle:
             # Win Rate
             win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
 
-            # Profit Factor = Gross Profit / |Gross Loss|; ∞ when no losses recorded
+            # Profit Factor = Gross Profit / |Gross Loss|; use 9999.0 when no losses recorded
+            _MAX_PROFIT_FACTOR = 9999.0   # cap value used when there are no losses (avoids ∞ in JSON)
             if gross_loss < 0:
                 profit_factor = gross_profit / abs(gross_loss)
             elif gross_profit > 0:
-                profit_factor = float('inf')
+                profit_factor = _MAX_PROFIT_FACTOR
             else:
                 profit_factor = 0.0
 
@@ -1166,13 +1167,13 @@ class Oracle:
                 "win_rate": round(win_rate, 2),
                 "win_count": win_count,
                 "total_trades": total_trades,
-                "profit_factor": profit_factor if profit_factor != float('inf') else 9999.0,  # cap ∞ for JSON serialisation
+                "profit_factor": profit_factor,  # capped at 9999.0 when no losses (see _MAX_PROFIT_FACTOR)
                 "gross_profit": gross_profit,
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
                 "estimated_fees": round(estimated_fees, 2),
                 "total_volume_idr": total_volume,
-                "triggered_at": datetime.now().isoformat(),
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
                 "status": "PENDING",  # PENDING → CONTINUE or STOP after user action
             }
             db.save_state("strategic_break_payload", json.dumps(payload))

@@ -2549,7 +2549,8 @@ def session_action():
             try:
                 orig_target = float(db.get_state("daily_profit_target") or 0)
                 target_pct = (orig_target / equity) if equity > 0 else 0.01
-            except Exception:
+            except Exception as _tpe:
+                logging.warning(f"[StrategicBreak] Could not derive target_pct: {_tpe}. Using 1% fallback.")
                 target_pct = 0.01
 
             # New profit target = equity × target_pct
