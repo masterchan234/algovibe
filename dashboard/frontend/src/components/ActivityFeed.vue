@@ -24,8 +24,8 @@
           @click="filterMode = 'active'"
         >
           Active
-          <span v-if="store.positions.filter(p => ['OPEN', 'EXITING'].includes(p.status.toUpperCase())).length > 0" class="tab-count">
-            {{ store.positions.filter(p => ['OPEN', 'EXITING'].includes(p.status.toUpperCase())).length }}
+          <span v-if="activeVisibleCount > 0" class="tab-count">
+            {{ activeVisibleCount }}
           </span>
         </button>
         <button 
@@ -52,14 +52,14 @@
         </div>
         <div class="positions-list">
           <div
-            v-for="pos in store.positions"
+            v-for="pos in visiblePositions"
             :key="pos.pair"
             class="position-item"
-            :class="pos.pnl_net_idr >= 0 ? 'green' : 'red'"
+            :class="[pos.pnl_net_idr >= 0 ? 'green' : 'red', { 'exit-pending': isExitRequested(pos.pair) }]"
           >
             <div class="col-pair">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
-              <div class="status-pill" :class="pos.status.toLowerCase()">{{ pos.status }}</div>
+              <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
             </div>
             
             <div class="col-size">
@@ -97,7 +97,7 @@
 
             <div class="col-exit">
               <button
-                v-if="(pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
+                v-if="(pos.status || '').toUpperCase() === 'OPEN' && (pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
@@ -105,9 +105,10 @@
               >
                 {{ exitingPairs.has(pos.pair) ? '⏳' : 'EXIT' }}
               </button>
+              <span v-else-if="isExitRequested(pos.pair)" class="exit-queued">QUEUED</span>
             </div>
           </div>
-          <div v-if="filterMode === 'active' && store.positions.length === 0" class="empty-state">
+          <div v-if="filterMode === 'active' && visiblePositions.length === 0" class="empty-state">
             No active positions.
           </div>
         </div>
@@ -194,7 +195,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
 
 const store = useTradeStore()
@@ -206,11 +207,57 @@ const manualExitMaxNetPct = computed(() => store.stats.manual_exit_max_net_pct ?
 
 // Track pairs currently being exited to disable the button during processing
 const exitingPairs = ref(new Set())
+const exitRequestedPairs = ref(new Set())
+const temporarilyHiddenExitRows = ref(new Set())
+
+const visiblePositions = computed(() =>
+  store.positions.filter(p => !temporarilyHiddenExitRows.value.has(String(p.pair || '').toLowerCase()))
+)
+
+const activeVisibleCount = computed(() =>
+  visiblePositions.value.filter(p => ['OPEN', 'EXITING'].includes(String(p.status || '').toUpperCase())).length
+)
 
 function getCookie(name) {
   const value = `; ${document.cookie}`
   const parts = value.split(`; ${name}=`)
   if (parts.length === 2) return parts.pop().split(';').shift()
+}
+
+function normalizePair(pair) {
+  return String(pair || '').toLowerCase()
+}
+
+function isExitRequested(pair) {
+  return exitRequestedPairs.value.has(normalizePair(pair))
+}
+
+function displayStatus(pos) {
+  if (isExitRequested(pos.pair) && String(pos.status || '').toUpperCase() === 'EXITING') {
+    return 'EXIT REQUESTED'
+  }
+  return pos.status
+}
+
+function markExitRequestedUx(pair) {
+  const key = normalizePair(pair)
+  exitRequestedPairs.value = new Set([...exitRequestedPairs.value, key])
+
+  // Hide row briefly to create instant feedback after successful click.
+  setTimeout(() => {
+    temporarilyHiddenExitRows.value = new Set([...temporarilyHiddenExitRows.value, key])
+  }, 700)
+
+  // Restore row visibility if it is still present, and clear requested marker.
+  setTimeout(() => {
+    const nextHidden = new Set(temporarilyHiddenExitRows.value)
+    nextHidden.delete(key)
+    temporarilyHiddenExitRows.value = nextHidden
+
+    const nextReq = new Set(exitRequestedPairs.value)
+    nextReq.delete(key)
+    exitRequestedPairs.value = nextReq
+  }, 12000)
 }
 
 async function handleManualExit(pair) {
@@ -241,6 +288,12 @@ async function handleManualExit(pair) {
       } else {
         alert(`Exit failed: ${err.error || res.statusText}`)
       }
+    } else {
+      const target = store.positions.find(p => (p.pair || '').toLowerCase() === String(pair).toLowerCase())
+      if (target) {
+        target.status = 'EXITING'
+      }
+      markExitRequestedUx(pair)
     }
   } catch (e) {
     alert(`Exit request error: ${e.message}`)
@@ -255,6 +308,20 @@ async function handleManualExit(pair) {
 }
 
 const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
+
+watch(openPairSet, (pairs) => {
+  const alive = new Set(Array.from(pairs || []))
+
+  const nextReq = new Set(Array.from(exitRequestedPairs.value).filter(p => alive.has(p)))
+  if (nextReq.size !== exitRequestedPairs.value.size) {
+    exitRequestedPairs.value = nextReq
+  }
+
+  const nextHidden = new Set(Array.from(temporarilyHiddenExitRows.value).filter(p => alive.has(p)))
+  if (nextHidden.size !== temporarilyHiddenExitRows.value.size) {
+    temporarilyHiddenExitRows.value = nextHidden
+  }
+}, { immediate: true })
 
 const filteredStream = computed(() => {
   const items = store.activityFeed
@@ -407,6 +474,11 @@ function formatIdr(val) {
 
 .position-item:hover, .history-item:hover {
   background: rgba(88, 166, 255, 0.03);
+}
+
+.position-item.exit-pending {
+  border-left: 3px solid rgba(210, 153, 34, 0.5);
+  background: rgba(210, 153, 34, 0.06);
 }
 
 .pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
@@ -573,4 +645,15 @@ function formatIdr(val) {
 }
 .btn-manual-exit:hover:not(:disabled) { background: #f85149; }
 .btn-manual-exit:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.exit-queued {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
 </style>

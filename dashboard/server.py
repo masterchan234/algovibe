@@ -2258,7 +2258,7 @@ def _build_trades_payload():
                     "amount_coin":  amount_crypto,
                     "duration":     0,
                     "created_at":   str(p.get('timestamp') or ''),
-                    "status":       "OPEN",
+                    "status":       pos_status,
                     "pos_status":   pos_status,
                     "is_manual":    0
                 })
