@@ -63,6 +63,61 @@
       ⚠️ Bot engine appears offline or unreachable. Displaying last known state.
     </div>
 
+    <!-- ── Net-Zero Survival Activated Banner ─────────────────────── -->
+    <div v-if="liveState.net_zero_survival_active" class="nz-survival-banner">
+      🛡️ NET-ZERO SURVIVAL ACTIVATED — Emergency exit executed. System Paused.
+      Manual review required before resuming.
+    </div>
+
+    <!-- ── Safety Gauge (Net-Zero Survival Zone) ──────────────────── -->
+    <div
+      class="safety-gauge-wrap"
+      :class="{ 'gauge-danger': safetyIsDanger || liveState.net_zero_survival_active }"
+      v-if="livePositions.length > 0 || liveState.net_zero_survival_active"
+    >
+      <div class="gauge-header">
+        <span class="gauge-icon">🛡️</span>
+        <span class="gauge-title">SURVIVAL SAFETY GAUGE</span>
+        <span class="gauge-net" :class="safetyNetPnl >= 0 ? 'profit' : 'loss'">
+          Net: {{ safetyNetPnl >= 0 ? '+' : '' }}Rp {{ formatNumber(safetyNetPnl) }}
+        </span>
+        <span class="gauge-vel" :class="_momentumState === 'DROPPING' ? 'loss' : (_momentumState === 'IMPROVING' ? 'profit' : 'neutral')">
+          {{ momentumIcon }} {{ liveState.net_pnl_velocity >= 0 ? '+' : '' }}{{ Number(liveState.net_pnl_velocity).toFixed(1) }} IDR/s
+        </span>
+      </div>
+
+      <div class="gauge-bar-row">
+        <span class="gauge-lbl">Realized</span>
+        <div class="gauge-track">
+          <div
+            class="gauge-fill"
+            :style="{
+              width: safetyGaugePct + '%',
+              background: safetyGaugeColor,
+              transition: 'width 0.6s ease, background 0.4s ease',
+            }"
+          ></div>
+          <div class="gauge-zero-line" :class="{ 'zero-blink': safetyIsDanger || liveState.net_zero_survival_active }"></div>
+        </div>
+        <span class="gauge-pct" :style="{ color: safetyGaugeColor }">{{ safetyGaugePct.toFixed(0) }}%</span>
+      </div>
+
+      <div class="gauge-legend-row">
+        <span class="gauge-legend-item">
+          <span class="legend-dot" style="background:#00e676"></span>
+          Realized: {{ liveState.net_pnl_realized >= 0 ? '+' : '' }}Rp {{ formatNumber(liveState.net_pnl_realized) }}
+        </span>
+        <span class="gauge-legend-item">
+          <span class="legend-dot" :style="{ background: liveState.net_pnl_unrealized >= 0 ? '#00e676' : '#ff4444' }"></span>
+          Unrealized: {{ liveState.net_pnl_unrealized >= 0 ? '+' : '' }}Rp {{ formatNumber(liveState.net_pnl_unrealized) }}
+        </span>
+        <span class="gauge-legend-item" :class="safetyNetPnl >= 0 ? 'profit' : 'loss'">
+          <span class="legend-dot" :style="{ background: safetyGaugeColor }"></span>
+          Net PnL: {{ safetyNetPnl >= 0 ? '+' : '' }}Rp {{ formatNumber(safetyNetPnl) }}
+        </span>
+      </div>
+    </div>
+
     <!-- ── Mobile KPI strip ──────────────────────────────────────────── -->
     <div class="mobile-kpi-strip show-on-mobile">
       <div class="mkpi">
@@ -298,6 +353,10 @@ const liveState = ref({
   session_mode: 'NORMAL',
   is_latched: false,
   bot_offline: false,
+  net_zero_survival_active: false,
+  net_pnl_velocity: 0,
+  net_pnl_realized: 0,
+  net_pnl_unrealized: 0,
 })
 
 // ── Orders ─────────────────────────────────────────────────────────────────
@@ -323,6 +382,30 @@ const momentumIcon = computed(() => {
   if (_momentumState.value === 'IMPROVING') return '▲'
   if (_momentumState.value === 'DROPPING') return '▼'
   return '●'
+})
+
+// ── Safety Gauge (Net-Zero Survival) ───────────────────────────────────────
+// netPnl = realized + unrealized; gauge shows how far from zero we are
+const safetyNetPnl = computed(
+  () => liveState.value.net_pnl_realized + liveState.value.net_pnl_unrealized
+)
+// Buffer is the realized profit that cushions unrealised losses
+const safetyBuffer = computed(() => liveState.value.net_pnl_realized)
+// Gauge fill % — 100 % when net PnL equals realized buffer; 0 % at net zero
+const safetyGaugePct = computed(() => {
+  const buffer = safetyBuffer.value
+  if (buffer <= 0) return 0
+  return Math.max(0, Math.min(100, (safetyNetPnl.value / buffer) * 100))
+})
+// Danger condition: net PnL is low AND momentum is DROPPING
+const safetyIsDanger = computed(() =>
+  (safetyGaugePct.value < 20 || safetyNetPnl.value <= 0)
+  && _momentumState.value === 'DROPPING'
+)
+const safetyGaugeColor = computed(() => {
+  if (liveState.value.net_zero_survival_active || safetyIsDanger.value) return '#ff1e1e'
+  if (safetyGaugePct.value < 40) return '#f5a623'
+  return '#00e676'
 })
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -408,7 +491,9 @@ function formatTime(ts) {
 }
 
 // ── Polling interval ────────────────────────────────────────────────────────
+const LIVE_STATE_POLL_MS = 3_000   // poll live state (gauge) every 3 s
 let _pollInterval = null
+let _statePollInterval = null
 
 onMounted(async () => {
   if (!store.socket) store.connect()
@@ -417,10 +502,13 @@ onMounted(async () => {
   await fetchOrders()
   // Poll orders every ORDER_POLL_INTERVAL_MS
   _pollInterval = setInterval(fetchOrders, ORDER_POLL_INTERVAL_MS)
+  // Poll live state (gauge + Net-Zero) every LIVE_STATE_POLL_MS
+  _statePollInterval = setInterval(fetchLiveState, LIVE_STATE_POLL_MS)
 })
 
 onUnmounted(() => {
   if (_pollInterval) clearInterval(_pollInterval)
+  if (_statePollInterval) clearInterval(_statePollInterval)
 })
 </script>
 
@@ -918,4 +1006,130 @@ onUnmounted(() => {
 .lmn-btn.active { color: #f5a623; }
 .lmn-btn > span:first-child { font-size: 20px; line-height: 1; }
 .lmn-label { font-size: 10px; font-weight: 600; text-transform: uppercase; }
+
+/* ── Net-Zero Survival Activated Banner ─────────────────────────────── */
+.nz-survival-banner {
+  background: rgba(255, 30, 30, 0.15);
+  border-bottom: 2px solid #ff1e1e;
+  border-top: 2px solid #ff1e1e;
+  color: #ff4444;
+  padding: 10px 20px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-align: center;
+  animation: nz-pulse 1.5s ease-in-out infinite;
+}
+@keyframes nz-pulse {
+  0%, 100% { background: rgba(255, 30, 30, 0.15); }
+  50%       { background: rgba(255, 30, 30, 0.30); }
+}
+
+/* ── Safety Gauge ────────────────────────────────────────────────────── */
+.safety-gauge-wrap {
+  margin: 0 16px 0 16px;
+  padding: 10px 14px;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.4s ease;
+}
+.safety-gauge-wrap.gauge-danger {
+  border-color: #ff1e1e;
+  box-shadow: 0 0 12px rgba(255, 30, 30, 0.25);
+}
+.gauge-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.gauge-icon { font-size: 1rem; }
+.gauge-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #f5a623;
+  flex: 1;
+}
+.gauge-net, .gauge-vel {
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.gauge-vel.neutral { color: #f5a623; }
+
+.gauge-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.gauge-lbl {
+  font-size: 0.6rem;
+  color: #666;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  width: 52px;
+  flex-shrink: 0;
+}
+.gauge-track {
+  flex: 1;
+  height: 10px;
+  background: #1e1e1e;
+  border-radius: 5px;
+  overflow: visible;
+  position: relative;
+  border: 1px solid #333;
+}
+.gauge-fill {
+  height: 100%;
+  border-radius: 5px;
+  min-width: 2px;
+}
+.gauge-zero-line {
+  position: absolute;
+  right: 0;
+  top: -3px;
+  width: 2px;
+  height: 16px;
+  background: #555;
+  border-radius: 1px;
+}
+.gauge-zero-line.zero-blink {
+  background: #ff1e1e;
+  animation: zero-blink 0.8s ease-in-out infinite;
+}
+@keyframes zero-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+.gauge-pct {
+  font-size: 0.7rem;
+  font-weight: 700;
+  width: 36px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.gauge-legend-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.gauge-legend-item {
+  font-size: 0.62rem;
+  color: #888;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.neutral { color: #f5a623; }
 </style>

@@ -1203,7 +1203,9 @@ def get_live_state():
         rows = live_conn.execute(
             "SELECT key, value FROM bot_state WHERE key IN "
             "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
-            "'session_mode', 'session_latched')"
+            "'session_mode', 'session_latched', "
+            "'net_zero_survival_active', 'net_pnl_velocity', "
+            "'net_pnl_realized', 'net_pnl_unrealized')"
         ).fetchall()
         live_conn.close()
         state = {r['key']: r['value'] for r in rows}
@@ -1216,6 +1218,10 @@ def get_live_state():
                 (state.get("session_latched", "false") == "true")
                 or (state.get("session_mode", "NORMAL") == "HARVEST_ONLY")
             ),
+            "net_zero_survival_active": state.get("net_zero_survival_active", "false") == "true",
+            "net_pnl_velocity": float(state.get("net_pnl_velocity") or 0),
+            "net_pnl_realized": float(state.get("net_pnl_realized") or 0),
+            "net_pnl_unrealized": float(state.get("net_pnl_unrealized") or 0),
         })
     except Exception as e:
         logging.warning(f"[/api/live/state] {e}")
@@ -1226,6 +1232,10 @@ def get_live_state():
             "session_mode": "NORMAL",
             "is_latched": False,
             "bot_offline": True,
+            "net_zero_survival_active": False,
+            "net_pnl_velocity": 0,
+            "net_pnl_realized": 0,
+            "net_pnl_unrealized": 0,
         })
 
 
