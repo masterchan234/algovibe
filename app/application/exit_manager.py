@@ -22,6 +22,8 @@ from config import (
     MOMENTUM_HIGH_CORR_BUFFER_REDUCTION,
     NET_ZERO_SURVIVAL_ENABLED, NET_ZERO_MOMENTUM_THRESHOLD, NET_ZERO_HYSTERESIS_SEC,
     NET_ZERO_IMMEDIATE_VELOCITY,
+    NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
+    NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -551,10 +553,16 @@ class ExitManager:
                 fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
 
-                # ── Net-Zero Survival Guard ───────────────────────────────────────────────
-                # Monitors: Net PnL (realized + unrealized) ≤ 0 AND velocity dropping.
-                # Fires BASKET_EXIT after NET_ZERO_HYSTERESIS_SEC consecutive seconds.
-                if NET_ZERO_SURVIVAL_ENABLED and not self._net_zero_fired:
+                # ── Net-Zero Survival Guard (v3) ──────────────────────────────────────────
+                # Fires BASKET_EXIT when the combined Net PnL (realized + unrealized)
+                # breaches its active floor with negative momentum.
+                #
+                # v3 behaviour:
+                #   • Before target reached: uses NET_ZERO_PNL_FLOOR_IDR as hard loss floor.
+                #   • After target reached: floor ratchets upward with latest Net PnL,
+                #     preserving profit and forcing unrealized-profit execution on breakdown.
+                #   • Avg velocity + hysteresis remain to filter noise.
+                if NET_ZERO_SURVIVAL_ENABLED:
                     try:
                         realized_pnl_today = db.get_daily_stats()['total_pnl_idr']
                         net_total_pnl = realized_pnl_today + total_net_pnl
@@ -563,53 +571,180 @@ class ExitManager:
                             db.save_state("net_pnl_realized", str(round(realized_pnl_today, 2)))
                         except Exception:
                             pass
-                        latest_velocity = self._velocity_readings[-1] if self._velocity_readings else 0.0
-                        nz_condition = (
-                            net_total_pnl <= 0
-                            and latest_velocity < NET_ZERO_MOMENTUM_THRESHOLD
+
+                        # Resolve target-aware floor.
+                        target_raw = db.get_state("daily_profit_target")
+                        daily_target_idr = float(target_raw) if target_raw else float(MOMENTUM_TARGET_PNL_IDR or 0.0)
+                        locked_target_raw = db.get_state("net_zero_target_floor")
+                        locked_target_floor = float(locked_target_raw) if locked_target_raw else 0.0
+                        active_target_floor = max(daily_target_idr, locked_target_floor)
+
+                        peak_raw = db.get_state("peak_pnl_today")
+                        peak_pnl_today = float(peak_raw) if peak_raw else 0.0
+                        target_reached_once = (
+                            (daily_target_idr > 0 and peak_pnl_today >= daily_target_idr)
+                            or locked_target_floor > 0
                         )
-                        # Momentum spike: extreme crash velocity — bypass hysteresis entirely.
-                        nz_immediate = (
-                            net_total_pnl <= 0
-                            and latest_velocity < NET_ZERO_IMMEDIATE_VELOCITY
-                        )
-                        if nz_condition:
-                            # Always stamp the timer on first detection (also covers
-                            # the nz_immediate fast-path where we fire on tick 1).
-                            if self._net_zero_trigger_ts == 0.0:
-                                self._net_zero_trigger_ts = _now_ts
+
+                        # Ratchet target upward after target reached.
+                        # Keep a breathing buffer so minor pullbacks do not instantly fire.
+                        if target_reached_once and net_total_pnl > 0:
+                            candidate_floor = max(
+                                active_target_floor,
+                                net_total_pnl - float(max(MOMENTUM_SAFETY_BUFFER_IDR, 0.0)),
+                            )
+                            if candidate_floor > active_target_floor:
+                                active_target_floor = candidate_floor
+                                try:
+                                    db.save_state("net_zero_target_floor", str(round(active_target_floor, 2)))
+                                    db.save_state("daily_profit_target", str(round(active_target_floor, 2)))
+                                except Exception:
+                                    pass
                                 log_message(
-                                    f"⚠️ [NET-ZERO GUARD] Condition detected — hysteresis timer started. "
-                                    f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
-                                    f"Velocity: {latest_velocity:+.1f} IDR/s"
+                                    f"🎯 [NET-ZERO TARGET RATCHET] Floor naik ke Rp {active_target_floor:,.0f} "
+                                    f"(Net PnL: Rp {net_total_pnl:,.0f})"
                                 )
-                            # nz_immediate: extreme crash velocity → bypass hysteresis on this tick.
-                            # Hysteresis path: condition sustained for the required duration.
-                            # In both cases _net_zero_trigger_ts is already set above.
-                            if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
-                                if nz_immediate:
-                                    log_message(
-                                        f"🚨 [NET-ZERO GUARD] IMMEDIATE exit — extreme velocity "
-                                        f"{latest_velocity:+.1f} IDR/s bypasses hysteresis."
+
+                        # Once profit floor is locked, switch to HARVEST_ONLY (sell-only)
+                        # so the bot secures existing unrealized profit without opening new risk.
+                        if target_reached_once and active_target_floor > 0:
+                            _session_mode = db.get_state("session_mode") or "NORMAL"
+                            _buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
+                            if _session_mode != "HARVEST_ONLY" or _buy_enabled:
+                                try:
+                                    db.save_state("session_buy_enabled", "false")
+                                    db.save_state("session_mode", "HARVEST_ONLY")
+                                    db.save_state("session_latched", "true")
+                                    db.save_state("target_protection_active", "true")
+                                except Exception:
+                                    pass
+                                log_message(
+                                    f"🌾 [NET-ZERO PROFIT LOCK] HARVEST_ONLY aktif | "
+                                    f"Buy blocked | Floor: Rp {active_target_floor:,.0f}"
+                                )
+                                send_telegram_message(
+                                    f"🌾 *NET-ZERO Profit Lock*\n"
+                                    f"Mode: HARVEST_ONLY (sell-only)\n"
+                                    f"Target Floor: Rp {active_target_floor:,.0f}\n"
+                                    f"Buy baru diblok untuk menjaga profit."
+                                )
+
+                        net_zero_floor = active_target_floor if target_reached_once else float(NET_ZERO_PNL_FLOOR_IDR)
+
+                        # ── Auto-recovery check ───────────────────────────────────────────
+                        # After the guard fires, give the session NET_ZERO_AUTO_RESET_SEC to
+                        # recover.  If PnL is back above the floor when the timer expires,
+                        # auto-re-enable buys so profitable sessions aren't permanently halted.
+                        if self._net_zero_fired and NET_ZERO_AUTO_RESET_SEC > 0:
+                            fired_at = float(db.get_state("net_zero_fired_at") or 0)
+                            fired_floor = float(db.get_state("net_zero_floor_locked") or net_zero_floor)
+                            if fired_at > 0 and (_now_ts - fired_at) >= NET_ZERO_AUTO_RESET_SEC:
+                                if net_total_pnl > fired_floor:
+                                    self._net_zero_fired = False
+                                    self._net_zero_trigger_ts = 0.0
+                                    try:
+                                        if target_reached_once:
+                                            db.save_state("session_buy_enabled", "false")
+                                            db.save_state("session_mode", "HARVEST_ONLY")
+                                            db.save_state("session_latched", "true")
+                                        else:
+                                            db.save_state("session_buy_enabled", "true")
+                                            db.save_state("session_mode", "NORMAL")
+                                            db.save_state("session_latched", "false")
+                                        db.save_state("net_zero_survival_active", "false")
+                                    except Exception:
+                                        pass
+                                    _recovery_msg = (
+                                        f"🟢 [NET-ZERO GUARD] Auto-recovery: PnL Rp {net_total_pnl:+,.0f} "
+                                        f"above floor Rp {fired_floor:,.0f} after {NET_ZERO_AUTO_RESET_SEC}s cooldown. "
+                                        f"Mode: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
                                     )
-                                # Condition sustained for required duration — fire survival guard.
-                                self._net_zero_fired = True
-                                self._fire_net_zero_survival(
-                                    open_pairs_for_basket=open_pairs_for_basket,
-                                    realized_pnl=realized_pnl_today,
-                                    unrealized_pnl=total_net_pnl,
-                                    net_total_pnl=net_total_pnl,
-                                    latest_velocity=latest_velocity,
-                                    mark_exit_requested=mark_exit_requested,
-                                    positions=positions,
-                                    modified_pairs=modified_pairs,
-                                    current_tickers=current_tickers,
+                                    log_message(_recovery_msg)
+                                    send_telegram_message(
+                                        f"🟢 *NET-ZERO Auto-Recovery*\n"
+                                        f"Net PnL: Rp {net_total_pnl:+,.0f} — kondisi pulih.\n"
+                                        f"Mode aktif: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
+                                    )
+
+                        if not self._net_zero_fired:
+                            # AVERAGE velocity over rolling window — filters noisy single-tick spikes.
+                            avg_velocity = (
+                                sum(self._velocity_readings) / len(self._velocity_readings)
+                                if self._velocity_readings else 0.0
+                            )
+                            # LAST velocity — kept for the immediate-bypass crash detector only.
+                            latest_velocity = self._velocity_readings[-1] if self._velocity_readings else 0.0
+
+                            # Unrealised loss as fraction of total invested capital in this basket.
+                            unrealized_loss_pct = (
+                                total_net_pnl / total_amount_idr if total_amount_idr > 0 else 0.0
+                            )
+
+                            # Trigger policy differs by phase:
+                            # - Post-target: prioritize profit protection (floor + momentum + basket size).
+                            # - Pre-target : retain loss-quality gate to avoid noise exits.
+                            if target_reached_once:
+                                nz_condition = (
+                                    net_total_pnl <= net_zero_floor
+                                    and avg_velocity < NET_ZERO_MOMENTUM_THRESHOLD
+                                    and n >= NET_ZERO_MIN_POSITIONS
                                 )
-                                return  # basket exit submitted; exit evaluation frame
-                        else:
-                            # Condition no longer met — reset hysteresis timer.
-                            if self._net_zero_trigger_ts != 0.0:
-                                self._net_zero_trigger_ts = 0.0
+                                nz_immediate = (
+                                    net_total_pnl <= net_zero_floor
+                                    and latest_velocity < NET_ZERO_IMMEDIATE_VELOCITY
+                                    and n >= NET_ZERO_MIN_POSITIONS
+                                )
+                            else:
+                                nz_condition = (
+                                    net_total_pnl <= net_zero_floor
+                                    and avg_velocity < NET_ZERO_MOMENTUM_THRESHOLD
+                                    and unrealized_loss_pct < -NET_ZERO_MIN_UNREALIZED_LOSS_PCT
+                                    and n >= NET_ZERO_MIN_POSITIONS
+                                )
+                                # Immediate crash bypass is disabled until target profit
+                                # has been reached at least once.
+                                nz_immediate = False
+
+                            if nz_condition:
+                                # Stamp the timer on first detection.
+                                if self._net_zero_trigger_ts == 0.0:
+                                    self._net_zero_trigger_ts = _now_ts
+                                    log_message(
+                                        f"⚠️ [NET-ZERO GUARD] Condition detected — hysteresis timer started. "
+                                        f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
+                                        f"Floor: Rp {net_zero_floor:,.0f} | "
+                                        f"Avg velocity: {avg_velocity:+.1f} IDR/s | "
+                                        f"Mode: {'PROFIT_PROTECT' if target_reached_once else 'LOSS_SURVIVAL'} | "
+                                        f"Unrealised: {unrealized_loss_pct*100:.2f}%"
+                                    )
+                                if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
+                                    if nz_immediate:
+                                        log_message(
+                                            f"🚨 [NET-ZERO GUARD] IMMEDIATE exit — extreme crash velocity "
+                                            f"{latest_velocity:+.1f} IDR/s bypasses hysteresis."
+                                        )
+                                    self._net_zero_fired = True
+                                    try:
+                                        db.save_state("net_zero_fired_at", str(_now_ts))
+                                        db.save_state("net_zero_floor_locked", str(net_zero_floor))
+                                    except Exception:
+                                        pass
+                                    self._fire_net_zero_survival(
+                                        open_pairs_for_basket=open_pairs_for_basket,
+                                        realized_pnl=realized_pnl_today,
+                                        unrealized_pnl=total_net_pnl,
+                                        net_total_pnl=net_total_pnl,
+                                        latest_velocity=avg_velocity,
+                                        mark_exit_requested=mark_exit_requested,
+                                        positions=positions,
+                                        modified_pairs=modified_pairs,
+                                        current_tickers=current_tickers,
+                                    )
+                                    return  # basket exit submitted; exit evaluation frame
+                            else:
+                                # Condition no longer met — reset hysteresis timer.
+                                if self._net_zero_trigger_ts != 0.0:
+                                    self._net_zero_trigger_ts = 0.0
                     except Exception as _nz_err:
                         log_message(f"⚠️ [NET-ZERO GUARD] Check error: {_nz_err}")
 

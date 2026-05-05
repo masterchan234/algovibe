@@ -13,6 +13,15 @@ from config import (
     MAX_TRACKED_PAIRS,
     MAX_TRADES_PER_DAY,
     MIN_TRACKING_VOLATILITY,
+    HARVEST_MOMENTUM_REENTRY_ENABLED,
+    HARVEST_MOMENTUM_MAX_NEW_POSITIONS,
+    HARVEST_MOMENTUM_MIN_CONFIDENCE,
+    HARVEST_MOMENTUM_MIN_TQ_PROB,
+    HARVEST_MOMENTUM_MIN_SCORE,
+    HARVEST_MOMENTUM_MIN_5M_PCT,
+    HARVEST_MOMENTUM_MIN_15M_PCT,
+    HARVEST_MOMENTUM_MIN_TP_PCT,
+    HARVEST_MOMENTUM_MIN_RR,
 )
 import config
 from app.infrastructure.database import db
@@ -118,6 +127,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
     # Counter posisi baru yang berhasil dibuka dalam siklus recovery ini
     recovery_new_positions = 0
+    harvest_reentry_new_positions = 0
 
     if target_status["loss_limit_hit"]:
         # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
@@ -137,17 +147,27 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
     # Snapshot session mode BEFORE evaluation so we can detect the HARVEST_ONLY transition.
     _pre_eval_mode = target_status.get("session_mode", "NORMAL")
     session_info = bot.oracle.evaluate_and_update_session_mode(target_status)
+    harvest_reentry_mode = False
     if not session_info["buy_enabled"]:
-        # Only log once — at the exact moment the session transitions into HARVEST_ONLY.
-        # If already latched, proceed silently to avoid spamming every 2-second cycle.
-        if _pre_eval_mode != "HARVEST_ONLY":
-            log_message(
-                f"🛑 [{session_info['session_mode']}] "
-                f"Target Rp {target_idr:,.0f} sudah tercapai "
-                f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
-                f"{session_info['message']}"
-            )
-        return
+        # HARVEST_ONLY override: allow BUY only for strict high-quality momentum setups.
+        if session_info.get("session_mode") == "HARVEST_ONLY" and HARVEST_MOMENTUM_REENTRY_ENABLED:
+            harvest_reentry_mode = True
+            if _pre_eval_mode != "HARVEST_ONLY":
+                log_message(
+                    f"🌾 [HARVEST_ONLY] BUY normal diblok. "
+                    f"Selective re-entry aktif (momentum high-quality only)."
+                )
+        else:
+            # Only log once — at the exact moment the session transitions into HARVEST_ONLY.
+            # If already latched, proceed silently to avoid spamming every 2-second cycle.
+            if _pre_eval_mode != "HARVEST_ONLY":
+                log_message(
+                    f"🛑 [{session_info['session_mode']}] "
+                    f"Target Rp {target_idr:,.0f} sudah tercapai "
+                    f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
+                    f"{session_info['message']}"
+                )
+            return
 
     # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan
     if target_status["near"]:
@@ -189,6 +209,48 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
             target = calculate_entry_target(bot, p, enriched, gate, adaptive_cfg)
 
+            if harvest_reentry_mode:
+                if harvest_reentry_new_positions >= HARVEST_MOMENTUM_MAX_NEW_POSITIONS:
+                    continue
+
+                total_conf = float(gate.get("total_confidence", 0) or 0.0)
+                tq_prob = float(enriched.get("tq_prob", 0) or 0.0)
+                score = float(p.get("score", 0) or 0.0)
+                ch_5m = float(enriched.get("ch_5m", 0) or 0.0)
+                ch_15m = float(enriched.get("ch_15m", 0) or 0.0)
+                trend_up = str(enriched.get("trend", "") or "").upper() == "UP"
+                breakout_ok = bool(enriched.get("breakout"))
+
+                tp = float(target.get("final_dyn_tp", 0) or 0.0)
+                sl_abs = abs(float(target.get("final_dyn_sl", 0) or 0.0))
+                rr_ratio = (tp / sl_abs) if sl_abs > 0 else 0.0
+
+                momentum_quality_ok = (
+                    trend_up
+                    and breakout_ok
+                    and total_conf >= HARVEST_MOMENTUM_MIN_CONFIDENCE
+                    and tq_prob >= HARVEST_MOMENTUM_MIN_TQ_PROB
+                    and score >= HARVEST_MOMENTUM_MIN_SCORE
+                    and ch_5m >= HARVEST_MOMENTUM_MIN_5M_PCT
+                    and ch_15m >= HARVEST_MOMENTUM_MIN_15M_PCT
+                    and tp >= HARVEST_MOMENTUM_MIN_TP_PCT
+                    and rr_ratio >= HARVEST_MOMENTUM_MIN_RR
+                )
+
+                if not momentum_quality_ok:
+                    log_message(
+                        f"🔒 [HARVEST RE-ENTRY BLOCK] {pair} — "
+                        f"conf={total_conf:.1f}% tq={tq_prob*100:.0f}% score={score:.0f} "
+                        f"mom5={ch_5m:.2f}% mom15={ch_15m:.2f}% tp={tp*100:.2f}% rr={rr_ratio:.2f}"
+                    )
+                    continue
+
+                log_message(
+                    f"✅ [HARVEST RE-ENTRY ALLOW] {pair} — momentum high-quality "
+                    f"(conf={total_conf:.1f}% tq={tq_prob*100:.0f}% score={score:.0f} "
+                    f"tp={tp*100:.2f}% rr={rr_ratio:.2f})"
+                )
+
             # [Senior Fix] Shadow Recovery Path
             if isinstance(gate, dict) and gate.get('mode') == "SHADOW":
                 bot.execute_shadow_trade(pair, p['last'], gate, target)
@@ -202,6 +264,8 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 db.save_state("daily_trades", bot.daily_trades)
                 if adaptive_cfg.get("recovery_mode"):
                     recovery_new_positions += 1
+                if harvest_reentry_mode:
+                    harvest_reentry_new_positions += 1
 
         except Exception as e:
             log_message(f"⚠️ [Pair Loop Error] {pair}: {e}")

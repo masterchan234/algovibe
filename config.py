@@ -76,7 +76,7 @@ MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # Rp 20.000 combined net pr
 # Buffer above the floor that defines the "Safety Zone" range
 # [MOMENTUM_TARGET_PNL_IDR, MOMENTUM_TARGET_PNL_IDR + MOMENTUM_SAFETY_BUFFER_IDR].
 # When portfolio PnL drops into this range from above, momentum-gated logic activates.
-MOMENTUM_SAFETY_BUFFER_IDR = 5000   # Rp 5.000 warning cushion above the floor
+MOMENTUM_SAFETY_BUFFER_IDR = 2000   # Rp 2.000 cushion for faster profit lock
 
 # Velocity threshold (IDR / second). Positive velocity exceeding this value means
 # the portfolio is recovering → enable Tight Trailing Stop instead of immediate exit.
@@ -92,6 +92,19 @@ MOMENTUM_TIGHT_TRAILING_PCT = 0.05  # 5% drawdown from session peak (vs default 
 # When the majority of open positions are losing (high correlation risk), reduce the
 # safety buffer by this fraction to trigger an exit sooner.
 MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correlation
+
+# HARVEST_ONLY selective re-entry:
+# Allows a small number of new BUY orders only for momentum setups with
+# high-quality profit profile while session remains in HARVEST_ONLY.
+HARVEST_MOMENTUM_REENTRY_ENABLED = True
+HARVEST_MOMENTUM_MAX_NEW_POSITIONS = 1
+HARVEST_MOMENTUM_MIN_CONFIDENCE = 82.0   # total gate confidence (%).
+HARVEST_MOMENTUM_MIN_TQ_PROB = 0.72      # technical probability (0..1).
+HARVEST_MOMENTUM_MIN_SCORE = 65.0        # ranked momentum score.
+HARVEST_MOMENTUM_MIN_5M_PCT = 0.25       # short momentum (%).
+HARVEST_MOMENTUM_MIN_15M_PCT = 0.60      # follow-through momentum (%).
+HARVEST_MOMENTUM_MIN_TP_PCT = 0.018      # minimum expected TP (1.8%).
+HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
 
 # ==========================================
 # NET-ZERO SURVIVAL GUARD
@@ -113,6 +126,27 @@ NET_ZERO_HYSTERESIS_SEC = 3.0
 # immediately on the first tick — no 3-second wait.
 # Example: a -7000 IDR/s momentum spike (well below -500) triggers instant exit.
 NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (any velocity below -500 IDR/s fires instantly)
+
+# Minimum combined Net PnL (realized + unrealized) the portfolio must reach before
+# the guard even considers firing.  Prevents triggering on Rp -1 rounding noise or
+# a single position dipping -0.3% while heading to its +3% TP.
+# Rule of thumb: set to -(3 × BASKET_HARVEST_TARGET_IDR) so the guard only fires
+# when the session is in genuine loss territory — not just temporarily underwater.
+NET_ZERO_PNL_FLOOR_IDR = -20000        # IDR  (fires only when Net PnL ≤ -Rp 20.000)
+
+# Unrealized loss as a fraction of total invested capital that must be exceeded before
+# the guard arms.  Prevents spurious exits on tiny dips (e.g., 5 positions each down
+# 0.1% = -0.1% basket loss should NOT trigger).
+NET_ZERO_MIN_UNREALIZED_LOSS_PCT = 0.010  # 1.0% of total open capital must be unrealised loss
+
+# Minimum number of open positions required for the basket-level guard to activate.
+# A single position at -0.5% is handled by its individual SL — not by a basket nuke.
+NET_ZERO_MIN_POSITIONS = 2              # need at least 2 open positions
+
+# Seconds after the guard fires before buys can be auto-re-enabled, provided the
+# combined Net PnL has recovered above NET_ZERO_PNL_FLOOR_IDR.
+# Set to 0 to require manual re-enable via the dashboard (old behaviour).
+NET_ZERO_AUTO_RESET_SEC = 1800          # 30-minute auto-recovery cooldown
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
