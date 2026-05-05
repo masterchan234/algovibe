@@ -213,13 +213,27 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
-import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
 import AiAnalysisModal from './AiAnalysisModal.vue'
 
-echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
+let echarts = null
+let chartInitialized = false
+
+// Lazy-load echarts on mount
+async function initializeECharts() {
+  if (chartInitialized) return
+  try {
+    const echartsCore = await import('echarts/core')
+    const { LineChart } = await import('echarts/charts')
+    const { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } = await import('echarts/components')
+    const { CanvasRenderer } = await import('echarts/renderers')
+    
+    echarts = echartsCore
+    echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
+    chartInitialized = true
+  } catch (err) {
+    console.error('Failed to load ECharts:', err)
+  }
+}
 
 const store = useTradeStore()
 const stats = computed(() => store.stats)
@@ -670,8 +684,9 @@ watch(() => store.connected, (conn) => {
   }
 })
 
-onMounted(() => {
-  if (!chartContainer.value) return
+onMounted(async () => {
+  await initializeECharts()
+  if (!chartContainer.value || !echarts) return
   chart = echarts.init(chartContainer.value, null, { renderer: 'canvas' })
   chart.setOption(buildChartOption())
 

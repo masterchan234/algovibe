@@ -208,15 +208,17 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, reactive, computed, watch, nextTick } from 'vue'
+import { onMounted, onUnmounted, ref, reactive, computed, watch, nextTick, defineAsyncComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTradeStore } from './stores/trade'
 import { useAuth } from './composables/useAuth'
 import ActivityFeed from './components/ActivityFeed.vue'
-import ProfitChart from './components/ProfitChart.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 import ApprovalGateModal from './components/ApprovalGateModal.vue'
 import StrategicBreakModal from './components/StrategicBreakModal.vue'
+
+// Lazy-load ProfitChart to defer echarts bundle loading
+const ProfitChart = defineAsyncComponent(() => import('./components/ProfitChart.vue'))
 
 const store = useTradeStore()
 const router = useRouter()
