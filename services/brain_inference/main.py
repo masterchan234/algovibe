@@ -391,13 +391,19 @@ class BrainInferenceService:
                         continue
                 
                 if isinstance(gate, dict) and gate.get("mode") == "LIVE":
-                    logger.info(f"[brain-inference] 🔥 SIGNAL DETECTED: {pair} (confidence: {gate.get('total_confidence', 0):.1f}%)")
+                    gate_conf = float(gate.get('total_confidence', 0) or 0.0)
+                    tq_prob = float(enriched.get('tq_prob', 0.0) or 0.0)
+                    logger.info(
+                        f"[brain-inference] 🔥 SIGNAL DETECTED: {pair} "
+                        f"(gate={gate_conf:.1f}%, tq_prob={tq_prob * 100:.1f}%)"
+                    )
                     
                     # Emit Signal via ZMQ
                     sig = Signal()
                     sig.symbol = pair
                     sig.action = SignalAction.Value("ACTION_BUY")
-                    sig.confidence = gate.get("total_confidence", 0)
+                    # Monolith parity: execute_trade consumes technical probability (0..1).
+                    sig.confidence = tq_prob
                     sig.source = SignalSource.Value("SOURCE_ORACLE")
                     sig.timestamp = int(time.time() * 1000)
                     
