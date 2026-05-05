@@ -232,7 +232,8 @@ class MarketDataWS:
             # ── Auth response ──────────────────────────────────────────────────
             if "result" in msg and "client" in msg.get("result", {}):
                 logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
-                # Step 2: Subscribe ke channel summary 24h
+                # Step 2: Wait 1s for server state to settle before subscribing
+                time.sleep(1)
                 req_id = self._next_id()
                 sub_msg = {
                     "method": 1,
