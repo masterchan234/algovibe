@@ -123,11 +123,17 @@ class ExecutiveCoreService:
             try:
                 tick = Tick()
                 tick.ParseFromString(raw)
+            except Exception as exc:
+                logger.error(
+                    f"[executive-core] Failed to parse tick message: {exc}"
+                )
+                continue
+            try:
                 self._ticks[tick.symbol] = tick
                 # Recalculate unrealised P&L with new prices
                 await self._update_unrealized_pnl()
             except Exception as exc:
-                logger.error(f"[executive-core] Tick parse error: {exc}")
+                logger.error(f"[executive-core] Tick processing error: {exc}")
 
     # ── P&L calculation ───────────────────────────────────────────────────────
 
@@ -196,6 +202,7 @@ class ExecutiveCoreService:
 
     async def _equity_broadcast_loop(self) -> None:
         """Publish EquityUpdate every second to ipc:///tmp/equity_stream.ipc."""
+        _heartbeat_counter = 0
         while self._running:
             try:
                 equity = EquityUpdate()
@@ -211,6 +218,17 @@ class ExecutiveCoreService:
                 # Persist snapshot to DB for dashboard
                 db.save_state("net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
                 db.save_state("net_pnl_realized",   str(round(self._realized_pnl, 2)))
+
+                # Heartbeat every 5 seconds
+                _heartbeat_counter += 1
+                if _heartbeat_counter >= 5:
+                    _heartbeat_counter = 0
+                    net_pnl = self._realized_pnl + self._unrealized_pnl
+                    logger.info(
+                        f"[executive-core] ❤️  Heartbeat — Net PnL: {net_pnl:,.0f} IDR "
+                        f"(realized={self._realized_pnl:,.0f}, "
+                        f"unrealized={self._unrealized_pnl:,.0f})"
+                    )
 
             except Exception as exc:
                 logger.error(f"[executive-core] Equity broadcast error: {exc}")

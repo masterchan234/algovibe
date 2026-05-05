@@ -24,6 +24,8 @@ from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
+from shared.transport import ZMQSubscriber, IPC_EQUITY
+from shared.algovibe_pb2 import EquityUpdate  # type: ignore[attr-defined]
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
@@ -186,10 +188,15 @@ from config import DB_PATH_LIVE, DB_PATH_DRYRUN, INITIAL_CAPITAL as _IC
 # Default pair — akan diperbarui saat user memilih koin di dashboard
 CURRENT_WATCH_PAIR = "btcidr"
 
-# Inisialisasi Market WS untuk dashboard agar data harga realtime (detik)
+# Inisialisasi Market WS untuk dashboard — tidak distart di sini; data ticker
+# dibaca dari cache internal saat dibutuhkan oleh endpoint REST.
+# Double ingress ke exchange dilarang keras di arsitektur microservice ini.
 mws = MarketDataWS()
-mws.start()
-mws.subscribe_market_trades(CURRENT_WATCH_PAIR)
+# NOTE: mws.start() TIDAK dipanggil — dashboard bukan ingress exchange.
+
+# ── ZMQ Equity Subscriber — forward executive-core updates to SocketIO ────────
+_equity_zmq_sub = ZMQSubscriber(IPC_EQUITY)
+_equity_zmq_sub.start()
 
 _start_time = time.time()
 
@@ -1902,8 +1909,6 @@ def handle_watch_pair(data):
         return
     CURRENT_WATCH_PAIR = pair
     db.save_state('current_watch_pair', pair)
-    # Trigger WS Market to subscribe to this pair's trades
-    mws.subscribe_market_trades(pair)
     db.save_state('trigger_analysis_pair', pair)
 
 def _build_stats_payload():
@@ -2861,6 +2866,26 @@ def get_resilience_status():
 
 # Start background thread
 socketio.start_background_task(push_data_loop)
+
+# ── ZMQ Equity Bridge — forward executive-core equity updates to SocketIO ────
+def _zmq_equity_bridge():
+    """Background task: subscribe to equity_stream.ipc and emit equity_update events."""
+    for raw in _equity_zmq_sub.iter_messages():
+        try:
+            equity = EquityUpdate()
+            equity.ParseFromString(raw)
+            socketio.emit('equity_update', {
+                'net_pnl':          equity.net_pnl,
+                'realized_pnl':     equity.total_realized,
+                'unrealized_pnl':   equity.total_unrealized,
+                'velocity':         equity.velocity,
+                'peak_equity':      equity.peak_equity,
+                'timestamp':        equity.timestamp,
+            })
+        except Exception as _eq_err:
+            logging.warning(f"[ZMQ] Equity parse error: {_eq_err}")
+
+socketio.start_background_task(_zmq_equity_bridge)
 
 # ── Inject SocketIO emit into the shared EmergencyNotifier ──────────────────
 try:

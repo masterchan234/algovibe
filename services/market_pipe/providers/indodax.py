@@ -116,6 +116,7 @@ class IndodaxProvider(MarketProvider):
                 for pair, data in tickers.items():
                     tick_bytes = self._build_tick(pair, data, ts_ms)
                     if tick_bytes:
+                        logger.info(f"[ZMQ] Publishing tick: {pair}")
                         self._emit(tick_bytes)
 
             except Exception as exc:

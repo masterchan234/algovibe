@@ -81,7 +81,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s
+      start_period: 120s
     logging:
       driver: "json-file"
       options:
@@ -104,7 +104,7 @@ services:
     stop_grace_period: 30s
     depends_on:
       market-pipe:
-        condition: service_healthy
+        condition: service_started
     env_file:
       - .env
     volumes:

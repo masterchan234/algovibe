@@ -50,13 +50,25 @@ class BrainInferenceService:
         self._running = True
         self._tick_sub.start()
         self._signal_pub.start()
+        self._stop_event = asyncio.Event()
         logger.info("[brain-inference] Started — market=%s signal=%s", IPC_MARKET, IPC_SIGNAL)
-        await self._consume_ticks()
+        await asyncio.gather(
+            self._consume_ticks(),
+            self._stop_event.wait(),
+        )
 
     def stop(self) -> None:
         self._running = False
         self._tick_sub.stop()
         self._signal_pub.stop()
+        # Unblock the keep-alive event so gather() can complete
+        if hasattr(self, "_stop_event"):
+            try:
+                loop = asyncio.get_event_loop()
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(self._stop_event.set)
+            except RuntimeError:
+                pass
         logger.info("[brain-inference] Stopped.")
 
     async def _consume_ticks(self) -> None:
