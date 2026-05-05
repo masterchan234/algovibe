@@ -3,31 +3,22 @@ import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
 
 // Lazy-loaded components
-const PublicDashboard = () => import('../App.vue')
-const LiveDashboard   = () => import('../views/LiveDashboard.vue')
+const LoginView       = () => import('../views/Login.vue')
 const ModeSelector    = () => import('../views/ModeSelector.vue')
+const Dashboard       = () => import('../App.vue')
+const LiveDashboard   = () => import('../views/LiveDashboard.vue')
+const NotFound        = () => import('../views/NotFound.vue')
 
 const routes = [
   {
-    // Public simulation dashboard — accessible without auth
+    path: '/login',
+    name: 'login',
+    component: LoginView,
+    meta: { requiresAuth: false },
+  },
+  {
     path: '/',
-    name: 'public',
-    component: PublicDashboard,
-    meta: { requiresAuth: false },
-  },
-  {
-    // Dry-run dashboard — same component as '/', reached from mode selector
-    path: '/dashboard',
-    name: 'dashboard',
-    component: PublicDashboard,
-    meta: { requiresAuth: false },
-  },
-  {
-    // Guarded dry-run member dashboard — requires auth + mode selection
-    path: '/dashboard-dry',
-    name: 'dry',
-    component: PublicDashboard,
-    meta: { requiresAuth: true },
+    redirect: '/login',
   },
   {
     // Post-login mode selection screen
@@ -37,11 +28,23 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    // Guarded live member dashboard
+    // Dry-run dashboard
+    path: '/dashboard-dry',
+    name: 'dry',
+    component: Dashboard,
+    meta: { requiresAuth: true, requiresMode: 'dry' },
+  },
+  {
+    // Live member dashboard
     path: '/dashboard-live',
     name: 'live',
     component: LiveDashboard,
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, requiresMode: 'live' },
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: NotFound,
   },
 ]
 
@@ -53,23 +56,27 @@ const router = createRouter({
 // Route guard
 router.beforeEach((to) => {
   const { isAuthenticated } = useAuth()
-  const { hasModeSelected } = useMode()
+  const { hasModeSelected, selectedMode } = useMode()
 
-  // Temporary debug logs — remove once mode-selection flow is verified
-  console.log('[Router Guard] Auth Status:', isAuthenticated.value, '| LocalMode:', localStorage.getItem('algovibe_mode'), '| Target Route:', to.fullPath)
-
-  // Unauthenticated users cannot access protected routes
+  // 1. Redirect unauthenticated users to login
   if (to.meta.requiresAuth && !isAuthenticated.value) {
-    console.log('[Router Guard] → Redirecting unauthenticated user to /')
-    return { path: '/', query: { redirect: to.fullPath } }
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
 
-  // Authenticated users on a guarded dashboard without a mode selection
-  // must choose their operating mode first
-  const requiresModeSelection = (to.name === 'live' || to.name === 'dry')
-  if (requiresModeSelection && isAuthenticated.value && !hasModeSelected.value) {
-    console.log('[Router Guard] → No mode selected, redirecting to /mode-select')
-    return { path: '/mode-select' }
+  // 2. Prevent authenticated users from going back to login
+  if (to.name === 'login' && isAuthenticated.value) {
+    return { name: 'mode-select' }
+  }
+
+  // 3. Force mode selection if accessing dashboard without a mode
+  const isDashboardRoute = (to.name === 'live' || to.name === 'dry')
+  if (isDashboardRoute && isAuthenticated.value && !hasModeSelected.value) {
+    return { name: 'mode-select' }
+  }
+
+  // 4. Ensure mode matches the route (e.g. can't go to /dashboard-live while in dry mode)
+  if (to.meta.requiresMode && to.meta.requiresMode !== selectedMode.value) {
+    return { name: selectedMode.value === 'live' ? 'live' : 'dry' }
   }
 })
 

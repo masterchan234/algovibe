@@ -51,6 +51,11 @@ class NetZeroGuard:
 
     Call evaluate() on every EquityUpdate message received from the
     executive-core's equity subscriber.
+
+    The guard is a pure profit-protection mechanism: it only arms *after*
+    the caller signals that the daily target has been reached at least once
+    (target_reached=True parameter on evaluate()).  Before that point both
+    the hysteresis and the immediate-bypass paths are fully disabled.
     """
 
     def __init__(self, on_basket_exit: Optional[BasketExitCallback] = None):
@@ -61,6 +66,8 @@ class NetZeroGuard:
         self._enabled: bool = NET_ZERO_SURVIVAL_ENABLED
         # Rolling velocity buffer — same 5-reading window as ExitManager.
         self._velocity_readings: list = []
+        # One-shot audit log flag.
+        self._pretarget_logged: bool = False
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -69,6 +76,7 @@ class NetZeroGuard:
         net_pnl: float,
         velocity: float,
         now_ts: Optional[float] = None,
+        target_reached: bool = False,
     ) -> bool:
         """
         Evaluate the Net-Zero condition for the current equity snapshot.
@@ -94,6 +102,19 @@ class NetZeroGuard:
 
         ts = now_ts or time.time()
 
+        # ── Guard is disarmed until target profit has been reached ────────────
+        # Before target_reached, individual per-position SL/DCA handles losses.
+        if not target_reached:
+            if self._trigger_ts != 0.0:
+                self._trigger_ts = 0.0
+            if not self._pretarget_logged:
+                self._pretarget_logged = True
+                logger.info(
+                    "[NetZeroGuard] PRE-TARGET: guard disarmed. "
+                    "Akan aktif setelah target harian tercapai."
+                )
+            return False
+
         # ── Auto-recovery check ───────────────────────────────────────────────
         if self._fired and NET_ZERO_AUTO_RESET_SEC > 0:
             if self._fired_at > 0 and (ts - self._fired_at) >= NET_ZERO_AUTO_RESET_SEC:
@@ -118,7 +139,7 @@ class NetZeroGuard:
             if self._velocity_readings else 0.0
         )
 
-        # ── Immediate bypass — uses last (raw) velocity for fastest crash detection ──
+        # ── Immediate bypass — uses raw last velocity for fastest crash detection ──
         if (net_pnl <= NET_ZERO_PNL_FLOOR_IDR
                 and velocity < NET_ZERO_IMMEDIATE_VELOCITY):
             logger.warning(
@@ -142,7 +163,7 @@ class NetZeroGuard:
         if self._trigger_ts == 0.0:
             self._trigger_ts = ts
             logger.info(
-                f"[NetZeroGuard] Condition triggered — starting {NET_ZERO_HYSTERESIS_SEC}s hysteresis. "
+                f"[NetZeroGuard] PROFIT_PROTECT: hysteresis started. "
                 f"net_pnl={net_pnl:+,.0f} avg_velocity={avg_velocity:+.1f}"
             )
             return False
@@ -150,7 +171,7 @@ class NetZeroGuard:
         elapsed = ts - self._trigger_ts
         if elapsed >= NET_ZERO_HYSTERESIS_SEC:
             logger.warning(
-                f"[NetZeroGuard] BASKET_EXIT after {elapsed:.1f}s hysteresis. "
+                f"[NetZeroGuard] PROFIT_PROTECT BASKET_EXIT after {elapsed:.1f}s hysteresis. "
                 f"net_pnl={net_pnl:+,.0f} avg_velocity={avg_velocity:+.1f}"
             )
             self._fire("NET_ZERO_SURVIVAL")
@@ -164,6 +185,7 @@ class NetZeroGuard:
         self._fired_at = 0.0
         self._trigger_ts = 0.0
         self._velocity_readings.clear()
+        self._pretarget_logged = False
         logger.info("[NetZeroGuard] Session reset.")
 
     # ── Internal ──────────────────────────────────────────────────────────────

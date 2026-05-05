@@ -110,12 +110,17 @@ const { selectMode } = useMode()
 
 const hoveredMode = ref('')
 
-function enter(mode) {
-  selectMode(mode)
-  if (mode === 'live') {
-    router.push('/dashboard-live')
-  } else {
-    router.push('/dashboard-dry')
+async function enter(mode) {
+  try {
+    await selectMode(mode, backendUrl)
+    if (mode === 'live') {
+      router.push('/dashboard-live')
+    } else {
+      router.push('/dashboard-dry')
+    }
+  } catch (err) {
+    console.error('Failed to enter mode:', err)
+    alert(err.message || 'Gagal masuk ke mode ini. Pastikan Anda sudah login.')
   }
 }
 

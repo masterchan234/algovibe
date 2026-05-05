@@ -73,6 +73,8 @@ class ExitManager:
         # Session guard: True after the emergency basket exit has fired once, prevents
         # repeated triggers within the same session.
         self._net_zero_fired: bool = False
+        # One-shot flag: audit log fired once to confirm pre-target guard is silent.
+        self._net_zero_pretarget_logged: bool = False
         # Throttle for saving realised/unrealised PnL snapshots to bot_state (DB).
         self._last_pnl_snapshot_ts: float = 0.0
         self._sync_jaring_from_db()
@@ -680,9 +682,11 @@ class ExitManager:
                                 total_net_pnl / total_amount_idr if total_amount_idr > 0 else 0.0
                             )
 
-                            # Trigger policy differs by phase:
-                            # - Post-target: prioritize profit protection (floor + momentum + basket size).
-                            # - Pre-target : retain loss-quality gate to avoid noise exits.
+                            # Net-Zero is a pure profit-protection guard.
+                            # It only arms after the daily target has been reached at least once.
+                            # Before that point both the hysteresis AND the immediate bypass
+                            # are completely disabled — pre-target losses are handled by
+                            # individual per-position SL / DCA, not a basket nuke.
                             if target_reached_once:
                                 nz_condition = (
                                     net_total_pnl <= net_zero_floor
@@ -695,15 +699,17 @@ class ExitManager:
                                     and n >= NET_ZERO_MIN_POSITIONS
                                 )
                             else:
-                                nz_condition = (
-                                    net_total_pnl <= net_zero_floor
-                                    and avg_velocity < NET_ZERO_MOMENTUM_THRESHOLD
-                                    and unrealized_loss_pct < -NET_ZERO_MIN_UNREALIZED_LOSS_PCT
-                                    and n >= NET_ZERO_MIN_POSITIONS
-                                )
-                                # Immediate crash bypass is disabled until target profit
-                                # has been reached at least once.
+                                nz_condition = False
                                 nz_immediate = False
+                                if self._net_zero_trigger_ts != 0.0:
+                                    self._net_zero_trigger_ts = 0.0
+                                if not self._net_zero_pretarget_logged:
+                                    self._net_zero_pretarget_logged = True
+                                    log_message(
+                                        f"🔕 [NET-ZERO GUARD] PRE-TARGET: guard disarmed. "
+                                        f"Aktif setelah target harian tercapai. "
+                                        f"Floor (post-target): Rp {daily_target_idr:,.0f}"
+                                    )
 
                             if nz_condition:
                                 # Stamp the timer on first detection.
@@ -714,7 +720,7 @@ class ExitManager:
                                         f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
                                         f"Floor: Rp {net_zero_floor:,.0f} | "
                                         f"Avg velocity: {avg_velocity:+.1f} IDR/s | "
-                                        f"Mode: {'PROFIT_PROTECT' if target_reached_once else 'LOSS_SURVIVAL'} | "
+                                        f"Mode: PROFIT_PROTECT | "
                                         f"Unrealised: {unrealized_loss_pct*100:.2f}%"
                                     )
                                 if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:

@@ -25,8 +25,21 @@ from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
-from shared.transport import IPC_EQUITY, IPC_MARKET
+from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
 from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
+
+# --- [ZMQ COMMAND PUBLISHER] ---
+_ctx = zmq_eventlet.Context()
+_cmd_pub = _ctx.socket(zmq_eventlet.PUB)
+_cmd_pub.bind(IPC_COMMAND)
+logging.info(f"📡 [IPC] Command Publisher bound to {IPC_COMMAND}")
+
+def broadcast_command(action, payload=None):
+    """Broadcast a command to all subscribers (e.g. executive-core)."""
+    msg = {"action": action, "payload": payload or {}, "ts": time.time()}
+    # Use multipart: [topic, payload] for ZMQSubscriber compatibility
+    _cmd_pub.send_multipart([b"CMD", json.dumps(msg).encode()])
+    logging.info(f"📤 [IPC] Broadcasted command: {action}")
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
@@ -86,27 +99,31 @@ def set_csrf_cookie(response):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Handshake keamanan: Cek session atau view-token
+    # Handshake keamanan: Cek session (untuk Full Dashboard) atau view-token (untuk Guest/Kiosk)
+    # Namun, User Journey baru mensyaratkan LOGIN, jadi kita prioritaskan session.
     client_token = auth.get('token') if auth else None
-    valid_token = generate_view_token()
     
     is_authenticated = 'user_id' in session
-    is_token_valid = (client_token == valid_token)
+    
+    # Guest access via view-token (deprecated by user request, but kept as fallback for static kiosks if needed)
+    is_token_valid = (client_token == generate_view_token())
 
     if not is_authenticated and not is_token_valid:
         logging.warning(f"🚫 Unauthorized WS connection (Token: {client_token[:8] if client_token else 'None'})")
         return False # Tolak koneksi
     
-    # Semua orang yang lolos masuk ke room public
-    join_room('public')
-    
+    # Join authenticated room if user is logged in
     if is_authenticated:
+        join_room('authenticated')
         user_id = session.get('user_id')
         username = session.get('username')
         join_room(f"user_{user_id}")
-        logging.info(f"🔌 Authenticated User {username} connected")
+        logging.info(f"🔌 Authenticated User {username} connected and joined 'authenticated' room")
     else:
-        logging.info("🔌 Guest User connected via Valid Token (Public Mode)")
+        # If we still allow guest token access, they don't get the 'authenticated' room
+        join_room('public')
+        logging.info("🔌 Guest User connected (Public/View-only mode)")
+        
     return True
 
 @socketio.on('disconnect')
@@ -652,11 +669,13 @@ def login():
     return jsonify({"success": False, "message": "Invalid username or password"}), 401
 
 @app.route('/api/logout', methods=['POST'])
-def logout():
+@login_required
+def logout_api():
     session.clear()
     return jsonify({"success": True})
 
 @app.route('/api/check-auth')
+@login_required
 def check_auth():
     payload = _get_current_user_payload()
     if payload:
@@ -676,6 +695,7 @@ def refresh_token():
     return jsonify({"success": True, "token": new_token})
 
 @app.route('/api/view-token')
+@login_required
 def get_view_token():
     """Expose short-lived token for guest Socket.IO handshake."""
     return jsonify({"token": generate_view_token()})
@@ -702,6 +722,7 @@ def user_settings():
     return jsonify({"success": False, "message": "Failed to update settings"}), 500
 
 @app.route('/api/stats')
+@login_required
 def get_stats():
     conn = get_db_connection()
     try:
@@ -875,6 +896,7 @@ def get_stats():
         conn.close()
 
 @app.route('/api/positions')
+@login_required
 def get_positions():
     """Dedicated endpoint untuk open positions dengan unrealized PnL."""
     conn = get_db_connection()
@@ -945,6 +967,7 @@ def get_positions():
         conn.close()
 
 @app.route('/api/pnl-history/<tf>')
+@login_required
 def get_pnl_history_api(tf):
     """
     Menyusun histori ekuitas (PnL kumulatif) dari database trade_history.
@@ -997,6 +1020,7 @@ def get_pnl_history_api(tf):
         conn.close()
 
 @app.route('/api/debug/positions-summary')
+@login_required
 def get_positions_summary():
     """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
     import config as cfg
@@ -1066,6 +1090,7 @@ def get_positions_summary():
         conn.close()
 
 @app.route('/api/wallet/sync', methods=['POST'])
+@login_required
 def sync_wallet():
     """
     Sinkronisasi posisi di DB dengan saldo wallet Indodax secara real-time.
@@ -1171,6 +1196,7 @@ def sync_wallet():
 
 
 @app.route('/api/orders')
+@login_required
 def get_orders():
     """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
     try:
@@ -1188,6 +1214,7 @@ def get_orders():
 
 
 @app.route('/api/live/state')
+@login_required
 def get_live_state():
     """Return persistent live-engine state for dashboard state-recovery on page load.
 
@@ -1334,12 +1361,14 @@ def get_market_context(pair):
         conn.close()
 
 @app.route('/api/analyze/<pair>')
+@login_required
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""
     db.save_state("trigger_analysis_pair", pair.lower())
     return jsonify({"status": "requested", "pair": pair})
 
 @app.route('/api/reasoning/<pair>')
+@login_required
 def get_pair_reasoning(pair):
     """Ambil nalar AI/LLM terbaru untuk koin tertentu."""
     p = pair.lower().strip()
@@ -1428,46 +1457,53 @@ def trade_manual_exit():
     logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net,0)} IDR)")
     return jsonify({"status": "exit_requested", "pair": pair})
 
-@app.route('/api/bot/toggle-dry-run', methods=['POST'])
-def toggle_dry_run():
-    """Toggle mode dengan policy auth:
-    - DRY -> LIVE: wajib login
-    - LIVE -> DRY: auto logout + clear session
+@app.route('/api/bot/select-mode', methods=['POST'])
+@login_required
+def select_mode():
+    """
+    Explicitly select operational mode (LIVE vs DRY).
+    If DRY is selected, the current LIVE session is terminated (logged out).
     """
     import config as cfg
-    # Baca nilai saat ini dari DB agar toggle akurat
-    current_val = db.get_state("dry_run") == "true"
-    new_val = not current_val
-
-    # Hanya izinkan mode LIVE jika user terautentikasi
-    if not new_val and _get_current_user_payload() is None:
-        return jsonify({
-            "error": "Unauthorized",
-            "login_required": True,
-            "target_mode": "LIVE"
-        }), 401
-
-    db.save_state("dry_run", str(new_val).lower())
-    cfg.clear_dry_run_cache()    # Hapus cache config
-    db._mode_cache = None        # Hapus cache DatabaseRouter langsung
-    logging.info(f"🔄 [DYNAMIC MODE] User changed mode to: {'DRY RUN' if new_val else 'LIVE'}")
-
+    data = request.get_json()
+    mode = data.get('mode') # 'LIVE' or 'DRY'
+    
+    if mode not in ['LIVE', 'DRY']:
+        return jsonify({"success": False, "message": "Invalid mode selection"}), 400
+    
+    target_dry_run = (mode == 'DRY')
+    
+    # Update config (In-memory for current process)
+    cfg.DRY_RUN = target_dry_run
+    # Update DB state for persistent retrieval by other engines
+    db.save_state("dry_run", "1" if target_dry_run else "0")
+    
+    # Sync with Executive Core via ZMQ
+    broadcast_command("MODE_CHANGE", {"dry_run": target_dry_run})
+    
     logged_out = False
-    # Saat balik ke DRY, paksa logout dan bersihkan session
-    if new_val:
+    if target_dry_run:
+        # If moving to DRY, we clear the session for security as requested
         session.clear()
         logged_out = True
+        logging.info("🛡️ User selected DRY mode. Session cleared (auto-logout).")
 
     # Push stats_update langsung agar frontend tidak tunggu 5s push loop
     try:
         socketio.emit('stats_update', _build_stats_payload())
         socketio.emit('trades_update', _build_trades_payload())
-    except Exception as _e:
-        logging.warning(f"[toggle] immediate push failed: {_e}")
+    except:
+        pass
 
-    return jsonify({"success": True, "dry_run": new_val, "logged_out": logged_out})
+    return jsonify({
+        "success": True, 
+        "mode": mode, 
+        "dry_run": target_dry_run, 
+        "logged_out": logged_out
+    })
 
 @app.route('/api/bot/toggle-loose-gates', methods=['POST'])
+@login_required
 def toggle_loose_gates():
     """Toggle mode LOOSE GATES untuk testing."""
     import config as cfg
@@ -1480,6 +1516,7 @@ def toggle_loose_gates():
     return jsonify({"success": True, "loose_gates": new_val})
 
 @app.route('/api/bot-status')
+@login_required
 def get_bot_status():
     """Status bot: online/offline/dry_run, uptime, last trade."""
     conn = get_db_connection()
@@ -1525,6 +1562,7 @@ def get_bot_status():
         conn.close()
 
 @app.route('/api/history/<pair>')
+@login_required
 def get_pair_history(pair):
     conn = get_db_connection()
     try:
@@ -1538,6 +1576,7 @@ def get_pair_history(pair):
         conn.close()
 
 @app.route('/api/ohlcv/<pair>/<tf>')
+@login_required
 def get_ohlcv(pair, tf):
     """Ambil data OHLCV dari bursa untuk timeframe tertentu."""
     try:
@@ -1582,7 +1621,8 @@ def trigger_full_sync():
     return jsonify({"success": True, "message": "Sync dimulai. Ledger akan otomatis terupdate setelah sync selesai."})
 
 @app.route('/api/trades/sync/status')
-def get_sync_status():
+@login_required
+def sync_trades_status():
     """Cek apakah sync sudah selesai dengan membandingkan jumlah trade."""
     try:
         conn = get_db_connection()
@@ -1605,10 +1645,12 @@ def get_sync_status():
         return jsonify({"is_running": False, "new_trades": 0, "done": True})
 
 @app.route('/api/trades')
+@login_required
 def get_trades():
     return jsonify(_build_trades_payload())
 
 @app.route('/api/radar')
+@login_required
 def get_radar_data():
     conn = get_db_connection()
     try:
@@ -1645,6 +1687,7 @@ def get_radar_data():
 
 
 @app.route('/api/radar-audit')
+@login_required
 def get_radar_audit():
     conn = get_db_connection()
     try:
@@ -1753,6 +1796,7 @@ def get_radar_audit():
         conn.close()
 
 @app.route('/api/logs')
+@login_required
 def get_logs():
     conn = get_db_connection()
     try:
@@ -1866,6 +1910,7 @@ def _fetch_rss_titles(url: str, source: str, limit: int = 8) -> list:
 
 
 @app.route('/api/news')
+@login_required
 def api_news():
     global _news_cache
     now = time.time()
