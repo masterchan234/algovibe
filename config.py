@@ -92,6 +92,21 @@ MOMENTUM_TIGHT_TRAILING_PCT = 0.05  # 5% drawdown from session peak (vs default 
 # When the majority of open positions are losing (high correlation risk), reduce the
 # safety buffer by this fraction to trigger an exit sooner.
 MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correlation
+
+# ==========================================
+# NET-ZERO SURVIVAL GUARD
+# ==========================================
+# Master switch — set to False to fully disable the guard without removing code.
+NET_ZERO_SURVIVAL_ENABLED = True
+
+# PnL velocity (IDR / second) below which the portfolio is considered to be DROPPING.
+# Net-Zero Survival only fires when the most recent velocity sample is at or below
+# this threshold (already consistent with MOMENTUM_RECOVERY_THRESHOLD sign convention).
+NET_ZERO_MOMENTUM_THRESHOLD = -50.0   # IDR/s  (negative = portfolio value falling)
+
+# Minimum number of consecutive seconds the condition must stay true before the
+# emergency basket exit is executed (hysteresis: prevents one-tick false positives).
+NET_ZERO_HYSTERESIS_SEC = 3.0
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002

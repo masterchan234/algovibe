@@ -20,6 +20,7 @@ from config import (
     MOMENTUM_TARGET_PNL_IDR, MOMENTUM_SAFETY_BUFFER_IDR, MOMENTUM_RECOVERY_THRESHOLD,
     MOMENTUM_VELOCITY_INTERVAL_SEC, MOMENTUM_TIGHT_TRAILING_PCT,
     MOMENTUM_HIGH_CORR_BUFFER_REDUCTION,
+    NET_ZERO_SURVIVAL_ENABLED, NET_ZERO_MOMENTUM_THRESHOLD, NET_ZERO_HYSTERESIS_SEC,
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -62,6 +63,15 @@ class ExitManager:
         self._peak_net_pnl_session: float = 0.0
         # Guard set: ensures "Target Reached" log + Telegram fires only once per session.
         self._target_fired_session: set = set()
+        # ─── Net-Zero Survival Guard ───────────────────────────────────────────────
+        # Timestamp when the Net-Zero condition (net_pnl ≤ 0 + dropping velocity) was
+        # first detected.  Reset to 0 whenever the condition clears.
+        self._net_zero_trigger_ts: float = 0.0
+        # Session guard: True after the emergency basket exit has fired once, prevents
+        # repeated triggers within the same session.
+        self._net_zero_fired: bool = False
+        # Throttle for saving realised/unrealised PnL snapshots to bot_state (DB).
+        self._last_pnl_snapshot_ts: float = 0.0
         self._sync_jaring_from_db()
 
     @property
@@ -140,8 +150,110 @@ class ExitManager:
         except Exception:
             pass
 
-    @staticmethod
-    def _order_id_variants(order_id):
+    def _fire_net_zero_survival(
+        self,
+        open_pairs_for_basket: list,
+        realized_pnl: float,
+        unrealized_pnl: float,
+        net_total_pnl: float,
+        latest_velocity: float,
+        mark_exit_requested,
+        positions: dict,
+        modified_pairs: set,
+    ) -> None:
+        """Execute the Net-Zero Survival emergency basket exit.
+
+        Called when Net PnL (realized + unrealized) ≤ 0 AND momentum velocity
+        has been below NET_ZERO_MOMENTUM_THRESHOLD for NET_ZERO_HYSTERESIS_SEC
+        consecutive seconds.
+
+        Actions:
+          1. Log to system_events (persisted, survives reboot).
+          2. Persist guard state to bot_state for dashboard + reboot awareness.
+          3. Set SYSTEM_PAUSE: blocks new buys by latching HARVEST_ONLY.
+          4. Send high-priority Telegram notification.
+          5. Execute BASKET_EXIT for every open position.
+        """
+        n = len(open_pairs_for_basket)
+        log_message(
+            f"🛡️ [NET-ZERO SURVIVAL] ACTIVATED — Executing emergency BASKET_EXIT "
+            f"for {n} position(s). Net PnL: Rp {net_total_pnl:+,.0f} | "
+            f"Velocity: {latest_velocity:+.1f} IDR/s"
+        )
+
+        # ── Persist event ─────────────────────────────────────────────────────
+        event_msg = (
+            f"NET_ZERO_SURVIVAL ACTIVATED | "
+            f"Realized: Rp {realized_pnl:+,.0f} | "
+            f"Unrealized: Rp {unrealized_pnl:+,.0f} | "
+            f"Net PnL: Rp {net_total_pnl:+,.0f} | "
+            f"Velocity: {latest_velocity:+.1f} IDR/s"
+        )
+        try:
+            db.log_system_event("PORTFOLIO", "NET_ZERO_SURVIVAL", event_msg, "CRITICAL")
+        except Exception:
+            pass
+
+        try:
+            db.save_state("net_zero_survival_active", "true")
+            db.save_state("net_zero_survival_net_pnl", str(round(net_total_pnl, 2)))
+            db.save_state("net_zero_survival_realized", str(round(realized_pnl, 2)))
+            db.save_state("net_zero_survival_unrealized", str(round(unrealized_pnl, 2)))
+            db.save_state("net_zero_survival_ts", datetime.now().isoformat())
+        except Exception:
+            pass
+
+        # ── SYSTEM_PAUSE: latch HARVEST_ONLY to block all new buys ─────────────
+        try:
+            db.save_state("session_buy_enabled", "false")
+            db.save_state("session_mode", "HARVEST_ONLY")
+            db.save_state("session_latched", "true")
+        except Exception:
+            pass
+
+        # ── Telegram emergency notification ───────────────────────────────────
+        telegram_msg = (
+            f"🛡️ *NET-ZERO SURVIVAL ACTIVATED*\n"
+            f"⚠️ Emergency Basket Exit executed to protect principal.\n"
+            f"Realized: Rp {realized_pnl:+,.0f}\n"
+            f"Unrealized: Rp {unrealized_pnl:+,.0f}\n"
+            f"Net PnL: Rp {net_total_pnl:+,.0f}\n"
+            f"Momentum: {latest_velocity:+.1f} IDR/s\n"
+            f"⏸️ System Paused. Manual review required."
+        )
+        log_message(telegram_msg.replace('*', '').replace('\n', ' | '))
+        send_telegram_message(telegram_msg)
+
+        # ── Reset HWM and execute BASKET_EXIT ────────────────────────────────
+        self._portfolio_hwm = 0.0
+        self._was_above_safety_zone = False
+        self._peak_net_pnl_session = 0.0
+        self._target_fired_session.discard("TARGET_REACHED")
+        try:
+            db.save_state("target_protection_active", "false")
+            db.save_state("peak_net_pnl_session", "0")
+        except Exception:
+            pass
+
+        for pair, data, current_price, amount in open_pairs_for_basket:
+            reason = "NET_ZERO_SURVIVAL"
+            log_msg = f"🛡️ [NET-ZERO SURVIVAL] {pair}: Emergency exit at Rp {current_price:,.0f}."
+            log_message(log_msg)
+            try:
+                db.log_system_event(pair, "NET_ZERO_SURVIVAL", log_msg, "CRITICAL")
+            except Exception:
+                pass
+
+            order_id = self.execute_exit(
+                pair, amount, current_price, reason,
+                entry_price=data.get('entry_price', 0),
+                amount_idr=data.get('amount_idr', 0),
+                position_data=data,
+            )
+            if order_id:
+                mark_exit_requested(pair, order_id)
+
+        self.save_positions(positions, modified_pairs)
         """Generate comparable variants for heterogeneous order IDs.
 
         Examples:
@@ -392,13 +504,67 @@ class ExitManager:
             # ── PnL Velocity ──────────────────────────────────────────────────────────────
             self._update_pnl_velocity(total_net_pnl, _now_ts)
 
+            # ── Snapshot unrealised PnL to bot_state for dashboard (throttled) ─────────
+            if _now_ts - self._last_pnl_snapshot_ts >= 5.0:
+                try:
+                    db.save_state("net_pnl_unrealized", str(round(total_net_pnl, 2)))
+                except Exception:
+                    pass
+                self._last_pnl_snapshot_ts = _now_ts
+
             if open_pairs_for_basket:
                 n = len(open_pairs_for_basket)
                 gross_pnl_pct = (total_gross_pnl  / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
 
-                # ── Position Correlation Check ────────────────────────────────────────────
+                # ── Net-Zero Survival Guard ───────────────────────────────────────────────
+                # Monitors: Net PnL (realized + unrealized) ≤ 0 AND velocity dropping.
+                # Fires BASKET_EXIT after NET_ZERO_HYSTERESIS_SEC consecutive seconds.
+                if NET_ZERO_SURVIVAL_ENABLED and not self._net_zero_fired:
+                    try:
+                        realized_pnl_today = db.get_daily_stats()['total_pnl_idr']
+                        net_total_pnl = realized_pnl_today + total_net_pnl
+                        # Save realized PnL snapshot for the dashboard gauge.
+                        try:
+                            db.save_state("net_pnl_realized", str(round(realized_pnl_today, 2)))
+                        except Exception:
+                            pass
+                        latest_velocity = self._velocity_readings[-1] if self._velocity_readings else 0.0
+                        nz_condition = (
+                            net_total_pnl <= 0
+                            and latest_velocity < NET_ZERO_MOMENTUM_THRESHOLD
+                        )
+                        if nz_condition:
+                            if self._net_zero_trigger_ts == 0.0:
+                                self._net_zero_trigger_ts = _now_ts
+                                log_message(
+                                    f"⚠️ [NET-ZERO GUARD] Condition detected — hysteresis timer started. "
+                                    f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
+                                    f"Velocity: {latest_velocity:+.1f} IDR/s"
+                                )
+                            elif _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
+                                # Condition sustained for required duration — fire survival guard.
+                                self._net_zero_fired = True
+                                self._fire_net_zero_survival(
+                                    open_pairs_for_basket=open_pairs_for_basket,
+                                    realized_pnl=realized_pnl_today,
+                                    unrealized_pnl=total_net_pnl,
+                                    net_total_pnl=net_total_pnl,
+                                    latest_velocity=latest_velocity,
+                                    mark_exit_requested=mark_exit_requested,
+                                    positions=positions,
+                                    modified_pairs=modified_pairs,
+                                )
+                                return  # basket exit submitted; exit evaluation frame
+                        else:
+                            # Condition no longer met — reset hysteresis timer.
+                            if self._net_zero_trigger_ts != 0.0:
+                                self._net_zero_trigger_ts = 0.0
+                    except Exception as _nz_err:
+                        log_message(f"⚠️ [NET-ZERO GUARD] Check error: {_nz_err}")
+
+
                 # Count positions moving in the same negative direction.  If the majority
                 # are losing, it's High Correlation Risk — shrink the safety buffer so the
                 # exit fires sooner and capital is better protected.
