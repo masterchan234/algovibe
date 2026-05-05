@@ -125,7 +125,7 @@ class ExecutiveCoreService:
                 tick.ParseFromString(raw)
             except Exception as exc:
                 logger.error(
-                    f"[executive-core] Protobuf schema mismatch — cannot parse tick: {exc}"
+                    f"[executive-core] Failed to parse tick message: {exc}"
                 )
                 continue
             try:
