@@ -650,3 +650,154 @@ class EmergencyNotifier:
 
 #: Shared EmergencyNotifier — used by CircuitBreaker, ShadowSync, and the bridge.
 emergency_notifier = EmergencyNotifier()
+
+
+# ── Auto-Resume Heartbeat ─────────────────────────────────────────────────────
+
+# How often to ping the exchange while SYSTEM_PAUSE is active (seconds).
+AUTO_RESUME_PING_INTERVAL_SEC = 300      # 5 minutes
+# Number of consecutive successful pings required to auto-resume.
+AUTO_RESUME_SUCCESS_THRESHOLD = 3
+
+
+class AutoResumeHeartbeat:
+    """Background task that pings the exchange every 5 minutes during SYSTEM_PAUSE.
+
+    Recovery Protocol
+    ─────────────────
+    • When session_mode is SYSTEM_PAUSE, begin pinging the exchange health endpoint.
+    • After AUTO_RESUME_SUCCESS_THRESHOLD consecutive successful pings, automatically:
+        1. Reset session_mode → ACTIVE / NORMAL.
+        2. Reset session_latched → false.
+        3. Fire a Telegram alert and an EmergencyNotifier SUCCESS event.
+
+    Usage
+    ─────
+    ::
+        heartbeat = AutoResumeHeartbeat(ping_fn=trading_bridge.get_balances)
+        heartbeat.start()
+    """
+
+    def __init__(
+        self,
+        ping_fn: "Callable",
+        ping_interval_sec: float = AUTO_RESUME_PING_INTERVAL_SEC,
+        success_threshold: int   = AUTO_RESUME_SUCCESS_THRESHOLD,
+        notifier: "EmergencyNotifier | None" = None,
+    ):
+        """
+        Parameters
+        ----------
+        ping_fn          : Callable that performs a lightweight exchange API call.
+                           Should raise on failure, return any value on success.
+        ping_interval_sec: Seconds between each ping while SYSTEM_PAUSE is active.
+        success_threshold: Number of consecutive successes required to auto-resume.
+        notifier         : EmergencyNotifier for sending alerts on resume.
+        """
+        self._ping_fn           = ping_fn
+        self._interval          = ping_interval_sec
+        self._threshold         = success_threshold
+        self._notifier          = notifier or emergency_notifier
+        self._lock              = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._running           = False
+        self._consecutive_ok    = 0
+
+    def start(self) -> None:
+        """Start the heartbeat daemon thread (idempotent)."""
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._loop,
+                name="AutoResumeHeartbeat",
+                daemon=True,
+            )
+            self._thread.start()
+            logger.info(
+                "[AutoResumeHeartbeat] Started (interval=%ds, threshold=%d pings).",
+                self._interval, self._threshold,
+            )
+
+    def stop(self) -> None:
+        """Signal the heartbeat thread to stop."""
+        self._running = False
+
+    # ── Private ──────────────────────────────────────────────────────────────
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                session_mode = self._get_session_mode()
+                if session_mode == "SYSTEM_PAUSE":
+                    self._ping_once()
+                else:
+                    # Reset streak whenever we leave SYSTEM_PAUSE (graceful or manual)
+                    if self._consecutive_ok > 0:
+                        logger.debug(
+                            "[AutoResumeHeartbeat] Session no longer SYSTEM_PAUSE — resetting streak."
+                        )
+                    self._consecutive_ok = 0
+            except Exception as exc:
+                logger.warning("[AutoResumeHeartbeat] Loop error: %s", exc)
+            time.sleep(self._interval)
+
+    def _ping_once(self) -> None:
+        """Perform one exchange ping and handle the result."""
+        try:
+            self._ping_fn()
+            self._consecutive_ok += 1
+            logger.info(
+                "[AutoResumeHeartbeat] Ping OK (%d/%d consecutive).",
+                self._consecutive_ok, self._threshold,
+            )
+            if self._consecutive_ok >= self._threshold:
+                self._trigger_auto_resume()
+        except Exception as exc:
+            logger.warning(
+                "[AutoResumeHeartbeat] Ping FAILED (streak reset): %s", exc
+            )
+            self._consecutive_ok = 0
+
+    def _trigger_auto_resume(self) -> None:
+        """Restore trading state after sufficient consecutive ping successes."""
+        self._consecutive_ok = 0  # Reset streak immediately to avoid repeated fires.
+        try:
+            from app.infrastructure.database import db
+            db.save_state("session_mode",    "NORMAL")
+            db.save_state("session_latched", "false")
+            db.save_state("circuit_breaker_status", "CLOSED")
+        except Exception as exc:
+            logger.error("[AutoResumeHeartbeat] Could not persist resume state: %s", exc)
+            return
+
+        msg = (
+            f"✅ *AUTO-RESUME SUCCESS* ✅\n"
+            f"{AUTO_RESUME_SUCCESS_THRESHOLD} consecutive successful API pings.\n"
+            f"Session restored to NORMAL mode. Trading resumed."
+        )
+        logger.critical("[AutoResumeHeartbeat] %s", msg.replace("*", "").replace("\n", " | "))
+
+        # Telegram alert
+        try:
+            from app.interfaces.telegram_bot import send_telegram_message
+            send_telegram_message(msg)
+        except Exception as exc:
+            logger.warning("[AutoResumeHeartbeat] Telegram alert failed: %s", exc)
+
+        # EmergencyNotifier (dashboard + SocketIO)
+        self._notifier.send(
+            event_type="AUTO_RESUME_SUCCESS",
+            message=msg.replace("*", "").replace("\n", " "),
+            level="INFO",
+        )
+
+    @staticmethod
+    def _get_session_mode() -> str:
+        try:
+            from app.infrastructure.database import db
+            return (db.get_state("session_mode") or "NORMAL").upper()
+        except Exception:
+            return "NORMAL"
+

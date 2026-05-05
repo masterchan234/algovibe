@@ -1,6 +1,9 @@
 import sqlite3
 import os
 import logging
+import shutil
+import threading
+import time as _time_module
 from contextlib import contextmanager
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -8,11 +11,101 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from config import DB_PATH
 from .migrations import run_migrations
 
+# ── DB Backup Configuration ────────────────────────────────────────────────────
+_DB_BACKUP_INTERVAL_SEC = 6 * 3600   # 6 hours
+_DB_BACKUP_MAX_SNAPSHOTS = 4          # Keep last 4 snapshots (~24 hours)
+
 class Database:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
+        self._run_integrity_check()
         self._init_db()
         run_migrations(self.db_path)
+
+    # ── Integrity Check & Auto-Recovery ───────────────────────────────────────
+
+    def _run_integrity_check(self) -> None:
+        """Run PRAGMA integrity_check at startup; auto-restore from latest snapshot on failure."""
+        if not os.path.exists(self.db_path):
+            return  # Fresh DB — nothing to check yet.
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            row = conn.execute("PRAGMA integrity_check;").fetchone()
+            conn.close()
+            if row and row[0] == "ok":
+                logging.info("[DB] integrity_check passed for %s", self.db_path)
+                return
+            logging.critical(
+                "[DB] integrity_check FAILED for %s: %s — attempting restore from snapshot.",
+                self.db_path, row[0] if row else "unknown",
+            )
+            self._restore_from_snapshot()
+        except Exception as exc:
+            logging.error("[DB] integrity_check error for %s: %s", self.db_path, exc)
+
+    def _restore_from_snapshot(self) -> None:
+        """Replace a corrupt DB with the latest available 6-hour snapshot."""
+        backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
+        if not os.path.isdir(backup_dir):
+            logging.warning("[DB] No backup directory found at %s — cannot restore.", backup_dir)
+            return
+
+        snapshots = sorted(
+            [
+                f for f in os.listdir(backup_dir)
+                if f.startswith("snapshot_") and f.endswith(".db")
+            ],
+            reverse=True,
+        )
+        if not snapshots:
+            logging.warning("[DB] No snapshots found in %s — cannot restore.", backup_dir)
+            return
+
+        latest = os.path.join(backup_dir, snapshots[0])
+        corrupt_path = self.db_path + ".corrupt"
+        try:
+            if os.path.exists(self.db_path):
+                os.rename(self.db_path, corrupt_path)
+            shutil.copy2(latest, self.db_path)
+            logging.critical(
+                "[DB] AUTO-RESTORE completed: %s → %s (corrupt saved as %s)",
+                latest, self.db_path, corrupt_path,
+            )
+        except Exception as exc:
+            logging.critical("[DB] AUTO-RESTORE failed: %s", exc)
+
+    def create_snapshot(self) -> str | None:
+        """Create a consistent snapshot of this DB using sqlite3 backup API.
+
+        Returns the snapshot path on success, None on failure.
+        """
+        backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.db_path))[0]
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = os.path.join(backup_dir, f"snapshot_{stem}_{stamp}.db")
+        try:
+            src = sqlite3.connect(self.db_path, timeout=30)
+            dst = sqlite3.connect(snapshot_path)
+            src.backup(dst)
+            dst.close()
+            src.close()
+            # Prune old snapshots beyond _DB_BACKUP_MAX_SNAPSHOTS
+            all_snaps = sorted(
+                [f for f in os.listdir(backup_dir)
+                 if f.startswith(f"snapshot_{stem}_") and f.endswith(".db")],
+                reverse=True,
+            )
+            for old in all_snaps[_DB_BACKUP_MAX_SNAPSHOTS:]:
+                try:
+                    os.remove(os.path.join(backup_dir, old))
+                except Exception:
+                    pass
+            logging.info("[DB] Snapshot created: %s", snapshot_path)
+            return snapshot_path
+        except Exception as exc:
+            logging.error("[DB] Snapshot failed for %s: %s", self.db_path, exc)
+            return None
 
     @contextmanager
     def get_connection(self):
@@ -900,8 +993,6 @@ class Database:
             logging.error(f"[DB] Error updating keys: {e}")
             return False
 
-import time as _time
-
 class DatabaseRouter:
     """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
     based on the current dry_run flag in bot_state.
@@ -919,10 +1010,59 @@ class DatabaseRouter:
         self._dryrun = Database(DB_PATH_DRYRUN)
         self._mode_cache: bool | None = None
         self._mode_cache_ts: float = 0.0
+        self._backup_thread: threading.Thread | None = None
+        self._backup_running: bool = False
+        self._start_backup_scheduler()
+
+    # ── Scheduled 6-hour backup ────────────────────────────────────────────
+
+    def _start_backup_scheduler(self) -> None:
+        """Start a daemon thread that snapshots both DBs every 6 hours."""
+        if self._backup_running:
+            return
+        self._backup_running = True
+        self._backup_thread = threading.Thread(
+            target=self._backup_loop,
+            name="DBBackupScheduler",
+            daemon=True,
+        )
+        self._backup_thread.start()
+        logging.info("[DBBackup] 6-hour backup scheduler started.")
+
+    def _backup_loop(self) -> None:
+        """Run DB snapshots every _DB_BACKUP_INTERVAL_SEC seconds."""
+        # Initial delay so the bot fully initialises before first snapshot.
+        _time_module.sleep(60)
+        while self._backup_running:
+            try:
+                self._run_scheduled_backup()
+            except Exception as exc:
+                logging.error("[DBBackup] Backup loop error: %s", exc)
+            _time_module.sleep(_DB_BACKUP_INTERVAL_SEC)
+
+    def _run_scheduled_backup(self) -> None:
+        """Create snapshots of both live and dryrun DBs and notify via Telegram."""
+        results = []
+        for db_instance in (self._live, self._dryrun):
+            snap = db_instance.create_snapshot()
+            if snap:
+                results.append(os.path.basename(snap))
+        if results:
+            msg = f"💾 [DB BACKUP] 6-hour snapshot created: {', '.join(results)}"
+            logging.info(msg)
+            try:
+                from app.interfaces.telegram_bot import send_telegram_message
+                send_telegram_message(msg)
+            except Exception:
+                pass
+
+    def run_backup_now(self) -> None:
+        """Trigger an immediate DB snapshot (e.g. from dashboard or CLI)."""
+        self._run_scheduled_backup()
 
     def _read_mode_raw(self) -> bool:
         """Return True if dry_run, False if live. Reads from live DB with 2s cache."""
-        now = _time.time()
+        now = _time_module.time()
         if self._mode_cache is not None and (now - self._mode_cache_ts) < 2.0:
             return self._mode_cache
         try:
