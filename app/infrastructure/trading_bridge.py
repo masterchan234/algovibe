@@ -456,7 +456,7 @@ class TradingBridge:
             pass
         return {
             "circuit_breaker":    cb_status,
-            "shadow_sync_running": self._shadow_sync._running,
+            "shadow_sync_running": self._shadow_sync.is_running(),
         }
 
     # ── DB persistence helpers ────────────────────────────────────────────────

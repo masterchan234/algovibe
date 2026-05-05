@@ -395,6 +395,10 @@ class ShadowSync:
         """Signal the background thread to stop after the current pass."""
         self._running = False
 
+    def is_running(self) -> bool:
+        """Return True if the background reconciliation thread is active."""
+        return self._running
+
     def run_once(self) -> dict:
         """Perform a single reconciliation pass and return a summary dict."""
         return self._reconcile()
@@ -554,13 +558,12 @@ class ShadowSync:
                     ),
                     level="CRITICAL" if summary["discrepancies"] else "INFO",
                 )
-            except Exception:
-                pass
+            except Exception as log_exc:
+                logger.debug("[ShadowSync] Could not persist sync event to DB: %s", log_exc)
 
         except Exception as exc:
             logger.error("[ShadowSync] Unexpected error: %s", exc)
             summary["error"] = str(exc)
-
         return summary
 
 
@@ -579,9 +582,12 @@ class EmergencyNotifier:
 
     def __init__(self):
         self._socketio_fn: Callable | None = None
+        self._fn_lock = threading.Lock()
 
     def set_socketio_fn(self, fn: Callable) -> None:
         """Inject a SocketIO emit callable so the notifier can push to the frontend.
+
+        Thread-safe: protected by an internal lock.
 
         Example
         -------
@@ -591,7 +597,8 @@ class EmergencyNotifier:
                 lambda event, data: socketio.emit(event, data, room="public")
             )
         """
-        self._socketio_fn = fn
+        with self._fn_lock:
+            self._socketio_fn = fn
 
     def send(
         self,
@@ -626,10 +633,12 @@ class EmergencyNotifier:
         except Exception as exc:
             logger.warning("[EmergencyNotifier] Telegram send failed: %s", exc)
 
-        # 4. SocketIO (if injected)
-        if self._socketio_fn:
+        # 4. SocketIO (if injected) — read under lock, call outside lock
+        with self._fn_lock:
+            emit_fn = self._socketio_fn
+        if emit_fn:
             try:
-                self._socketio_fn(
+                emit_fn(
                     event_type.lower(),
                     {"message": message, "level": level, "pair": pair},
                 )
