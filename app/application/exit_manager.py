@@ -21,6 +21,7 @@ from config import (
     MOMENTUM_VELOCITY_INTERVAL_SEC, MOMENTUM_TIGHT_TRAILING_PCT,
     MOMENTUM_HIGH_CORR_BUFFER_REDUCTION,
     NET_ZERO_SURVIVAL_ENABLED, NET_ZERO_MOMENTUM_THRESHOLD, NET_ZERO_HYSTERESIS_SEC,
+    NET_ZERO_IMMEDIATE_VELOCITY,
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -160,6 +161,7 @@ class ExitManager:
         mark_exit_requested,
         positions: dict,
         modified_pairs: set,
+        current_tickers: dict = None,
     ) -> None:
         """Execute the Net-Zero Survival emergency basket exit.
 
@@ -173,6 +175,7 @@ class ExitManager:
           3. Set SYSTEM_PAUSE: blocks new buys by latching HARVEST_ONLY.
           4. Send high-priority Telegram notification.
           5. Execute BASKET_EXIT for every open position.
+          6. Defensive sweep: cancel orphan exchange orders/positions not in DB.
         """
         n = len(open_pairs_for_basket)
         log_message(
@@ -253,7 +256,13 @@ class ExitManager:
             if order_id:
                 mark_exit_requested(pair, order_id)
 
+        # Defensive sweep: close any orphan exchange positions not tracked in local DB.
+        if current_tickers is not None:
+            self._defensive_close_exchange_positions(current_tickers, reason="NET_ZERO_SURVIVAL")
+
         self.save_positions(positions, modified_pairs)
+
+    def _order_id_variants(self, order_id):
         """Generate comparable variants for heterogeneous order IDs.
 
         Examples:
@@ -460,35 +469,58 @@ class ExitManager:
             has_stagnant = False
 
             for pair, data in positions.items():
-                if data.get('status') == "OPEN" and pair in current_tickers:
-                    current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
-                    entry_price = data.get('entry_price', 0)
-                    amount = data.get('amount_crypto', 0)
-                    amount_idr = data.get('amount_idr', 0)
+                if data.get('status') != "OPEN":
+                    continue
+                # Resolve current price: prefer live ticker, fall back to last known
+                # price history entry, then entry_price (conservative: no gain assumed).
+                # This ensures ALL active positions contribute to the net PnL calculation
+                # regardless of whether the pair has a fresh WebSocket tick.
+                if pair in current_tickers:
+                    current_price = float(
+                        current_tickers[pair].get('last')
+                        or current_tickers[pair].get('buy')
+                        or 0
+                    )
+                else:
+                    # Fallback: use last price from rolling price history if available
+                    _ph = price_history.get(pair) if price_history else None
+                    if _ph and len(_ph) > 0:
+                        current_price = float(list(_ph)[-1])
+                    else:
+                        current_price = float(data.get('entry_price') or 0)
 
-                    sell_value = amount * current_price
-                    fee_sell = sell_value * FEE_SELL_TAKER
-                    fee_buy = amount_idr * FEE_BUY_TAKER
+                if current_price <= 0:
+                    current_price = float(data.get('entry_price') or 0)
 
-                    gross_pnl = (current_price - entry_price) * amount
-                    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                entry_price = data.get('entry_price', 0)
+                amount = data.get('amount_crypto', 0)
+                amount_idr = data.get('amount_idr', 0)
 
-                    if net_pnl_idr < 0:
-                        has_losers = True
+                sell_value = amount * current_price
+                fee_sell = sell_value * FEE_SELL_TAKER
+                fee_buy = amount_idr * FEE_BUY_TAKER
 
-                    # Deteksi posisi stagnant: mandek lama & masih merugi
-                    try:
-                        _pos_ts = datetime.fromisoformat(data['timestamp'])
-                        _pos_age = (datetime.now() - _pos_ts).total_seconds() / 60.0
-                        if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_idr < 0:
-                            has_stagnant = True
-                    except Exception:
-                        pass
+                gross_pnl = (current_price - entry_price) * amount
+                net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
 
-                    total_gross_pnl  += gross_pnl
-                    total_fees_idr   += fee_buy + fee_sell
-                    total_net_pnl    += net_pnl_idr
-                    total_amount_idr += amount_idr
+                if net_pnl_idr < 0:
+                    has_losers = True
+
+                # Deteksi posisi stagnant: mandek lama & masih merugi
+                try:
+                    _pos_ts = datetime.fromisoformat(data['timestamp'])
+                    _pos_age = (datetime.now() - _pos_ts).total_seconds() / 60.0
+                    if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_idr < 0:
+                        has_stagnant = True
+                except Exception:
+                    pass
+
+                total_gross_pnl  += gross_pnl
+                total_fees_idr   += fee_buy + fee_sell
+                total_net_pnl    += net_pnl_idr
+                total_amount_idr += amount_idr
+                # Only include in basket if we have a usable live price for execution
+                if pair in current_tickers and current_price > 0:
                     open_pairs_for_basket.append((pair, data, current_price, amount))
 
             # ── High-water-mark tracking ─────────────────────────────────────────────────
@@ -535,6 +567,11 @@ class ExitManager:
                             net_total_pnl <= 0
                             and latest_velocity < NET_ZERO_MOMENTUM_THRESHOLD
                         )
+                        # Momentum spike: extreme crash velocity — bypass hysteresis entirely.
+                        nz_immediate = (
+                            net_total_pnl <= 0
+                            and latest_velocity < NET_ZERO_IMMEDIATE_VELOCITY
+                        )
                         if nz_condition:
                             if self._net_zero_trigger_ts == 0.0:
                                 self._net_zero_trigger_ts = _now_ts
@@ -543,7 +580,12 @@ class ExitManager:
                                     f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
                                     f"Velocity: {latest_velocity:+.1f} IDR/s"
                                 )
-                            elif _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
+                            if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
+                                if nz_immediate:
+                                    log_message(
+                                        f"🚨 [NET-ZERO GUARD] IMMEDIATE exit — extreme velocity "
+                                        f"{latest_velocity:+.1f} IDR/s bypasses hysteresis."
+                                    )
                                 # Condition sustained for required duration — fire survival guard.
                                 self._net_zero_fired = True
                                 self._fire_net_zero_survival(
@@ -555,6 +597,7 @@ class ExitManager:
                                     mark_exit_requested=mark_exit_requested,
                                     positions=positions,
                                     modified_pairs=modified_pairs,
+                                    current_tickers=current_tickers,
                                 )
                                 return  # basket exit submitted; exit evaluation frame
                         else:
@@ -856,6 +899,9 @@ class ExitManager:
                         )
                         if order_id:
                             mark_exit_requested(pair, order_id)
+
+                    # Defensive sweep: close any orphan exchange positions not in the local DB.
+                    self._defensive_close_exchange_positions(current_tickers, reason="BASKET_EXIT")
 
                     self.save_positions(positions, modified_pairs)
                     return  # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
@@ -1254,6 +1300,90 @@ class ExitManager:
                 log_message(traceback.format_exc())
 
         self.save_positions(positions, modified_pairs)
+
+    def _defensive_close_exchange_positions(self, current_tickers: dict, reason: str = "BASKET_EXIT") -> None:
+        """Defensive sweep: close any open exchange positions/orders not tracked in the local DB.
+
+        Called as a second pass after the DB-tracked BASKET_EXIT loop so that orphan
+        positions (e.g. opened via the exchange UI, or created before a crash that wiped
+        the DB) are not left dangling on the exchange.
+
+        Steps:
+          1. Cancel all open BUY orders on the exchange (prevents new positions accumulating).
+          2. Fetch exchange balance and sell any coin with a meaningful holding that has no
+             corresponding OPEN record in the local DB.
+        """
+        if self.dry_run:
+            return  # No real exchange in dry-run mode
+
+        try:
+            # ── 1. Cancel open BUY limit orders ──────────────────────────────────
+            try:
+                open_orders = self.exchange.fetch_open_orders()
+                for order in open_orders or []:
+                    if (order.get('side') or '').lower() == 'buy':
+                        try:
+                            symbol = order.get('symbol') or ''
+                            pair = symbol.replace('/', '').lower()
+                            self.exchange.cancel_order(
+                                order['id'],
+                                symbol,
+                                params={'pair': pair.replace('idr', '_idr'), 'side': 'buy'},
+                            )
+                            log_message(
+                                f"🛡️ [DEFENSIVE_CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
+                            )
+                        except Exception as _ce:
+                            log_message(f"⚠️ [DEFENSIVE_CLOSE] Cancel order error: {_ce}")
+            except Exception as _oe:
+                log_message(f"⚠️ [DEFENSIVE_CLOSE] fetch_open_orders error: {_oe}")
+
+            # ── 2. Sell orphan coin balances ─────────────────────────────────────
+            try:
+                bal = self.exchange.fetch_balance()
+                total_bal = bal.get('total', {})
+                # Collect pairs already being closed via the DB-tracked path
+                tracked_open_pairs = set()
+                for pair, data in self.get_open_positions().items():
+                    if data.get('status') == 'OPEN':
+                        tracked_open_pairs.add(pair)
+
+                for coin, amount in total_bal.items():
+                    if coin in ('IDR', 'info'):
+                        continue
+                    amount = float(amount or 0)
+                    if amount <= 0:
+                        continue
+                    pair = f"{coin.lower()}idr"
+                    if pair in tracked_open_pairs:
+                        continue  # Already handled by the DB-tracked basket exit loop
+                    # Estimate value in IDR to filter out dust
+                    price = float(
+                        (current_tickers.get(pair) or {}).get('last')
+                        or (current_tickers.get(pair) or {}).get('buy')
+                        or 0
+                    )
+                    if price <= 0:
+                        continue
+                    idr_value = amount * price
+                    if idr_value < 10000:
+                        continue  # Skip dust (< Rp 10.000)
+                    try:
+                        symbol = f"{coin.upper()}/IDR"
+                        self.exchange.create_order(
+                            symbol, 'market', 'sell', amount, price,
+                            {'pair': pair.replace('idr', '_idr')}
+                        )
+                        log_message(
+                            f"🛡️ [DEFENSIVE_CLOSE] Sold orphan {coin} ({amount}) "
+                            f"≈ Rp {idr_value:,.0f} via {reason}"
+                        )
+                    except Exception as _se:
+                        log_message(f"⚠️ [DEFENSIVE_CLOSE] Sell orphan {coin} error: {_se}")
+            except Exception as _be:
+                log_message(f"⚠️ [DEFENSIVE_CLOSE] fetch_balance error: {_be}")
+        except Exception as _e:
+            log_message(f"⚠️ [DEFENSIVE_CLOSE] Unexpected error: {_e}")
 
     def _request_approval(self, action_type, description, reason_text, impact_idr, default_approve=True):
         """Supreme Commander Approval Gate — blocks up to 30 s waiting for user response.
