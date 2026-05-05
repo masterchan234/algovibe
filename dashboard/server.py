@@ -1229,6 +1229,83 @@ def get_live_state():
         })
 
 
+# ── Mode-specific API aliases ─────────────────────────────────────────────────
+# Routes under /api/dry/* and /api/live/* are thin wrappers that forward to
+# the main endpoints while forcing the requested DB mode.
+# The frontend uses these prefixes so that Dry and Live stats can be fetched
+# independently, regardless of the bot's current runtime mode.
+
+def _mode_stats_response(forced_dry: bool):
+    """Return /api/stats payload, overriding DRY_RUN for this request only."""
+    import config as _cfg
+    original = _cfg.DRY_RUN
+    try:
+        _cfg.DRY_RUN = forced_dry
+        return get_stats()
+    finally:
+        _cfg.DRY_RUN = original
+
+@app.route('/api/dry/stats')
+def get_dry_stats():
+    """Stats endpoint forcing Dry-Run database view."""
+    return _mode_stats_response(True)
+
+@app.route('/api/live/stats')
+def get_live_stats_alias():
+    """Stats endpoint forcing Live database view (auth required)."""
+    if _get_current_user_payload() is None:
+        return jsonify({"error": "Unauthorized"}), 401
+    return _mode_stats_response(False)
+
+@app.route('/api/dry/positions')
+def get_dry_positions():
+    """Positions from dry-run DB."""
+    import config as _cfg
+    original = _cfg.DRY_RUN
+    try:
+        _cfg.DRY_RUN = True
+        return get_positions()
+    finally:
+        _cfg.DRY_RUN = original
+
+@app.route('/api/live/positions')
+@login_required
+def get_live_positions():
+    """Positions from live DB (auth required)."""
+    import config as _cfg
+    original = _cfg.DRY_RUN
+    try:
+        _cfg.DRY_RUN = False
+        return get_positions()
+    finally:
+        _cfg.DRY_RUN = original
+
+@app.route('/api/dry/pnl-history/<tf>')
+def get_dry_pnl_history(tf):
+    """PnL history from dry-run DB."""
+    import config as _cfg
+    original = _cfg.DRY_RUN
+    try:
+        _cfg.DRY_RUN = True
+        return get_pnl_history_api(tf)
+    finally:
+        _cfg.DRY_RUN = original
+
+@app.route('/api/live/pnl-history/<tf>')
+@login_required
+def get_live_pnl_history(tf):
+    """PnL history from live DB (auth required)."""
+    import config as _cfg
+    original = _cfg.DRY_RUN
+    try:
+        _cfg.DRY_RUN = False
+        return get_pnl_history_api(tf)
+    finally:
+        _cfg.DRY_RUN = original
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def get_market_context(pair):
     """
     Menyediakan konteks pasar lengkap untuk modal ORACLE:

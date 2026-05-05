@@ -204,14 +204,56 @@
         V1.4.2-STABLE
       </div>
     </footer>
+
+    <!-- Mobile Bottom Navigation Bar (visible only on <768px) -->
+    <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
+      <button
+        class="mbn-btn"
+        :class="{ active: activeTab === 'dashboard' }"
+        @click="activeTab = 'dashboard'"
+        aria-label="Dashboard"
+      >
+        <span class="mbn-icon">📊</span>
+        <span class="mbn-label">Dashboard</span>
+      </button>
+      <button
+        class="mbn-btn"
+        :class="{ active: activeTab === 'positions' }"
+        @click="activeTab = 'positions'"
+        aria-label="Positions"
+      >
+        <span class="mbn-icon">📈</span>
+        <span class="mbn-label">Positions</span>
+        <span v-if="store.stats.active_positions > 0" class="mbn-badge">{{ store.stats.active_positions }}</span>
+      </button>
+      <button
+        class="mbn-btn"
+        :class="{ active: activeTab === 'history' }"
+        @click="activeTab = 'history'"
+        aria-label="History"
+      >
+        <span class="mbn-icon">📋</span>
+        <span class="mbn-label">History</span>
+      </button>
+      <button
+        class="mbn-btn"
+        :class="{ active: activeTab === 'settings' }"
+        @click="activeTab = 'settings'; showLoginModal = !isAuthenticated"
+        aria-label="Settings"
+      >
+        <span class="mbn-icon">⚙️</span>
+        <span class="mbn-label">Settings</span>
+      </button>
+    </nav>
   </div>
 </template>
 
 <script setup>
 import { onMounted, onUnmounted, ref, reactive, computed, watch, nextTick, defineAsyncComponent } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useTradeStore } from './stores/trade'
 import { useAuth } from './composables/useAuth'
+import { useMode } from './composables/useMode'
 import ActivityFeed from './components/ActivityFeed.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 import ApprovalGateModal from './components/ApprovalGateModal.vue'
@@ -222,7 +264,12 @@ const ProfitChart = defineAsyncComponent(() => import('./components/ProfitChart.
 
 const store = useTradeStore()
 const router = useRouter()
+const route = useRoute()
 const { isAuthenticated, login: authLogin, logout: authLogout, getAuthHeaders } = useAuth()
+const { isDryMode } = useMode()
+
+// Active bottom-nav tab (mobile)
+const activeTab = ref('dashboard')
 
 const newsHeadlines = ref([])
 const tickerContent = ref(null)
@@ -331,14 +378,16 @@ async function handleLogin() {
       pendingLiveSwitch.value = false
       if (toggleRes.ok) {
         showLoginModal.value = false
-        alert('Login successful. Mode langsung berpindah ke LIVE.')
+        // Redirect to mode selector so user can choose their operating environment
+        router.push('/mode-select')
       } else {
         showLoginModal.value = false
         alert('Login berhasil, tapi auto-switch ke LIVE gagal. Silakan klik toggle sekali lagi.')
       }
     } else {
       showLoginModal.value = false
-      alert('Login successful!')
+      // Redirect to mode selector after successful login
+      router.push('/mode-select')
     }
   } catch (e) {
     alert(`Login failed: ${e.message || 'Invalid credentials'}`)
@@ -1190,5 +1239,100 @@ body {
   .footer-right { order: 2; font-size: 8px; opacity: 0.5; }
   
   .ticker-item { margin-right: 16px; }
+}
+
+/* ── Tech-Purple Dry Mode accent override ───────────────────────── */
+:root {
+  --dry-accent: #a371f7;
+  --dry-accent-dim: rgba(163, 113, 247, 0.15);
+}
+
+/* ── Mobile Bottom Navigation Bar ──────────────────────────────── */
+.mobile-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* Add padding so content is not obscured by bottom nav */
+  .app {
+    padding-bottom: 64px;
+  }
+
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 64px;
+    background: rgba(13, 17, 23, 0.96);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border-dim);
+    z-index: 200;
+    justify-content: space-around;
+    align-items: stretch;
+    /* Safe area inset for iPhone home indicator */
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  .mbn-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 8px 4px;
+    min-height: 44px;
+    min-width: 44px;
+    position: relative;
+    transition: color 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mbn-btn.active {
+    color: var(--dry-accent);
+  }
+
+  .mbn-btn.active .mbn-icon {
+    filter: drop-shadow(0 0 6px var(--dry-accent));
+  }
+
+  .mbn-icon {
+    font-size: 20px;
+    line-height: 1;
+    transition: transform 0.2s;
+  }
+
+  .mbn-btn.active .mbn-icon { transform: scale(1.15); }
+
+  .mbn-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .mbn-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 22px);
+    background: var(--accent-red);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 800;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+  }
 }
 </style>

@@ -4,12 +4,52 @@ import { io } from 'socket.io-client'
 import { useNotifications } from '../composables/useNotifications'
 import { useAuth } from '../composables/useAuth'
 
+// ── Battery Saver helpers ─────────────────────────────────────────────────────
+
+/** True when the viewport is mobile-sized (<768px) */
+function _isMobile() {
+  return typeof window !== 'undefined' && window.innerWidth < 768
+}
+
+/** Max pnlHistory items — fewer on mobile to reduce memory */
+function _maxHistory() {
+  return _isMobile() ? 75 : 300
+}
+
+/**
+ * Throttle wrapper: ensures `fn` is called at most once per `intervalMs`.
+ * On mobile the default interval is 4000 ms; on desktop it follows whatever
+ * the caller specifies (or is called immediately).
+ */
+function _makeThrottle(intervalMs) {
+  let _lastCall = 0
+  return function (fn) {
+    const now = Date.now()
+    if (now - _lastCall >= intervalMs) {
+      _lastCall = now
+      fn()
+    }
+  }
+}
+
 export const useTradeStore = defineStore('trade', () => {
   const { notify } = useNotifications()
-  
+
   // Connection state
   const connected = ref(false)
   const socket = ref(null)
+
+  // Visibility API — pause heavy updates when tab/screen is hidden
+  const _pageVisible = ref(true)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      _pageVisible.value = !document.hidden
+    })
+  }
+
+  // Throttle gate for mobile UI re-renders (4 s on mobile, 0 ms on desktop)
+  const _throttleStats = _makeThrottle(_isMobile() ? 4000 : 0)
+  const _throttleTrades = _makeThrottle(_isMobile() ? 4000 : 0)
 
   // Stats
   const stats = reactive({
@@ -72,8 +112,8 @@ export const useTradeStore = defineStore('trade', () => {
   const MAX_FEED_ITEMS = 100
 
   // Profit history for line chart: [{time, pnl}]
+  // Capacity is adaptive: 75 pts on mobile, 300 on desktop
   const pnlHistory = ref([])
-  const MAX_HISTORY = 300
 
   // Radar data
   const radarPairs = ref([])
@@ -127,10 +167,14 @@ export const useTradeStore = defineStore('trade', () => {
   }
 
   function _recordPnl(pnl) {
+    // Skip recording entirely when the page is hidden (Visibility API — battery saver)
+    if (!_pageVisible.value) return
+
     const rounded = Math.round(pnl)
     const now = new Date()
     const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    
+    const maxPts = _maxHistory()
+
     // Always record two points if empty to ensure ECharts draws a line immediately
     if (pnlHistory.value.length === 0) {
       const prevNow = new Date(now.getTime() - 1000)
@@ -144,8 +188,8 @@ export const useTradeStore = defineStore('trade', () => {
     const last = pnlHistory.value[pnlHistory.value.length - 1]
     if (last && last.pnl === rounded && pnlHistory.value.length > 20) return
     pnlHistory.value.push({ time: timeStr, pnl: rounded })
-    if (pnlHistory.value.length > MAX_HISTORY) {
-      pnlHistory.value = pnlHistory.value.slice(-MAX_HISTORY)
+    if (pnlHistory.value.length > maxPts) {
+      pnlHistory.value = pnlHistory.value.slice(-maxPts)
     }
   }
 
@@ -184,56 +228,63 @@ export const useTradeStore = defineStore('trade', () => {
     s.on('disconnect', () => { connected.value = false })
 
     s.on('stats_update', (data) => {
-      Object.assign(stats, {
-        daily_pnl: data.daily_pnl ?? 0,
-        all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
-        available_idr: data.available_idr ?? 0,
-        idr_used: data.idr_used ?? 0,
-        total_equity: data.total_equity ?? 0,
-        utilization: data.utilization ?? 0,
-        win_rate: data.win_rate ?? 0,
-        active_positions: data.active_positions ?? 0,
-        unrealized_pnl: data.unrealized_pnl ?? 0,
-        regime: data.regime ?? 'CHOPPY',
-        regime_leader: data.regime_leader ?? '',
-        market_sentiment_index: data.market_sentiment_index ?? 50,
-        latest_llm_insight: data.latest_llm_insight ?? '',
-        hero_ai_insight: data.hero_ai_insight ?? 'Waiting for AI analysis...',
-        hero_ai_insights: Array.isArray(data.hero_ai_insights) ? data.hero_ai_insights : [],
-        active_reasoning: data.active_reasoning ?? '',
-        equity_reasoning: data.equity_reasoning ?? '',
-        equity_action_plan: data.equity_action_plan ?? '',
-        first_trade_ts: data.first_trade_ts ?? 0,
-        alpha_contributor: data.alpha_contributor ?? '',
-        best_trade: data.best_trade ?? 0,
-        intensity: data.intensity ?? 0,
-        asset_contributions: data.asset_contributions ?? [],
-        recent_trades: data.recent_trades ?? [],
-        trades: data.trades ?? 0,
-        history_count: data.history_count ?? 0,
-        open_count: data.open_count ?? 0,
-        dry_run: data.dry_run ?? true,
-        dry_run_loose_gates: data.dry_run_loose_gates ?? false,
-        manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
-        btc_price: data.btc_price ?? 0,
-        btc_change_24h: data.btc_change_24h ?? 0,
-        btc_ch_5m: data.btc_ch_5m ?? 0,
-        btc_ch_15m: data.btc_ch_15m ?? 0,
-        btc_ch_1h: data.btc_ch_1h ?? 0,
-        btc_trend: data.btc_trend ?? 'N/A',
-        btc_score: data.btc_score ?? 50,
-        btc_weakening: data.btc_weakening ?? false,
-        btc_crash: data.btc_crash ?? false,
-        momentum_state: data.momentum_state ?? 'STALLING',
-        net_pnl_velocity: data.net_pnl_velocity ?? 0,
+      // Throttle UI re-renders on mobile; always allow on desktop
+      _throttleStats(() => {
+        // Skip non-critical updates when page is hidden (Visibility API)
+        if (!_pageVisible.value) return
+        Object.assign(stats, {
+          daily_pnl: data.daily_pnl ?? 0,
+          all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
+          available_idr: data.available_idr ?? 0,
+          idr_used: data.idr_used ?? 0,
+          total_equity: data.total_equity ?? 0,
+          utilization: data.utilization ?? 0,
+          win_rate: data.win_rate ?? 0,
+          active_positions: data.active_positions ?? 0,
+          unrealized_pnl: data.unrealized_pnl ?? 0,
+          regime: data.regime ?? 'CHOPPY',
+          regime_leader: data.regime_leader ?? '',
+          market_sentiment_index: data.market_sentiment_index ?? 50,
+          latest_llm_insight: data.latest_llm_insight ?? '',
+          hero_ai_insight: data.hero_ai_insight ?? 'Waiting for AI analysis...',
+          hero_ai_insights: Array.isArray(data.hero_ai_insights) ? data.hero_ai_insights : [],
+          active_reasoning: data.active_reasoning ?? '',
+          equity_reasoning: data.equity_reasoning ?? '',
+          equity_action_plan: data.equity_action_plan ?? '',
+          first_trade_ts: data.first_trade_ts ?? 0,
+          alpha_contributor: data.alpha_contributor ?? '',
+          best_trade: data.best_trade ?? 0,
+          intensity: data.intensity ?? 0,
+          asset_contributions: data.asset_contributions ?? [],
+          recent_trades: data.recent_trades ?? [],
+          trades: data.trades ?? 0,
+          history_count: data.history_count ?? 0,
+          open_count: data.open_count ?? 0,
+          dry_run: data.dry_run ?? true,
+          dry_run_loose_gates: data.dry_run_loose_gates ?? false,
+          manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
+          btc_price: data.btc_price ?? 0,
+          btc_change_24h: data.btc_change_24h ?? 0,
+          btc_ch_5m: data.btc_ch_5m ?? 0,
+          btc_ch_15m: data.btc_ch_15m ?? 0,
+          btc_ch_1h: data.btc_ch_1h ?? 0,
+          btc_trend: data.btc_trend ?? 'N/A',
+          btc_score: data.btc_score ?? 50,
+          btc_weakening: data.btc_weakening ?? false,
+          btc_crash: data.btc_crash ?? false,
+          momentum_state: data.momentum_state ?? 'STALLING',
+          net_pnl_velocity: data.net_pnl_velocity ?? 0,
+        })
+        _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })
-      _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
     })
 
     s.on('trades_update', (data) => {
-      if (Array.isArray(data)) {
-        positions.value = data
-      }
+      _throttleTrades(() => {
+        if (Array.isArray(data)) {
+          positions.value = data
+        }
+      })
     })
 
     s.on('logs_update', (data) => {
