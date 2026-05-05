@@ -54,7 +54,7 @@
       </form>
 
       <div class="lp-footer-links">
-        <a href="/" class="lp-link">← View Public Dashboard</a>
+        <button class="lp-link" @click="router.push('/')">← View Public Dashboard</button>
       </div>
     </div>
   </div>
@@ -279,6 +279,11 @@ async function handleLogin() {
   font-size: 12px;
   color: #555;
   text-decoration: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
   transition: color 0.2s;
 }
 
