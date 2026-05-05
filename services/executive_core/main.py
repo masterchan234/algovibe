@@ -326,6 +326,16 @@ class ExecutiveCoreService:
                     # Enqueue a buy order. 
                     # Use the domain execute_trade logic
                     from app.application.use_cases.trade_execution import execute_trade
+                    tq_prob = float(sig.confidence or 0.0)
+                    # Compatibility: accept either 0..1 or 0..100 confidence payloads.
+                    if tq_prob > 1.0:
+                        tq_prob /= 100.0
+                    tq_prob = max(0.0, min(1.0, tq_prob))
+                    tick_obj = self._ticks.get(sig.symbol)
+                    entry_price = float(tick_obj.price) if tick_obj and float(tick_obj.price) > 0 else 0.0
+                    if entry_price <= 0:
+                        logger.warning(f"[executive-core] BUY signal ignored for {sig.symbol}: no valid tick price yet")
+                        continue
                     
                     # We run this in a thread because it might do blocking DB/API calls
                     loop = asyncio.get_event_loop()
@@ -334,9 +344,9 @@ class ExecutiveCoreService:
                         lambda: execute_trade(
                             self,
                             sig.symbol,
-                            self._ticks[sig.symbol].price if sig.symbol in self._ticks else 0,
+                            entry_price,
                             trend="ORACLE_SIGNAL",
-                            tq_prob=sig.confidence / 100.0,
+                            tq_prob=tq_prob,
                             taker=True # Signals are high-priority
                         )
                     )

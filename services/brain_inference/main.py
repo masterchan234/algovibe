@@ -82,7 +82,8 @@ class BrainInferenceService:
         # Buffers for realtime analysis
         self._tickers = {}  # {symbol: {last, bid, ask, high, low, vol_idr, change_24h}}
         self._history = {}  # {symbol: deque([prices], maxlen=200)}
-        self._history_maxlen = 200
+        # Monolith parity: keep exactly the same rolling history depth.
+        self._history_maxlen = 100
         self._pre_load_history()
         
         # [Restoration] Exchange for backfill
@@ -104,6 +105,8 @@ class BrainInferenceService:
         
         # Load blacklist
         self.blacklist = set(db.get_blacklist())
+        self.daily_trades = int(db.get_state("daily_trades", 0) or 0)
+        self.start_day = int(db.get_state("start_day", datetime.now().day) or datetime.now().day)
 
     async def start(self) -> None:
         self._running = True
@@ -167,11 +170,6 @@ class BrainInferenceService:
                 # Update History
                 if symbol not in self._history:
                     self._history[symbol] = deque(maxlen=self._history_maxlen)
-                
-                # Simple deduplication: only add if price changed significantly or every 10 ticks
-                hist = self._history[symbol]
-                if not hist or abs(hist[-1] - price) > (price * 0.0001):
-                    hist.append(price)
                 
             except Exception as exc:
                 logger.warning("[brain-inference] Tick processing error: %s", exc)
@@ -313,20 +311,52 @@ class BrainInferenceService:
         if not ranked:
             return
 
+        # Monolith parity: reset daily counters on calendar day rollover.
+        current_day = datetime.now().day
+        if current_day != self.start_day:
+            self.daily_trades = 0
+            self.start_day = current_day
+            db.save_state("daily_trades", 0)
+            db.save_state("start_day", current_day)
+            db.save_state("session_mode", "NORMAL")
+            db.save_state("session_buy_enabled", "true")
+            db.save_state("session_latched", "false")
+
         regime = self.oracle.get_market_regime()
         open_positions = db.get_open_positions()
+
+        # Monolith parity: run target/loss gates before evaluating entries.
+        adaptive_cfg = dict(self._adaptive_cfg)
+        target_status = self.oracle.get_daily_target_status()
+        session_info = self.oracle.evaluate_and_update_session_mode(target_status)
+        if not session_info.get("buy_enabled", True):
+            return
+
+        if target_status.get("near"):
+            original_threshold = adaptive_cfg.get("tech_threshold", config.TECH_CONFIDENCE_THRESHOLD)
+            adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
+
+        recovery_mode = False
+        recovery_new_positions = 0
+        if target_status.get("loss_limit_hit"):
+            adaptive_cfg["tech_threshold"] = 0.80
+            recovery_mode = True
         
         # Mocking bot-like interface for entry_gates use case
         class BotMock:
-            def __init__(self, oracle, blacklist, history):
+            def __init__(self, oracle, blacklist, history, history_maxlen):
                 self.oracle = oracle
                 self.blacklist = blacklist
                 self.price_history = history # Shared reference to self._history
+                self._history_maxlen = history_maxlen
 
             def update_history_and_trend(self, pair, price):
-                history_deque = self.price_history.get(pair, deque(maxlen=200))
-                # Note: we don't append here because _consume_ticks already did.
-                # Just derive stats.
+                history_deque = self.price_history.get(pair)
+                if history_deque is None:
+                    history_deque = deque(maxlen=self._history_maxlen)
+                    self.price_history[pair] = history_deque
+                # Monolith parity: append one sample per evaluation cycle.
+                history_deque.append(price)
                 history = list(history_deque)
                 if not history:
                     return "SIDEWAYS", False, []
@@ -339,16 +369,26 @@ class BrainInferenceService:
 
                 return "UP" if is_uptrend else "SIDEWAYS", is_pullback, history
 
-        bot_mock = BotMock(self.oracle, self.blacklist, self._history)
+        bot_mock = BotMock(self.oracle, self.blacklist, self._history, self._history_maxlen)
         
-        for r in ranked[:10]: # Check top 10 ranked candidates
+        for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
             try:
+                if self.daily_trades >= config.MAX_TRADES_PER_DAY:
+                    break
+
                 # Prepare mock for enrichment/gates
                 bot_mock.price_history[pair] = self._history.get(pair, deque())
                 
                 enriched = enrich_pair(bot_mock, r, self._tickers)
-                gate = check_entry_gates(bot_mock, r, enriched, regime, self._adaptive_cfg, open_positions)
+                gate = check_entry_gates(bot_mock, r, enriched, regime, adaptive_cfg, open_positions)
+
+                if recovery_mode:
+                    total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0
+                    if total_conf < 75.0:
+                        continue
+                    if recovery_new_positions >= 1:
+                        continue
                 
                 if isinstance(gate, dict) and gate.get("mode") == "LIVE":
                     logger.info(f"[brain-inference] 🔥 SIGNAL DETECTED: {pair} (confidence: {gate.get('total_confidence', 0):.1f}%)")
@@ -363,6 +403,10 @@ class BrainInferenceService:
                     
                     # Use "signal" topic for ZMQ multipart
                     self._signal_pub.send(sig.SerializeToString(), topic="signal")
+                    self.daily_trades += 1
+                    db.save_state("daily_trades", self.daily_trades)
+                    if recovery_mode:
+                        recovery_new_positions += 1
                     
             except Exception as e:
                 logger.error(f"[brain-inference] Signal scan error for {pair}: {e}")
