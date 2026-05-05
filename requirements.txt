@@ -51,4 +51,4 @@ yarl==1.23.0
 joblib==1.4.2
 scikit-learn==1.6.1
 PyJWT==2.9.0
-protobuf==6.31.1
+protobuf==6.33.5
