@@ -41,12 +41,14 @@ self.addEventListener('fetch', (event) => {
   const { request } = event
   const url = new URL(request.url)
 
-  // Never intercept socket.io, chrome-extension, non-GET, or cross-origin
+  // Never intercept socket.io, non-GET, or cross-origin requests —
+  // return early without calling respondWith so the browser handles them natively.
   if (
     request.method !== 'GET' ||
     url.pathname.startsWith('/socket.io') ||
     url.origin !== self.location.origin
   ) {
+    // Explicitly fall through to browser default fetch (no respondWith)
     return
   }
 

@@ -12,7 +12,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import sqlite3
 import json
 import jwt as pyjwt
-from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template
+from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template, g
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import secrets
@@ -771,7 +771,7 @@ def get_stats():
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
 
-        if cfg.DRY_RUN:
+        if _is_dry_run():
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
@@ -811,7 +811,7 @@ def get_stats():
         # Performance definitions
         perf = db.get_daily_stats()
         import config as cfg
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if cfg.DRY_RUN else 0)
+        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if _is_dry_run() else 0)
         
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
@@ -827,7 +827,7 @@ def get_stats():
         best_trade = float(best_trade_row[0] or 0)
 
         # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
-        _dr_val = 1 if cfg.DRY_RUN else 0
+        _dr_val = 1 if _is_dry_run() else 0
         active_positions_count = len([p for p in positions if int(p['dry_run'] or 0) == _dr_val])
 
         return jsonify({
@@ -869,7 +869,7 @@ def get_stats():
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
             "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',
             "new_listings": db.get_new_listings(),
-            "dry_run": bool(cfg.DRY_RUN),
+            "dry_run": bool(_is_dry_run()),
             "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
         })
     except Exception as e:
@@ -955,7 +955,7 @@ def get_pnl_history_api(tf):
     conn = get_db_connection()
     try:
         import config as cfg
-        dr_val = 1 if cfg.DRY_RUN else 0
+        dr_val = 1 if _is_dry_run() else 0
         
         tf_map = {
             '1h': '-1 hours',
@@ -1230,78 +1230,56 @@ def get_live_state():
 
 
 # ── Mode-specific API aliases ─────────────────────────────────────────────────
-# Routes under /api/dry/* and /api/live/* are thin wrappers that forward to
-# the main endpoints while forcing the requested DB mode.
-# The frontend uses these prefixes so that Dry and Live stats can be fetched
-# independently, regardless of the bot's current runtime mode.
+# Routes under /api/dry/* and /api/live/* are thin wrappers that set a
+# per-request DRY_RUN override via Flask's `g` object, so that individual
+# requests see a specific mode without mutating the shared global config
+# (which would cause race conditions under eventlet concurrency).
 
-def _mode_stats_response(forced_dry: bool):
-    """Return /api/stats payload, overriding DRY_RUN for this request only."""
+def _is_dry_run() -> bool:
+    """Return effective DRY_RUN value for the current request.
+    Respects g._dry_run_override when set by mode-specific aliases."""
     import config as _cfg
-    original = _cfg.DRY_RUN
-    try:
-        _cfg.DRY_RUN = forced_dry
-        return get_stats()
-    finally:
-        _cfg.DRY_RUN = original
+    return getattr(g, '_dry_run_override', _cfg.DRY_RUN)
 
 @app.route('/api/dry/stats')
 def get_dry_stats():
     """Stats endpoint forcing Dry-Run database view."""
-    return _mode_stats_response(True)
+    g._dry_run_override = True
+    return get_stats()
 
 @app.route('/api/live/stats')
 def get_live_stats_alias():
     """Stats endpoint forcing Live database view (auth required)."""
     if _get_current_user_payload() is None:
         return jsonify({"error": "Unauthorized"}), 401
-    return _mode_stats_response(False)
+    g._dry_run_override = False
+    return get_stats()
 
 @app.route('/api/dry/positions')
 def get_dry_positions():
     """Positions from dry-run DB."""
-    import config as _cfg
-    original = _cfg.DRY_RUN
-    try:
-        _cfg.DRY_RUN = True
-        return get_positions()
-    finally:
-        _cfg.DRY_RUN = original
+    g._dry_run_override = True
+    return get_positions()
 
 @app.route('/api/live/positions')
 @login_required
 def get_live_positions():
     """Positions from live DB (auth required)."""
-    import config as _cfg
-    original = _cfg.DRY_RUN
-    try:
-        _cfg.DRY_RUN = False
-        return get_positions()
-    finally:
-        _cfg.DRY_RUN = original
+    g._dry_run_override = False
+    return get_positions()
 
 @app.route('/api/dry/pnl-history/<tf>')
 def get_dry_pnl_history(tf):
     """PnL history from dry-run DB."""
-    import config as _cfg
-    original = _cfg.DRY_RUN
-    try:
-        _cfg.DRY_RUN = True
-        return get_pnl_history_api(tf)
-    finally:
-        _cfg.DRY_RUN = original
+    g._dry_run_override = True
+    return get_pnl_history_api(tf)
 
 @app.route('/api/live/pnl-history/<tf>')
 @login_required
 def get_live_pnl_history(tf):
     """PnL history from live DB (auth required)."""
-    import config as _cfg
-    original = _cfg.DRY_RUN
-    try:
-        _cfg.DRY_RUN = False
-        return get_pnl_history_api(tf)
-    finally:
-        _cfg.DRY_RUN = original
+    g._dry_run_override = False
+    return get_pnl_history_api(tf)
 
 # ─────────────────────────────────────────────────────────────────────────────
 

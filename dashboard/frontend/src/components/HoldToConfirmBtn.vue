@@ -42,6 +42,8 @@ const props = defineProps({
   doneText: { type: String, default: '✓ Confirmed' },
   /** Time in ms to hold before firing */
   holdMs: { type: Number, default: 2000 },
+  /** Auto-reset delay in ms after confirming (before button becomes interactive again) */
+  resetMs: { type: Number, default: 2000 },
   /** Colour variant: 'danger' | 'warning' | 'primary' */
   variant: { type: String, default: 'danger' },
   disabled: { type: Boolean, default: false },
@@ -77,11 +79,11 @@ function _tick() {
     isHolding.value = false
     isDone.value = true
     emit('confirm')
-    // Auto-reset after 2 s so button can be re-used
+    // Auto-reset after resetMs so button can be re-used
     setTimeout(() => {
       isDone.value = false
       progress.value = 0
-    }, 2000)
+    }, props.resetMs)
     return
   }
   _raf = requestAnimationFrame(_tick)

@@ -1290,6 +1290,7 @@ body {
     padding: 8px 4px;
     min-height: 44px;
     min-width: 44px;
+    min-width: 44px;
     position: relative;
     transition: color 0.2s;
     -webkit-tap-highlight-color: transparent;
