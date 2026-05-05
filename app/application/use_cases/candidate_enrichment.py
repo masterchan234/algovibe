@@ -67,6 +67,9 @@ def enrich_pair(bot, p, tickers):
         "trend": trend,
         "breakout": breakout,
         "history": history,
+        "ch_5m": ch_5m,
+        "ch_15m": ch_15m,
+        "ch_1h": ch_1h,
         "imbalance_ratio": imbalance_ratio,
         "tq_prob": tq_prob,
         "whale_boost": whale_boost,       # display only

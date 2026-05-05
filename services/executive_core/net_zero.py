@@ -31,6 +31,10 @@ from config import (
     NET_ZERO_MOMENTUM_THRESHOLD,
     NET_ZERO_HYSTERESIS_SEC,
     NET_ZERO_IMMEDIATE_VELOCITY,
+    NET_ZERO_PNL_FLOOR_IDR,
+    NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
+    NET_ZERO_MIN_POSITIONS,
+    NET_ZERO_AUTO_RESET_SEC,
     FEE_BUY_TAKER,
     FEE_SELL_TAKER,
 )
@@ -52,8 +56,11 @@ class NetZeroGuard:
     def __init__(self, on_basket_exit: Optional[BasketExitCallback] = None):
         self._on_basket_exit = on_basket_exit
         self._trigger_ts: float = 0.0   # when the condition was first detected
-        self._fired: bool = False        # one-shot per session guard
+        self._fired: bool = False        # one-shot per session guard (resettable)
+        self._fired_at: float = 0.0     # unix ts when guard last fired
         self._enabled: bool = NET_ZERO_SURVIVAL_ENABLED
+        # Rolling velocity buffer — same 5-reading window as ExitManager.
+        self._velocity_readings: list = []
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -71,7 +78,9 @@ class NetZeroGuard:
         net_pnl:
             total_realized + total_unrealized (IDR).
         velocity:
-            Portfolio value velocity in IDR/second (negative = falling).
+            Latest velocity sample (IDR/second).  Accumulated internally in a
+            5-reading rolling buffer; hysteresis uses the smoothed average while
+            the immediate bypass uses the raw last reading.
         now_ts:
             Current Unix timestamp (defaults to time.time()).
 
@@ -80,35 +89,61 @@ class NetZeroGuard:
         bool
             True if the basket-exit callback was fired this call.
         """
-        if not self._enabled or self._fired:
+        if not self._enabled:
             return False
 
         ts = now_ts or time.time()
 
+        # ── Auto-recovery check ───────────────────────────────────────────────
+        if self._fired and NET_ZERO_AUTO_RESET_SEC > 0:
+            if self._fired_at > 0 and (ts - self._fired_at) >= NET_ZERO_AUTO_RESET_SEC:
+                if net_pnl > NET_ZERO_PNL_FLOOR_IDR:
+                    self._fired = False
+                    self._trigger_ts = 0.0
+                    logger.info(
+                        f"[NetZeroGuard] Auto-recovery: net_pnl={net_pnl:+,.0f} above floor "
+                        f"after {NET_ZERO_AUTO_RESET_SEC}s cooldown."
+                    )
+
+        if self._fired:
+            return False
+
+        # Maintain rolling velocity buffer (max 5 readings)
+        self._velocity_readings.append(velocity)
+        if len(self._velocity_readings) > 5:
+            self._velocity_readings.pop(0)
+
+        avg_velocity = (
+            sum(self._velocity_readings) / len(self._velocity_readings)
+            if self._velocity_readings else 0.0
+        )
+
+        # ── Immediate bypass — uses last (raw) velocity for fastest crash detection ──
+        if (net_pnl <= NET_ZERO_PNL_FLOOR_IDR
+                and velocity < NET_ZERO_IMMEDIATE_VELOCITY):
+            logger.warning(
+                f"[NetZeroGuard] IMMEDIATE EXIT: velocity={velocity:.1f} IDR/s "
+                f"(threshold={NET_ZERO_IMMEDIATE_VELOCITY}) | net_pnl={net_pnl:+,.0f}"
+            )
+            self._fire("NET_ZERO_IMMEDIATE")
+            return True
+
+        # ── Hysteresis condition — uses AVERAGE velocity (noise-filtered) ────────
         condition = (
-            net_pnl <= 0
-            and velocity < NET_ZERO_MOMENTUM_THRESHOLD
+            net_pnl <= NET_ZERO_PNL_FLOOR_IDR
+            and avg_velocity < NET_ZERO_MOMENTUM_THRESHOLD
         )
 
         if not condition:
             self._trigger_ts = 0.0
             return False
 
-        # Immediate bypass — no hysteresis
-        if velocity < NET_ZERO_IMMEDIATE_VELOCITY:
-            logger.warning(
-                f"[NetZeroGuard] IMMEDIATE EXIT: velocity={velocity:.1f} IDR/s "
-                f"(threshold={NET_ZERO_IMMEDIATE_VELOCITY}) | net_pnl={net_pnl:.2f}"
-            )
-            self._fire("NET_ZERO_IMMEDIATE")
-            return True
-
         # Start or continue the hysteresis window
         if self._trigger_ts == 0.0:
             self._trigger_ts = ts
             logger.info(
                 f"[NetZeroGuard] Condition triggered — starting {NET_ZERO_HYSTERESIS_SEC}s hysteresis. "
-                f"net_pnl={net_pnl:.2f} velocity={velocity:.1f}"
+                f"net_pnl={net_pnl:+,.0f} avg_velocity={avg_velocity:+.1f}"
             )
             return False
 
@@ -116,7 +151,7 @@ class NetZeroGuard:
         if elapsed >= NET_ZERO_HYSTERESIS_SEC:
             logger.warning(
                 f"[NetZeroGuard] BASKET_EXIT after {elapsed:.1f}s hysteresis. "
-                f"net_pnl={net_pnl:.2f} velocity={velocity:.1f}"
+                f"net_pnl={net_pnl:+,.0f} avg_velocity={avg_velocity:+.1f}"
             )
             self._fire("NET_ZERO_SURVIVAL")
             return True
@@ -124,17 +159,18 @@ class NetZeroGuard:
         return False
 
     def reset_session(self) -> None:
-        """
-        Call at the start of each trading session to allow the guard to fire again.
-        """
+        """Call at the start of each trading session to allow the guard to fire again."""
         self._fired = False
+        self._fired_at = 0.0
         self._trigger_ts = 0.0
+        self._velocity_readings.clear()
         logger.info("[NetZeroGuard] Session reset.")
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _fire(self, reason: str) -> None:
         self._fired = True
+        self._fired_at = time.time()
         self._trigger_ts = 0.0
         if self._on_basket_exit:
             try:
