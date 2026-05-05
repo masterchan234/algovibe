@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package algovibe;
+
+enum ExchangeId {
+  EXCHANGE_UNKNOWN = 0;
+  EXCHANGE_INDODAX = 1;
+  EXCHANGE_BINANCE = 2;
+}
+
+enum SignalAction {
+  ACTION_NONE = 0;
+  ACTION_BUY = 1;
+  ACTION_SELL = 2;
+}
+
+enum SignalSource {
+  SOURCE_UNKNOWN = 0;
+  SOURCE_ORACLE = 1;
+  SOURCE_XGBOOST = 2;
+}
+
+message Tick {
+  string symbol = 1;
+  double price = 2;
+  double volume = 3;
+  int64 timestamp = 4;
+  ExchangeId exchange_id = 5;
+  double bid = 6;
+  double ask = 7;
+  double high_24h = 8;
+  double low_24h = 9;
+  double vol_idr = 10;
+}
+
+message Trade {
+  string symbol = 1;
+  double price = 2;
+  double amount = 3;
+  string side = 4;
+  int64 timestamp = 5;
+  string tid = 6;
+  ExchangeId exchange_id = 7;
+}
+
+message Signal {
+  string symbol = 1;
+  SignalAction action = 2;
+  float confidence = 3;
+  SignalSource source = 4;
+  int64 timestamp = 5;
+}
+
+message EquityUpdate {
+  double total_realized = 1;
+  double total_unrealized = 2;
+  double net_pnl = 3;
+  double velocity = 4;
+  int64 timestamp = 5;
+  double peak_equity = 6;
+}

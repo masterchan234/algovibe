@@ -115,20 +115,26 @@ class ZMQPublisher:
 
     # ── Send ──────────────────────────────────────────────────────────────────
 
-    def send(self, proto_bytes: bytes) -> None:
+    def send(self, proto_bytes: bytes, topic: str = "") -> None:
         """
-        Publish a single Protobuf-serialised message.
+        Publish a single Protobuf-serialised message, optionally with a topic.
 
         Parameters
         ----------
         proto_bytes:
             Result of ``message.SerializeToString()`` for any Protobuf message.
+        topic:
+            Optional topic string (e.g., "tick", "trade"). If provided, the
+            message is sent as a multipart message [topic, data].
         """
         if not self._started:
-            raise RuntimeError("ZMQPublisher.start() has not been called.")
+            raise RuntimeError("ZMQPublisher.send() has not been called.")
         with self._lock:
             try:
-                self._socket.send(proto_bytes, flags=zmq.NOBLOCK)
+                if topic:
+                    self._socket.send_multipart([topic.encode(), proto_bytes], flags=zmq.NOBLOCK)
+                else:
+                    self._socket.send(proto_bytes, flags=zmq.NOBLOCK)
             except zmq.Again:
                 # Subscriber(s) not yet connected or HWM reached — drop silently
                 pass
@@ -193,7 +199,7 @@ class ZMQSubscriber:
         """
         while self._running:
             try:
-                yield self._socket.recv()
+                yield self._socket.recv_multipart()[-1]
             except zmq.Again:
                 # Timeout — check _running flag and retry
                 continue
@@ -221,8 +227,8 @@ class ZMQSubscriber:
         try:
             while self._running:
                 try:
-                    raw = await asyncio.wait_for(async_sock.recv(), timeout=1.0)
-                    yield raw
+                    raw = await asyncio.wait_for(async_sock.recv_multipart(), timeout=1.0)
+                    yield raw[-1]
                 except asyncio.TimeoutError:
                     continue
         finally:

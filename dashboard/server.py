@@ -26,7 +26,7 @@ import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
 from shared.transport import IPC_EQUITY, IPC_MARKET
-from shared.algovibe_pb2 import EquityUpdate, Tick  # type: ignore[attr-defined]
+from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
@@ -210,17 +210,10 @@ except Exception as _sync_err:
 _MIGRATED_DBS: set = set()
 
 def get_db_connection():
-    """Membuka koneksi SQLite ke DB aktif (live/dryrun).
-    
-    Memastikan migrasi skema sudah dijalankan untuk path ini sebelum
-    koneksi diberikan ke caller — mencegah 'no such table' secara permanen
-    meskipun dashboard start sebelum bot selesai inisialisasi.
-    """
-    path = DB_PATH_DRYRUN if cfg.DRY_RUN else DB_PATH_LIVE
-    if path not in _MIGRATED_DBS:
-        run_migrations(path)
-        _MIGRATED_DBS.add(path)
-    conn = sqlite3.connect(path, timeout=30)
+    """Membuka koneksi SQLite ke DB aktif melalui DatabaseRouter."""
+    # Ambil path dari database yang sedang aktif (live/dryrun)
+    active_db = db._active()
+    conn = sqlite3.connect(active_db.db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1907,6 +1900,13 @@ def handle_watch_pair(data):
     CURRENT_WATCH_PAIR = pair
     db.save_state('current_watch_pair', pair)
     db.save_state('trigger_analysis_pair', pair)
+    
+    # [Fix] Aktifkan subscibe trades & OB untuk pair yang sedang dipantau
+    try:
+        mws.subscribe_market_trades(pair)
+        mws._subscribe_specific_ob(pair)
+    except Exception as e:
+        logging.warning(f"Failed to subscribe dynamic data for {pair}: {e}")
 
 def _build_stats_payload():
     """Bangun payload stats langsung tanpa melalui Flask request context."""
@@ -2913,29 +2913,58 @@ def _zmq_market_bridge():
     try:
         while True:
             try:
-                raw = sub.recv()
-                _err_delay = 0.1
-                tick = Tick()
-                tick.ParseFromString(raw)
+                # Receive multipart [topic, data]
+                parts = sub.recv_multipart()
+                if len(parts) < 2: continue
                 
-                pair = tick.symbol
-                with mws._lock:
-                    if pair not in mws._tickers:
-                        mws._tickers[pair] = {
-                            "last": tick.price, "buy": tick.bid, "sell": tick.ask,
-                            "high": tick.high_24h, "low": tick.low_24h, "open": 0,
-                            "vol_idr": tick.vol_idr, "vol_coin": "0",
-                            "bid_depth": 0, "ask_depth": 0,
-                            "bids_list": [], "asks_list": []
-                        }
-                    else:
-                        t = mws._tickers[pair]
-                        t["last"] = tick.price
-                        t["buy"] = tick.bid
-                        t["sell"] = tick.ask
-                        if tick.high_24h > 0: t["high"] = tick.high_24h
-                        if tick.low_24h > 0: t["low"] = tick.low_24h
-                        if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
+                topic = parts[0].decode()
+                raw = parts[1]
+                _err_delay = 0.1
+                
+                if topic == "tick":
+                    # logging.debug(f"[ZMQ] Received tick")
+                    tick = Tick()
+                    tick.ParseFromString(raw)
+                    pair = tick.symbol
+                    with mws._lock:
+                        if pair not in mws._tickers:
+                            mws._tickers[pair] = {
+                                "last": tick.price, "buy": tick.bid, "sell": tick.ask,
+                                "high": tick.high_24h, "low": tick.low_24h, "open": 0,
+                                "vol_idr": tick.vol_idr, "vol_coin": "0",
+                                "bid_depth": 0, "ask_depth": 0,
+                                "bids_list": [], "asks_list": []
+                            }
+                        else:
+                            t = mws._tickers[pair]
+                            t["last"] = tick.price
+                            t["buy"] = tick.bid
+                            t["sell"] = tick.ask
+                            if tick.high_24h > 0: t["high"] = tick.high_24h
+                            if tick.low_24h > 0: t["low"] = tick.low_24h
+                            if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
+                
+                elif topic == "trade":
+                    logging.info(f"[ZMQ] Received trade for {pair if 'pair' in locals() else 'unknown'}")
+                    trade = Trade()
+                    trade.ParseFromString(raw)
+                    pair = trade.symbol.lower()
+                    # Format for dashboard: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
+                    t_fmt = [
+                        pair,
+                        trade.timestamp / 1000, # convert back to epoch sec
+                        trade.tid,
+                        trade.side,
+                        trade.price,
+                        trade.price * trade.amount,
+                        trade.amount
+                    ]
+                    with mws._lock:
+                        if pair not in mws._trades:
+                            mws._trades[pair] = []
+                        mws._trades[pair].insert(0, t_fmt)
+                        mws._trades[pair] = mws._trades[pair][:50]
+
             except Exception as _m_err:
                 logging.warning(f"[ZMQ] Market bridge error: {_m_err}")
                 eventlet.sleep(_err_delay)

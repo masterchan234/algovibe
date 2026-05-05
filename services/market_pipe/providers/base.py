@@ -15,8 +15,9 @@ import time
 from typing import Callable, Optional
 
 
-# Callback type: receives a Protobuf-serialised Tick bytes object
+# Callback type: receives a Protobuf-serialised bytes object
 TickCallback = Callable[[bytes], None]
+TradeCallback = Callable[[bytes], None]
 
 
 class MarketProvider(abc.ABC):
@@ -25,23 +26,30 @@ class MarketProvider(abc.ABC):
 
     Lifecycle
     ---------
-    provider = MyProvider(on_tick=callback)
+    provider = MyProvider(on_tick=callback, on_trade=trade_callback)
     provider.start()   # connects / subscribes in the background
     provider.wait_ready(timeout=30)
     ...
     provider.stop()
     """
 
-    def __init__(self, on_tick: Optional[TickCallback] = None):
+    def __init__(
+        self, 
+        on_tick: Optional[TickCallback] = None,
+        on_trade: Optional[TradeCallback] = None
+    ):
         """
         Parameters
         ----------
         on_tick:
             Callable invoked with the serialised Protobuf Tick bytes every
-            time a new price update arrives.  If None, ticks are buffered
-            internally and accessible via get_latest_tick().
+            time a new price update arrives.
+        on_trade:
+            Callable invoked with the serialised Protobuf Trade bytes every
+            time a new market trade arrives.
         """
         self._on_tick = on_tick
+        self._on_trade = on_trade
         self._latest_tick_bytes: Optional[bytes] = None
         self._start_time: float = 0.0
 
@@ -85,7 +93,7 @@ class MarketProvider(abc.ABC):
 
     # ── Helpers for subclasses ────────────────────────────────────────────────
 
-    def _emit(self, tick_bytes: bytes) -> None:
+    def _emit(self, tick_bytes: bytes, topic: str = "tick") -> None:
         """
         Store the latest tick and invoke the on_tick callback (if set).
         Subclasses call this after serialising a new Tick message.
@@ -93,12 +101,27 @@ class MarketProvider(abc.ABC):
         self._latest_tick_bytes = tick_bytes
         if self._on_tick is not None:
             try:
-                self._on_tick(tick_bytes)
+                # If the callback is the publisher.send, it will use the topic
+                self._on_tick(tick_bytes, topic=topic)
             except Exception as exc:  # noqa: BLE001
                 # Never let a faulty callback crash the provider thread
                 import logging
                 logging.getLogger(__name__).error(
                     f"[{self.exchange_id}] on_tick callback raised: {exc}"
+                )
+
+    def _emit_trade(self, trade_bytes: bytes, topic: str = "trade") -> None:
+        """
+        Invoke the on_trade callback (if set).
+        Subclasses call this after serialising a new Trade message.
+        """
+        if self._on_trade is not None:
+            try:
+                self._on_trade(trade_bytes, topic=topic)
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).error(
+                    f"[{self.exchange_id}] on_trade callback raised: {exc}"
                 )
 
     # ── Diagnostics ───────────────────────────────────────────────────────────

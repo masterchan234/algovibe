@@ -50,7 +50,10 @@ def main() -> None:
     publisher = ZMQPublisher(IPC_MARKET)
     publisher.start()
 
-    provider = IndodaxProvider(on_tick=publisher.send)
+    provider = IndodaxProvider(
+        on_tick=publisher.send,
+        on_trade=publisher.send
+    )
     provider.start()
 
     # Wait until the first tick arrives before logging "ready"

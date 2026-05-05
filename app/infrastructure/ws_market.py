@@ -67,7 +67,7 @@ class MarketDataWS:
         mws.stop()
     """
 
-    def __init__(self):
+    def __init__(self, on_tick=None, on_trade=None):
         self._tickers: dict = {}          # {pair: {last, buy, sell, high, low, vol_idr, ...}}
         self._lock    = threading.Lock()
         self._ws      = None
@@ -83,6 +83,10 @@ class MarketDataWS:
         self._ob_done = False                # True setelah OB subscribe pertama selesai
         self._pending_subs: dict = {}        # {req_id: channel_name} untuk ACK tracking
         
+        # Callbacks
+        self.on_tick = on_tick
+        self.on_trade = on_trade
+
         # SaaS Hub Config
         self._use_hub = os.getenv("USE_MARKET_HUB", "false").lower() == "true"
         self._hub_host = os.getenv("MARKET_HUB_HOST", "127.0.0.1")
@@ -309,6 +313,11 @@ class MarketDataWS:
                 "bid_depth": existing.get("bid_depth", 0),
                 "ask_depth": existing.get("ask_depth", 0),
             }
+        
+        # Trigger Callbacks
+        if self.on_tick:
+            for pair, data in updated.items():
+                self.on_tick(pair, data)
 
         # Trigger OB subscribe dinamis, seiring bertambahnya pair bervolume tinggi
         # (Karena summary-24h payload-nya parsial, tidak datang 200 pair sekaligus)
@@ -518,6 +527,12 @@ class MarketDataWS:
                 self._trades[pair].insert(0, t)
             # Simpan 50 terakhir
             self._trades[pair] = self._trades[pair][:50]
+            
+            # Trigger Callbacks
+            if self.on_trade:
+                for t in data:
+                    self.on_trade(pair, t)
+            
             logger.info(f"[MarketWS] Stored {len(self._trades[pair])} trades for {pair}")
 
 

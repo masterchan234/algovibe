@@ -23,6 +23,7 @@ import os
 import signal
 import sys
 import time
+from collections import defaultdict
 
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,14 +36,16 @@ from shared.transport import (
     ZMQPublisher,
     IPC_MARKET,
     IPC_EQUITY,
+    IPC_SIGNAL,
     install_uvloop,
 )
-from shared.algovibe_pb2 import Tick, EquityUpdate  # type: ignore[attr-defined]
+from shared.algovibe_pb2 import Tick, EquityUpdate, Signal, Trade  # type: ignore[attr-defined]
 from shared.pid_lock import PidLock
 from services.executive_core.net_zero import NetZeroGuard
 from services.executive_core.profit_lock import ProfitLock
 from app.infrastructure.database import db
 from app.infrastructure.exchange_factory import create_indodax_exchange
+from app.infrastructure.ws_private import PrivateWS
 from utils.logger import log_message, send_telegram_message
 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
 
@@ -69,6 +72,7 @@ class ExecutiveCoreService:
         self._exchange = create_indodax_exchange()
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
         self._equity_sub = ZMQSubscriber(IPC_EQUITY)
+        self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
         self._equity_pub = ZMQPublisher(IPC_EQUITY)
 
         # Current tick cache  {symbol: Tick}
@@ -84,7 +88,7 @@ class ExecutiveCoreService:
         self._velocity: float = 0.0
         
         # Price history buffer for Dashboard
-        self._price_history: dict = {}
+        self._price_history: dict = defaultdict(list)
         self._last_history_save: float = 0.0
 
         # Guards
@@ -95,27 +99,269 @@ class ExecutiveCoreService:
         self._order_queue: asyncio.Queue = asyncio.Queue()
 
         self._running = False
+        
+        # [Restoration] Bot-like interface for domain logic reuse
+        from app.application.oracle import Oracle
+        class MarketWSMock:
+            def __init__(self, ticks): self.ticks = ticks
+            def get_tickers(self): 
+                # Convert Tick objects to richer dict so Oracle can operate safely.
+                out = {}
+                for s, t in self.ticks.items():
+                    last = float(t.price or 0.0)
+                    out[s] = {
+                        "pair": s,
+                        "last": last,
+                        "bid": float(t.bid or last),
+                        "ask": float(t.ask or last),
+                        "high": float(t.high_24h or last),
+                        "low": float(t.low_24h or last),
+                        "vol_idr": float(t.vol_idr or 0.0),
+                        "change_24h": 0.0,
+                    }
+                return out
+            def is_connected(self):
+                return True
+            def get_latency(self):
+                return 0.0
+            def get_order_book(self, pair):
+                return {"bids": [], "asks": []}
+        
+        self.market_ws = MarketWSMock(self._ticks)
+        self.oracle = Oracle(self.market_ws)
+        self.cached_balance = 0.0
+        # Compatibility aliases for legacy use_cases.trade_execution
+        self.exchange = self._exchange
+        self.price_history = self._price_history
+
+        # Legacy parity mode: reuse full ExitManager logic (TP/SL/force-profit/manual-exit).
+        from app.application.exit_manager import ExitManager
+        self.exit_manager = ExitManager(self._exchange, oracle=self.oracle, bot=self)
+        self._legacy_exit_enabled = True
+
+        # Private WS order updates are required so pending BUY/SELL can be reconciled.
+        api_key = os.getenv("INDODAX_API_KEY", "")
+        api_secret = os.getenv("INDODAX_API_SECRET", "")
+        self._private_ws = None
+        if api_key and api_secret:
+            self._private_ws = PrivateWS(
+                api_key=api_key,
+                api_secret=api_secret,
+                on_order_update=self.exit_manager.handle_order_update,
+            )
+        else:
+            logger.warning("[executive-core] PrivateWS disabled: missing API credentials")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         self._running = True
         self._tick_sub.start()
+        self._signal_sub.start()
         self._equity_pub.start()
+        if self._private_ws:
+            self._private_ws.start()
+
+        # Warm cache from 24h REST snapshot to avoid vol_idr=0 on cold start.
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._warmup_market_snapshot)
+        except Exception as exc:
+            logger.warning(f"[executive-core] Market snapshot warmup skipped: {exc}")
 
         logger.info("[executive-core] ✅ Started — subscribing to ZMQ streams.")
 
+        # Keep legacy reconciliation behavior at startup.
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.exit_manager.reconcile_with_exchange)
+        except Exception as exc:
+            logger.warning(f"[executive-core] Exit reconcile skipped: {exc}")
+
         await asyncio.gather(
             self._consume_ticks(),
+            self._consume_signals(),
             self._order_processor(),
             self._equity_broadcast_loop(),
+            self._legacy_exit_monitor_loop(),
         )
 
     def stop(self) -> None:
         self._running = False
         self._tick_sub.stop()
+        self._signal_sub.stop()
         self._equity_pub.stop()
+        if self._private_ws:
+            self._private_ws.stop()
         logger.info("[executive-core] Stopped.")
+
+    def _build_current_tickers_snapshot(self) -> dict:
+        """Convert protobuf tick cache into MarketWS-compatible ticker dict."""
+        out = {}
+        for pair, tick in self._ticks.items():
+            last = float(tick.price or 0.0)
+            out[pair] = {
+                "pair": pair,
+                "last": last,
+                "buy": float(tick.bid or last),
+                "sell": float(tick.ask or last),
+                "high": float(tick.high_24h or last),
+                "low": float(tick.low_24h or last),
+                "vol_idr": float(tick.vol_idr or 0.0),
+                "change_24h": 0.0,
+            }
+        return out
+
+    async def _legacy_exit_monitor_loop(self) -> None:
+        """Parity loop: run legacy ExitManager every 2s like the monolith."""
+        if not self._legacy_exit_enabled:
+            return
+
+        get_prediction = None
+        try:
+            from app.domain.predictor import get_prediction as _gp
+            get_prediction = _gp
+        except Exception as exc:
+            logger.warning(f"[executive-core] predictor unavailable for exit monitor: {exc}")
+
+        while self._running:
+            try:
+                tickers = self._build_current_tickers_snapshot()
+                if tickers:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: self.exit_manager.monitor_and_execute(
+                            current_tickers=tickers,
+                            price_history=self.price_history,
+                            get_prediction_fn=get_prediction,
+                        ),
+                    )
+            except Exception as exc:
+                logger.error(f"[executive-core] Legacy exit monitor error: {exc}")
+
+            await asyncio.sleep(2.0)
+
+    def _sync_balances_to_db(self) -> None:
+        """Compatibility hook used by ExitManager order-update callback."""
+        try:
+            bal = self._exchange.fetch_balance()
+            db.save_balances(bal)
+            self.cached_balance = float(bal.get("free", {}).get("IDR", self.cached_balance))
+        except Exception as exc:
+            logger.debug(f"[executive-core] _sync_balances_to_db skip: {exc}")
+
+    def _warmup_market_snapshot(self) -> None:
+        """Seed _ticks from exchange 24h ticker snapshot for all IDR pairs."""
+        try:
+            raw_tickers = self._exchange.fetch_tickers()
+        except Exception as exc:
+            logger.warning(f"[executive-core] Warmup fetch_tickers failed: {exc}")
+            return
+
+        if not isinstance(raw_tickers, dict):
+            logger.warning("[executive-core] Warmup fetch_tickers returned non-dict payload")
+            return
+
+        seeded = 0
+        ts_ms = int(time.time() * 1000)
+
+        for symbol, payload in raw_tickers.items():
+            sym = str(symbol or "")
+            if "/" in sym:
+                pair = sym.replace("/", "").lower()
+            else:
+                pair = sym.lower()
+            if not pair.endswith("idr"):
+                continue
+
+            info = payload.get("info") if isinstance(payload, dict) else {}
+            info = info if isinstance(info, dict) else {}
+
+            last = float(payload.get("last") or info.get("last") or 0.0)
+            bid = float(payload.get("bid") or info.get("buy") or last)
+            ask = float(payload.get("ask") or info.get("sell") or last)
+            high = float(payload.get("high") or info.get("high") or last)
+            low = float(payload.get("low") or info.get("low") or last)
+            vol_idr = float(
+                payload.get("quoteVolume")
+                or info.get("vol_idr")
+                or info.get("vol_idr24h")
+                or 0.0
+            )
+            vol_coin = float(payload.get("baseVolume") or info.get("vol_btc") or 0.0)
+
+            if last <= 0:
+                continue
+
+            tick = Tick()
+            tick.symbol = pair
+            tick.price = last
+            tick.volume = vol_coin
+            tick.timestamp = ts_ms
+            tick.bid = bid
+            tick.ask = ask
+            tick.high_24h = high
+            tick.low_24h = low
+            tick.vol_idr = vol_idr
+
+            self._ticks[pair] = tick
+            seeded += 1
+
+        logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} IDR pairs")
+
+    # ── Signal consumer ───────────────────────────────────────────────────────
+
+    async def _consume_signals(self) -> None:
+        """Consume Signal messages from brain-inference and execute trades."""
+        async for raw in self._signal_sub.aiter_messages():
+            if not self._running:
+                break
+            try:
+                sig = Signal()
+                sig.ParseFromString(raw)
+                
+                if sig.action == 1: # BUY
+                    logger.info(f"[executive-core] 🚀 Received BUY signal for {sig.symbol} (conf: {sig.confidence:.1f}%)")
+                    # Enqueue a buy order. 
+                    # Use the domain execute_trade logic
+                    from app.application.use_cases.trade_execution import execute_trade
+                    
+                    # We run this in a thread because it might do blocking DB/API calls
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: execute_trade(
+                            self,
+                            sig.symbol,
+                            self._ticks[sig.symbol].price if sig.symbol in self._ticks else 0,
+                            trend="ORACLE_SIGNAL",
+                            tq_prob=sig.confidence / 100.0,
+                            taker=True # Signals are high-priority
+                        )
+                    )
+                elif sig.action == 2:  # SELL
+                    pair = str(sig.symbol or "").lower()
+                    logger.info(f"[executive-core] 🔻 Received SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    pos = db.get_position(pair)
+                    if pos and pos.get("status") == "OPEN":
+                        tick = self._ticks.get(pair)
+                        px = float(tick.price) if tick and tick.price > 0 else float(pos.get("entry_price") or 0)
+                        if px > 0:
+                            await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: self.exit_manager.execute_exit(
+                                    pair=pair,
+                                    amount=float(pos.get("amount_crypto") or 0),
+                                    price=px,
+                                    reason="SIGNAL_SELL",
+                                    entry_price=float(pos.get("entry_price") or 0),
+                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    position_data=pos,
+                                ),
+                            )
+            except Exception as exc:
+                logger.error(f"[executive-core] Failed to parse signal: {exc}")
 
     # ── Tick consumer ─────────────────────────────────────────────────────────
 
@@ -133,6 +379,19 @@ class ExecutiveCoreService:
                 )
                 continue
             try:
+                prev = self._ticks.get(tick.symbol)
+                if prev is not None:
+                    if float(tick.vol_idr or 0.0) <= 0:
+                        tick.vol_idr = float(prev.vol_idr or 0.0)
+                    if float(tick.high_24h or 0.0) <= 0:
+                        tick.high_24h = float(prev.high_24h or tick.price)
+                    if float(tick.low_24h or 0.0) <= 0:
+                        tick.low_24h = float(prev.low_24h or tick.price)
+                    if float(tick.bid or 0.0) <= 0:
+                        tick.bid = float(prev.bid or tick.price)
+                    if float(tick.ask or 0.0) <= 0:
+                        tick.ask = float(prev.ask or tick.price)
+
                 self._ticks[tick.symbol] = tick
                 # History buffering for radar/dashboard
                 if tick.symbol not in self._price_history:
@@ -171,8 +430,13 @@ class ExecutiveCoreService:
             logger.error(f"[executive-core] DB error fetching positions: {exc}")
             return
 
+        if isinstance(open_positions, dict):
+            positions_iter = open_positions.values()
+        else:
+            positions_iter = open_positions
+
         total_unrealized = 0.0
-        for pos in open_positions:
+        for pos in positions_iter:
             pair = pos.get("pair") or pos.get("symbol", "")
             tick = self._ticks.get(pair)
             if not tick or tick.price <= 0:
@@ -190,11 +454,18 @@ class ExecutiveCoreService:
 
         self._unrealized_pnl = total_unrealized
 
-        # Fetch today's realised P&L from DB
+        # ── Update Balance & Stats ────────────────────────────────────────────
         try:
+            # Update balance every 10 seconds to avoid rate limits
+            if int(time.time()) % 10 == 0:
+                loop = asyncio.get_event_loop()
+                bal_data = await loop.run_in_executor(None, self._exchange.fetch_balance)
+                self.cached_balance = float(bal_data.get('free', {}).get('IDR', 0))
+            
             stats = db.get_daily_stats()
             self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[executive-core] Balance/Stats fetch skip: {e}")
             pass
 
         net_pnl = self._realized_pnl + self._unrealized_pnl
@@ -205,8 +476,10 @@ class ExecutiveCoreService:
             self._peak_equity = net_pnl
 
         # ── Run guards ────────────────────────────────────────────────────────
-        self._net_zero.evaluate(net_pnl, self._velocity)
-        self._profit_lock.update(net_pnl)
+        # In legacy-parity mode, ExitManager handles advanced exit orchestration.
+        if not self._legacy_exit_enabled:
+            self._net_zero.evaluate(net_pnl, self._velocity)
+            self._profit_lock.update(net_pnl)
 
     def _update_velocity(self, net_pnl: float) -> None:
         """Update the velocity rolling buffer."""
@@ -288,23 +561,62 @@ class ExecutiveCoreService:
     async def _execute_order(self, order: dict) -> None:
         """Execute a single order via the exchange adapter."""
         try:
+            pair = str(order.get("symbol") or "").lower().replace("/", "")
+            side = str(order.get("side") or "").lower()
+            order_type = str(order.get("type") or "limit").lower()
+            volume = float(order.get("volume") or 0.0)
+            price = order.get("price")
+
+            if not pair or side not in {"buy", "sell"} or volume <= 0:
+                logger.warning(f"[executive-core] Invalid order payload skipped: {order}")
+                return
+
+            ccxt_symbol = pair.upper().replace("IDR", "/IDR")
+
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._exchange.place_order(
-                    symbol=order["symbol"],
-                    side=order["side"],
-                    order_type=order.get("type", "limit"),
-                    volume=order["volume"],
-                    price=order.get("price"),
-                ),
-            )
+            if hasattr(self._exchange, "place_order"):
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self._exchange.place_order(
+                        symbol=pair,
+                        side=side,
+                        order_type=order_type,
+                        volume=volume,
+                        price=price,
+                    ),
+                )
+            else:
+                pair_param = pair[:-3] + "_idr" if pair.endswith("idr") else pair
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self._exchange.create_order(
+                        ccxt_symbol,
+                        order_type,
+                        side,
+                        volume,
+                        None if order_type == "market" else price,
+                        {"pair": pair_param},
+                    ),
+                )
+
+            order_id = str(result.get("order_id") or result.get("id") or f"EXEC-{int(time.time())}")
+            exec_price = float(result.get("price") or price or 0.0)
+            status = str(result.get("status") or "submitted")
+
             logger.info(
-                f"[executive-core] Order placed: {order['side'].upper()} "
-                f"{order['symbol']} → order_id={result.get('order_id')}"
+                f"[executive-core] Order placed: {side.upper()} "
+                f"{pair} → order_id={order_id}"
             )
             # Persist to DB
-            db.upsert_order_book(result)
+            db.upsert_order_book(
+                order_id=order_id,
+                pair=pair,
+                side=side.upper(),
+                price=exec_price,
+                amount=volume,
+                status=status,
+                raw_response=result,
+            )
         except Exception as exc:
             logger.error(f"[executive-core] Order execution failed: {exc}")
             send_telegram_message(f"⚠️ Order error: {exc}")
@@ -331,7 +643,8 @@ class ExecutiveCoreService:
         """Enqueue sell orders for every open position."""
         try:
             positions = db.get_open_positions()
-            for pos in positions:
+            positions_iter = positions.values() if isinstance(positions, dict) else positions
+            for pos in positions_iter:
                 pair = pos.get("pair") or pos.get("symbol", "")
                 tick = self._ticks.get(pair)
                 price = tick.price if tick and tick.price > 0 else None
