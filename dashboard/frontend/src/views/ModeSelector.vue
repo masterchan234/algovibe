@@ -115,7 +115,7 @@ function enter(mode) {
   if (mode === 'live') {
     router.push('/dashboard-live')
   } else {
-    router.push('/dashboard')
+    router.push('/dashboard-dry')
   }
 }
 
