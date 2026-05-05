@@ -58,6 +58,19 @@ def _load_model():
     return _model
 
 
+def preload_model() -> None:
+    """Pre-load the ML model into the global cache at startup.
+
+    Calling this once at bot startup ensures subsequent calls to get_prediction()
+    return immediately without paying the joblib load cost on the first trade.
+    """
+    model = _load_model()
+    if model is not None:
+        log_message("✅ [Predictor] ML model pre-loaded into memory at startup.")
+    else:
+        log_message("⚠️ [Predictor] ML model not found at startup (will load on demand when available).")
+
+
 def _compute_technical_probability(price_history: list, ticker_data: dict = None) -> float:
     """
     Menghitung probabilitas BUY murni dari indikator teknikal.

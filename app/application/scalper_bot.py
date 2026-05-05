@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import subprocess
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from multiprocessing.pool import ThreadPool
@@ -17,7 +18,11 @@ from app.application.exit_manager import ExitManager
 from app.application.oracle import Oracle
 from app.infrastructure.ws_market import MarketDataWS
 from app.infrastructure.ws_private import PrivateWS
+from app.infrastructure.resilience import AutoResumeHeartbeat, emergency_notifier
 from utils.logger import log_message, send_telegram_message
+
+# WIB = UTC+7
+_WIB_OFFSET_HOURS = 7
 
 
 class ScalperBot:
@@ -69,6 +74,15 @@ class ScalperBot:
         self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
         self.exit_monitor_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True)
         self.utc_reset_thread = threading.Thread(target=self._utc_reset_monitor_loop, daemon=True)
+        self.daily_report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
+        self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+
+        # ── Auto-Resume Heartbeat ────────────────────────────────────────────
+        # Uses a lightweight balance fetch to confirm exchange reachability.
+        self.auto_resume_heartbeat = AutoResumeHeartbeat(
+            ping_fn=self.exchange.fetch_balance,
+            notifier=emergency_notifier,
+        )
 
         # ── UTC Reset Persistence: check on startup ──────────────────────────
         # If the bot/server restarts on a new UTC day, trigger reset before trade logic.
@@ -457,6 +471,101 @@ class ScalperBot:
                 log_message(f"⚠️ UTC Reset Monitor Error: {e}")
             time.sleep(60)
 
+    def _daily_report_loop(self):
+        """Background daemon: sends a Telegram performance summary at 00:00 WIB every day.
+
+        WIB = UTC+7.  The loop checks the current WIB hour/minute every 60 seconds.
+        A state key 'last_daily_report_date' prevents duplicate sends on the same day.
+        """
+        while True:
+            try:
+                from datetime import timedelta
+                now_wib = datetime.now(timezone.utc) + timedelta(hours=_WIB_OFFSET_HOURS)
+                # Fire between 00:00 and 00:01 WIB
+                if now_wib.hour == 0 and now_wib.minute == 0:
+                    today_wib = now_wib.date().isoformat()
+                    last_sent = db.get_state("last_daily_report_date")
+                    if last_sent != today_wib:
+                        self._send_daily_report()
+                        db.save_state("last_daily_report_date", today_wib)
+            except Exception as e:
+                log_message(f"⚠️ Daily Report Loop Error: {e}")
+            time.sleep(60)
+
+    def _send_daily_report(self):
+        """Compose and send the daily performance summary to Telegram."""
+        try:
+            from datetime import timedelta
+            now_wib = datetime.now(timezone.utc) + timedelta(hours=_WIB_OFFSET_HOURS)
+            stats = db.get_daily_stats()
+            total = stats.get('total_trades', 0)
+            wins  = stats.get('win_count', 0)
+            losses = stats.get('loss_count', 0)
+            win_rate = (wins / total * 100) if total > 0 else 0.0
+            net_pnl  = stats.get('total_pnl_idr', 0.0)
+            msg = (
+                f"📊 *DAILY PERFORMANCE SUMMARY* 📊\n"
+                f"Tanggal: {now_wib.strftime('%d %b %Y')} WIB\n"
+                f"Total Trades: {total} | Win: {wins} | Loss: {losses}\n"
+                f"Win Rate: {win_rate:.1f}%\n"
+                f"Net Profit: Rp {net_pnl:,.0f}"
+            )
+            log_message(msg.replace('*', '').replace('\n', ' | '))
+            send_telegram_message(msg)
+        except Exception as e:
+            log_message(f"⚠️ Daily Report Send Error: {e}")
+
+    def _cleanup_loop(self):
+        """Background daemon: periodic cleanup of zombie data and Docker build cache.
+
+        Runs once every 24 hours to prevent disk bloat.
+        """
+        # Initial delay — let the bot stabilise first.
+        time.sleep(3600)
+        while True:
+            try:
+                self._run_cleanup()
+            except Exception as e:
+                log_message(f"⚠️ Cleanup Loop Error: {e}")
+            time.sleep(86400)  # 24 hours
+
+    def _run_cleanup(self):
+        """Execute disk hygiene tasks:
+        1. Prune old DB rows (system events, ticker history, analytics).
+        2. Remove Docker build cache to prevent the observed 33GB accumulation.
+           Set DOCKER_CLEANUP_ENABLED=false in .env to disable.
+        """
+        log_message("🧹 [CLEANUP] Starting scheduled disk hygiene...")
+        # 1. Prune stale DB records
+        try:
+            db.prune_old_data(hours=48)
+            db.purge_old_data(days=7)
+            log_message("🧹 [CLEANUP] DB prune completed.")
+        except Exception as e:
+            log_message(f"⚠️ [CLEANUP] DB prune error: {e}")
+
+        # 2. Docker build cache cleanup — controlled by DOCKER_CLEANUP_ENABLED env var.
+        docker_cleanup_enabled = os.getenv("DOCKER_CLEANUP_ENABLED", "true").lower() == "true"
+        if not docker_cleanup_enabled:
+            log_message("ℹ️ [CLEANUP] Docker cleanup disabled via DOCKER_CLEANUP_ENABLED=false.")
+            return
+        try:
+            result = subprocess.run(
+                ["docker", "builder", "prune", "--force", "--filter", "until=24h"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().splitlines()
+                freed = lines[-1] if lines else "unknown"
+                log_message(f"🧹 [CLEANUP] Docker build cache cleared. {freed}")
+                send_telegram_message(f"🧹 *CLEANUP* Docker build cache cleared. {freed}")
+            else:
+                log_message(f"⚠️ [CLEANUP] Docker prune exited {result.returncode}: {result.stderr[:200]}")
+        except FileNotFoundError:
+            log_message("ℹ️ [CLEANUP] Docker not available — skipping build cache prune.")
+        except Exception as e:
+            log_message(f"⚠️ [CLEANUP] Docker prune error: {e}")
+
     def run(self):
         log_message("Starting Market Data WebSocket…")
         self.market_ws.start()
@@ -471,6 +580,9 @@ class ScalperBot:
         self.insight_thread.start()
         self.exit_monitor_thread.start()
         self.utc_reset_thread.start()
+        self.daily_report_thread.start()
+        self.cleanup_thread.start()
+        self.auto_resume_heartbeat.start()
         log_message("Starting main loop…")
 
         while True:
