@@ -44,6 +44,7 @@ from services.executive_core.profit_lock import ProfitLock
 from app.infrastructure.database import db
 from app.infrastructure.exchange_factory import create_indodax_exchange
 from utils.logger import log_message, send_telegram_message
+from config import FEE_BUY_TAKER, FEE_SELL_TAKER
 
 logging.basicConfig(
     level=logging.INFO,
@@ -153,8 +154,8 @@ class ExecutiveCoreService:
             if entry <= 0 or amount <= 0:
                 continue
 
-            fee_buy = amount_idr * 0.001111
-            fee_sell = amount * tick.price * 0.001111
+            fee_buy = amount_idr * FEE_BUY_TAKER
+            fee_sell = amount * tick.price * FEE_SELL_TAKER
             gross = (tick.price - entry) * amount
             total_unrealized += gross - fee_buy - fee_sell
 

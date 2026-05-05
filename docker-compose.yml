@@ -255,6 +255,9 @@ volumes:
   algovibe_models:
   # Shared /tmp volume — mounts as /tmp in every service so ZMQ IPC sockets
   # (ipc:///tmp/*.ipc) are accessible across all containers.
+  # Security: this is a Docker-managed named tmpfs volume, NOT the host /tmp.
+  # Only services that explicitly mount algovibe_ipc can reach the IPC sockets,
+  # isolating them from any other processes running on the host.
   algovibe_ipc:
     driver: local
     driver_opts:

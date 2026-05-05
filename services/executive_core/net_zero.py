@@ -31,6 +31,8 @@ from config import (
     NET_ZERO_MOMENTUM_THRESHOLD,
     NET_ZERO_HYSTERESIS_SEC,
     NET_ZERO_IMMEDIATE_VELOCITY,
+    FEE_BUY_TAKER,
+    FEE_SELL_TAKER,
 )
 
 logger = logging.getLogger(__name__)
