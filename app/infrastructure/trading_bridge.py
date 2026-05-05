@@ -95,9 +95,20 @@ class TradingBridge:
 
         adapter_cls = _REGISTRY[resolved_id]
 
-        # Resolve credentials
-        key    = api_key    or os.getenv("INDODAX_API_KEY", "")
-        secret = api_secret or os.getenv("INDODAX_API_SECRET", "")
+        # Resolve credentials — check exchange-specific env vars first, then
+        # fall back to the generic EXCHANGE_API_KEY / EXCHANGE_API_SECRET pair
+        # so the bridge works correctly for any configured exchange.
+        env_prefix = resolved_id.upper()
+        key = (
+            api_key
+            or os.getenv(f"{env_prefix}_API_KEY")
+            or os.getenv("EXCHANGE_API_KEY", "")
+        )
+        secret = (
+            api_secret
+            or os.getenv(f"{env_prefix}_API_SECRET")
+            or os.getenv("EXCHANGE_API_SECRET", "")
+        )
 
         self._adapter = adapter_cls(key, secret)
         self._exchange_id = resolved_id
