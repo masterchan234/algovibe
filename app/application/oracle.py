@@ -1404,10 +1404,6 @@ class Oracle:
             overrides["tech_threshold"] = 0.95  # Hampir tidak beli apapun
             overrides["max_spread"] /= 2.0    # Spread harus sangat tipis
             
-        # Self-Tuning based on recent performance
-        performance_penalty = self.learn_from_history()
-        overrides["tech_threshold"] += performance_penalty
-
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
             stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0) # Ambil statistik 24 jam terakhir
@@ -1460,50 +1456,12 @@ class Oracle:
             dyn += 1.0
             llm_buy_min_conf = 62.0
 
-        # Self-tuning dari 20 trade terakhir
-        try:
-            recent = db.get_recent_trades(limit=20)
-            if recent:
-                wins = sum(1 for t in recent if float(t.get('pnl_idr') or 0) > 0)
-                wr = wins / len(recent)
-                if wr < 0.50:
-                    dyn += 3.0
-                    llm_buy_min_conf += 3.0
-                elif wr >= 0.65:
-                    dyn -= 1.5
-                    llm_buy_min_conf -= 1.0
-        except Exception:
-            pass
-
         return {
             "dynamic_threshold": max(50.0, min(85.0, dyn)),
             "llm_buy_min_conf": max(50.0, min(85.0, llm_buy_min_conf)),
             "llm_hold_block_conf": max(55.0, min(90.0, llm_hold_block_conf)),
             "llm_avoid_block_conf": max(50.0, min(90.0, llm_avoid_block_conf)),
         }
-
-    def learn_from_history(self) -> float:
-        """
-        Analyze recent trades to see if the current strategy is losing money.
-        Returns a penalty to be added to AI_THRESHOLD.
-        """
-        try:
-            recent_trades = db.get_recent_trades(limit=10)
-            if not recent_trades: return 0.0
-            
-            wins = sum(1 for t in recent_trades if t['pnl_idr'] > 0)
-            win_rate = wins / len(recent_trades)
-            
-            if win_rate < 0.4: # Win rate buruk
-                logger.info(f"[Oracle] Self-Tuning: Recent Win Rate is low ({win_rate*100:.0f}%). Tightening filters.")
-                return 0.10
-            elif win_rate < 0.6:
-                return 0.05
-                
-            return 0.0
-        except Exception as e:
-            logger.error(f"[Oracle] Learning Error: {e}")
-            return 0.0
 
     def get_sizing_multiplier(self, pair: str, velocity_score: float = 0.5, confidence: float = 0.5) -> float:
         """
