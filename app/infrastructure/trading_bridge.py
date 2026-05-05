@@ -34,6 +34,8 @@ import os
 import time
 from typing import Any
 
+from app.infrastructure.resilience import ExecutionSafety, ShadowSync, emergency_notifier
+
 logger = logging.getLogger(__name__)
 
 # ── Supported exchanges ───────────────────────────────────────────────────────
@@ -112,6 +114,12 @@ class TradingBridge:
 
         self._adapter = adapter_cls(key, secret)
         self._exchange_id = resolved_id
+
+        # ── Resilience: Shadow Sync ───────────────────────────────────────────
+        self._shadow_sync = ShadowSync(
+            get_balances_fn=self.get_all_balances,
+            notifier=emergency_notifier,
+        )
 
         logger.info("[TradingBridge] Initialised with exchange='%s'.", resolved_id)
 
@@ -276,18 +284,81 @@ class TradingBridge:
     ) -> dict:
         """Place an order via the adapter and persist the result to order_book.
 
+        Resilience features
+        ───────────────────
+        • Min-trade volume guard: rejects orders below MIN_TRADE_IDR.
+        • Insufficient-balance retry: on a BUY 'insufficient balance' error,
+          decrements volume by 1.5 % and retries once.
+
         Parameters match BaseExchangeAdapter.place_order.
 
         Returns
         -------
         dict — unified order response (see BaseExchangeAdapter docstring).
         """
-        order = self._adapter.place_order(symbol, side, order_type, volume, price)
+        from config import MIN_TRADE_IDR
+
+        # ── Resolve execution price for pre-flight checks ─────────────────────
+        exec_price = price or 0.0
+        if exec_price <= 0:
+            try:
+                ticker = self._adapter.get_ticker(symbol)
+                exec_price = ticker["ask"] if side.lower() == "buy" else ticker["bid"]
+            except Exception:
+                pass  # If ticker fetch fails, skip the min-trade pre-check
+
+        # ── Min-trade volume guard ────────────────────────────────────────────
+        if exec_price > 0 and not ExecutionSafety.validate_min_trade(
+            volume, exec_price, MIN_TRADE_IDR
+        ):
+            raise ValueError(
+                f"[ExecutionSafety] Order {side.upper()} {symbol.upper()} "
+                f"vol={volume:.8f} × price={exec_price:.0f} = {volume * exec_price:.0f} IDR "
+                f"is below MIN_TRADE_IDR={MIN_TRADE_IDR}."
+            )
+
+        # ── Place order with insufficient-balance retry (BUY only) ───────────
+        actual_volume = volume
+        try:
+            order = self._adapter.place_order(symbol, side, order_type, actual_volume, price)
+        except RuntimeError as exc:
+            if side.lower() == "buy" and ExecutionSafety.is_insufficient_balance_error(
+                str(exc)
+            ):
+                adjusted = ExecutionSafety.adjusted_volume(actual_volume)
+                logger.warning(
+                    "[TradingBridge] Insufficient balance for BUY %s vol=%.8f — "
+                    "retrying with reduced vol=%.8f (−%.1f%%)",
+                    symbol.upper(),
+                    actual_volume,
+                    adjusted,
+                    ExecutionSafety.INSUFFICIENT_DECREMENT * 100,
+                )
+                # Verify adjusted size still meets min-trade
+                if exec_price > 0 and not ExecutionSafety.validate_min_trade(
+                    adjusted, exec_price, MIN_TRADE_IDR
+                ):
+                    logger.error(
+                        "[TradingBridge] Adjusted vol %.8f × %.0f = %.0f IDR is still below "
+                        "MIN_TRADE_IDR=%d. Aborting.",
+                        adjusted,
+                        exec_price,
+                        adjusted * exec_price,
+                        MIN_TRADE_IDR,
+                    )
+                    raise
+                order = self._adapter.place_order(
+                    symbol, side, order_type, adjusted, price
+                )
+                actual_volume = adjusted
+            else:
+                raise
+
         self._persist_order(order)
         logger.info(
             "[TradingBridge] Order placed: %s %s %s vol=%.8f price=%s → id=%s",
             side.upper(), order_type.upper(), symbol.upper(),
-            volume, price, order.get("order_id"),
+            actual_volume, price, order.get("order_id"),
         )
         return order
 
@@ -353,6 +424,36 @@ class TradingBridge:
     def test_connection(self) -> bool:
         """Proxy the adapter's connectivity test."""
         return self._adapter.test_connection()
+
+    def start_shadow_sync(self) -> None:
+        """Start the background Shadow Sync reconciliation thread.
+
+        Call this once after the bridge is initialised (e.g. in main.py or
+        scalper_bot.py).  The thread is a daemon and will stop when the
+        process exits.
+        """
+        self._shadow_sync.start()
+
+    def get_resilience_status(self) -> dict:
+        """Return resilience / circuit-breaker status for monitoring endpoints.
+
+        Returns
+        -------
+        dict
+            {
+                "circuit_breaker": { state, first_error_at, tripped_at, … },
+                "shadow_sync_running": bool,
+            }
+        """
+        cb_status = {}
+        try:
+            cb_status = self._adapter.get_circuit_breaker_status()  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        return {
+            "circuit_breaker":    cb_status,
+            "shadow_sync_running": self._shadow_sync._running,
+        }
 
     # ── DB persistence helpers ────────────────────────────────────────────────
 

@@ -23,6 +23,16 @@ from typing import Any
 import requests
 
 from .base_adapter import BaseExchangeAdapter
+from app.infrastructure.resilience import (
+    CircuitBreaker,
+    RateLimiter429,
+    RETRY_BASE_DELAY_SEC,
+    RETRY_MAX_RETRIES,
+    RETRY_MULTIPLIER,
+    _CB_HTTP_CODES,
+    _CB_ERROR_SUBSTRINGS,
+    emergency_notifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +66,11 @@ class IndodaxAdapter(BaseExchangeAdapter):
         self._rate_lock = threading.Lock()
         self._last_call_ts: float = 0.0   # Unix timestamp of the last TAPI call
         self._nonce_counter: int = int(time.time() * 1000)  # monotonic nonce
+
+        # ── Resilience components ─────────────────────────────────────────────
+        self._circuit_breaker = CircuitBreaker(name="indodax")
+        self._circuit_breaker.attach_notifier(emergency_notifier)
+        self._rate_limiter = RateLimiter429()
 
     # ── Identity ──────────────────────────────────────────────────────────────
 
@@ -101,6 +116,13 @@ class IndodaxAdapter(BaseExchangeAdapter):
     def _tapi_post(self, method: str, params: dict | None = None) -> dict:
         """Send a signed POST request to the Indodax Trade API.
 
+        Resilience features applied
+        ───────────────────────────
+        • Circuit breaker: rejects calls immediately when OPEN.
+        • 429 dynamic cooldown: on rate-limit response, sleeps and retries.
+        • Exponential backoff: up to RETRY_MAX_RETRIES retries on 5xx / Timeout,
+          with delay doubling from RETRY_BASE_DELAY_SEC.
+
         Parameters
         ----------
         method: TAPI method name, e.g. 'getInfo', 'trade', 'openOrders'.
@@ -112,38 +134,133 @@ class IndodaxAdapter(BaseExchangeAdapter):
 
         Raises
         ------
-        RuntimeError on API-level errors or network failures.
+        RuntimeError on API-level errors, network failures, or circuit-breaker open.
         """
-        self._throttle()
+        # Reject immediately if circuit breaker is OPEN
+        if self._circuit_breaker.is_open():
+            raise RuntimeError(
+                f"[CircuitBreaker] Exchange API is currently unreachable. "
+                f"Call to '{method}' rejected."
+            )
 
-        payload_dict = {"method": method, "nonce": self._next_nonce()}
-        if params:
-            payload_dict.update(params)
+        # Apply pre-throttle if we recently hit a 429
+        if self._rate_limiter.should_pre_throttle():
+            logger.warning(
+                "[IndodaxAdapter] Pre-throttling '%s' due to recent 429 — brief pause.", method
+            )
+            time.sleep(RETRY_BASE_DELAY_SEC / 2)
 
-        payload_str = urllib.parse.urlencode(payload_dict)
-        sign = self._sign(payload_str)
+        def _build_payload() -> tuple[str, dict]:
+            """Build a fresh (payload_str, headers) pair with a new nonce."""
+            self._throttle()
+            payload = {"method": method, "nonce": self._next_nonce()}
+            if params:
+                payload.update(params)
+            p_str = urllib.parse.urlencode(payload)
+            sign = self._sign(p_str)
+            hdrs = {
+                "Key":          self._api_key,
+                "Sign":         sign,
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            return p_str, hdrs
 
-        headers = {
-            "Key":          self._api_key,
-            "Sign":         sign,
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
+        delay = RETRY_BASE_DELAY_SEC
+        last_exc: RuntimeError | None = None
 
-        try:
-            resp = requests.post(TAPI_URL, headers=headers, data=payload_str, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.RequestException as exc:
-            logger.error("[IndodaxAdapter] Network error in %s: %s", method, exc)
-            raise RuntimeError(f"IndodaxAdapter network error: {exc}") from exc
+        for attempt in range(RETRY_MAX_RETRIES + 1):
+            # Re-check circuit breaker at start of each retry
+            if attempt > 0 and self._circuit_breaker.is_open():
+                raise RuntimeError(
+                    f"[CircuitBreaker] OPEN — aborting retries for '{method}'."
+                )
 
-        if data.get("success") != 1:
-            err = data.get("error", "unknown error")
-            err_code = data.get("error_code", "")
-            logger.error("[IndodaxAdapter] API error in %s: %s (%s)", method, err, err_code)
-            raise RuntimeError(f"Indodax API error [{err_code}]: {err}")
+            payload_str, headers = _build_payload()
 
-        return data.get("return", {})
+            try:
+                resp = requests.post(
+                    TAPI_URL, headers=headers, data=payload_str, timeout=15
+                )
+
+                # ── 429 Too Many Requests ──────────────────────────────────
+                if resp.status_code == 429:
+                    self._rate_limiter.on_429()
+                    # Do not count as a circuit-breaker failure; retry transparently
+                    continue
+
+                # ── 5xx Server Errors ──────────────────────────────────────
+                if resp.status_code in _CB_HTTP_CODES:
+                    err = RuntimeError(
+                        f"IndodaxAdapter HTTP {resp.status_code} in '{method}'"
+                    )
+                    self._circuit_breaker.record_failure(str(err))
+                    last_exc = err
+                    if attempt < RETRY_MAX_RETRIES:
+                        logger.warning(
+                            "[IndodaxAdapter] HTTP %d on '%s' (attempt %d/%d) — "
+                            "retrying in %.1f s",
+                            resp.status_code, method, attempt + 1, RETRY_MAX_RETRIES, delay,
+                        )
+                        time.sleep(delay)
+                        delay *= RETRY_MULTIPLIER
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+
+            except requests.exceptions.Timeout as exc:
+                err = RuntimeError(f"IndodaxAdapter timeout in '{method}': {exc}")
+                self._circuit_breaker.record_failure(str(err))
+                last_exc = err
+                if attempt < RETRY_MAX_RETRIES:
+                    logger.warning(
+                        "[IndodaxAdapter] Timeout on '%s' (attempt %d/%d) — "
+                        "retrying in %.1f s",
+                        method, attempt + 1, RETRY_MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    delay *= RETRY_MULTIPLIER
+                    continue
+                raise err from exc
+
+            except requests.RequestException as exc:
+                err = RuntimeError(f"IndodaxAdapter network error in '{method}': {exc}")
+                # Only count as a CB failure for server-side / connectivity issues
+                exc_str = str(exc).lower()
+                if any(kw in exc_str for kw in _CB_ERROR_SUBSTRINGS):
+                    self._circuit_breaker.record_failure(str(err))
+                last_exc = err
+                if attempt < RETRY_MAX_RETRIES:
+                    logger.warning(
+                        "[IndodaxAdapter] Network error on '%s' (attempt %d/%d) — "
+                        "retrying in %.1f s",
+                        method, attempt + 1, RETRY_MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    delay *= RETRY_MULTIPLIER
+                    continue
+                raise err from exc
+
+            # ── API-level error (success != 1) ─────────────────────────────
+            if data.get("success") != 1:
+                err_msg  = data.get("error", "unknown error")
+                err_code = data.get("error_code", "")
+                logger.error(
+                    "[IndodaxAdapter] API error in '%s': %s (%s)", method, err_msg, err_code
+                )
+                raise RuntimeError(f"Indodax API error [{err_code}]: {err_msg}")
+
+            # ── Success path ───────────────────────────────────────────────
+            self._circuit_breaker.record_success()
+            self._rate_limiter.on_success()
+            return data.get("return", {})
+
+        # All attempts exhausted
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(
+            f"IndodaxAdapter: '{method}' failed after {RETRY_MAX_RETRIES} retries."
+        )
 
     @staticmethod
     def _normalise_symbol(symbol: str) -> str:
@@ -318,6 +435,10 @@ class IndodaxAdapter(BaseExchangeAdapter):
         except Exception as exc:
             logger.warning("[IndodaxAdapter] test_connection failed: %s", exc)
             return False
+
+    def get_circuit_breaker_status(self) -> dict:
+        """Return current circuit breaker status for this adapter."""
+        return self._circuit_breaker.get_status()
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
