@@ -58,6 +58,7 @@ def _acquire_pid_lock() -> None:
     current_pid = os.getpid()
 
     if os.path.exists(pid_file):
+        old_pid = None
         try:
             with open(pid_file) as f:
                 old_pid = int(f.read().strip())
@@ -74,7 +75,7 @@ def _acquire_pid_lock() -> None:
             logger.warning(
                 "[Bootstrap] Stale PID file found (PID %s no longer running). "
                 "Overwriting with current PID %s.",
-                old_pid if 'old_pid' in dir() else '?',
+                old_pid,
                 current_pid,
             )
 

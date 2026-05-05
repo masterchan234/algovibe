@@ -111,7 +111,8 @@ NET_ZERO_HYSTERESIS_SEC = 3.0
 # Extreme velocity threshold (IDR / second) that bypasses the hysteresis entirely.
 # If the portfolio is collapsing faster than this value, the survival guard fires
 # immediately on the first tick — no 3-second wait.
-NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (e.g. -7000 IDR/s spike triggers instant exit)
+# Example: a -7000 IDR/s momentum spike (well below -500) triggers instant exit.
+NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (any velocity below -500 IDR/s fires instantly)
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002

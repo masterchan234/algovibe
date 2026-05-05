@@ -482,7 +482,8 @@ class ExitManager:
                         or 0
                     )
                 else:
-                    # Fallback: use last price from rolling price history if available
+                    # Fallback: use last price from rolling price_history parameter
+                    # (price_history is passed from _monitor_and_execute_inner scope).
                     _ph = price_history.get(pair) if price_history else None
                     if _ph and len(_ph) > 0:
                         current_price = float(list(_ph)[-1])
@@ -573,6 +574,8 @@ class ExitManager:
                             and latest_velocity < NET_ZERO_IMMEDIATE_VELOCITY
                         )
                         if nz_condition:
+                            # Always stamp the timer on first detection (also covers
+                            # the nz_immediate fast-path where we fire on tick 1).
                             if self._net_zero_trigger_ts == 0.0:
                                 self._net_zero_trigger_ts = _now_ts
                                 log_message(
@@ -580,6 +583,9 @@ class ExitManager:
                                     f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
                                     f"Velocity: {latest_velocity:+.1f} IDR/s"
                                 )
+                            # nz_immediate: extreme crash velocity → bypass hysteresis on this tick.
+                            # Hysteresis path: condition sustained for the required duration.
+                            # In both cases _net_zero_trigger_ts is already set above.
                             if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
                                 if nz_immediate:
                                     log_message(
