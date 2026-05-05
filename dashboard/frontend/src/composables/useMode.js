@@ -14,15 +14,34 @@ const apiBase = computed(() =>
   selectedMode.value === 'live' ? '/api/live' : '/api/dry'
 )
 
+// Apply theme class on module load to restore the theme after a page refresh
+if (selectedMode.value === 'live') {
+  document.body.classList.add('theme-live')
+} else if (selectedMode.value === 'dry') {
+  document.body.classList.add('theme-dry')
+}
+
+function _applyTheme(mode) {
+  document.body.classList.remove('theme-live', 'theme-dry')
+  if (mode === 'live') {
+    document.body.classList.add('theme-live')
+  } else if (mode === 'dry') {
+    document.body.classList.add('theme-dry')
+  }
+}
+
 function selectMode(mode) {
   if (mode !== 'dry' && mode !== 'live') return
   selectedMode.value = mode
   localStorage.setItem(_MODE_KEY, mode)
+  // Inject theme class immediately so CSS transitions apply without a page reload
+  _applyTheme(mode)
 }
 
 function clearMode() {
   selectedMode.value = null
   localStorage.removeItem(_MODE_KEY)
+  document.body.classList.remove('theme-live', 'theme-dry')
 }
 
 export function useMode() {
