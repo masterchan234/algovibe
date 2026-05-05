@@ -1,0 +1,70 @@
+// AlgoVibe Microservice Protocol — Shared Message Schema
+// Compile with:  bash scripts/build_proto.sh
+// Wire transport: ZeroMQ IPC sockets (ipc:///tmp/*.ipc)
+
+syntax = "proto3";
+
+package algovibe;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Exchange identifier enum
+// ──────────────────────────────────────────────────────────────────────────────
+enum ExchangeId {
+  EXCHANGE_UNKNOWN = 0;
+  EXCHANGE_INDODAX = 1;
+  EXCHANGE_BINANCE  = 2;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tick — one normalised price/volume snapshot from any exchange
+// Published by: market-pipe  →  ipc:///tmp/market_stream.ipc
+// ──────────────────────────────────────────────────────────────────────────────
+message Tick {
+  string      symbol      = 1;  // e.g. "btcidr", "BTCUSDT"
+  double      price       = 2;  // last trade price
+  double      volume      = 3;  // 24-h base-asset volume
+  int64       timestamp   = 4;  // Unix epoch milliseconds
+  ExchangeId  exchange_id = 5;
+  double      bid         = 6;  // best bid (0 if unavailable)
+  double      ask         = 7;  // best ask (0 if unavailable)
+  double      high_24h    = 8;
+  double      low_24h     = 9;
+  double      vol_idr     = 10; // 24-h quote-asset (IDR) volume
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Signal — trading signal produced by Oracle / XGBoost
+// Published by: brain-inference  →  ipc:///tmp/signal_stream.ipc
+// ──────────────────────────────────────────────────────────────────────────────
+enum SignalAction {
+  ACTION_NONE = 0;
+  ACTION_BUY  = 1;
+  ACTION_SELL = 2;
+}
+
+enum SignalSource {
+  SOURCE_UNKNOWN  = 0;
+  SOURCE_ORACLE   = 1;
+  SOURCE_XGBOOST  = 2;
+}
+
+message Signal {
+  string        symbol     = 1;
+  SignalAction  action     = 2;
+  float         confidence = 3;  // 0.0 – 1.0
+  SignalSource  source     = 4;
+  int64         timestamp  = 5;  // Unix epoch milliseconds
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EquityUpdate — real-time portfolio P&L snapshot
+// Published by: executive-core  →  ipc:///tmp/equity_stream.ipc
+// ──────────────────────────────────────────────────────────────────────────────
+message EquityUpdate {
+  double total_realized   = 1;  // sum of closed-trade P&L today (IDR)
+  double total_unrealized = 2;  // sum of open-position P&L at current prices (IDR)
+  double net_pnl          = 3;  // total_realized + total_unrealized
+  double velocity         = 4;  // IDR / second (negative = dropping)
+  int64  timestamp        = 5;  // Unix epoch milliseconds
+  double peak_equity      = 6;  // session all-time-high net_pnl (for profit lock)
+}
