@@ -1,6 +1,6 @@
 import eventlet
 eventlet.monkey_patch()
-import zmq.green as zmq_eventlet  # eventlet-compatible zmq (uses patched select)
+from eventlet.green import zmq as zmq_eventlet  # eventlet-native zmq (no gevent dependency)
 import os
 import sys
 import time
