@@ -72,7 +72,27 @@ def execute_trade(
             return False
 
         if config.DRY_RUN:
-            amount_idr = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT * multiplier
+            # Derive simulated balance from INITIAL_CAPITAL adjusted by today's realised
+            # PnL and currently open DRY positions so sizing decays correctly with losses
+            # (parity requirement: must mirror the LIVE balance-based sizing path).
+            try:
+                dry_stats = db.get_daily_stats()
+                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
+                open_pos = db.get_open_positions()
+                pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
+                used_idr = sum(
+                    float(p.get("amount_idr", 0))
+                    for p in pos_iter
+                    if int(p.get("dry_run", 0)) == 1
+                )
+                dry_balance = INITIAL_CAPITAL + realized_pnl_dry - used_idr
+            except Exception:
+                dry_balance = INITIAL_CAPITAL
+            if dry_balance < MIN_BALANCE_THRESHOLD:
+                log_message(f"STOP DRY: Simulated balance {dry_balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
+                return False
+            target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
+            amount_idr = min(target_amount, dry_balance - MIN_BALANCE_THRESHOLD)
         else:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < MIN_BALANCE_THRESHOLD:
@@ -152,10 +172,17 @@ def execute_trade(
         sl_target = buy_price * (1 + final_sl)
 
         if config.DRY_RUN:
+            # Apply the same slippage_buffer the live adapter models (0.21%) so
+            # the simulated entry price is not unrealistically tight.
+            from config import ROUND_TRIP_FEE_PCT
+            _sim_slippage = 0.0021  # mirrors IndodaxAdapter.fee_structure['slippage_buffer']
+            sim_fill_price = buy_price * (1 + _sim_slippage)
+            buy_price = sim_fill_price   # update buy_price so PnL calc uses realistic entry
+            amount_crypto = amount_idr / buy_price  # recalculate amount at simulated fill
             order = {
                 'id': f"DRY-{int(time.time())}",
                 'status': 'closed',
-                'price': buy_price,
+                'price': buy_price,   # [SIMULATION] pre-computed price + 0.21% slippage
                 'amount': amount_crypto,
                 'symbol': symbol,
                 'timestamp': datetime.now().isoformat(),

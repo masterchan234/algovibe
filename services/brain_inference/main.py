@@ -64,7 +64,12 @@ class ZMQMarketProxy:
         return self.tickers
 
     def get_trades(self, pair):
-        # We don't have historical trades in ZMQ ticks, return empty
+        # ZMQ Tick stream does not carry per-trade records — the Trade proto
+        # events are published but brain-inference has no ZMQSubscriber for
+        # IPC_TRADE yet.  Oracle callers all guard with `or []`, so returning
+        # an empty list degrades VWAP/flow-imbalance quality but does not crash.
+        # TODO: add a ZMQSubscriber(IPC_TRADE) and a rolling trade cache here
+        #       once the Trade IPC stream is wired in market-pipe.
         return []
 
     def get_price_history(self, pair):
@@ -155,6 +160,19 @@ class BrainInferenceService:
                 symbol = tick.symbol.lower()
                 price = float(tick.price)
                 
+                # Update rolling price history (was created but never appended — bug fix)
+                if symbol not in self._history:
+                    self._history[symbol] = deque(maxlen=self._history_maxlen)
+                self._history[symbol].append(price)
+
+                # Derive change_24h from rolling price history now that we have data
+                hist = self._history[symbol]
+                if len(hist) >= 2:
+                    oldest = float(hist[0] or price)
+                    change_24h = ((price - oldest) / oldest * 100.0) if oldest > 0 else 0.0
+                else:
+                    change_24h = 0.0
+
                 # Update Tickers
                 self._tickers[symbol] = {
                     'pair': symbol,
@@ -164,12 +182,8 @@ class BrainInferenceService:
                     'high': float(tick.high_24h) if tick.high_24h else price,
                     'low': float(tick.low_24h) if tick.low_24h else price,
                     'vol_idr': float(tick.vol_idr) if tick.vol_idr else 0,
-                    'change_24h': 0.0, # Not in current proto definition
+                    'change_24h': change_24h,
                 }
-                
-                # Update History
-                if symbol not in self._history:
-                    self._history[symbol] = deque(maxlen=self._history_maxlen)
                 
             except Exception as exc:
                 logger.warning("[brain-inference] Tick processing error: %s", exc)

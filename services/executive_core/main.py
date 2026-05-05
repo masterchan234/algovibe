@@ -102,13 +102,23 @@ class ExecutiveCoreService:
         
         # [Restoration] Bot-like interface for domain logic reuse
         from app.application.oracle import Oracle
-        class MarketWSMock:
-            def __init__(self, ticks): self.ticks = ticks
-            def get_tickers(self): 
-                # Convert Tick objects to richer dict so Oracle can operate safely.
+        class ZMQMarketProxy:
+            """Adapts the live ZMQ tick cache to the MarketDataWS interface expected
+            by Oracle.  Uses real tick prices and real price history — no mock data."""
+            def __init__(self, ticks, price_history):
+                self.ticks = ticks
+                self.price_history = price_history  # shared ref to _price_history dict
+            def get_tickers(self):
                 out = {}
                 for s, t in self.ticks.items():
                     last = float(t.price or 0.0)
+                    # Derive change_24h from rolling price history where available
+                    hist = self.price_history.get(s, [])
+                    if len(hist) >= 2:
+                        oldest = float(hist[0] or last)
+                        change_24h = ((last - oldest) / oldest * 100.0) if oldest > 0 else 0.0
+                    else:
+                        change_24h = 0.0
                     out[s] = {
                         "pair": s,
                         "last": last,
@@ -117,7 +127,7 @@ class ExecutiveCoreService:
                         "high": float(t.high_24h or last),
                         "low": float(t.low_24h or last),
                         "vol_idr": float(t.vol_idr or 0.0),
-                        "change_24h": 0.0,
+                        "change_24h": change_24h,
                     }
                 return out
             def is_connected(self):
@@ -125,9 +135,22 @@ class ExecutiveCoreService:
             def get_latency(self):
                 return 0.0
             def get_order_book(self, pair):
-                return {"bids": [], "asks": []}
+                # Return single-level depth from the tick cache so Oracle whale
+                # detection and fake-pump logic have real bid/ask data to work with.
+                # Volume per level is unknown (not in Tick proto), so amount=0 is set;
+                # WHALE_THRESHOLD_IDR checks will not fire until a depth ZMQ stream
+                # is added, but detect_fake_pump will no longer return True by default.
+                t = self.ticks.get(pair)
+                if not t:
+                    return {"bids": [], "asks": []}
+                bid = float(t.bid or t.price or 0.0)
+                ask = float(t.ask or t.price or 0.0)
+                return {
+                    "bids": [[bid, 0.0]] if bid > 0 else [],
+                    "asks": [[ask, 0.0]] if ask > 0 else [],
+                }
         
-        self.market_ws = MarketWSMock(self._ticks)
+        self.market_ws = ZMQMarketProxy(self._ticks, self._price_history)
         self.oracle = Oracle(self.market_ws)
         self.cached_balance = 0.0
         # Compatibility aliases for legacy use_cases.trade_execution
@@ -200,6 +223,12 @@ class ExecutiveCoreService:
         out = {}
         for pair, tick in self._ticks.items():
             last = float(tick.price or 0.0)
+            hist = self._price_history.get(pair, [])
+            if len(hist) >= 2:
+                oldest = float(hist[0] or last)
+                change_24h = ((last - oldest) / oldest * 100.0) if oldest > 0 else 0.0
+            else:
+                change_24h = 0.0
             out[pair] = {
                 "pair": pair,
                 "last": last,
@@ -208,7 +237,7 @@ class ExecutiveCoreService:
                 "high": float(tick.high_24h or last),
                 "low": float(tick.low_24h or last),
                 "vol_idr": float(tick.vol_idr or 0.0),
-                "change_24h": 0.0,
+                "change_24h": change_24h,
             }
         return out
 
