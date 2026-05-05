@@ -13,7 +13,7 @@
         </span>
       </div>
 
-      <div class="ld-header-stats">
+      <div class="ld-header-stats hide-on-mobile">
         <div class="ld-stat">
           <span class="ld-stat-label">Balance IDR</span>
           <span class="ld-stat-value gold">Rp {{ formatNumber(store.stats.available_idr) }}</span>
@@ -43,13 +43,42 @@
         <span class="latch-badge" v-if="liveState.is_latched">
           🌾 HARVEST ONLY
         </span>
-        <button class="back-btn" @click="goBack">← DRY RUN VIEW</button>
+        <!-- BASKET_EXIT — Hold-to-Confirm in Live Mode -->
+        <HoldToConfirmBtn
+          v-if="livePositions.length > 0"
+          label="🚨 BASKET EXIT"
+          holding-text="Holding…"
+          done-text="✓ Exit Sent"
+          variant="danger"
+          :hold-ms="2500"
+          @confirm="triggerBasketExit"
+          class="basket-exit-htc"
+        />
+        <button class="back-btn" @click="goBack">← DRY VIEW</button>
       </div>
     </header>
 
     <!-- ── Bot Offline Banner ──────────────────────────────────────── -->
     <div v-if="liveState.bot_offline" class="offline-banner">
       ⚠️ Bot engine appears offline or unreachable. Displaying last known state.
+    </div>
+
+    <!-- ── Mobile KPI strip ──────────────────────────────────────────── -->
+    <div class="mobile-kpi-strip show-on-mobile">
+      <div class="mkpi">
+        <span class="mkpi-label">Equity</span>
+        <span class="mkpi-value gold">Rp {{ formatNumber(store.stats.total_equity) }}</span>
+      </div>
+      <div class="mkpi">
+        <span class="mkpi-label">PnL</span>
+        <span class="mkpi-value" :class="store.stats.daily_pnl >= 0 ? 'profit' : 'loss'">
+          {{ store.stats.daily_pnl >= 0 ? '+' : '' }}Rp {{ formatNumber(store.stats.daily_pnl) }}
+        </span>
+      </div>
+      <div class="mkpi momentum-stat" :class="`ms-${momentumClass}`">
+        <span class="mkpi-label">Momentum</span>
+        <span class="mkpi-value momentum-val">{{ momentumIcon }} {{ _momentumState }}</span>
+      </div>
     </div>
 
     <!-- ── Main Grid ──────────────────────────────────────────────── -->
@@ -62,8 +91,10 @@
           <span class="panel-title">ACTIVE POSITIONS</span>
           <span class="panel-count">{{ livePositions.length }}</span>
         </div>
-        <div class="positions-table-wrap">
-          <table class="positions-table" v-if="livePositions.length">
+
+        <!-- Desktop Table -->
+        <div class="positions-table-wrap hide-on-mobile" v-if="livePositions.length">
+          <table class="positions-table">
             <thead>
               <tr>
                 <th>PAIR</th>
@@ -92,9 +123,40 @@
               </tr>
             </tbody>
           </table>
-          <div v-else class="empty-state">
-            <span>No active live positions</span>
+        </div>
+
+        <!-- Mobile Cards -->
+        <div class="pos-cards show-on-mobile" v-if="livePositions.length">
+          <div
+            v-for="pos in livePositions"
+            :key="`mob-${pos.pair}`"
+            class="pos-card"
+            :class="pos.pnl_net_idr >= 0 ? 'card-profit' : 'card-loss'"
+          >
+            <div class="pos-card-top">
+              <span class="pos-card-pair">{{ formatPair(pos.pair) }}</span>
+              <span class="pos-card-pnl" :class="pos.pnl_net_idr >= 0 ? 'profit' : 'loss'">
+                {{ pos.pnl_net_idr >= 0 ? '+' : '' }}Rp {{ formatNumber(pos.pnl_net_idr) }}
+                <small>({{ pos.pnl_pct >= 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%)</small>
+              </span>
+            </div>
+            <div class="pos-card-row">
+              <span class="pos-card-lbl">Entry</span>
+              <span>{{ formatPrice(pos.entry_price) }}</span>
+              <span class="pos-card-lbl">Mark</span>
+              <span>{{ formatPrice(pos.last_price) }}</span>
+            </div>
+            <div class="pos-card-row">
+              <span class="pos-card-lbl">Size</span>
+              <span>Rp {{ formatNumber(pos.amount_idr) }}</span>
+              <span class="pos-card-lbl">Duration</span>
+              <span>{{ formatDuration(pos.duration_sec) }}</span>
+            </div>
           </div>
+        </div>
+
+        <div v-if="!livePositions.length" class="empty-state">
+          <span>No active live positions</span>
         </div>
       </section>
 
@@ -119,7 +181,9 @@
             <span class="panel-title">ORDER BOOK</span>
             <button class="refresh-btn" @click="fetchOrders" :disabled="loadingOrders">↻</button>
           </div>
-          <div v-if="orders.length" class="orders-table-wrap">
+
+          <!-- Desktop Table -->
+          <div v-if="orders.length" class="orders-table-wrap hide-on-mobile">
             <table class="orders-table">
               <thead>
                 <tr>
@@ -146,7 +210,32 @@
               </tbody>
             </table>
           </div>
-          <div v-else class="empty-state">
+
+          <!-- Mobile Order Cards -->
+          <div v-if="orders.length" class="order-cards show-on-mobile">
+            <div
+              v-for="ord in orders"
+              :key="`mob-ord-${ord.order_id || ord.created_at}`"
+              class="order-card"
+            >
+              <div class="order-card-top">
+                <span class="order-card-pair">{{ formatPair(ord.pair) }}</span>
+                <span :class="(ord.side || '').toLowerCase() === 'buy' ? 'side-buy' : 'side-sell'" class="order-card-side">
+                  {{ (ord.side || '').toUpperCase() }}
+                </span>
+                <span class="status-chip" :class="`chip-${(ord.status||'').toLowerCase()}`">{{ ord.status }}</span>
+              </div>
+              <div class="order-card-row">
+                <span class="pos-card-lbl">Price</span>
+                <span>{{ formatPrice(ord.price) }}</span>
+                <span class="pos-card-lbl">Amount</span>
+                <span>{{ (ord.amount || 0).toFixed(6) }}</span>
+              </div>
+              <div class="order-card-time">{{ formatTime(ord.created_at) }}</div>
+            </div>
+          </div>
+
+          <div v-if="!orders.length" class="empty-state">
             <span>{{ loadingOrders ? 'Loading orders...' : 'No recent orders' }}</span>
           </div>
         </div>
@@ -156,11 +245,27 @@
     <!-- ── Footer ──────────────────────────────────────────────────── -->
     <footer class="ld-footer">
       <span>Peak PnL (Session): <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
-      <span>Session Mode: <strong class="gold">{{ liveState.session_mode || 'NORMAL' }}</strong></span>
+      <span class="hide-on-mobile">Session Mode: <strong class="gold">{{ liveState.session_mode || 'NORMAL' }}</strong></span>
       <span class="footer-conn" :class="store.connected ? 'ok' : 'err'">
         {{ store.connected ? '● CONNECTED' : '○ DISCONNECTED' }}
       </span>
     </footer>
+
+    <!-- Mobile Bottom Navigation Bar -->
+    <nav class="ld-mobile-nav show-on-mobile" aria-label="Live dashboard navigation">
+      <button class="lmn-btn" :class="{ active: liveTab === 'positions' }" @click="liveTab = 'positions'" aria-label="Positions">
+        <span>📊</span><span class="lmn-label">Positions</span>
+      </button>
+      <button class="lmn-btn" :class="{ active: liveTab === 'chart' }" @click="liveTab = 'chart'" aria-label="Chart">
+        <span>📈</span><span class="lmn-label">Chart</span>
+      </button>
+      <button class="lmn-btn" :class="{ active: liveTab === 'orders' }" @click="liveTab = 'orders'" aria-label="Orders">
+        <span>📋</span><span class="lmn-label">Orders</span>
+      </button>
+      <button class="lmn-btn" @click="goBack" aria-label="Back to Dry Run">
+        <span>🔄</span><span class="lmn-label">Dry Run</span>
+      </button>
+    </nav>
   </div>
 </template>
 
@@ -170,6 +275,7 @@ import { useRouter } from 'vue-router'
 import { useTradeStore } from '../stores/trade'
 import { useAuth } from '../composables/useAuth'
 import ProfitChart from '../components/ProfitChart.vue'
+import HoldToConfirmBtn from '../components/HoldToConfirmBtn.vue'
 
 const store = useTradeStore()
 const router = useRouter()
@@ -180,6 +286,9 @@ const backendUrl = import.meta.env.DEV
   : window.location.origin
 
 const ORDER_POLL_INTERVAL_MS = 10_000
+
+// Active tab on mobile bottom nav
+const liveTab = ref('positions')
 
 // ── Live State (target protection, peak PnL, session) ─────────────────────
 const liveState = ref({
@@ -244,6 +353,27 @@ async function fetchOrders() {
     }
   } catch { /* ignore */ } finally {
     loadingOrders.value = false
+  }
+}
+
+// ── BASKET_EXIT — triggered by HoldToConfirmBtn after successful hold ───────
+async function triggerBasketExit() {
+  try {
+    const res = await fetch(`${backendUrl}/api/bot/basket-exit`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify({ reason: 'MANUAL_LIVE_BASKET_EXIT' }),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      console.log('[LiveDash] BASKET_EXIT triggered:', data)
+    }
+  } catch (e) {
+    console.error('[LiveDash] BASKET_EXIT request failed:', e)
   }
 }
 
@@ -585,9 +715,207 @@ onUnmounted(() => {
 .footer-conn.ok  { color: #00e676; margin-left: auto; }
 .footer-conn.err { color: #ff4444; margin-left: auto; }
 
-/* ── Responsive ──────────────────────────────────────────────────────── */
+/* ── Basket Exit HTC button ──────────────────────────────────────────── */
+.basket-exit-htc {
+  font-family: 'Courier New', monospace;
+  font-size: 0.72rem;
+  letter-spacing: 1px;
+}
+
+/* ── Responsive helpers ──────────────────────────────────────────────── */
+.hide-on-mobile { display: initial; }
+.show-on-mobile { display: none;    }
+
+/* ── Mobile responsive ───────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .ld-main { grid-template-columns: 1fr; }
   .ld-header-stats { gap: 12px; }
 }
+
+@media (max-width: 768px) {
+  .hide-on-mobile { display: none !important; }
+  .show-on-mobile { display: flex !important; }
+
+  /* Add bottom padding for mobile nav */
+  .live-dashboard { padding-bottom: 64px; }
+
+  .ld-header {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+
+  .ld-header-right { gap: 6px; margin-left: auto; }
+
+  .back-btn { padding: 8px 10px; min-height: 44px; }
+
+  /* Mobile KPI strip */
+  .mobile-kpi-strip {
+    display: flex;
+    gap: 0;
+    background: #161616;
+    border-bottom: 1px solid #2a2a2a;
+    padding: 8px 12px;
+    justify-content: space-around;
+    flex-wrap: nowrap;
+  }
+
+  .mkpi {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .mkpi-label {
+    font-size: 0.58rem;
+    color: #666;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .mkpi-value {
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+
+  /* Mobile cards for positions */
+  .pos-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    overflow-y: auto;
+  }
+
+  .pos-card {
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pos-card.card-profit { border-left: 3px solid #00e676; }
+  .pos-card.card-loss   { border-left: 3px solid #ff4444; }
+
+  .pos-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .pos-card-pair {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #f5a623;
+  }
+
+  .pos-card-pnl { font-size: 0.85rem; font-weight: 700; }
+  .pos-card-pnl small { font-size: 0.7rem; margin-left: 4px; }
+
+  .pos-card-row {
+    display: grid;
+    grid-template-columns: 50px 1fr 50px 1fr;
+    gap: 4px;
+    font-size: 0.72rem;
+    align-items: center;
+  }
+
+  .pos-card-lbl {
+    color: #666;
+    font-size: 0.62rem;
+    letter-spacing: 0.5px;
+  }
+
+  /* Mobile order cards */
+  .order-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    overflow-y: auto;
+  }
+
+  .order-card {
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .order-card-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .order-card-pair {
+    font-weight: 700;
+    color: #f5a623;
+    font-size: 0.85rem;
+    flex: 1;
+  }
+
+  .order-card-side { font-size: 0.75rem; font-weight: 700; }
+
+  .order-card-row {
+    display: grid;
+    grid-template-columns: 50px 1fr 50px 1fr;
+    gap: 4px;
+    font-size: 0.72rem;
+    align-items: center;
+  }
+
+  .order-card-time { font-size: 0.62rem; color: #555; }
+
+  /* Ensure touch targets ≥ 44×44px */
+  .basket-exit-htc { min-height: 44px; min-width: 44px; }
+}
+
+/* ── Live Mobile Bottom Nav ──────────────────────────────────────────── */
+.ld-mobile-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
+  background: rgba(13, 13, 13, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid #2a2a2a;
+  z-index: 200;
+  justify-content: space-around;
+  align-items: stretch;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.lmn-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: inherit;
+  letter-spacing: 0.5px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 4px;
+  transition: color 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lmn-btn.active { color: #f5a623; }
+.lmn-btn > span:first-child { font-size: 20px; line-height: 1; }
+.lmn-label { font-size: 10px; font-weight: 600; text-transform: uppercase; }
 </style>

@@ -2,11 +2,35 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <!-- PWA & theme -->
+    <meta name="theme-color" content="#a371f7" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="AlgoVibe" />
+    <meta name="description" content="Crypto scalping bot dashboard — simulation &amp; live modes" />
+
+    <link rel="manifest" href="/manifest.json" />
+    <!-- Fallback Apple icon (reuse favicon until real PNGs are generated) -->
+    <link rel="apple-touch-icon" href="/favicon.ico" />
+
     <title>AlgoVibe Dashboard</title>
   </head>
   <body>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
+
+    <!-- Service Worker registration -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .then(() => console.log('[SW] AlgoVibe service worker registered'))
+            .catch((err) => console.warn('[SW] Registration failed:', err))
+        })
+      }
+    </script>
   </body>
 </html>
