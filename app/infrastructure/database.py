@@ -5,7 +5,7 @@ import shutil
 import threading
 import time as _time_module
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from config import DB_PATH
@@ -29,9 +29,8 @@ class Database:
         if not os.path.exists(self.db_path):
             return  # Fresh DB — nothing to check yet.
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            row = conn.execute("PRAGMA integrity_check;").fetchone()
-            conn.close()
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
+                row = conn.execute("PRAGMA integrity_check;").fetchone()
             if row and row[0] == "ok":
                 logging.info("[DB] integrity_check passed for %s", self.db_path)
                 return
@@ -75,14 +74,18 @@ class Database:
             logging.critical("[DB] AUTO-RESTORE failed: %s", exc)
 
     def create_snapshot(self) -> str | None:
-        """Create a consistent snapshot of this DB using sqlite3 backup API.
+        """Create a consistent snapshot of this DB using the sqlite3 native backup API.
+
+        Uses ``sqlite3.Connection.backup()`` so the snapshot is consistent even
+        while WAL mode is active.  After the copy, old snapshots beyond
+        ``_DB_BACKUP_MAX_SNAPSHOTS`` are pruned from the backups directory.
 
         Returns the snapshot path on success, None on failure.
         """
         backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
         os.makedirs(backup_dir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(self.db_path))[0]
-        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         snapshot_path = os.path.join(backup_dir, f"snapshot_{stem}_{stamp}.db")
         try:
             src = sqlite3.connect(self.db_path, timeout=30)

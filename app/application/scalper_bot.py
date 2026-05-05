@@ -495,6 +495,8 @@ class ScalperBot:
     def _send_daily_report(self):
         """Compose and send the daily performance summary to Telegram."""
         try:
+            from datetime import timedelta
+            now_wib = datetime.now(timezone.utc) + timedelta(hours=_WIB_OFFSET_HOURS)
             stats = db.get_daily_stats()
             total = stats.get('total_trades', 0)
             wins  = stats.get('win_count', 0)
@@ -503,7 +505,7 @@ class ScalperBot:
             net_pnl  = stats.get('total_pnl_idr', 0.0)
             msg = (
                 f"📊 *DAILY PERFORMANCE SUMMARY* 📊\n"
-                f"Tanggal: {datetime.now().strftime('%d %b %Y')} WIB\n"
+                f"Tanggal: {now_wib.strftime('%d %b %Y')} WIB\n"
                 f"Total Trades: {total} | Win: {wins} | Loss: {losses}\n"
                 f"Win Rate: {win_rate:.1f}%\n"
                 f"Net Profit: Rp {net_pnl:,.0f}"
@@ -531,6 +533,7 @@ class ScalperBot:
         """Execute disk hygiene tasks:
         1. Prune old DB rows (system events, ticker history, analytics).
         2. Remove Docker build cache to prevent the observed 33GB accumulation.
+           Set DOCKER_CLEANUP_ENABLED=false in .env to disable.
         """
         log_message("🧹 [CLEANUP] Starting scheduled disk hygiene...")
         # 1. Prune stale DB records
@@ -541,14 +544,19 @@ class ScalperBot:
         except Exception as e:
             log_message(f"⚠️ [CLEANUP] DB prune error: {e}")
 
-        # 2. Docker build cache cleanup (fire-and-forget, non-blocking)
+        # 2. Docker build cache cleanup — controlled by DOCKER_CLEANUP_ENABLED env var.
+        docker_cleanup_enabled = os.getenv("DOCKER_CLEANUP_ENABLED", "true").lower() == "true"
+        if not docker_cleanup_enabled:
+            log_message("ℹ️ [CLEANUP] Docker cleanup disabled via DOCKER_CLEANUP_ENABLED=false.")
+            return
         try:
             result = subprocess.run(
                 ["docker", "builder", "prune", "--force", "--filter", "until=24h"],
                 capture_output=True, text=True, timeout=120,
             )
             if result.returncode == 0:
-                freed = result.stdout.strip().splitlines()[-1] if result.stdout else "?"
+                lines = result.stdout.strip().splitlines()
+                freed = lines[-1] if lines else "unknown"
                 log_message(f"🧹 [CLEANUP] Docker build cache cleared. {freed}")
                 send_telegram_message(f"🧹 *CLEANUP* Docker build cache cleared. {freed}")
             else:

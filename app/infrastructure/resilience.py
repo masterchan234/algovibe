@@ -774,7 +774,7 @@ class AutoResumeHeartbeat:
 
         msg = (
             f"✅ *AUTO-RESUME SUCCESS* ✅\n"
-            f"{AUTO_RESUME_SUCCESS_THRESHOLD} consecutive successful API pings.\n"
+            f"{self._threshold} consecutive successful API pings.\n"
             f"Session restored to NORMAL mode. Trading resumed."
         )
         logger.critical("[AutoResumeHeartbeat] %s", msg.replace("*", "").replace("\n", " | "))
