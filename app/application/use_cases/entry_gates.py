@@ -37,31 +37,50 @@ _BREAK = "BREAK"  # sentinel value returned to caller
 
 
 def _derive_radar_recommendation(p, enriched, adaptive_cfg):
-    """Satu sumber rekomendasi untuk Radar + gate entry bot."""
+    """Satu sumber rekomendasi untuk Radar + gate entry bot (Strict Mode)."""
     signal_v = str(enriched.get('signal_verdict', 'HOLD') or 'HOLD').upper()
     trend = str(enriched.get('trend', 'N/A') or 'N/A').upper()
+    breakout = enriched.get('breakout', False)
     score = float(p.get('score', 0) or 0)
     tq_prob = float(enriched.get('tq_prob', 0) or 0)
     imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
     tech_threshold = float(adaptive_cfg.get('tech_threshold', 0.6) or 0.6)
 
+    # ── 1. Sell Block ──
     if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
         return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
 
-    buy_ready = (
-        signal_v == 'BUY' and (
-            tq_prob >= max(0.35, tech_threshold * 0.9)
-            or score >= 60
-            or (trend == 'UP' and imbalance_ratio >= 1.2)
-        )
-    )
-    if buy_ready:
+    # ── 2. BUY Filter (Sync with check_entry_gates) ──
+    # Radar hanya boleh bilang BUY jika kriteria trend dan probabilitas terpenuhi
+    is_trend_ok = config.DRY_RUN_LOOSE_GATES or breakout or trend == "UP"
+    
+    # Mirroring Step 9: Dynamic threshold based on volatility
+    current_vol = float(p.get('volatility', 0) or 0)
+    base_thresh = 55.0
+    if current_vol > 2.0:
+        base_thresh = 65.0
+    elif current_vol < 0.6:
+        base_thresh = 50.0
+    if trend != "UP":
+        base_thresh += 4.0
+    
+    # tq_prob is 0.0-1.0, threshold is 0-100
+    is_prob_ok = (tq_prob * 100) >= base_thresh
+
+    if signal_v == 'BUY' and is_trend_ok and is_prob_ok:
         return "BUY", (
-            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}, "
-            f"imbalance={imbalance_ratio:.2f}x"
+            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
+            f"vol={current_vol:.2f}%"
         )
 
-    return "HOLD", f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, score={score:.0f}"
+    # ── 3. Fallback to HOLD ──
+    reason = "HOLD"
+    if not is_trend_ok:
+        reason = f"Trend {trend} (no breakout)"
+    elif not is_prob_ok:
+        reason = f"Prob {tq_prob*100:.0f}% < Thresh {base_thresh:.0f}%"
+
+    return "HOLD", f"signal={signal_v} | {reason}"
 
 
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
