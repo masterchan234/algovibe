@@ -2762,8 +2762,50 @@ def session_action():
         logging.error(f"[StrategicBreak] session_action error: {e}")
         return jsonify({"error": "Internal server error processing session action."}), 500
 
+
+@app.route('/api/resilience/status', methods=['GET'])
+@login_required
+def get_resilience_status():
+    """
+    Returns the current resilience / circuit-breaker state so the frontend
+    and Telegram bot can surface SYSTEM_PAUSE alerts to the user.
+
+    Response keys
+    ─────────────
+    circuit_breaker_status : "CLOSED" | "OPEN" | "HALF_OPEN" (from bot_state DB)
+    circuit_breaker_tripped_at : ISO timestamp or empty string
+    system_pause_active    : bool — True when session_mode is "SYSTEM_PAUSE"
+    session_latched        : bool
+    """
+    try:
+        cb_status    = db.get_state("circuit_breaker_status") or "CLOSED"
+        cb_tripped   = db.get_state("circuit_breaker_tripped_at") or ""
+        session_mode = db.get_state("session_mode") or "NORMAL"
+        latched_raw  = db.get_state("session_latched") or "false"
+        return jsonify({
+            "circuit_breaker_status":     cb_status,
+            "circuit_breaker_tripped_at": cb_tripped,
+            "system_pause_active":        session_mode == "SYSTEM_PAUSE",
+            "session_latched":            latched_raw.lower() == "true",
+            "session_mode":               session_mode,
+        })
+    except Exception as e:
+        logging.error(f"[ResilienceStatus] Error: {e}")
+        return jsonify({"error": "Internal server error."}), 500
+
+
 # Start background thread
 socketio.start_background_task(push_data_loop)
+
+# ── Inject SocketIO emit into the shared EmergencyNotifier ──────────────────
+try:
+    from app.infrastructure.resilience import emergency_notifier as _emergency_notifier
+    _emergency_notifier.set_socketio_fn(
+        lambda event, data: socketio.emit(event, data, room="public")
+    )
+    logging.info("✅ EmergencyNotifier SocketIO channel wired.")
+except Exception as _wire_err:
+    logging.warning(f"⚠️ Could not wire EmergencyNotifier SocketIO: {_wire_err}")
 
 def _background_wallet_sync_loop():
     """
