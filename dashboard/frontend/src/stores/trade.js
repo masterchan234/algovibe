@@ -374,7 +374,9 @@ export const useTradeStore = defineStore('trade', () => {
     const backendUrl = import.meta.env.DEV
       ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
       : window.location.origin
-    const { getAuthHeaders } = useAuth()
+    const { getAuthHeaders, isAuthenticated } = useAuth()
+    // Skip if not logged in — avoids console 401 on unauthenticated page loads
+    if (!isAuthenticated.value) return
     try {
       const res = await fetch(`${backendUrl}/api/session/status`, {
         method: 'GET',
