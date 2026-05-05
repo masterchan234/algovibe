@@ -57,23 +57,172 @@ services:
         fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # [Main Service] Algovibe Bot + Dashboard
+  # [Microservice 1] market-pipe — Market Data Ingress
+  # Connects to Indodax WebSocket, normalises ticks into Protobuf, and
+  # publishes to ipc:///tmp/market_stream.ipc via ZMQ PUB socket.
+  # network_mode: host gives the lowest possible latency for exchange WebSocket.
   # ─────────────────────────────────────────────────────────────────────────────
-  algovibe:
+  market-pipe:
     image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
-    container_name: algovibe
+    container_name: algovibe-market-pipe
+    restart: unless-stopped
+    stop_grace_period: 15s
+    network_mode: host             # Bypass Docker NAT for minimum WS latency
+    env_file:
+      - .env
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_ipc:/tmp           # Shared IPC volume for ZMQ sockets
+    shm_size: 256mb
+    command: ["python", "-m", "services.market_pipe.main"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import zmq; c=zmq.Context(); s=c.socket(zmq.SUB); s.RCVTIMEO=2000; s.setsockopt(zmq.SUBSCRIBE,b''); s.connect('ipc:///tmp/market_stream.ipc'); s.recv(); s.close(); c.term()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Microservice 2] executive-core — Brain & Muscle
+  # Subscribes to market ticks + equity updates.
+  # Runs Net-Zero Survival Guard and Profit Lock.
+  # Places all API orders as high-priority async tasks.
+  # Persists state to SQLite (WAL mode).
+  # ─────────────────────────────────────────────────────────────────────────────
+  executive-core:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-executive-core
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
+      market-pipe:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
+    shm_size: 256mb
+    # Elevate CPU priority so exit logic is never starved
+    cpu_shares: 2048               # 2× the default 1024 — highest priority among services
+    command: ["python", "-m", "services.executive_core.main"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import os; f=open('data/algovibe_bot.pid'); pid=int(f.read()); os.kill(pid,0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Microservice 3] brain-inference — AI / Oracle Inference
+  # Runs Oracle + XGBoost scoring and publishes Signal messages to
+  # ipc:///tmp/signal_stream.ipc.
+  # ─────────────────────────────────────────────────────────────────────────────
+  brain-inference:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-brain-inference
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
       model-downloader:
-        condition: service_completed_successfully   # Wajib tunggu model tersedia
+        condition: service_completed_successfully
+      market-pipe:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
+      - algovibe_ipc:/tmp           # Same IPC volume
+    shm_size: 256mb
+    command: ["python", "-m", "app.application.oracle", "--service-mode"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Microservice 4] dashboard-api — Flask REST + SocketIO Dashboard
+  # Serves the Vue.js SPA and exposes /api/* endpoints.
+  # Read-only view of the shared SQLite DB.
+  # ─────────────────────────────────────────────────────────────────────────────
+  dashboard-api:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-dashboard
+    restart: unless-stopped
+    stop_grace_period: 10s
+    depends_on:
+      executive-core:
+        condition: service_started
     env_file:
       - .env
     ports:
       - "8080:8080"
     volumes:
       - algovibe_data:/app/data
-      - algovibe_models:/app/models   # Sama volume dengan model-downloader
+      - algovibe_ipc:/tmp           # Subscribe to equity stream for live gauges
+    command: ["python", "-m", "dashboard.server"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+      - npm_external
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Legacy] algovibe — original monolith kept for backward-compat rollback
+  # Disabled by default (profiles: ["legacy"]).
+  # Enable with:  docker compose --profile legacy up -d algovibe
+  # ─────────────────────────────────────────────────────────────────────────────
+  algovibe:
+    profiles: ["legacy"]
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
     read_only: true
     tmpfs:
       - /tmp:exec,mode=777
@@ -104,3 +253,11 @@ networks:
 volumes:
   algovibe_data:
   algovibe_models:
+  # Shared /tmp volume — mounts as /tmp in every service so ZMQ IPC sockets
+  # (ipc:///tmp/*.ipc) are accessible across all containers.
+  algovibe_ipc:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,mode=1777"
