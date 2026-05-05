@@ -176,6 +176,29 @@ MIGRATIONS = [
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """),
+    ("create_order_book", """
+        CREATE TABLE IF NOT EXISTS order_book (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT UNIQUE,
+            pair TEXT,
+            side TEXT,
+            price REAL,
+            amount REAL,
+            status TEXT DEFAULT 'open',
+            raw_response TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """),
+    ("create_balance_history", """
+        CREATE TABLE IF NOT EXISTS balance_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idr_free REAL DEFAULT 0.0,
+            idr_total REAL DEFAULT 0.0,
+            equity_total_idr REAL DEFAULT 0.0,
+            recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """),
 
     # --- 2. EVOLUTION (ALTER TABLES & INDEXES) ---
     ("add_updated_at_to_dynamic_weights", "ALTER TABLE dynamic_weights ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
@@ -207,6 +230,13 @@ MIGRATIONS = [
     ("add_rsi_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN rsi REAL DEFAULT 0.0"),
     ("add_ema_dist_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN ema_dist REAL DEFAULT 0.0"),
 ]
+
+def sync_schema_both_dbs():
+    """Apply all migrations to both live and dryrun databases for schema parity."""
+    from config import DB_PATH_LIVE, DB_PATH_DRYRUN
+    run_migrations(DB_PATH_DRYRUN)
+    run_migrations(DB_PATH_LIVE)
+
 
 def run_migrations(db_path):
     """

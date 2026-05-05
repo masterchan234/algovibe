@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, reactive } from 'vue'
 import { io } from 'socket.io-client'
 import { useNotifications } from '../composables/useNotifications'
+import { useAuth } from '../composables/useAuth'
 
 export const useTradeStore = defineStore('trade', () => {
   const { notify } = useNotifications()
@@ -322,10 +323,12 @@ export const useTradeStore = defineStore('trade', () => {
     const backendUrl = import.meta.env.DEV
       ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
       : window.location.origin
+    const { getAuthHeaders } = useAuth()
     try {
       const res = await fetch(`${backendUrl}/api/session/status`, {
         method: 'GET',
         credentials: 'include',
+        headers: getAuthHeaders(),
       })
       if (!res.ok) return
       const data = await res.json()

@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
@@ -268,3 +269,82 @@ def execute_trade(
     except Exception as e:
         log_message(f"Trade Error: {e}")
         return False
+
+
+def execute_basket_exit_live(exchange_client, positions: list) -> dict:
+    """Issue simultaneous market sell orders for all given live positions.
+
+    Each position dict must contain at least: pair, amount_crypto, entry_price, amount_idr.
+    Orders are placed in parallel via a ThreadPoolExecutor.  After a successful fill
+    the position is deleted from the DB and the order is recorded in order_book.
+
+    Returns a summary dict: {filled: [...], failed: [...]}.
+    """
+    if not positions:
+        return {"filled": [], "failed": []}
+
+    filled = []
+    failed = []
+
+    def _sell_one(pos):
+        pair = pos.get("pair", "")
+        amount_crypto = float(pos.get("amount_crypto") or 0)
+        entry_price   = float(pos.get("entry_price") or 0)
+        amount_idr    = float(pos.get("amount_idr") or 0)
+
+        if amount_crypto <= 0 or not pair:
+            return {"pair": pair, "ok": False, "error": "invalid position data"}
+
+        symbol = pair.upper().replace("IDR", "/IDR")
+        # Build Indodax param: ensure suffix is exactly '_idr', not mid-string
+        _pair_param = pair.lower()
+        if _pair_param.endswith("idr"):
+            _pair_param = _pair_param[:-3] + "_idr"
+        try:
+            order = exchange_client.create_order(
+                symbol, "market", "sell", amount_crypto, None,
+                {"pair": _pair_param}
+            )
+            import random as _random
+            order_id = order.get("id") or (
+                f"LIVE-SELL-{pair}-{int(time.time())}-{_random.randint(1000, 9999)}"
+            )
+            fill_price = float(order.get("price") or entry_price)
+
+            # Record in order_book
+            db.upsert_order_book(
+                order_id=order_id,
+                pair=pair,
+                side="SELL",
+                price=fill_price,
+                amount=amount_crypto,
+                status=order.get("status", "filled"),
+                raw_response=order,
+            )
+            # Delete position from DB atomically
+            db.delete_position(pair)
+
+            pnl = (fill_price - entry_price) * amount_crypto
+            log_message(
+                f"⚡ [LIVE BASKET EXIT] {pair}: SOLD {amount_crypto:.6f} @ Rp {fill_price:,.0f} "
+                f"| PnL ≈ Rp {pnl:,.0f}"
+            )
+            return {"pair": pair, "ok": True, "order_id": order_id, "price": fill_price}
+        except Exception as exc:
+            log_message(f"❌ [LIVE BASKET EXIT] {pair} sell failed: {exc}")
+            return {"pair": pair, "ok": False, "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=min(8, len(positions))) as pool:
+        futures = {pool.submit(_sell_one, p): p for p in positions}
+        for future in as_completed(futures):
+            result = future.result()
+            if result.get("ok"):
+                filled.append(result)
+            else:
+                failed.append(result)
+
+    log_message(
+        f"🧺 [LIVE BASKET EXIT] Complete — filled: {len(filled)}, failed: {len(failed)}"
+    )
+    return {"filled": filled, "failed": failed}
+

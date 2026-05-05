@@ -111,6 +111,11 @@ class ScalperBot:
             except Exception as e:
                 log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
 
+            # Crash Recovery: resume management of any existing live positions
+            self._resume_live_positions()
+            # Reconcile order_book table with exchange's actual open orders
+            self._reconcile_open_orders()
+
         self._backfill_historical_data()
 
         # Hitung target profit harian awal saat startup
@@ -125,6 +130,53 @@ class ScalperBot:
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(init_msg)
+
+    def _resume_live_positions(self):
+        """Crash Recovery: re-subscribe market streams for all open live positions.
+
+        Ensures the exit monitor loop keeps tracking positions that were open when
+        the bot last shut down — prevents orphan positions from going unmanaged.
+        """
+        try:
+            live_positions = db.live.get_open_positions()
+            if not live_positions:
+                return
+            for pair in live_positions:
+                self.market_ws.subscribe_market_trades(pair)
+                log_message(f"♻️ [RESUME] Re-subscribed market stream for live position: {pair}")
+            log_message(
+                f"✅ [CRASH RECOVERY] Resumed management of {len(live_positions)} live positions."
+            )
+        except Exception as e:
+            log_message(f"⚠️ [RESUME] Failed to resume live positions: {e}")
+
+    def _reconcile_open_orders(self):
+        """Reconcile order_book table with actual open orders on Indodax.
+
+        Called once at startup in LIVE mode.  Fetches all open orders from the
+        exchange via CCXT and upserts their current status into order_book so the
+        dashboard reflects the real state even after a restart.
+        """
+        try:
+            open_orders = self.exchange.fetch_open_orders()
+            if not open_orders:
+                return
+            for order in open_orders:
+                pair = (order.get("symbol") or "").replace("/", "").lower()
+                db.live.upsert_order_book(
+                    order_id=str(order.get("id") or ""),
+                    pair=pair,
+                    side=(order.get("side") or "").upper(),
+                    price=float(order.get("price") or 0),
+                    amount=float(order.get("amount") or 0),
+                    status=order.get("status") or "open",
+                    raw_response=order,
+                )
+            log_message(
+                f"✅ [ORDER RECONCILE] Synced {len(open_orders)} open orders into order_book."
+            )
+        except Exception as e:
+            log_message(f"⚠️ [ORDER RECONCILE] Failed: {e}")
 
     def _backfill_historical_data(self):
         log_message("⏳ Starting FULL Historical Backfill (1h window)...")
