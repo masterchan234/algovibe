@@ -506,7 +506,7 @@ class ShadowSync:
             # 4. Reconcile: update account_balances in DB to reflect exchange truth
             for b in balances:
                 try:
-                    with db._active().get_connection() as conn:
+                    with db.get_connection() as conn:
                         conn.execute(
                             """
                             INSERT INTO account_balances (asset, free, used, total, updated_at)

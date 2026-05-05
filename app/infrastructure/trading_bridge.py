@@ -307,15 +307,19 @@ class TradingBridge:
             except Exception:
                 pass  # If ticker fetch fails, skip the min-trade pre-check
 
+        def _check_min_trade(vol: float) -> None:
+            """Raise ValueError if vol × exec_price is below the minimum."""
+            if exec_price > 0 and not ExecutionSafety.validate_min_trade(
+                vol, exec_price, MIN_TRADE_IDR
+            ):
+                raise ValueError(
+                    f"[ExecutionSafety] Order {side.upper()} {symbol.upper()} "
+                    f"vol={vol:.8f} × price={exec_price:.0f} = {vol * exec_price:.0f} IDR "
+                    f"is below MIN_TRADE_IDR={MIN_TRADE_IDR}."
+                )
+
         # ── Min-trade volume guard ────────────────────────────────────────────
-        if exec_price > 0 and not ExecutionSafety.validate_min_trade(
-            volume, exec_price, MIN_TRADE_IDR
-        ):
-            raise ValueError(
-                f"[ExecutionSafety] Order {side.upper()} {symbol.upper()} "
-                f"vol={volume:.8f} × price={exec_price:.0f} = {volume * exec_price:.0f} IDR "
-                f"is below MIN_TRADE_IDR={MIN_TRADE_IDR}."
-            )
+        _check_min_trade(volume)
 
         # ── Place order with insufficient-balance retry (BUY only) ───────────
         actual_volume = volume
@@ -334,10 +338,10 @@ class TradingBridge:
                     adjusted,
                     ExecutionSafety.INSUFFICIENT_DECREMENT * 100,
                 )
-                # Verify adjusted size still meets min-trade
-                if exec_price > 0 and not ExecutionSafety.validate_min_trade(
-                    adjusted, exec_price, MIN_TRADE_IDR
-                ):
+                # Verify adjusted size still meets min-trade before retrying
+                try:
+                    _check_min_trade(adjusted)
+                except ValueError:
                     logger.error(
                         "[TradingBridge] Adjusted vol %.8f × %.0f = %.0f IDR is still below "
                         "MIN_TRADE_IDR=%d. Aborting.",
@@ -346,7 +350,7 @@ class TradingBridge:
                         adjusted * exec_price,
                         MIN_TRADE_IDR,
                     )
-                    raise
+                    raise exc  # re-raise the original insufficient-balance error
                 order = self._adapter.place_order(
                     symbol, side, order_type, adjusted, price
                 )

@@ -167,6 +167,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
 
         delay = RETRY_BASE_DELAY_SEC
         last_exc: RuntimeError | None = None
+        _429_count = 0  # separate cap for 429 retries to prevent infinite loops
 
         for attempt in range(RETRY_MAX_RETRIES + 1):
             # Re-check circuit breaker at start of each retry
@@ -184,8 +185,14 @@ class IndodaxAdapter(BaseExchangeAdapter):
 
                 # ── 429 Too Many Requests ──────────────────────────────────
                 if resp.status_code == 429:
+                    _429_count += 1
+                    if _429_count > RETRY_MAX_RETRIES:
+                        raise RuntimeError(
+                            f"IndodaxAdapter: '{method}' rate-limited after "
+                            f"{_429_count} consecutive 429 responses."
+                        )
                     self._rate_limiter.on_429()
-                    # Do not count as a circuit-breaker failure; retry transparently
+                    # Do not count 429 toward CB failures; retry transparently
                     continue
 
                 # ── 5xx Server Errors ──────────────────────────────────────
