@@ -82,6 +82,10 @@ class ExecutiveCoreService:
 
         # Velocity (IDR/s)
         self._velocity: float = 0.0
+        
+        # Price history buffer for Dashboard
+        self._price_history: dict = {}
+        self._last_history_save: float = 0.0
 
         # Guards
         self._net_zero = NetZeroGuard(on_basket_exit=self._on_basket_exit)
@@ -130,10 +134,29 @@ class ExecutiveCoreService:
                 continue
             try:
                 self._ticks[tick.symbol] = tick
-                # Recalculate unrealised P&L with new prices
-                await self._update_unrealized_pnl()
+                # History buffering for radar/dashboard
+                if tick.symbol not in self._price_history:
+                    self._price_history[tick.symbol] = []
+                # Only append if price changed or it's empty to save space
+                if not self._price_history[tick.symbol] or self._price_history[tick.symbol][-1] != tick.price:
+                    self._price_history[tick.symbol].append(tick.price)
+                    if len(self._price_history[tick.symbol]) > 60:
+                        self._price_history[tick.symbol].pop(0)
+
             except Exception as exc:
                 logger.error(f"[executive-core] Tick processing error: {exc}")
+
+    def _flush_ticker_history(self) -> None:
+        """Flushes the buffered price history to DB for dashboard radar."""
+        try:
+            updates = []
+            for symbol, hist in self._price_history.items():
+                if len(hist) > 0:
+                    updates.append((symbol, list(hist), 0.0, 0.0, 0.0))
+            if updates:
+                db.save_ticker_history_batch(updates)
+        except Exception as e:
+            logger.error(f"[executive-core] Failed to flush ticker_history: {e}")
 
     # ── P&L calculation ───────────────────────────────────────────────────────
 
@@ -205,6 +228,15 @@ class ExecutiveCoreService:
         _heartbeat_counter = 0
         while self._running:
             try:
+                # 1. Update PnL once per second instead of per-tick
+                await self._update_unrealized_pnl()
+
+                # 2. Flush history periodically here
+                now = time.time()
+                if now - self._last_history_save > 30:
+                    self._flush_ticker_history()
+                    self._last_history_save = now
+
                 equity = EquityUpdate()
                 equity.total_realized   = self._realized_pnl
                 equity.total_unrealized = self._unrealized_pnl

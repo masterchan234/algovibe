@@ -73,6 +73,11 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Shared IPC volume for ZMQ sockets
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
     shm_size: 256mb
     command: ["python", "-m", "services.market_pipe.main"]
     healthcheck:
@@ -110,6 +115,11 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
     shm_size: 256mb
     # Elevate CPU priority so exit logic is never starved
     cpu_shares: 2048               # 2× the default 1024 — highest priority among services
@@ -152,6 +162,11 @@ services:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
       - algovibe_ipc:/tmp           # Same IPC volume
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
     shm_size: 256mb
     command: ["python", "-m", "services.brain_inference.main"]
     logging:
@@ -184,6 +199,12 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Subscribe to equity stream for live gauges
+      - ./dashboard:/app/dashboard
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
     command: ["python", "-m", "dashboard.server"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]

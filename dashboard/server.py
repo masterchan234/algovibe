@@ -25,8 +25,8 @@ from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
-from shared.transport import IPC_EQUITY
-from shared.algovibe_pb2 import EquityUpdate  # type: ignore[attr-defined]
+from shared.transport import IPC_EQUITY, IPC_MARKET
+from shared.algovibe_pb2 import EquityUpdate, Tick  # type: ignore[attr-defined]
 
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
@@ -2901,6 +2901,49 @@ def _zmq_equity_bridge():
         sub.close(linger=0)
 
 socketio.start_background_task(_zmq_equity_bridge)
+
+# ── ZMQ Market Bridge — forward market-pipe ticks to dashboard ────────────────
+def _zmq_market_bridge():
+    ctx = zmq_eventlet.Context.instance()
+    sub = ctx.socket(zmq_eventlet.SUB)
+    sub.setsockopt(zmq_eventlet.SUBSCRIBE, b"")
+    sub.connect(IPC_MARKET)
+    logging.info(f"[ZMQ] Market bridge connected to {IPC_MARKET}")
+    _err_delay = 0.1
+    try:
+        while True:
+            try:
+                raw = sub.recv()
+                _err_delay = 0.1
+                tick = Tick()
+                tick.ParseFromString(raw)
+                
+                pair = tick.symbol
+                with mws._lock:
+                    if pair not in mws._tickers:
+                        mws._tickers[pair] = {
+                            "last": tick.price, "buy": tick.bid, "sell": tick.ask,
+                            "high": tick.high_24h, "low": tick.low_24h, "open": 0,
+                            "vol_idr": tick.vol_idr, "vol_coin": "0",
+                            "bid_depth": 0, "ask_depth": 0,
+                            "bids_list": [], "asks_list": []
+                        }
+                    else:
+                        t = mws._tickers[pair]
+                        t["last"] = tick.price
+                        t["buy"] = tick.bid
+                        t["sell"] = tick.ask
+                        if tick.high_24h > 0: t["high"] = tick.high_24h
+                        if tick.low_24h > 0: t["low"] = tick.low_24h
+                        if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
+            except Exception as _m_err:
+                logging.warning(f"[ZMQ] Market bridge error: {_m_err}")
+                eventlet.sleep(_err_delay)
+                _err_delay = min(_err_delay * 2, 30)
+    finally:
+        sub.close(linger=0)
+
+socketio.start_background_task(_zmq_market_bridge)
 
 # ── Inject SocketIO emit into the shared EmergencyNotifier ──────────────────
 try:
