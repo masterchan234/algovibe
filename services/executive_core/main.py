@@ -37,6 +37,7 @@ from shared.transport import (
     IPC_MARKET,
     IPC_EQUITY,
     IPC_SIGNAL,
+    IPC_COMMAND,
     install_uvloop,
 )
 from shared.algovibe_pb2 import Tick, EquityUpdate, Signal, Trade  # type: ignore[attr-defined]
@@ -73,6 +74,7 @@ class ExecutiveCoreService:
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
         self._equity_sub = ZMQSubscriber(IPC_EQUITY)
         self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
+        self._command_sub = ZMQSubscriber(IPC_COMMAND)
         self._equity_pub = ZMQPublisher(IPC_EQUITY)
 
         # Current tick cache  {symbol: Tick}
@@ -181,6 +183,7 @@ class ExecutiveCoreService:
         self._running = True
         self._tick_sub.start()
         self._signal_sub.start()
+        self._command_sub.start()
         self._equity_pub.start()
         if self._private_ws:
             self._private_ws.start()
@@ -204,6 +207,7 @@ class ExecutiveCoreService:
         await asyncio.gather(
             self._consume_ticks(),
             self._consume_signals(),
+            self._consume_commands(),
             self._order_processor(),
             self._equity_broadcast_loop(),
             self._legacy_exit_monitor_loop(),
@@ -213,6 +217,7 @@ class ExecutiveCoreService:
         self._running = False
         self._tick_sub.stop()
         self._signal_sub.stop()
+        self._command_sub.stop()
         self._equity_pub.stop()
         if self._private_ws:
             self._private_ws.stop()
@@ -401,6 +406,34 @@ class ExecutiveCoreService:
                             )
             except Exception as exc:
                 logger.error(f"[executive-core] Failed to parse signal: {exc}")
+
+    # ── Command consumer ───────────────────────────────────────────────────────
+
+    async def _consume_commands(self) -> None:
+        """Consume command messages from dashboard (e.g., mode changes)."""
+        import json
+        async for raw in self._command_sub.aiter_messages():
+            if not self._running:
+                break
+            try:
+                cmd = json.loads(raw.decode())
+                action = cmd.get("action")
+                payload = cmd.get("payload", {})
+                
+                if action == "MODE_CHANGE":
+                    new_dry_run = payload.get("dry_run")
+                    logger.info(f"[executive-core] 🔄 Mode Change Received: {'DRY RUN' if new_dry_run else 'LIVE'}")
+                    # Force reload of DB mode cache and config cache
+                    import config as cfg
+                    cfg.clear_dry_run_cache()
+                    db._mode_cache = None
+                    # Update local state if needed
+                    # ExitManager already checks db.is_dry_run() which now points to the new DB
+                    # Re-reconcile with exchange for the new mode
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self.exit_manager.reconcile_with_exchange)
+            except Exception as exc:
+                logger.error(f"[executive-core] Failed to process command: {exc}")
 
     # ── Tick consumer ─────────────────────────────────────────────────────────
 

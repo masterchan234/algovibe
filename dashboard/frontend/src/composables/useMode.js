@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { useAuth } from './useAuth'
 
 const _MODE_KEY = 'algovibe_mode'
 
@@ -30,18 +31,52 @@ function _applyTheme(mode) {
   }
 }
 
-function selectMode(mode) {
+async function selectMode(mode, backendUrl = '') {
   if (mode !== 'dry' && mode !== 'live') return
+  
+  const { getAuthHeaders, logout } = useAuth()
+  
+  const res = await fetch(`${backendUrl}/api/bot/select-mode`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': _getCookie('csrf_token'),
+      ...getAuthHeaders()
+    },
+    body: JSON.stringify({ mode: mode === 'dry' ? 'dryrun' : 'live' }),
+    credentials: 'include'
+  })
+  
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || 'Failed to select mode')
+  }
+  
+  const data = await res.json()
+  
   selectedMode.value = mode
   localStorage.setItem(_MODE_KEY, mode)
   // Inject theme class immediately so CSS transitions apply without a page reload
   _applyTheme(mode)
+  
+  if (data.logged_out) {
+    await logout()
+  }
+  
+  return data
 }
 
 function clearMode() {
   selectedMode.value = null
   localStorage.removeItem(_MODE_KEY)
   document.body.classList.remove('theme-live', 'theme-dry')
+}
+
+function _getCookie(name) {
+  const value = `; ${document.cookie}`
+  const parts = value.split(`; ${name}=`)
+  if (parts.length === 2) return parts.pop().split(';').shift()
+  return ''
 }
 
 export function useMode() {

@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 IPC_MARKET = "ipc:///tmp/market_stream.ipc"
 IPC_SIGNAL = "ipc:///tmp/signal_stream.ipc"
 IPC_EQUITY = "ipc:///tmp/equity_stream.ipc"
+IPC_COMMAND = "ipc:///tmp/command_stream.ipc"
 
 # Default receive timeout so subscriber threads can exit cleanly (ms)
 _RECV_TIMEOUT_MS = 1000
