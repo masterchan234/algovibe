@@ -1,5 +1,6 @@
 import eventlet
 eventlet.monkey_patch()
+import zmq.green as zmq_eventlet  # eventlet-compatible zmq (uses patched select)
 import os
 import sys
 import time
@@ -24,7 +25,7 @@ from app.infrastructure.llm_worker import LLMWorker
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
-from shared.transport import ZMQSubscriber, IPC_EQUITY
+from shared.transport import IPC_EQUITY
 from shared.algovibe_pb2 import EquityUpdate  # type: ignore[attr-defined]
 
 # Exchange instance untuk public data (OHLCV)
@@ -193,10 +194,6 @@ CURRENT_WATCH_PAIR = "btcidr"
 # Double ingress ke exchange dilarang keras di arsitektur microservice ini.
 mws = MarketDataWS()
 # NOTE: mws.start() TIDAK dipanggil — dashboard bukan ingress exchange.
-
-# ── ZMQ Equity Subscriber — forward executive-core updates to SocketIO ────────
-_equity_zmq_sub = ZMQSubscriber(IPC_EQUITY)
-_equity_zmq_sub.start()
 
 _start_time = time.time()
 
@@ -2869,21 +2866,39 @@ socketio.start_background_task(push_data_loop)
 
 # ── ZMQ Equity Bridge — forward executive-core equity updates to SocketIO ────
 def _zmq_equity_bridge():
-    """Background task: subscribe to equity_stream.ipc and emit equity_update events."""
-    for raw in _equity_zmq_sub.iter_messages():
-        try:
-            equity = EquityUpdate()
-            equity.ParseFromString(raw)
-            socketio.emit('equity_update', {
-                'net_pnl':          equity.net_pnl,
-                'realized_pnl':     equity.total_realized,
-                'unrealized_pnl':   equity.total_unrealized,
-                'velocity':         equity.velocity,
-                'peak_equity':      equity.peak_equity,
-                'timestamp':        equity.timestamp,
-            })
-        except Exception as _eq_err:
-            logging.warning(f"[ZMQ] Equity parse error: {_eq_err}")
+    """Background task: subscribe to equity_stream.ipc and emit equity_update events.
+
+    Uses zmq.green (eventlet-compatible) so recv() cooperatively yields to the
+    eventlet hub instead of blocking the main thread.
+    """
+    ctx = zmq_eventlet.Context.instance()
+    sub = ctx.socket(zmq_eventlet.SUB)
+    # Subscribe to all messages — equity stream has no topic framing
+    sub.setsockopt(zmq_eventlet.SUBSCRIBE, b"")
+    sub.connect(IPC_EQUITY)
+    logging.info(f"[ZMQ] Equity bridge connected to {IPC_EQUITY}")
+    _err_delay = 0.1  # exponential backoff starting at 100ms, capped at 30s
+    try:
+        while True:
+            try:
+                raw = sub.recv()
+                _err_delay = 0.1  # reset backoff on success
+                equity = EquityUpdate()
+                equity.ParseFromString(raw)
+                socketio.emit('equity_update', {
+                    'net_pnl':          equity.net_pnl,
+                    'realized_pnl':     equity.total_realized,
+                    'unrealized_pnl':   equity.total_unrealized,
+                    'velocity':         equity.velocity,
+                    'peak_equity':      equity.peak_equity,
+                    'timestamp':        equity.timestamp,
+                }, namespace='/')
+            except Exception as _eq_err:
+                logging.warning(f"[ZMQ] Equity bridge error: {_eq_err}")
+                eventlet.sleep(_err_delay)
+                _err_delay = min(_err_delay * 2, 30)
+    finally:
+        sub.close(linger=0)
 
 socketio.start_background_task(_zmq_equity_bridge)
 
