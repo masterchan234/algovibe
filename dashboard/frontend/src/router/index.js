@@ -54,9 +54,9 @@ const router = createRouter({
 router.beforeEach((to) => {
   const { isAuthenticated } = useAuth()
   const { hasModeSelected } = useMode()
-  const localMode = localStorage.getItem('algovibe_mode')
 
-  console.log('[Router Guard] Auth Status:', isAuthenticated.value, '| LocalMode:', localMode, '| Target Route:', to.fullPath)
+  // Temporary debug logs — remove once mode-selection flow is verified
+  console.log('[Router Guard] Auth Status:', isAuthenticated.value, '| LocalMode:', localStorage.getItem('algovibe_mode'), '| Target Route:', to.fullPath)
 
   // Unauthenticated users cannot access protected routes
   if (to.meta.requiresAuth && !isAuthenticated.value) {
