@@ -107,6 +107,9 @@ export const useTradeStore = defineStore('trade', () => {
   // Strategic Break: full-screen blocking popup when daily target is reached
   const strategicBreak = ref(null)
 
+  // Bracket Exit Confirm: popup when bot wants to exit with projected negative PnL
+  const bracketExitConfirm = ref(null)
+
   // Activity feed (logs)
   const activityFeed = ref([])
   const MAX_FEED_ITEMS = 100
@@ -353,6 +356,17 @@ export const useTradeStore = defineStore('trade', () => {
       strategicBreak.value = null
     })
 
+    // ── Bracket Exit Confirm: negative-PnL exit requiring user approval ──
+    s.on('bracket_exit_confirm', (data) => {
+      if (data && data.exit_id && (data.projected_pnl ?? 0) < 0) {
+        bracketExitConfirm.value = data
+      }
+    })
+
+    s.on('bracket_exit_confirm_cleared', () => {
+      bracketExitConfirm.value = null
+    })
+
     s.on('toast_notification', (data) => {
       notify({
         title: data.title || 'Notification',
@@ -404,6 +418,7 @@ export const useTradeStore = defineStore('trade', () => {
     positions,
     pendingAction,
     strategicBreak,
+    bracketExitConfirm,
     activityFeed,
     pnlHistory,
     radarPairs,

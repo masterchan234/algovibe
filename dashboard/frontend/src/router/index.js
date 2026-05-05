@@ -6,8 +6,17 @@ import { useMode } from '../composables/useMode'
 const PublicDashboard = () => import('../App.vue')
 const LiveDashboard   = () => import('../views/LiveDashboard.vue')
 const ModeSelector    = () => import('../views/ModeSelector.vue')
+const LoginView       = () => import('../views/LoginView.vue')
+const NotFound        = () => import('../views/NotFound.vue')
 
 const routes = [
+  {
+    // Dedicated login page — auth gate for protected routes
+    path: '/login',
+    name: 'login',
+    component: LoginView,
+    meta: { requiresAuth: false },
+  },
   {
     // Public simulation dashboard — accessible without auth
     path: '/',
@@ -43,6 +52,13 @@ const routes = [
     component: LiveDashboard,
     meta: { requiresAuth: true },
   },
+  {
+    // Catch-all 404 — must be last
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: NotFound,
+    meta: { requiresAuth: false },
+  },
 ]
 
 const router = createRouter({
@@ -55,20 +71,20 @@ router.beforeEach((to) => {
   const { isAuthenticated } = useAuth()
   const { hasModeSelected } = useMode()
 
-  // Temporary debug logs — remove once mode-selection flow is verified
-  console.log('[Router Guard] Auth Status:', isAuthenticated.value, '| LocalMode:', localStorage.getItem('algovibe_mode'), '| Target Route:', to.fullPath)
+  // Redirect already-authenticated users away from /login
+  if (to.name === 'login' && isAuthenticated.value) {
+    return { path: '/mode-select' }
+  }
 
   // Unauthenticated users cannot access protected routes
   if (to.meta.requiresAuth && !isAuthenticated.value) {
-    console.log('[Router Guard] → Redirecting unauthenticated user to /')
-    return { path: '/', query: { redirect: to.fullPath } }
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
 
   // Authenticated users on a guarded dashboard without a mode selection
   // must choose their operating mode first
   const requiresModeSelection = (to.name === 'live' || to.name === 'dry')
   if (requiresModeSelection && isAuthenticated.value && !hasModeSelected.value) {
-    console.log('[Router Guard] → No mode selected, redirecting to /mode-select')
     return { path: '/mode-select' }
   }
 })

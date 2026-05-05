@@ -41,7 +41,23 @@
           <span class="conn-dot"></span>
         </div>
         
-        <div class="header-controls">
+        <!-- When authenticated: show LOGOUT button; when not: show mode-switcher controls -->
+        <div class="header-controls" v-if="isAuthenticated">
+          <!-- ENTER LIVE DASHBOARD: only visible when in Live mode -->
+          <button
+            v-if="!store.stats.dry_run"
+            class="control-btn live-dash-btn"
+            @click="goToLiveDashboard"
+            title="Open Live Member Dashboard"
+          >
+            ⚡ LIVE DASH
+          </button>
+          <button class="control-btn logout-btn" @click="handleLogout" title="Logout and clear session">
+            🚪 LOGOUT
+          </button>
+        </div>
+
+        <div class="header-controls" v-else>
           <button 
             class="control-btn" 
             :class="{ 'is-live': !store.stats.dry_run, 'is-loading': isToggling }"
@@ -59,16 +75,6 @@
             title="Toggle Loose Gates"
           >
             🔓
-          </button>
-
-          <!-- ENTER LIVE DASHBOARD: only visible when in Live mode and authenticated -->
-          <button
-            v-if="!store.stats.dry_run && isAuthenticated"
-            class="control-btn live-dash-btn"
-            @click="goToLiveDashboard"
-            title="Open Live Member Dashboard"
-          >
-            ⚡ LIVE DASH
           </button>
         </div>
       </div>
@@ -120,6 +126,9 @@
 
     <!-- Strategic Break: full-screen popup when daily target is reached -->
     <StrategicBreakModal />
+
+    <!-- Bracket Exit Confirm: popup for negative-PnL bot exits requiring user decision -->
+    <BracketExitConfirmModal />
 
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel">
@@ -258,6 +267,7 @@ import ActivityFeed from './components/ActivityFeed.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
 import ApprovalGateModal from './components/ApprovalGateModal.vue'
 import StrategicBreakModal from './components/StrategicBreakModal.vue'
+import BracketExitConfirmModal from './components/BracketExitConfirmModal.vue'
 
 // Lazy-load ProfitChart to defer echarts bundle loading
 const ProfitChart = defineAsyncComponent(() => import('./components/ProfitChart.vue'))
@@ -266,7 +276,7 @@ const store = useTradeStore()
 const router = useRouter()
 const route = useRoute()
 const { isAuthenticated, login: authLogin, logout: authLogout, getAuthHeaders } = useAuth()
-const { isDryMode } = useMode()
+const { isDryMode, clearMode } = useMode()
 
 // Active bottom-nav tab (mobile)
 const activeTab = ref('dashboard')
@@ -444,6 +454,14 @@ async function toggleLooseGates() {
 
 function goToLiveDashboard() {
   router.push('/dashboard-live')
+}
+
+async function handleLogout() {
+  // Disconnect the SocketIO connection before clearing credentials
+  try { store.socket?.disconnect() } catch { /* ignore */ }
+  await authLogout(backendUrl)
+  clearMode()
+  router.push('/login')
 }
 
 const uptimeStr = computed(() => {
@@ -819,6 +837,24 @@ body {
 .live-dash-btn:hover {
   background: rgba(245, 166, 35, 0.2);
   border-color: #f5a623;
+}
+
+.logout-btn {
+  background: rgba(248, 81, 73, 0.1);
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.4);
+  font-weight: 700;
+  letter-spacing: 1px;
+  min-height: 32px;
+  padding: 6px 14px;
+}
+.logout-btn:hover {
+  background: rgba(248, 81, 73, 0.22);
+  border-color: #f85149;
+  box-shadow: 0 0 10px rgba(248, 81, 73, 0.25);
+}
+.logout-btn:active {
+  transform: scale(0.97);
 }
 
 @media (max-width: 768px) {

@@ -55,6 +55,7 @@
           class="basket-exit-htc"
         />
         <button class="back-btn" @click="goBack">← DRY VIEW</button>
+        <button class="logout-btn-live" @click="handleLogout" title="Logout and clear session">🚪 LOGOUT</button>
       </div>
     </header>
 
@@ -320,7 +321,13 @@
       <button class="lmn-btn" @click="goBack" aria-label="Back to Dry Run">
         <span>🔄</span><span class="lmn-label">Dry Run</span>
       </button>
+      <button class="lmn-btn lmn-logout" @click="handleLogout" aria-label="Logout">
+        <span>🚪</span><span class="lmn-label">Logout</span>
+      </button>
     </nav>
+
+    <!-- Bracket Exit Confirm: popup for negative-PnL exits requiring user decision -->
+    <BracketExitConfirmModal />
   </div>
 </template>
 
@@ -329,12 +336,15 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTradeStore } from '../stores/trade'
 import { useAuth } from '../composables/useAuth'
+import { useMode } from '../composables/useMode'
 import ProfitChart from '../components/ProfitChart.vue'
 import HoldToConfirmBtn from '../components/HoldToConfirmBtn.vue'
+import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
 
 const store = useTradeStore()
 const router = useRouter()
-const { getAuthHeaders } = useAuth()
+const { getAuthHeaders, logout: authLogout } = useAuth()
+const { clearMode } = useMode()
 
 const backendUrl = import.meta.env.DEV
   ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
@@ -462,7 +472,14 @@ async function triggerBasketExit() {
 
 // ── Navigation ──────────────────────────────────────────────────────────────
 function goBack() {
-  router.push('/')
+  router.push('/dashboard')
+}
+
+async function handleLogout() {
+  try { store.socket?.disconnect() } catch { /* ignore */ }
+  await authLogout(backendUrl)
+  clearMode()
+  router.push('/login')
 }
 
 // ── Formatters ──────────────────────────────────────────────────────────────
@@ -636,6 +653,26 @@ onUnmounted(() => {
   transition: all 0.2s;
 }
 .back-btn:hover { border-color: #f5a623; color: #f5a623; }
+
+.logout-btn-live {
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  color: #f85149;
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.5px;
+  transition: all 0.2s;
+}
+.logout-btn-live:hover {
+  background: rgba(248, 81, 73, 0.22);
+  border-color: #f85149;
+  box-shadow: 0 0 10px rgba(248, 81, 73, 0.25);
+}
+.logout-btn-live:active { transform: scale(0.97); }
 
 /* ── Offline Banner ──────────────────────────────────────────────────── */
 .offline-banner {
@@ -1006,6 +1043,8 @@ onUnmounted(() => {
 .lmn-btn.active { color: #f5a623; }
 .lmn-btn > span:first-child { font-size: 20px; line-height: 1; }
 .lmn-label { font-size: 10px; font-weight: 600; text-transform: uppercase; }
+.lmn-btn.lmn-logout { color: #f85149; }
+.lmn-btn.lmn-logout:hover { color: #ff6b6b; }
 
 /* ── Net-Zero Survival Activated Banner ─────────────────────────────── */
 .nz-survival-banner {
