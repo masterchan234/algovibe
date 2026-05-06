@@ -49,6 +49,29 @@
       </button>
     </div>
   </header>
+
+  <!-- Mobile stats strip — shown only on small screens -->
+  <div class="mobile-stats-strip show-mobile" :class="headerClass">
+    <div class="ms-item">
+      <span class="ms-label">Equity</span>
+      <span class="ms-val highlight">Rp {{ formatNumber(stats.total_equity) }}</span>
+    </div>
+    <div class="ms-divider"></div>
+    <div class="ms-item">
+      <span class="ms-label">Available</span>
+      <span class="ms-val">Rp {{ formatNumber(stats.available_idr) }}</span>
+    </div>
+    <div class="ms-divider" v-if="stats.utilization !== undefined"></div>
+    <div class="ms-item" v-if="stats.utilization !== undefined">
+      <span class="ms-label">Utilization</span>
+      <span class="ms-val" :class="stats.utilization > 80 ? 'c-bear' : 'c-bull'">{{ stats.utilization }}%</span>
+    </div>
+    <div class="ms-divider" v-if="stats.regime"></div>
+    <div class="ms-item" v-if="stats.regime">
+      <span class="ms-label">Regime</span>
+      <span class="ms-val" :class="regimeClass">{{ stats.regime }}</span>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -135,6 +158,7 @@ async function handleLogout() {
 <style scoped>
 .app-header {
   height: 64px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -329,5 +353,56 @@ async function handleLogout() {
   .hide-mobile { display: none; }
   .app-header { padding: 0 16px; }
   .logout-btn { padding: 6px 12px; font-size: 10px; }
+}
+
+/* Mobile stats strip */
+.mobile-stats-strip {
+  display: none;
+  align-items: center;
+  padding: 0 16px;
+  height: 40px;
+  background: rgba(8, 10, 18, 0.95);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  gap: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.mobile-stats-strip::-webkit-scrollbar { display: none; }
+
+.ms-item {
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+.ms-label {
+  font-size: 8px;
+  font-weight: 700;
+  color: #444;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.ms-val {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ccc;
+  white-space: nowrap;
+}
+.ms-val.highlight { color: #fff; }
+.ms-divider {
+  width: 1px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .show-mobile { display: flex !important; }
+}
+
+@media (min-width: 769px) {
+  .show-mobile { display: none !important; }
 }
 </style>

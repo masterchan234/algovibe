@@ -1,5 +1,5 @@
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'mobile-tab-activity': mobileTab === 'activity', 'mobile-tab-chart': mobileTab === 'chart' }">
     <Header :stats="store.stats" :connected="store.connected" />
     
     <NotificationCenter />
@@ -8,18 +8,30 @@
     <StrategicBreakModal />
 
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
-      <section class="left-panel">
+      <section class="left-panel" :class="{ 'mobile-hidden': mobileTab !== 'activity' }">
         <ActivityFeed />
       </section>
       
-      <div class="resizer" @mousedown="startResize" :class="{ 'is-active': isResizing }"></div>
+      <div class="resizer hide-mobile" @mousedown="startResize" :class="{ 'is-active': isResizing }"></div>
 
-      <section class="right-panel">
+      <section class="right-panel" :class="{ 'mobile-hidden': mobileTab !== 'chart' }">
         <ProfitChart />
       </section>
     </main>
 
-    <footer class="app-footer">
+    <!-- Mobile Bottom Navigation -->
+    <nav class="mobile-bottom-nav show-mobile">
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'activity' }" @click="mobileTab = 'activity'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 10h16M4 14h10"/></svg>
+        <span>Feed</span>
+      </button>
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'chart' }" @click="mobileTab = 'chart'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span>Chart</span>
+      </button>
+    </nav>
+
+    <footer class="app-footer hide-mobile">
       <div class="footer-left">
         <div class="mode-container">
           <span class="mode-badge dry-run">
@@ -90,6 +102,9 @@ import StrategicBreakModal from './components/StrategicBreakModal.vue'
 const store = useTradeStore()
 const router = useRouter()
 const { userInfo, isAuthenticated, getAuthHeaders, logout: authLogout } = useAuth()
+
+// Mobile tab state
+const mobileTab = ref('activity')
 
 const newsHeadlines = ref([])
 const startTime = ref(Date.now())
@@ -190,11 +205,13 @@ body {
   background: var(--bg-main);
   color: var(--text-main);
   font-family: 'Inter', sans-serif;
-  overflow: hidden;
+  overflow: hidden; /* Desktop: panels are fixed-height, no body scroll needed */
 }
 
 .app {
-  height: 100vh;
+  height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -205,6 +222,7 @@ body {
   overflow: hidden;
   padding: 16px;
   gap: 0;
+  min-height: 0;
 }
 
 .left-panel {
@@ -277,6 +295,7 @@ body {
 .ticker-tape {
   width: 100%;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .ticker-item {
@@ -306,10 +325,100 @@ body {
 .stat-item .v { color: #888; }
 
 @media (max-width: 768px) {
-  .hide-mobile { display: none; }
-  .main-grid { flex-direction: column; }
-  .left-panel { width: 100% !important; height: 50%; }
-  .resizer { height: 16px; width: 100%; cursor: row-resize; }
-  .resizer::after { width: 40px; height: 2px; }
+  body { overflow: hidden; }
+
+  .hide-mobile { display: none !important; }
+  .show-mobile { display: flex !important; }
+
+  .app {
+    height: 100%;
+    height: 100dvh;
+  }
+
+  .main-grid {
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  /* Only one panel visible at a time via bottom nav */
+  .left-panel {
+    width: 100% !important;
+    min-width: 0;
+    height: 100%;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+  }
+
+  .right-panel {
+    width: 100% !important;
+    height: 100%;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+  }
+
+  .mobile-hidden {
+    display: none !important;
+  }
+
+  /* Mobile Bottom Navigation */
+  .mobile-bottom-nav {
+    height: 56px;
+    height: calc(56px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    background: rgba(10, 12, 20, 0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border-dim);
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    z-index: 200;
+    flex-shrink: 0;
+  }
+
+  .mob-nav-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: #555;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    padding: 8px 0;
+    transition: color 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mob-nav-btn svg {
+    width: 20px;
+    height: 20px;
+    stroke: currentColor;
+  }
+
+  .mob-nav-btn.active {
+    color: var(--accent-purple);
+  }
+
+  .mob-nav-btn.active svg {
+    filter: drop-shadow(0 0 6px var(--accent-purple));
+  }
+}
+
+/* Desktop: hide mobile-only elements */
+@media (min-width: 769px) {
+  .show-mobile { display: none !important; }
+  .mobile-hidden { display: flex !important; }
 }
 </style>

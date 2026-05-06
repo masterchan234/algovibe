@@ -1,5 +1,5 @@
 <template>
-  <div class="live-dashboard">
+  <div class="live-dashboard" :class="`tab-${mobileTab}`">
     <Header :stats="store.stats" :connected="store.connected" />
     
     <RiskGuardPopup :socket="store.socket" />
@@ -42,14 +42,17 @@
       </div>
     </div>
 
+    <!-- Desktop + Mobile: main content area -->
     <main class="ld-main">
-      <section class="ld-panel positions-panel">
+      <!-- Positions panel -->
+      <section class="ld-panel positions-panel" :class="{ 'mob-hidden': mobileTab !== 'positions' }">
         <div class="panel-header">
           <span class="panel-title">ACTIVE LIVE POSITIONS</span>
           <span class="panel-count">{{ livePositions.length }}</span>
         </div>
 
-        <div class="positions-table-wrap" v-if="livePositions.length">
+        <!-- Desktop: table view -->
+        <div class="positions-table-wrap desktop-only" v-if="livePositions.length">
           <table class="positions-table">
             <thead>
               <tr>
@@ -73,11 +76,30 @@
             </tbody>
           </table>
         </div>
-        <div v-else class="empty-state">No active live positions</div>
+
+        <!-- Mobile: card view -->
+        <div class="positions-cards mobile-only" v-if="livePositions.length">
+          <div class="pos-card" v-for="pos in livePositions" :key="pos.pair">
+            <div class="pos-card-top">
+              <span class="pos-pair">{{ formatPair(pos.pair) }}</span>
+              <span class="pos-pnl" :class="pos.pnl_net_idr >= 0 ? 'profit' : 'loss'">
+                {{ pos.pnl_net_idr >= 0 ? '+' : '' }}Rp {{ formatNumber(pos.pnl_net_idr) }}
+              </span>
+            </div>
+            <div class="pos-card-row">
+              <div class="pos-stat"><span class="ps-label">Entry</span><span class="ps-val">{{ formatPrice(pos.entry_price) }}</span></div>
+              <div class="pos-stat"><span class="ps-label">Mark</span><span class="ps-val">{{ formatPrice(pos.last_price) }}</span></div>
+              <div class="pos-stat"><span class="ps-label">Size</span><span class="ps-val">Rp {{ formatNumber(pos.amount_idr) }}</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="!livePositions.length" class="empty-state">No active live positions</div>
       </section>
 
-      <section class="ld-panel right-panel">
-        <div class="chart-wrap">
+      <!-- Right panel: chart + orders -->
+      <section class="ld-panel right-panel" :class="{ 'mob-hidden': mobileTab === 'positions' }">
+        <div class="chart-wrap" :class="{ 'mob-hidden': mobileTab === 'orders' }">
           <div class="panel-header">
             <span class="panel-title">LIVE EQUITY FLOW</span>
             <span class="data-source-badge" :class="dataSourceClass">{{ dataSourceLabel }}</span>
@@ -85,12 +107,12 @@
           <ProfitChart />
         </div>
 
-        <div class="orders-wrap">
+        <div class="orders-wrap" :class="{ 'mob-hidden': mobileTab === 'chart' }">
           <div class="panel-header">
             <span class="panel-title">LIVE ORDER BOOK</span>
             <button class="refresh-btn" @click="fetchOrders">↻</button>
           </div>
-          <div class="orders-table-wrap" v-if="orders.length">
+          <div class="orders-table-wrap desktop-only" v-if="orders.length">
             <table class="orders-table">
               <thead>
                 <tr>
@@ -110,10 +132,36 @@
               </tbody>
             </table>
           </div>
-          <div v-else class="empty-state">No recent orders</div>
+          <!-- Mobile: order cards -->
+          <div class="order-cards mobile-only" v-if="orders.length">
+            <div class="order-card" v-for="ord in orders" :key="ord.order_id || ord.created_at">
+              <span class="oc-pair">{{ formatPair(ord.pair) }}</span>
+              <span class="oc-side" :class="ord.side === 'buy' ? 'profit' : 'loss'">{{ ord.side.toUpperCase() }}</span>
+              <span class="oc-price">{{ formatPrice(ord.price) }}</span>
+              <span class="status-chip">{{ ord.status }}</span>
+            </div>
+          </div>
+          <div v-if="!orders.length" class="empty-state">No recent orders</div>
         </div>
       </section>
     </main>
+
+    <!-- Mobile Bottom Navigation -->
+    <nav class="mob-bottom-nav">
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'positions' }" @click="mobileTab = 'positions'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="9" x2="9" y2="21"/></svg>
+        <span>Posisi</span>
+        <span v-if="livePositions.length" class="mob-badge">{{ livePositions.length }}</span>
+      </button>
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'chart' }" @click="mobileTab = 'chart'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span>Chart</span>
+      </button>
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'orders' }" @click="mobileTab = 'orders'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1" ry="1"/></svg>
+        <span>Orders</span>
+      </button>
+    </nav>
 
     <footer class="ld-footer">
       <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
@@ -123,7 +171,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, onActivated } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTradeStore } from '../stores/trade'
 import { useAuth } from '../composables/useAuth'
@@ -135,6 +183,9 @@ import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
 const store = useTradeStore()
 const router = useRouter()
 const { getAuthHeaders } = useAuth()
+
+// Mobile tab: positions | chart | orders
+const mobileTab = ref('positions')
 
 const backendUrl = import.meta.env.DEV
   ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
@@ -231,6 +282,7 @@ watch(() => store.forceLogout, (triggered) => {
 <style scoped>
 .live-dashboard {
   min-height: 100vh;
+  min-height: 100dvh;
   background: #060810;
   display: flex;
   flex-direction: column;
@@ -264,6 +316,7 @@ watch(() => store.forceLogout, (triggered) => {
   gap: 16px;
   padding: 16px;
   overflow: hidden;
+  min-height: 0;
 }
 
 .ld-panel {
@@ -416,7 +469,190 @@ td {
 
 .gold { color: #f5a623; }
 
+/* ─── Responsive ──────────────────────────────────── */
 @media (max-width: 1024px) {
-  .ld-main { grid-template-columns: 1fr; }
+  .ld-main { grid-template-columns: 1fr; overflow-y: auto; }
+}
+
+/* ─── Mobile card styles (hidden on desktop) ──────── */
+.positions-cards { padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+.pos-card {
+  background: #0d0f1a;
+  border: 1px solid #1a1c28;
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+.pos-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.pos-pair { font-size: 16px; font-weight: 800; color: #fff; letter-spacing: 1px; }
+.pos-pnl { font-size: 16px; font-weight: 800; }
+.pos-card-row { display: flex; gap: 12px; }
+.pos-stat { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.ps-label { font-size: 9px; font-weight: 700; color: #444; letter-spacing: 1px; text-transform: uppercase; }
+.ps-val { font-size: 12px; font-weight: 700; color: #ccc; }
+
+.order-cards { padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+.order-card {
+  background: #0d0f1a;
+  border: 1px solid #1a1c28;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.oc-pair { font-size: 13px; font-weight: 800; color: #fff; flex: 1; }
+.oc-side { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; }
+.oc-price { font-size: 12px; color: #888; }
+
+/* ─── Mobile Bottom Nav ───────────────────────────── */
+.mob-bottom-nav {
+  display: none; /* shown via media query */
+  height: 58px;
+  background: rgba(10, 12, 20, 0.97);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid #1a1c24;
+  flex-shrink: 0;
+  padding-bottom: env(safe-area-inset-bottom);
+  height: calc(58px + env(safe-area-inset-bottom));
+}
+.mob-nav-btn {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  color: #555;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 8px 0;
+  transition: color 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.mob-nav-btn svg { width: 20px; height: 20px; }
+.mob-nav-btn.active { color: #f5a623; }
+.mob-nav-btn.active svg { filter: drop-shadow(0 0 5px rgba(245, 166, 35, 0.7)); }
+.mob-badge {
+  position: absolute;
+  top: 6px;
+  right: calc(50% - 18px);
+  background: #ff3366;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+@media (max-width: 768px) {
+  .live-dashboard {
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .ld-main {
+    grid-template-columns: 1fr;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+    flex: 1;
+  }
+
+  .ld-panel {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+  }
+
+  /* Tab-based panel visibility */
+  .mob-hidden { display: none !important; }
+  .desktop-only { display: none !important; }
+  .mobile-only { display: flex !important; flex-direction: column; }
+
+  /* Full-height panel on mobile */
+  .positions-panel {
+    height: 100%;
+    overflow: hidden;
+  }
+  .positions-cards {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .right-panel {
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chart-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* On mobile 'chart' tab: show chart fullscreen */
+  .tab-chart .right-panel { display: flex !important; }
+  .tab-chart .orders-wrap { display: none !important; }
+  .tab-chart .chart-wrap { flex: 1; }
+
+  /* On mobile 'orders' tab: show orders full */
+  .tab-orders .right-panel { display: flex !important; }
+  .tab-orders .chart-wrap { display: none !important; }
+  .tab-orders .orders-wrap {
+    flex: 1;
+    display: flex !important;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .order-cards {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Footer hidden on mobile (replaced by bottom nav) */
+  .ld-footer { display: none; }
+
+  /* Show mobile bottom nav */
+  .mob-bottom-nav {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-around;
+  }
+
+  /* Safety gauge compact on mobile */
+  .safety-gauge-wrap { padding: 10px 16px; }
+  .gauge-title { font-size: 9px; }
+  .gauge-net { font-size: 11px; }
+}
+
+/* Desktop: hide mobile-only elements */
+@media (min-width: 769px) {
+  .desktop-only { display: block !important; }
+  .mobile-only { display: none !important; }
+  .mob-bottom-nav { display: none !important; }
+  .mob-hidden { display: flex !important; }
 }
 </style>
