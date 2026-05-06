@@ -4,6 +4,9 @@
     
     <RiskGuardPopup :socket="store.socket" />
 
+    <!-- Bracket Exit Confirm: shown when bot wants to exit at projected loss -->
+    <BracketExitConfirmModal />
+
     <div v-if="liveState.bot_offline" class="offline-banner">
       ⚠️ Bot engine appears offline or unreachable. Displaying last known state.
     </div>
@@ -120,15 +123,14 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useTradeStore } from '../stores/trade'
 import { useAuth } from '../composables/useAuth'
 import Header from '../components/Header.vue'
 import ProfitChart from '../components/ProfitChart.vue'
 import RiskGuardPopup from '../components/RiskGuardPopup.vue'
+import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
 
 const store = useTradeStore()
-const router = useRouter()
 const { getAuthHeaders } = useAuth()
 
 const backendUrl = import.meta.env.DEV

@@ -2648,6 +2648,7 @@ def push_data_loop():
     _slow_counter = 0
     _last_pending_action_id = None  # Track last forwarded action_id to avoid spam
     _last_strategic_break_ts = None  # Track last emitted strategic_break triggered_at to emit only once
+    _last_bracket_exit_id = None  # Track last forwarded bracket_exit_confirm exit_id to avoid spam
     while True:
         try:
             # Fast: data realtime sub-detik
@@ -2707,6 +2708,24 @@ def push_data_loop():
             except Exception as _sbe:
                 logging.warning(f"[StrategicBreak] Error forwarding payload: {_sbe}")
 
+            # ── Bracket Exit Confirm: forward negative-PnL exit popup to frontend ──
+            try:
+                raw_bec = db.get_state("bracket_exit_confirm")
+                if raw_bec:
+                    bec = json.loads(raw_bec)
+                    if (
+                        bec.get("status") == "PENDING"
+                        and bec.get("exit_id") != _last_bracket_exit_id
+                    ):
+                        _last_bracket_exit_id = bec.get("exit_id")
+                        socketio.emit('bracket_exit_confirm', bec, room='authenticated')
+                elif _last_bracket_exit_id is not None:
+                    # Resolved — tell frontend to dismiss
+                    socketio.emit('bracket_exit_confirm_cleared', {}, room='authenticated')
+                    _last_bracket_exit_id = None
+            except Exception as _bece:
+                logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
@@ -2744,6 +2763,34 @@ def handle_approval_response(data):
         logging.info(f"[ApprovalGate] {decision} received for action {action_id} ({pending.get('action_type', '')})")
     except Exception as e:
         logging.error(f"[ApprovalGate] Error processing approval_response: {e}")
+
+
+@socketio.on('bracket_exit_response')
+def handle_bracket_exit_response(data):
+    """Receive user CONFIRM / ABORT decision for a negative-PnL bracket exit."""
+    exit_id  = data.get('exit_id', '')
+    decision = data.get('decision', '')  # 'CONFIRM' or 'ABORT'
+
+    if not exit_id or decision not in ('CONFIRM', 'ABORT'):
+        logging.warning(f"[BracketExit] Invalid bracket_exit_response payload: {data}")
+        return
+
+    try:
+        raw = db.get_state("bracket_exit_confirm")
+        if not raw:
+            logging.debug(f"[BracketExit] No pending confirmation found for exit_id={exit_id}")
+            return
+        pending = json.loads(raw)
+        if pending.get("exit_id") != exit_id:
+            logging.warning(f"[BracketExit] exit_id mismatch: got {exit_id}, expected {pending.get('exit_id')}")
+            return
+        if pending.get("status") != "PENDING":
+            return  # Already resolved
+        pending["status"] = decision
+        db.save_state("bracket_exit_confirm", json.dumps(pending))
+        logging.info(f"[BracketExit] {decision} received for exit {exit_id}")
+    except Exception as e:
+        logging.error(f"[BracketExit] Error processing bracket_exit_response: {e}")
 
 
 @app.route('/api/session/status', methods=['GET'])
