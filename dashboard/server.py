@@ -765,7 +765,8 @@ def refresh_token():
     user = db.get_user(payload.get("username", ""))
     if not user:
         return jsonify({"error": "User not found"}), 404
-    new_token = _issue_token(user)
+    # Preserve the existing session_id so the DB session remains valid
+    new_token = _issue_token(user, session_id=payload.get("session_id"))
     return jsonify({"success": True, "token": new_token})
 
 @app.route('/api/view-token')

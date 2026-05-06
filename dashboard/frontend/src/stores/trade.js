@@ -34,6 +34,7 @@ function _makeThrottle(intervalMs) {
 
 export const useTradeStore = defineStore('trade', () => {
   const { notify } = useNotifications()
+  const { token: authToken, logout: authLogout } = useAuth()
 
   // Connection state
   const connected = ref(false)
@@ -204,8 +205,6 @@ export const useTradeStore = defineStore('trade', () => {
       ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
       : window.location.origin
 
-    const { token: authToken } = useAuth()
-
     const s = io(backendUrl, {
       path: '/socket.io',
       // Send JWT in auth so the server can validate the session on connect
@@ -230,8 +229,7 @@ export const useTradeStore = defineStore('trade', () => {
         type: 'error',
         duration: 8000,
       })
-      const { logout } = useAuth()
-      logout()
+      authLogout()
       connected.value = false
       forceLogout.value = true
     })
