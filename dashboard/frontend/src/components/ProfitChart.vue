@@ -1534,6 +1534,11 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1000px) {
+  .chart-panel {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .kpi-bar {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -1576,6 +1581,15 @@ onUnmounted(() => {
 }
 
 @media (max-width: 480px) {
+  .chart-wrap-integrated {
+    height: 170px;
+    min-height: 170px;
+  }
+
+  .radar-scroll-wrap {
+    max-height: 220px;
+  }
+
   .radar-list { grid-template-columns: repeat(2, 1fr); }
   .heatmap-tile { flex: 0 0 calc(25% - 3px); } /* 4 columns for very small */
 }

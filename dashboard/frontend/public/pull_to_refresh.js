@@ -2,9 +2,11 @@
 (function() {
     let startY = 0;
     let startX = 0;
+    let startContainer = null;
     let isPulling = false;
     let isScrollingContent = false;
     const threshold = 120;
+    const triggerZoneTop = 90;
     let refreshIndicator = null;
     let hasVibrated = false;
 
@@ -58,15 +60,19 @@
         document.body.prepend(refreshIndicator);
     }
 
-    function getPageScrollTop() {
-        // Cek main scrollable container dulu, fallback ke window
-        const container = document.querySelector('.center-area') || 
-                          document.querySelector('main') || 
-                          null;
-        if (container && container.scrollHeight > container.clientHeight) {
-            return container.scrollTop;
+    function getScrollParent(node) {
+        let el = node;
+        while (el && el !== document.body && el !== document.documentElement) {
+            if (el instanceof HTMLElement) {
+                const style = window.getComputedStyle(el);
+                const canScrollY = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                if (canScrollY && el.scrollHeight > el.clientHeight + 1) {
+                    return el;
+                }
+            }
+            el = el.parentElement;
         }
-        return window.scrollY || document.documentElement.scrollTop;
+        return null;
     }
 
     function resetPTR() {
@@ -77,18 +83,33 @@
         }
         startY = 0;
         startX = 0;
+        startContainer = null;
         isPulling = false;
         isScrollingContent = false;
         hasVibrated = false;
     }
 
     document.addEventListener('touchstart', (e) => {
+        if (!e.touches || e.touches.length !== 1) return;
+
         // Reset semua state
         isPulling = false;
         isScrollingContent = false;
         hasVibrated = false;
         startY = e.touches[0].pageY;
         startX = e.touches[0].pageX;
+
+        // Jika touch dimulai dari area yang bisa di-scroll, prioritaskan scroll konten.
+        startContainer = getScrollParent(e.target);
+        if (startContainer && startContainer.scrollTop > 0) {
+            isScrollingContent = true;
+            return;
+        }
+
+        // PTR hanya boleh dimulai dekat area paling atas viewport.
+        if (startY > triggerZoneTop) {
+            isScrollingContent = true;
+        }
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
@@ -109,13 +130,8 @@
 
         if (isScrollingContent) return;
 
-        // PTR hanya aktif jika:
-        // 1. Halaman benar-benar di posisi teratas (scrollTop <= 0)
-        // 2. Gerakan ke bawah (deltaY > 0)
-        const scrollTop = getPageScrollTop();
-
-        if (scrollTop > 2) {
-            // User sedang scroll konten, bukan PTR
+        // Jika gesture berasal dari container scrollable, jangan trigger PTR.
+        if (startContainer) {
             isScrollingContent = true;
             return;
         }

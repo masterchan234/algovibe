@@ -2668,6 +2668,9 @@ def _build_logs_payload():
             ORDER BY updated_at DESC
         """).fetchall()
 
+        # 4. Fetch latest market trades from websocket cache (watch pair)
+        market_trades = _build_market_trades_payload()
+
         results = []
         
         # Add System Events first (highest priority)
@@ -2707,6 +2710,29 @@ def _build_logs_payload():
                 "price": val.split('|')[1] if '|' in val else val,
                 "status": "DETECTED",
                 "level": "ALERT" if "whale" in o['key'] else ("WARN" if "pump" in o['key'] else "INFO")
+            })
+
+        for t in market_trades[:20]:
+            side_raw = str(t.get('side', '')).upper()
+            side = side_raw if side_raw in ('BUY', 'SELL') else 'MARKET'
+            pair = str(t.get('pair', CURRENT_WATCH_PAIR)).upper()
+            price = float(t.get('price', 0) or 0)
+            amount = float(t.get('amount', 0) or 0)
+            raw_ts = float(t.get('time', 0) or 0)
+            # Support both epoch-seconds and epoch-milliseconds from trade cache.
+            ts_ms = int(raw_ts * 1000) if raw_ts > 0 and raw_ts < 1_000_000_000_000 else int(raw_ts)
+            if ts_ms <= 0:
+                ts_ms = int(time.time() * 1000)
+            created_at = datetime.datetime.fromtimestamp(ts_ms / 1000.0).isoformat()
+            results.append({
+                "created_at": created_at,
+                "pair": pair,
+                "side": side,
+                "price": f"Market {side} | {amount:.6f} @ Rp {int(price):,}".replace(',', '.'),
+                "status": "LIVE",
+                "level": "INFO",
+                "source": "MARKET_WS",
+                "trade_id": t.get('id')
             })
 
         # Sort combined results by created_at descending

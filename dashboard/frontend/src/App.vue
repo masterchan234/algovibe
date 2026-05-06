@@ -228,6 +228,7 @@ body {
 .left-panel {
   width: var(--left-width);
   min-width: 300px;
+  min-height: 0;
   background: var(--bg-panel);
   border-radius: 16px;
   border: 1px solid var(--border-dim);
@@ -260,6 +261,7 @@ body {
 
 .right-panel {
   flex: 1;
+  min-height: 0;
   background: var(--bg-panel);
   border-radius: 16px;
   border: 1px solid var(--border-dim);
@@ -274,9 +276,26 @@ body {
   align-items: center;
   padding: 0 24px;
   gap: 24px;
+  flex-shrink: 0;
 }
 
-.footer-left { width: 220px; }
+.footer-left {
+  flex: 0 0 240px;
+  min-width: 200px;
+}
+.footer-right {
+  flex: 0 0 240px;
+  min-width: 180px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.mode-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .mode-badge {
   font-size: 10px;
   font-weight: 800;
@@ -285,10 +304,77 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
+}
+
+.info-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(163, 113, 247, 0.4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.mode-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  width: 320px;
+  background: #11141d;
+  border: 1px solid #252938;
+  border-radius: 12px;
+  padding: 10px 12px;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+
+.mode-container:hover .mode-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tooltip-header {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #f5a623;
+  margin-bottom: 8px;
+}
+
+.tooltip-body {
+  display: grid;
+  gap: 6px;
+}
+
+.tooltip-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #c9d1d9;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.t-bullet {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.t-text strong {
+  color: #fff;
 }
 
 .footer-center {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -298,12 +384,23 @@ body {
   overflow: hidden;
 }
 
+.ticker-content {
+  display: inline-block;
+  white-space: nowrap;
+  min-width: 100%;
+}
+
 .ticker-item {
   display: inline-block;
   margin-right: 40px;
   font-size: 12px;
   font-family: 'JetBrains Mono', monospace;
 }
+
+.t-source { color: #8b949e; margin-right: 6px; }
+.t-title { color: #d2d7de; }
+.t-sep { color: #6e7681; margin-left: 10px; }
+
 
 .t-pair { color: #888; margin-right: 8px; }
 .t-price { color: #fff; font-weight: 700; }
@@ -313,6 +410,7 @@ body {
 .system-stats {
   display: flex;
   gap: 20px;
+  white-space: nowrap;
 }
 
 .stat-item {
@@ -323,6 +421,52 @@ body {
 }
 
 .stat-item .v { color: #888; }
+
+@media (max-width: 1300px) {
+  .app-footer {
+    gap: 14px;
+    padding: 0 14px;
+  }
+
+  .footer-left {
+    flex-basis: 190px;
+    min-width: 160px;
+  }
+
+  .footer-right {
+    flex-basis: 180px;
+    min-width: 150px;
+  }
+
+  .mode-badge {
+    font-size: 9px;
+    letter-spacing: 0.7px;
+  }
+
+  .system-stats {
+    gap: 12px;
+  }
+
+  .stat-item {
+    font-size: 9px;
+    letter-spacing: 0.7px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .footer-left {
+    display: none;
+  }
+
+  .footer-center {
+    flex: 1;
+  }
+
+  .footer-right {
+    flex-basis: auto;
+    min-width: 150px;
+  }
+}
 
 @media (max-width: 768px) {
   body { overflow: hidden; }
@@ -337,8 +481,10 @@ body {
 
   .main-grid {
     flex-direction: column;
-    padding: 0;
+    padding: 8px;
     overflow: hidden;
+    gap: 8px;
+    min-height: 0;
   }
 
   /* Only one panel visible at a time via bottom nav */
@@ -349,7 +495,8 @@ body {
     border-radius: 0;
     border-left: none;
     border-right: none;
-    border-top: none;
+    border-top: 1px solid var(--border-dim);
+    border-radius: 12px;
   }
 
   .right-panel {
@@ -358,7 +505,8 @@ body {
     border-radius: 0;
     border-left: none;
     border-right: none;
-    border-top: none;
+    border-top: 1px solid var(--border-dim);
+    border-radius: 12px;
   }
 
   .mobile-hidden {
@@ -414,6 +562,10 @@ body {
   .mob-nav-btn.active svg {
     filter: drop-shadow(0 0 6px var(--accent-purple));
   }
+
+  .mode-tooltip {
+    display: none;
+  }
 }
 
 /* Desktop: hide mobile-only elements */
@@ -421,4 +573,5 @@ body {
   .show-mobile { display: none !important; }
   .mobile-hidden { display: flex !important; }
 }
+
 </style>

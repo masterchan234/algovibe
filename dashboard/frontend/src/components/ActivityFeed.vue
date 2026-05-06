@@ -325,12 +325,14 @@ watch(openPairSet, (pairs) => {
 
 const filteredStream = computed(() => {
   const items = store.activityFeed
-  // Stream di kanan sekarang independen (tampil semua)
-  if (activeStreamTab.value === 'market') {
-    return items.filter(item => item.status === 'LIVE')
-  } else {
-    return items.filter(item => item.status !== 'LIVE')
-  }
+  const marketItems = items.filter((item) => {
+    const src = String(item?.source || '').toUpperCase()
+    const side = String(item?.side || '').toUpperCase()
+    return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
+  })
+
+  if (activeStreamTab.value === 'market') return marketItems
+  return items.filter((item) => String(item?.source || '').toUpperCase() !== 'MARKET_WS')
 })
 
 function itemClass(item) {

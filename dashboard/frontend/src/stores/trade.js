@@ -322,35 +322,6 @@ export const useTradeStore = defineStore('trade', () => {
       }
     })
 
-    s.on('market_trades_update', (payload) => {
-      const pair = (payload?.pair || 'MARKET').toUpperCase()
-      const trades = Array.isArray(payload?.trades) ? payload.trades : []
-      if (!trades.length) return
-
-      // Ambil subset terbaru supaya feed tetap ringan.
-      const latest = trades.slice(0, 20)
-      const mapped = latest.map((t, idx) => {
-        const sideRaw = String(t?.side || '').toUpperCase()
-        const side = sideRaw === 'BUY' ? 'BUY' : (sideRaw === 'SELL' ? 'SELL' : 'MARKET')
-        const price = Number(t?.price || 0)
-        const amount = Number(t?.amount || 0)
-        const ts = Number(t?.time || Date.now())
-        const createdAt = new Date(ts).toISOString()
-
-        return {
-          id: `mkt_${pair}_${t?.id || idx}_${ts}`,
-          created_at: createdAt,
-          pair,
-          side,
-          message: `Market ${side} | ${amount.toFixed(6)} @ Rp ${price.toLocaleString('id-ID')}`,
-          level: 'INFO',
-          status: 'LIVE',
-        }
-      })
-
-      _addFeedItems(mapped)
-    })
-
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
         radarPairs.value = data

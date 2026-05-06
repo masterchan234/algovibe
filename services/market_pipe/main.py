@@ -52,7 +52,7 @@ def main() -> None:
 
     provider = IndodaxProvider(
         on_tick=publisher.send,
-        on_trade=publisher.send
+        on_trade=publisher.send,
     )
     provider.start()
 

@@ -326,6 +326,7 @@ watch(() => store.forceLogout, (triggered) => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .panel-header {
@@ -386,6 +387,7 @@ td {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .orders-wrap { border-top: 1px solid #1a1c24; }
@@ -574,6 +576,7 @@ td {
     gap: 0;
     overflow: hidden;
     flex: 1;
+    min-height: 0;
   }
 
   .ld-panel {
