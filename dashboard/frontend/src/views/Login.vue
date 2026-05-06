@@ -55,10 +55,11 @@
 
 <script setup>
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 
 const router = useRouter()
+const route = useRoute()
 const { login } = useAuth()
 
 const username = ref('')
@@ -70,6 +71,14 @@ const backendUrl = import.meta.env.DEV
   ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
   : window.location.origin
 
+function getSafeRedirectPath(value) {
+  if (!value || typeof value !== 'string') return null
+  if (!value.startsWith('/')) return null
+  if (value.startsWith('//')) return null
+  if (value.startsWith('/login')) return null
+  return value
+}
+
 async function handleLogin() {
   if (!username.value || !password.value) return
   
@@ -78,8 +87,8 @@ async function handleLogin() {
   
   try {
     await login(username.value, password.value, backendUrl)
-    // After login, redirect to mode selector
-    router.push('/mode-select')
+    const redirectPath = getSafeRedirectPath(route.query.redirect)
+    router.replace(redirectPath || '/mode-select')
   } catch (err) {
     error.value = err.message || 'Authentication failed'
   } finally {

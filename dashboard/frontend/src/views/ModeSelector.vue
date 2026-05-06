@@ -100,24 +100,39 @@
 
 <script setup>
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
 
 const router = useRouter()
+const route = useRoute()
 const { userInfo, logout } = useAuth()
 const { selectMode } = useMode()
 
 const hoveredMode = ref('')
 
+function getSafeRedirectPath(value) {
+  if (!value || typeof value !== 'string') return null
+  if (!value.startsWith('/')) return null
+  if (value.startsWith('//')) return null
+  if (value.startsWith('/login')) return null
+  return value
+}
+
 async function enter(mode) {
   try {
     await selectMode(mode, backendUrl)
-    if (mode === 'live') {
-      router.push('/dashboard-live')
-    } else {
-      router.push('/dashboard-dry')
+    const redirectPath = getSafeRedirectPath(route.query.redirect)
+    const redirectMatchesMode =
+      (mode === 'live' && redirectPath?.startsWith('/dashboard-live')) ||
+      (mode === 'dry' && redirectPath?.startsWith('/dashboard-dry'))
+
+    if (redirectMatchesMode) {
+      router.push(redirectPath)
+      return
     }
+
+    router.push(mode === 'live' ? '/dashboard-live' : '/dashboard-dry')
   } catch (err) {
     console.error('Failed to enter mode:', err)
     alert(err.message || 'Gagal masuk ke mode ini. Pastikan Anda sudah login.')

@@ -10,7 +10,9 @@ function _parseToken(t) {
   try {
     const parts = t.split('.')
     if (parts.length !== 3) return null
-    const payload = JSON.parse(atob(parts[1]))
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padding = '='.repeat((4 - (base64.length % 4)) % 4)
+    const payload = JSON.parse(atob(base64 + padding))
     // Check expiry
     if (payload.exp && Date.now() / 1000 > payload.exp) {
       return null

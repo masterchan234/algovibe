@@ -1543,7 +1543,6 @@ def trade_manual_exit():
 def select_mode():
     """
     Explicitly select operational mode (LIVE vs DRY).
-    If DRY is selected, the current LIVE session is terminated (logged out).
     """
     import config as cfg
     data = request.get_json()
@@ -1563,11 +1562,6 @@ def select_mode():
     broadcast_command("MODE_CHANGE", {"dry_run": target_dry_run})
     
     logged_out = False
-    if target_dry_run:
-        # If moving to DRY, we clear the session for security as requested
-        session.clear()
-        logged_out = True
-        logging.info("🛡️ User selected DRY mode. Session cleared (auto-logout).")
 
     # Push stats_update langsung agar frontend tidak tunggu 5s push loop
     try:

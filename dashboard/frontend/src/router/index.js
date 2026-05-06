@@ -53,6 +53,14 @@ const router = createRouter({
   routes,
 })
 
+function getSafeRedirectPath(value) {
+  if (!value || typeof value !== 'string') return null
+  if (!value.startsWith('/')) return null
+  if (value.startsWith('//')) return null
+  if (value.startsWith('/login')) return null
+  return value
+}
+
 // Route guard
 router.beforeEach(async (to) => {
   const { isAuthenticated, token, userInfo } = useAuth()
@@ -83,18 +91,22 @@ router.beforeEach(async (to) => {
 
   // 2. Prevent authenticated users from going back to login
   if (to.name === 'login' && isAuthenticated.value) {
+    const redirectPath = getSafeRedirectPath(to.query?.redirect)
+    if (redirectPath) {
+      return redirectPath
+    }
     return { name: 'mode-select' }
   }
 
   // 3. Force mode selection if accessing dashboard without a mode
   const isDashboardRoute = (to.name === 'live' || to.name === 'dry')
   if (isDashboardRoute && isAuthenticated.value && !hasModeSelected.value) {
-    return { name: 'mode-select' }
+    return { name: 'mode-select', query: { redirect: to.fullPath } }
   }
 
   // 4. Ensure mode matches the route (e.g. can't go to /dashboard-live while in dry mode)
   if (to.meta.requiresMode && to.meta.requiresMode !== selectedMode.value) {
-    return { name: selectedMode.value === 'live' ? 'live' : 'dry' }
+    return { name: 'mode-select', query: { redirect: to.fullPath } }
   }
 })
 
