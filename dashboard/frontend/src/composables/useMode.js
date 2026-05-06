@@ -43,13 +43,13 @@ async function selectMode(mode, backendUrl = '') {
       'X-CSRFToken': _getCookie('csrf_token'),
       ...getAuthHeaders()
     },
-    body: JSON.stringify({ mode: mode === 'dry' ? 'dryrun' : 'live' }),
+    body: JSON.stringify({ mode: mode === 'dry' ? 'DRY' : 'LIVE' }),
     credentials: 'include'
   })
   
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.error || 'Failed to select mode')
+    throw new Error(err.message || err.error || 'Failed to select mode')
   }
   
   const data = await res.json()

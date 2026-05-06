@@ -199,7 +199,8 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Subscribe to equity stream for live gauges
-      - ./dashboard:/app/dashboard
+      - ./dashboard/server.py:/app/dashboard/server.py
+      - ./dashboard/static/dist:/app/dashboard/static/dist
       - ./services:/app/services
       - ./app:/app/app
       - ./shared:/app/shared
@@ -207,7 +208,7 @@ services:
       - ./config.py:/app/config.py
     command: ["python", "-m", "dashboard.server"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/bot-status"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/login"]
       interval: 30s
       timeout: 10s
       retries: 3

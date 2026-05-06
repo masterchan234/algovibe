@@ -45,7 +45,7 @@ def broadcast_command(action, payload=None):
 # Exchange instance untuk public data (OHLCV)
 exchange = ccxt.indodax()
 
-app = Flask(__name__, static_folder='static/dist', static_url_path='')
+app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 
 # ── Pentest Fix: Secure Session Configuration ──
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
@@ -691,8 +691,14 @@ def mobile_dashboard():
     return render_template('mobile.html', view_token=token)
 
 @app.route('/')
+@app.route('/login')
+@app.route('/mode-select')
+@app.route('/dashboard-live')
+@app.route('/dashboard-dry')
 def index():
-    return send_from_directory(app.static_folder, 'index.html')
+    response = make_response(send_from_directory(app.static_folder, 'index.html'))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
 
 @app.route("/favicon.ico")
 def favicon():
@@ -2004,12 +2010,14 @@ def api_news():
 
 @app.route('/<path:path>')
 def static_proxy(path):
-    dist_dir = os.path.join(app.static_folder, 'dist')
+    dist_dir = app.static_folder
     full = os.path.join(dist_dir, path)
     if os.path.exists(full):
         return send_from_directory(dist_dir, path)
     # Fallback: serve Vue SPA index.html for client-side routing
-    return send_from_directory(dist_dir, 'index.html')
+    response = make_response(send_from_directory(dist_dir, 'index.html'))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
 
 @socketio.on('watch_pair')
 def handle_watch_pair(data):

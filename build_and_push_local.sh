@@ -11,6 +11,9 @@ echo "Target Registry: $REGISTRY_IP"
 echo "Image Name:      $IMAGE_NAME"
 echo "========================================="
 
+echo "🔄 Step 0: Pulling latest source from git..."
+git pull
+
 # Enable BuildKit
 export DOCKER_BUILDKIT=1
 
@@ -25,23 +28,30 @@ if [ -z "$REGISTRY_PASS" ]; then
     fi
 fi
 
-echo "🔐 Logging in to registry..."
+echo "🔐 Step 1: Logging in to registry..."
 echo "$REGISTRY_PASS" | docker login "$REGISTRY_IP:5000" -u "$REGISTRY_USER" --password-stdin
 
-echo "📦 Step 1: Building Docker Image..."
+echo "📦 Step 2: Building Docker image (no cache)..."
 docker build \
+  --no-cache \
   --progress=plain \
   -t $IMAGE_NAME .
 
 echo ""
-echo "📤 Step 2: Pushing Image to Registry (Local Path)..."
+echo "📤 Step 3: Pushing image to local registry..."
 # Proses ini sekarang akan sangat cepat (disk-to-disk)
 docker push $IMAGE_NAME
 
 echo ""
-echo "✅ DONE! Deployment package ready."
+echo "🚀 Step 4: Starting containers with Docker Compose..."
+docker compose up -d
+
+echo ""
+echo "✅ DONE! Build, push, and compose startup completed."
 echo "========================================="
-echo "To deploy on this server:"
-echo "1. Pull the new image: docker pull $IMAGE_NAME"
-echo "2. Restart container:  docker-compose up -d"
+echo "Summary:"
+echo "- Source updated from git"
+echo "- Fresh image built without cache"
+echo "- Image pushed to $IMAGE_NAME"
+echo "- Containers started via docker compose"
 echo "========================================="

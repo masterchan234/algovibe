@@ -66,7 +66,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 
 const props = defineProps({
-  socket: { type: Object, required: true }
+  socket: { type: Object, default: null }
 })
 
 const pendingAction = ref(null)
@@ -121,6 +121,7 @@ function startTimer() {
 
 function respond(decision) {
   if (!pendingAction.value || isResponding.value) return
+  if (!props.socket || typeof props.socket.emit !== 'function') return
   
   isResponding.value = true
   console.log(`🛡️ Risk Guard: Sending response ${decision} for ${pendingAction.value.action_id}`)
@@ -136,16 +137,33 @@ function respond(decision) {
   }, 500)
 }
 
+function attachSocketListeners(socket) {
+  if (!socket || typeof socket.on !== 'function') return
+  socket.on('BRACKET_EXIT_CONFIRM', handlePendingAction)
+  socket.on('pending_action', handlePendingAction)
+  socket.on('pending_action_cleared', clearAction)
+}
+
+function detachSocketListeners(socket) {
+  if (!socket || typeof socket.off !== 'function') return
+  socket.off('BRACKET_EXIT_CONFIRM', handlePendingAction)
+  socket.off('pending_action', handlePendingAction)
+  socket.off('pending_action_cleared', clearAction)
+}
+
 onMounted(() => {
-  props.socket.on('BRACKET_EXIT_CONFIRM', handlePendingAction)
-  props.socket.on('pending_action', handlePendingAction)
-  props.socket.on('pending_action_cleared', clearAction)
+  attachSocketListeners(props.socket)
+})
+
+watch(() => props.socket, (nextSocket, prevSocket) => {
+  if (prevSocket !== nextSocket) {
+    detachSocketListeners(prevSocket)
+    attachSocketListeners(nextSocket)
+  }
 })
 
 onUnmounted(() => {
-  props.socket.off('BRACKET_EXIT_CONFIRM', handlePendingAction)
-  props.socket.off('pending_action', handlePendingAction)
-  props.socket.off('pending_action_cleared', clearAction)
+  detachSocketListeners(props.socket)
   if (timerInterval) clearInterval(timerInterval)
 })
 </script>

@@ -39,6 +39,8 @@ export const useTradeStore = defineStore('trade', () => {
   // Connection state
   const connected = ref(false)
   const socket = ref(null)
+  const lastSocketStatsAt = ref(0)
+  const statsSource = ref('none')
 
   // Force-logout flag: set to true when the server invalidates this session
   const forceLogout = ref(false)
@@ -201,6 +203,10 @@ export const useTradeStore = defineStore('trade', () => {
   }
 
   async function connect() {
+    if (socket.value) {
+      return socket.value
+    }
+
     const backendUrl = import.meta.env.DEV
       ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
       : window.location.origin
@@ -219,7 +225,13 @@ export const useTradeStore = defineStore('trade', () => {
     socket.value = s
 
     s.on('connect', () => { connected.value = true })
-    s.on('disconnect', () => { connected.value = false })
+    s.on('disconnect', () => {
+      connected.value = false
+      if (statsSource.value === 'socket') {
+        statsSource.value = 'none'
+      }
+      socket.value = null
+    })
 
     // ── Single-Login Enforcement: force-logout this session if another login occurred ──
     s.on('FORCE_LOGOUT', () => {
@@ -239,6 +251,8 @@ export const useTradeStore = defineStore('trade', () => {
       _throttleStats(() => {
         // Skip non-critical updates when page is hidden (Visibility API)
         if (!_pageVisible.value) return
+        lastSocketStatsAt.value = Date.now()
+        statsSource.value = 'socket'
         Object.assign(stats, {
           daily_pnl: data.daily_pnl ?? 0,
           all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
@@ -383,6 +397,13 @@ export const useTradeStore = defineStore('trade', () => {
     return s
   }
 
+  function markApiStatsUsed(staleAfterMs = 7000) {
+    const now = Date.now()
+    if (!lastSocketStatsAt.value || now - lastSocketStatsAt.value > staleAfterMs) {
+      statsSource.value = 'api'
+    }
+  }
+
   /**
    * Checks the backend for an active HARVEST_ONLY latch on page load/refresh.
    * If the session is already latched and a PENDING strategic_break payload
@@ -428,6 +449,8 @@ export const useTradeStore = defineStore('trade', () => {
     radarPairs,
     connect,
     checkSessionStatus,
+    statsSource,
+    markApiStatsUsed,
     socket,
     forceLogout,
   }

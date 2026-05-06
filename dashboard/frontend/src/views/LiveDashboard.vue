@@ -80,6 +80,7 @@
         <div class="chart-wrap">
           <div class="panel-header">
             <span class="panel-title">LIVE EQUITY FLOW</span>
+            <span class="data-source-badge" :class="dataSourceClass">{{ dataSourceLabel }}</span>
           </div>
           <ProfitChart />
         </div>
@@ -161,11 +162,39 @@ const safetyGaugePct = computed(() => {
 })
 const safetyIsDanger = computed(() => safetyGaugePct.value < 20)
 const safetyGaugeColor = computed(() => safetyGaugePct.value < 20 ? '#ff3366' : '#00ff88')
+const dataSourceLabel = computed(() =>
+  store.statsSource === 'api' ? 'API FALLBACK' : 'WS REALTIME'
+)
+const dataSourceClass = computed(() =>
+  store.statsSource === 'api' ? 'is-fallback' : 'is-realtime'
+)
 
 async function fetchLiveState() {
   try {
     const res = await fetch(`${backendUrl}/api/live/state`, { headers: getAuthHeaders() })
-    if (res.ok) Object.assign(liveState.value, await res.json())
+    if (res.ok) {
+      const data = await res.json()
+      Object.assign(liveState.value, data)
+
+      // Fallback data path: keep chart alive even when socket stats_update is delayed.
+      const realized = Number(data.net_pnl_realized || 0)
+      const unrealized = Number(data.net_pnl_unrealized || 0)
+      const total = Math.round(realized + unrealized)
+
+      store.stats.daily_pnl = realized
+      store.stats.unrealized_pnl = unrealized
+      store.markApiStatsUsed(7000)
+
+      const now = new Date()
+      const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const last = store.pnlHistory[store.pnlHistory.length - 1]
+      if (!last || last.pnl !== total) {
+        store.pnlHistory.push({ time: timeStr, pnl: total })
+        if (store.pnlHistory.length > 300) {
+          store.pnlHistory.splice(0, store.pnlHistory.length - 300)
+        }
+      }
+    }
   } catch { liveState.value.bot_offline = true }
 }
 
@@ -182,6 +211,9 @@ function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase(
 
 let pollInt = null
 onMounted(() => {
+  // Live dashboard membutuhkan stream stats_update untuk mengisi pnlHistory/chart.
+  // Tanpa koneksi socket ini, chart akan terus "Waiting for data".
+  store.connect()
   fetchLiveState()
   fetchOrders()
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
@@ -320,6 +352,27 @@ td {
   border-radius: 4px;
   font-size: 10px;
   font-weight: 700;
+}
+
+.data-source-badge {
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.data-source-badge.is-realtime {
+  color: #00ff88;
+  background: rgba(0, 255, 136, 0.12);
+  border-color: rgba(0, 255, 136, 0.35);
+}
+
+.data-source-badge.is-fallback {
+  color: #f5a623;
+  background: rgba(245, 166, 35, 0.12);
+  border-color: rgba(245, 166, 35, 0.35);
 }
 
 .safety-gauge-wrap {
