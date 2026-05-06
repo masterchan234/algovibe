@@ -232,7 +232,7 @@ def get_dynamic_dry_run():
         from app.infrastructure.database import db
         db_val = db.get_state("dry_run")
         if db_val is not None:
-            val = db_val.lower() == "true"
+            val = db_val.lower() in ("true", "1")
             _DRY_RUN_CACHE["value"] = val
             _DRY_RUN_CACHE["last_check"] = now
             return val
@@ -246,7 +246,7 @@ def get_dynamic_loose_gates():
         from app.infrastructure.database import db
         db_val = db.get_state("dry_run_loose_gates")
         if db_val is not None:
-            return db_val.lower() == "true"
+            return db_val.lower() in ("true", "1")
     except Exception:
         pass
     return False # Default

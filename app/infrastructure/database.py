@@ -1151,7 +1151,7 @@ class DatabaseRouter:
             conn = _sq.connect(self._live.db_path, timeout=30)
             row = conn.execute("SELECT value FROM bot_state WHERE key='dry_run'").fetchone()
             conn.close()
-            val = (row[0].lower() == "true") if row else True
+            val = (row[0].lower() in ("true", "1")) if row else True
         except Exception:
             val = True  # safe fallback: treat as dryrun if uncertain
         self._mode_cache = val
