@@ -34,6 +34,25 @@
     </div>
 
     <div class="header-right">
+      <div class="mode-toggle" :class="{ busy: isSwitchingMode }" title="Switch execution mode">
+        <button
+          class="mode-btn"
+          :class="{ active: selectedMode === 'dry' }"
+          :disabled="isSwitchingMode"
+          @click="handleModeSwitch('dry')"
+        >
+          DRY
+        </button>
+        <button
+          class="mode-btn"
+          :class="{ active: selectedMode === 'live' }"
+          :disabled="isSwitchingMode"
+          @click="handleModeSwitch('live')"
+        >
+          LIVE
+        </button>
+      </div>
+
       <div class="conn-status" :class="{ 'is-live': connected }" title="WebSocket Connection Status">
         <span class="conn-dot"></span>
       </div>
@@ -79,6 +98,7 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
+import { useTradeStore } from '../stores/trade'
 
 const props = defineProps({
   stats: { type: Object, default: () => ({}) },
@@ -86,10 +106,12 @@ const props = defineProps({
 })
 
 const router = useRouter()
-const { userInfo, logout } = useAuth()
-const { selectedMode, isLiveMode } = useMode()
+const { userInfo, logout, getAuthHeaders } = useAuth()
+const store = useTradeStore()
+const { selectedMode, isLiveMode, selectMode } = useMode()
 
 const isLoggingOut = ref(false)
+const isSwitchingMode = ref(false)
 
 const headerClass = computed(() => ({
   'header-live': isLiveMode.value,
@@ -151,6 +173,66 @@ async function handleLogout() {
     console.error('Logout failed:', err)
   } finally {
     isLoggingOut.value = false
+  }
+}
+
+async function refreshDashboardState() {
+  const headers = getAuthHeaders()
+
+  const [statsRes, tradesRes] = await Promise.all([
+    fetch(`${backendUrl}/api/stats`, { headers, credentials: 'include' }),
+    fetch(`${backendUrl}/api/trades`, { headers, credentials: 'include' }),
+  ])
+
+  if (statsRes.ok) {
+    const data = await statsRes.json()
+    Object.assign(store.stats, {
+      daily_pnl: data.daily_pnl ?? 0,
+      all_time_pnl_dry: data.all_time_pnl_dry ?? 0,
+      available_idr: data.available_idr ?? 0,
+      idr_used: data.idr_used ?? 0,
+      total_equity: data.total_equity ?? 0,
+      utilization: data.utilization ?? 0,
+      win_rate: data.win_rate ?? 0,
+      active_positions: data.active_positions ?? 0,
+      unrealized_pnl: data.unrealized_pnl ?? 0,
+      regime: data.regime ?? 'CHOPPY',
+      latest_llm_insight: data.latest_llm_insight ?? '',
+      hero_ai_insight: data.hero_ai_insight ?? 'Waiting for AI analysis...',
+      hero_ai_insights: Array.isArray(data.hero_ai_insights) ? data.hero_ai_insights : [],
+      active_reasoning: data.active_reasoning ?? '',
+      alpha_contributor: data.alpha_contributor ?? '',
+      best_trade: data.best_trade ?? 0,
+      intensity: data.intensity ?? 0,
+      dry_run: data.dry_run ?? true,
+      dry_run_loose_gates: data.dry_run_loose_gates ?? false,
+    })
+    store.markApiStatsUsed(15000)
+  }
+
+  if (tradesRes.ok) {
+    const trades = await tradesRes.json()
+    if (Array.isArray(trades)) {
+      store.positions = trades
+    }
+  }
+}
+
+async function handleModeSwitch(mode) {
+  if (isSwitchingMode.value) return
+  if (mode !== 'dry' && mode !== 'live') return
+  if (selectedMode.value === mode) return
+
+  isSwitchingMode.value = true
+  try {
+    await selectMode(mode, backendUrl)
+    await refreshDashboardState()
+    router.push(mode === 'live' ? '/dashboard-live' : '/dashboard-dry')
+  } catch (err) {
+    console.error('Mode switch failed:', err)
+    alert(err?.message || 'Failed to switch mode')
+  } finally {
+    isSwitchingMode.value = false
   }
 }
 </script>
@@ -282,7 +364,48 @@ async function handleLogout() {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 14px;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.mode-toggle.busy {
+  opacity: 0.7;
+}
+
+.mode-btn {
+  border: none;
+  background: transparent;
+  color: #7d8590;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-btn.active {
+  color: #fff;
+  background: rgba(163, 113, 247, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(163, 113, 247, 0.45);
+}
+
+.header-live .mode-btn.active {
+  background: rgba(245, 166, 35, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(245, 166, 35, 0.45);
+}
+
+.mode-btn:disabled {
+  cursor: wait;
 }
 
 .conn-status {
@@ -352,6 +475,7 @@ async function handleLogout() {
 @media (max-width: 768px) {
   .hide-mobile { display: none; }
   .app-header { padding: 0 16px; }
+  .mode-btn { font-size: 9px; padding: 5px 8px; }
   .logout-btn { padding: 6px 12px; font-size: 10px; }
 }
 
