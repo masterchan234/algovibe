@@ -54,13 +54,31 @@ const router = createRouter({
 })
 
 // Route guard
-router.beforeEach((to) => {
-  const { isAuthenticated } = useAuth()
+router.beforeEach(async (to) => {
+  const { isAuthenticated, token, userInfo } = useAuth()
   const { hasModeSelected, selectedMode } = useMode()
 
   // 1. Redirect unauthenticated users to login
-  if (to.meta.requiresAuth && !isAuthenticated.value) {
-    return { name: 'login', query: { redirect: to.fullPath } }
+  if (to.meta.requiresAuth) {
+    if (!isAuthenticated.value) {
+      return { name: 'login', query: { redirect: to.fullPath } }
+    }
+    
+    // Verify token with backend to prevent loading dashboard with stale session
+    try {
+      const backendUrl = import.meta.env.DEV ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080') : window.location.origin
+      const res = await fetch(`${backendUrl}/api/check-auth`, {
+        headers: { Authorization: `Bearer ${token.value}` }
+      })
+      if (!res.ok) {
+        token.value = null
+        userInfo.value = null
+        localStorage.removeItem('algovibe_jwt')
+        return { name: 'login', query: { redirect: to.fullPath } }
+      }
+    } catch (e) {
+      // Ignore network errors, let it pass to allow offline caching or subsequent error handling
+    }
   }
 
   // 2. Prevent authenticated users from going back to login

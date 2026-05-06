@@ -64,7 +64,6 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useSocket } from '../composables/useSocket' // Assuming useSocket exists or I'll create it
 
 const props = defineProps({
   socket: { type: Object, required: true }
