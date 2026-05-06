@@ -169,36 +169,29 @@
             v-for="pair in radarDisplayPairs"
             :key="pair.pair"
             class="radar-item"
-            :class="[
-              itemClass(pair),
-              { 'active-radar': selectedPair?.pair === pair.pair }
-            ]"
+            :class="{ 'active-radar': radarDetailPair?.pair === pair.pair }"
+            :style="heatmapStyle(pair)"
+            :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '')"
             @click="onRadarClick(pair)"
           >
-            <div class="radar-top">
-              <span class="radar-pair">
-                {{ formatPair(pair.pair) }}
-                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="leader-crown">👑</span>
-              </span>
-              <span class="radar-signal" :class="signalClass(pair)">{{ recommendationOf(pair) }}</span>
-            </div>
-            <div class="radar-meter">
-              <div class="meter-fill" :style="{ width: (pair.score || 0) + '%', background: scoreColor(pair.score) }"></div>
-            </div>
-            <div class="radar-bottom">
-              <span class="radar-trend" :class="trendClass(pair.trend)">{{ pair.trend || 'N/A' }}</span>
-              <span class="radar-prob" v-if="pair.prediction != null">
-                {{ (pair.prediction * 100).toFixed(0) }}% · S{{ (pair.score || 0).toFixed(0) }}
-              </span>
-            </div>
-            <div class="radar-note" :class="pair.tradable ? 'note-ready' : 'note-blocked'">
-              <span v-if="pair.ai_veto" class="veto-chip">AI VETO {{ pair.ai_veto_confidence || 0 }}%</span>
-              <span class="note-text">{{ shortStatus(pair) }}</span>
-            </div>
+            <span class="ri-name">
+              {{ formatPair(pair.pair) }}
+              <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
+              <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
+            </span>
           </div>
         </div>
       </div>
     </div>
+
+    <RadarDetailModal
+      v-if="showRadarDetail"
+      :show="showRadarDetail"
+      :pair="radarDetailPair"
+      :regimeLeader="stats.regime_leader"
+      :onClose="closeRadarDetail"
+      :onDeepAnalysis="openAiFromDetail"
+    />
 
     <AiAnalysisModal
       v-if="showAiModal"
@@ -214,6 +207,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
 import AiAnalysisModal from './AiAnalysisModal.vue'
+import RadarDetailModal from './RadarDetailModal.vue'
 
 let echarts = null
 let chartInitialized = false
@@ -318,6 +312,8 @@ async function fetchPnlHistory() {
 const selectedPair = ref(null)
 const selectedPairData = ref(null)
 const showAiModal = ref(false)
+const showRadarDetail = ref(false)
+const radarDetailPair = ref(null)
 
 function onRadarClick(pairObj) {
   // Enrich data if coming from heatmap (which only has {pair: '...'})
@@ -326,12 +322,22 @@ function onRadarClick(pairObj) {
     const match = store.radarPairs.find(p => p.pair === pairObj.pair)
     if (match) fullData = { ...match, ...pairObj }
   }
-  
-  selectedPair.value = fullData
-  selectedPairData.value = fullData
-  showAiModal.value = true
-  
+  radarDetailPair.value = fullData
+  showRadarDetail.value = true
   store.socket.emit('watch_pair', { pair: fullData.pair })
+}
+
+function closeRadarDetail() {
+  showRadarDetail.value = false
+  radarDetailPair.value = null
+}
+
+function openAiFromDetail() {
+  const pair = radarDetailPair.value
+  closeRadarDetail()
+  selectedPair.value = pair
+  selectedPairData.value = pair
+  showAiModal.value = true
 }
 
 function closeAiModal() {
@@ -524,6 +530,58 @@ function trendClass(trend) {
   if (t === 'UP' || t === 'BULLISH') return 'trend-up'
   if (t === 'DOWN' || t === 'BEARISH') return 'trend-down'
   return 'trend-neutral'
+}
+
+function chipSignalClass(pair) {
+  const rec = recommendationOf(pair)
+  if (rec === 'BUY') return 'chip-buy'
+  if (rec === 'SELL') return 'chip-sell'
+  return 'chip-hold'
+}
+
+function heatmapStyle(pair) {
+  const score      = Number(pair?.score || 0)
+  const prediction = Number(pair?.prediction || 0.5)
+  const isVeto     = !!pair?.ai_veto
+  const isBlocked  = pair?.tradable === false
+  const rec        = recommendationOf(pair)
+
+  // Confidence: blended from score (0-100) + prediction (0-1), clamped 0-1
+  const conf = Math.min(1, Math.max(0, (score / 100) * 0.6 + prediction * 0.4))
+
+  // AI Veto → solid deep red with red outline
+  if (isVeto) {
+    const lit = Math.round(10 + conf * 8)
+    return {
+      background: `hsla(0, 90%, ${lit}%, 0.95)`,
+      outline: '1px solid rgba(248,81,73,0.6)'
+    }
+  }
+
+  if (rec === 'BUY' && !isBlocked) {
+    // Green family: hue 118-130, intensity driven by confidence
+    const sat = Math.round(40 + conf * 50)   // 40..90%
+    const lit = Math.round(8  + conf * 17)   // 8..25%
+    return { background: `hsla(122, ${sat}%, ${lit}%, 0.95)` }
+  }
+
+  if (rec === 'SELL' || isBlocked) {
+    // Red family: hue 0-5, intensity driven by (1 - confidence for sells) or flat for blocked
+    const intensity = rec === 'SELL' ? (1 - conf) : 0.5
+    const sat = Math.round(40 + intensity * 50)  // 40..90%
+    const lit = Math.round(8  + intensity * 14)  // 8..22%
+    // Desaturate blocked-only (non-sell)
+    if (isBlocked && rec !== 'SELL') {
+      return { background: `hsla(0, ${Math.round(sat * 0.5)}%, ${Math.round(lit * 0.8)}%, 0.75)` }
+    }
+    return { background: `hsla(2, ${sat}%, ${lit}%, 0.95)` }
+  }
+
+  // HOLD → muted amber, scaled by how close conf is to 0.5
+  const dist = Math.abs(conf - 0.5)
+  const sat  = Math.round(20 + dist * 40)
+  const lit  = Math.round(8  + dist * 10)
+  return { background: `hsla(40, ${sat}%, ${lit}%, 0.85)` }
 }
 
 function formatPair(pair) {
@@ -1206,10 +1264,10 @@ onUnmounted(() => {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  max-height: 340px;
+  max-height: 240px;
   border-top: 1px solid #30363d;
   background: #0d1117;
-  padding-bottom: 8px;
+  padding-bottom: 4px;
 }
 
 /* BTC Condition Bar */
@@ -1386,7 +1444,7 @@ onUnmounted(() => {
   min-height: 0;
   max-height: none;
   overflow-y: auto;
-  padding-right: 4px;
+  padding-right: 2px;
 }
 
 /* Custom scrollbar for radar */
@@ -1395,139 +1453,73 @@ onUnmounted(() => {
 .radar-scroll-wrap::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
 .radar-scroll-wrap::-webkit-scrollbar-thumb:hover { background: #a371f7; }
 
+/* === Radar heatmap grid (20 col × N row) === */
 .radar-list {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 8px;
-  padding: 4px 14px 12px;
+  grid-template-columns: repeat(20, 1fr);
+  gap: 2px;
+  padding: 4px 10px 6px;
 }
 
 .radar-item {
+  height: 22px;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  padding: 10px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
   cursor: pointer;
+  overflow: hidden;
+  min-width: 0;
+  transition: filter 0.15s, transform 0.1s;
   position: relative;
-  overflow: hidden;
 }
 
-.radar-item:hover, .active-radar {
-  background: #1c2128;
-  border-color: #a371f7;
-  transform: translateY(-3px);
-  box-shadow: 0 8px 20px rgba(163, 113, 247, 0.15);
+.radar-item:hover {
+  filter: brightness(1.45);
+  transform: scale(1.08);
+  z-index: 2;
 }
 
-.active-radar::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0; height: 2px;
-  background: linear-gradient(90deg, #a371f7, #7928ca);
+.active-radar {
+  outline: 1.5px solid #a371f7;
+  filter: brightness(1.3);
+  z-index: 2;
 }
 
-/* Conviction Heatmap */
-.conviction-high-up {
-  background: linear-gradient(135deg, #161b22 0%, rgba(63, 185, 80, 0.08) 100%);
-  border-color: rgba(63, 185, 80, 0.3);
-}
-.conviction-high-down {
-  background: linear-gradient(135deg, #161b22 0%, rgba(248, 81, 73, 0.08) 100%);
-  border-color: rgba(248, 81, 73, 0.3);
-}
-
-.radar-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.radar-pair { font-weight: 800; color: #58a6ff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
-.leader-crown { font-size: 10px; filter: drop-shadow(0 0 4px gold); }
-
-.radar-signal {
-  font-size: 8.5px;
-  font-weight: 900;
-  padding: 2px 6px;
-  border-radius: 999px;
-  letter-spacing: 0.5px;
-  border: 1px solid transparent;
-}
-
-.signal-buy {
-  background: rgba(63, 185, 80, 0.12);
-  color: #3fb950;
-  border-color: rgba(63, 185, 80, 0.32);
-}
-
-.signal-sell {
-  background: rgba(248, 81, 73, 0.12);
-  color: #f85149;
-  border-color: rgba(248, 81, 73, 0.32);
-}
-
-.signal-hold {
-  background: rgba(210, 153, 34, 0.12);
-  color: #d29922;
-  border-color: rgba(210, 153, 34, 0.3);
-}
-
-.radar-meter {
-  height: 3px;
-  background: #21262d;
-  border-radius: 2px;
-  overflow: hidden;
-}
-.meter-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 1s ease;
-}
-
-.radar-bottom {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.radar-note {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 18px;
-}
-
-.veto-chip {
-  font-size: 8px;
-  font-weight: 900;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: rgba(248, 81, 73, 0.15);
-  color: #f85149;
-  border: 1px solid rgba(248, 81, 73, 0.35);
-}
-
-.note-text {
-  font-size: 8px;
-  line-height: 1.2;
-  color: #8b949e;
-  display: block;
+/* Chip content */
+.ri-name {
+  font-size: 6.5px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.88);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: center;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.7);
 }
 
-.note-ready .note-text {
-  color: #3fb950;
-}
+.crown-micro { font-size: 6px; filter: drop-shadow(0 0 3px gold); }
 
-.note-blocked .note-text {
-  color: #f85149;
+.ri-veto-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(248,81,73,0.95);
+  color: #fff;
+  font-size: 5.5px;
+  font-weight: 900;
+  flex-shrink: 0;
+  line-height: 1;
 }
-.radar-trend { font-size: 8.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
+.radar-trend { font-size: 7.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; }
 .trend-up   { color: #3fb950; }
 .trend-down { color: #f85149; }
 .trend-neutral { color: #8b949e; }
@@ -1568,7 +1560,7 @@ onUnmounted(() => {
   }
 
   .radar-section {
-    max-height: 280px;
+    max-height: 200px;
   }
 
   .heatmap-tile {
@@ -1580,9 +1572,9 @@ onUnmounted(() => {
   .tile-label { font-size: 8px; }
 
   .radar-list {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-    padding: 4px 10px 12px;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 2px;
+    padding: 4px 10px 8px;
   }
 
   .radar-toolbar {
@@ -1599,10 +1591,10 @@ onUnmounted(() => {
   }
 
   .radar-section {
-    max-height: 230px;
+    max-height: 180px;
   }
 
-  .radar-list { grid-template-columns: repeat(2, 1fr); }
+  .radar-list { grid-template-columns: repeat(6, 1fr); }
   .heatmap-tile { flex: 0 0 calc(25% - 3px); } /* 4 columns for very small */
 }
 </style>
