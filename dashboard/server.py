@@ -1401,6 +1401,8 @@ def get_live_pnl_history(tf):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@app.route('/api/market-context/<pair>')
+@login_required
 def get_market_context(pair):
     """
     Menyediakan konteks pasar lengkap untuk modal ORACLE:

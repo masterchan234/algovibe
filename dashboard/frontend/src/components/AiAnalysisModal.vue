@@ -111,6 +111,7 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { useTradeStore } from '../stores/trade'
+import { useAuth } from '../composables/useAuth'
 
 const props = defineProps({
   show: Boolean,
@@ -120,6 +121,7 @@ const props = defineProps({
 })
 
 const store = useTradeStore()
+const { getAuthHeaders } = useAuth()
 
 const livePrice = computed(() => {
   if (!props.pair?.pair) return null
@@ -157,18 +159,29 @@ async function loadInsight() {
   context.value = null
   
   try {
-    const [insightRes, chartData, contextData] = await Promise.all([
+    const [insightRes, chartDataRes, contextDataRes] = await Promise.allSettled([
       props.fetchInsight(props.pair),
       fetchChartData(props.pair.pair),
       fetchMarketContext(props.pair.pair)
     ])
-    
-    insight.value = insightRes
+
+    const resolvedInsight = insightRes.status === 'fulfilled' ? insightRes.value : ''
+    const chartData = chartDataRes.status === 'fulfilled' ? chartDataRes.value : []
+    const contextData = contextDataRes.status === 'fulfilled' ? contextDataRes.value : null
+
+    insight.value = resolvedInsight || 'Tidak ada nalar AI yang tersedia saat ini.'
     context.value = contextData
     loading.value = false
-    
+
     await nextTick()
-    initChart(chartData)
+    if (Array.isArray(chartData) && chartData.length) {
+      initChart(chartData)
+    }
+
+    // Mark error only when all data channels fail completely.
+    if (!insight.value && !context.value && (!Array.isArray(chartData) || chartData.length === 0)) {
+      error.value = true
+    }
   } catch (err) {
     console.error('Modal Load Error:', err)
     error.value = true
@@ -177,19 +190,27 @@ async function loadInsight() {
 }
 
 async function fetchMarketContext(pair) {
+  if (!pair) return null
   const backendUrl = import.meta.env.DEV
     ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
     : window.location.origin
-  const res = await fetch(`${backendUrl}/api/market-context/${pair.toLowerCase()}`)
+  const res = await fetch(`${backendUrl}/api/market-context/${pair.toLowerCase()}`, {
+    headers: getAuthHeaders(),
+    credentials: 'include',
+  })
   if (res.ok) return await res.json()
   return null
 }
 
 async function fetchChartData(pair) {
+  if (!pair) return []
   const backendUrl = import.meta.env.DEV
     ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
     : window.location.origin
-  const res = await fetch(`${backendUrl}/api/ohlcv/${pair.toLowerCase().replace('/', '')}/1h`)
+  const res = await fetch(`${backendUrl}/api/ohlcv/${pair.toLowerCase().replace('/', '')}/1h`, {
+    headers: getAuthHeaders(),
+    credentials: 'include',
+  })
   if (res.ok) return await res.json()
   return []
 }
