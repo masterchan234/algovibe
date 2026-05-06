@@ -481,7 +481,7 @@ class Database:
             # Fallback to config if DB is somehow empty, though it shouldn't be
             from config import DRY_RUN as DEFAULT_DRY_RUN
             return DEFAULT_DRY_RUN
-        return val.lower() == "true"
+        return val.lower() in ("true", "1")
 
     # ── [Senior Logic] Realtime Balance Sync ──
     
