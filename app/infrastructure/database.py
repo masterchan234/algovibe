@@ -996,6 +996,85 @@ class Database:
             logging.error(f"[DB] Error updating keys: {e}")
             return False
 
+    # ── METODE SESSION MANAGEMENT ──
+
+    def create_user_session(self, session_id: str, user_id: int, ip_address: str, user_agent: str) -> bool:
+        """Insert a new active session record."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """INSERT INTO user_sessions (session_id, user_id, ip_address, user_agent, is_active)
+                       VALUES (?, ?, ?, ?, 1)""",
+                    (session_id, user_id, ip_address, user_agent),
+                )
+            return True
+        except Exception as e:
+            logging.error(f"[DB] create_user_session error: {e}")
+            return False
+
+    def get_active_sessions_for_user(self, user_id: int) -> list:
+        """Return all active sessions for a given user."""
+        try:
+            with self.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT session_id, ip_address, user_agent, created_at FROM user_sessions WHERE user_id = ? AND is_active = 1",
+                    (user_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logging.error(f"[DB] get_active_sessions_for_user error: {e}")
+            return []
+
+    def get_active_session(self, session_id: str) -> dict | None:
+        """Return the session record if it exists and is_active=1, else None."""
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT session_id, user_id, ip_address, user_agent, created_at, last_activity FROM user_sessions WHERE session_id = ? AND is_active = 1",
+                    (session_id,),
+                ).fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logging.error(f"[DB] get_active_session error: {e}")
+            return None
+
+    def deactivate_session(self, session_id: str) -> bool:
+        """Mark a specific session as inactive."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE user_sessions SET is_active = 0 WHERE session_id = ?",
+                    (session_id,),
+                )
+            return True
+        except Exception as e:
+            logging.error(f"[DB] deactivate_session error: {e}")
+            return False
+
+    def deactivate_all_user_sessions(self, user_id: int) -> bool:
+        """Mark all sessions for a user as inactive (bulk invalidation)."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE user_sessions SET is_active = 0 WHERE user_id = ? AND is_active = 1",
+                    (user_id,),
+                )
+            return True
+        except Exception as e:
+            logging.error(f"[DB] deactivate_all_user_sessions error: {e}")
+            return False
+
+    def update_session_activity(self, session_id: str) -> None:
+        """Refresh last_activity timestamp for a session."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = ?",
+                    (session_id,),
+                )
+        except Exception as e:
+            logging.warning(f"[DB] update_session_activity error: {e}")
+
 class DatabaseRouter:
     """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
     based on the current dry_run flag in bot_state.

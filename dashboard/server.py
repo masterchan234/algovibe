@@ -4,6 +4,7 @@ from eventlet.green import zmq as zmq_eventlet  # eventlet-native zmq (no gevent
 import os
 import sys
 import time
+import uuid
 import datetime
 import logging
 import urllib.request
@@ -99,31 +100,54 @@ def set_csrf_cookie(response):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Handshake keamanan: Cek session (untuk Full Dashboard) atau view-token (untuk Guest/Kiosk)
-    # Namun, User Journey baru mensyaratkan LOGIN, jadi kita prioritaskan session.
+    # Handshake: try JWT-based auth first (primary), then view-token (guest), then Flask session (legacy).
     client_token = auth.get('token') if auth else None
-    
-    is_authenticated = 'user_id' in session
-    
-    # Guest access via view-token (deprecated by user request, but kept as fallback for static kiosks if needed)
-    is_token_valid = (client_token == generate_view_token())
 
-    if not is_authenticated and not is_token_valid:
-        logging.warning(f"🚫 Unauthorized WS connection (Token: {client_token[:8] if client_token else 'None'})")
-        return False # Tolak koneksi
-    
-    # Join authenticated room if user is logged in
-    if is_authenticated:
+    is_authenticated = False
+    is_guest = False
+    session_id = None
+
+    # 1. JWT auth — primary path for dashboard clients
+    if client_token and client_token != generate_view_token():
+        payload = _decode_token(client_token)
+        if payload and payload.get('user_id'):
+            sess_id = payload.get('session_id')
+            if sess_id:
+                if db._live.get_active_session(sess_id):
+                    is_authenticated = True
+                    session_id = sess_id
+                    join_room(f'session_{session_id}')
+                else:
+                    logging.warning(f"🚫 WS connect rejected: session {sess_id[:8]} is no longer active")
+                    return False
+            else:
+                # Legacy JWT without session_id — allow but without targeted room
+                is_authenticated = True
+            join_room('authenticated')
+            join_room(f"user_{payload['user_id']}")
+            logging.info(f"🔌 User '{payload.get('username')}' connected via JWT (session: {session_id or 'legacy'})")
+
+    # 2. Legacy Flask session fallback
+    elif 'user_id' in session:
+        is_authenticated = True
         join_room('authenticated')
-        user_id = session.get('user_id')
-        username = session.get('username')
-        join_room(f"user_{user_id}")
-        logging.info(f"🔌 Authenticated User {username} connected and joined 'authenticated' room")
-    else:
-        # If we still allow guest token access, they don't get the 'authenticated' room
+        join_room(f"user_{session['user_id']}")
+        sess_id = session.get('session_id')
+        if sess_id:
+            session_id = sess_id
+            join_room(f'session_{session_id}')
+        logging.info(f"🔌 User '{session.get('username')}' connected via Flask session")
+
+    # 3. View-only guest token
+    elif client_token and client_token == generate_view_token():
+        is_guest = True
         join_room('public')
         logging.info("🔌 Guest User connected (Public/View-only mode)")
-        
+
+    if not is_authenticated and not is_guest:
+        logging.warning(f"🚫 Unauthorized WS connection attempt")
+        return False
+
     return True
 
 @socketio.on('disconnect')
@@ -145,6 +169,16 @@ def _get_jwt_secret():
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", 24))
 
+# Throttle session activity updates to avoid per-request DB writes (update at most every 30s)
+_SESSION_ACTIVITY_THROTTLE: dict = {}  # session_id -> last_update_ts
+
+def _get_client_ip() -> str:
+    """Return real client IP, respecting X-Forwarded-For from Nginx Proxy Manager."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or ""
+
 def _decode_token(token: str):
     """Decode and validate a JWT. Returns payload dict or None."""
     try:
@@ -154,12 +188,15 @@ def _decode_token(token: str):
     except pyjwt.InvalidTokenError:
         return None
 
-def _issue_token(user: dict) -> str:
-    """Issue a signed JWT for a user record."""
+def _issue_token(user: dict, session_id: str = None) -> str:
+    """Issue a signed JWT for a user record, embedding the session_id."""
+    if session_id is None:
+        session_id = str(uuid.uuid4())
     payload = {
         "user_id": user["id"],
         "username": user["username"],
         "role": user.get("role", "USER"),
+        "session_id": session_id,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=JWT_EXPIRY_HOURS),
     }
     return pyjwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
@@ -177,8 +214,22 @@ def _get_current_user_payload():
         return _decode_token(token)
     # Legacy session fallback
     if "user_id" in session:
-        return {"user_id": session["user_id"], "username": session.get("username", ""), "role": "USER"}
+        return {"user_id": session["user_id"], "username": session.get("username", ""), "role": "USER", "session_id": session.get("session_id")}
     return None
+
+def _validate_session_in_db(session_id: str | None) -> bool:
+    """Return True if session_id is active in the live DB (or if no session_id for legacy tokens)."""
+    if not session_id:
+        return True  # Legacy JWT without session_id — allow for backward-compat
+    sess = db._live.get_active_session(session_id)
+    if not sess:
+        return False
+    # Throttled activity update: write to DB at most every 30s per session
+    now = time.time()
+    if now - _SESSION_ACTIVITY_THROTTLE.get(session_id, 0) > 30:
+        _SESSION_ACTIVITY_THROTTLE[session_id] = now
+        db._live.update_session_activity(session_id)
+    return True
 
 def token_required(f):
     @wraps(f)
@@ -186,6 +237,8 @@ def token_required(f):
         payload = _get_current_user_payload()
         if not payload:
             return jsonify({"error": "Unauthorized", "login_required": True}), 401
+        if not _validate_session_in_db(payload.get("session_id")):
+            return jsonify({"error": "Session expired or invalidated", "login_required": True}), 401
         return f(*args, **kwargs)
     return decorated_function
 
@@ -655,22 +708,43 @@ def login():
     password = data.get('password')
     
     user = db.verify_user(username, password)
-    if user:
-        token = _issue_token(user)
-        # Also set legacy session for WebSocket auth and backward-compat
-        session['user_id'] = user['id']
-        session['username'] = user['username']
-        return jsonify({
-            "success": True,
-            "token": token,
-            "user": {"username": user['username'], "role": user['role']}
-        })
-    
-    return jsonify({"success": False, "message": "Invalid username or password"}), 401
+    if not user:
+        return jsonify({"success": False, "message": "Invalid username or password"}), 401
+
+    # ── Single Login Enforcement ──
+    # Invalidate all existing active sessions for this user and force-logout those clients.
+    old_sessions = db._live.get_active_sessions_for_user(user['id'])
+    for old_sess in old_sessions:
+        old_sid = old_sess['session_id']
+        socketio.emit('FORCE_LOGOUT', {"reason": "logged_in_elsewhere"}, room=f'session_{old_sid}')
+        db._live.deactivate_session(old_sid)
+        logging.info(f"🔐 Force-logout emitted to session {old_sid[:8]}... (user: {user['username']})")
+
+    # ── Create new session ──
+    session_id = str(uuid.uuid4())
+    ip_address = _get_client_ip()
+    user_agent = request.headers.get('User-Agent', '')
+    db._live.create_user_session(session_id, user['id'], ip_address, user_agent)
+    logging.info(f"✅ New session created for '{user['username']}' from {ip_address} (session: {session_id[:8]}...)")
+
+    token = _issue_token(user, session_id)
+    # Also set legacy Flask session for WebSocket auth and backward-compat
+    session['user_id'] = user['id']
+    session['username'] = user['username']
+    session['session_id'] = session_id
+    return jsonify({
+        "success": True,
+        "token": token,
+        "user": {"username": user['username'], "role": user['role']}
+    })
 
 @app.route('/api/logout', methods=['POST'])
 @login_required
 def logout_api():
+    payload = _get_current_user_payload()
+    if payload and payload.get("session_id"):
+        db._live.deactivate_session(payload["session_id"])
+        _SESSION_ACTIVITY_THROTTLE.pop(payload["session_id"], None)
     session.clear()
     return jsonify({"success": True})
 

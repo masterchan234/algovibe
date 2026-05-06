@@ -39,6 +39,9 @@ export const useTradeStore = defineStore('trade', () => {
   const connected = ref(false)
   const socket = ref(null)
 
+  // Force-logout flag: set to true when the server invalidates this session
+  const forceLogout = ref(false)
+
   // Visibility API — pause heavy updates when tab/screen is hidden
   const _pageVisible = ref(true)
   if (typeof document !== 'undefined') {
@@ -201,23 +204,12 @@ export const useTradeStore = defineStore('trade', () => {
       ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
       : window.location.origin
 
-    let viewToken = null
-    try {
-      const res = await fetch(`${backendUrl}/api/view-token`, {
-        method: 'GET',
-        credentials: 'include',
-      })
-      if (res.ok) {
-        const data = await res.json()
-        viewToken = data?.token || null
-      }
-    } catch {
-      viewToken = null
-    }
+    const { token: authToken } = useAuth()
 
     const s = io(backendUrl, {
       path: '/socket.io',
-      auth: viewToken ? { token: viewToken } : {},
+      // Send JWT in auth so the server can validate the session on connect
+      auth: authToken.value ? { token: authToken.value } : {},
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1000,
@@ -229,6 +221,20 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('connect', () => { connected.value = true })
     s.on('disconnect', () => { connected.value = false })
+
+    // ── Single-Login Enforcement: force-logout this session if another login occurred ──
+    s.on('FORCE_LOGOUT', () => {
+      notify({
+        title: 'Session Terminated',
+        message: 'Anda telah login dari perangkat lain. Sesi ini dinonaktifkan.',
+        type: 'error',
+        duration: 8000,
+      })
+      const { logout } = useAuth()
+      logout()
+      connected.value = false
+      forceLogout.value = true
+    })
 
     s.on('stats_update', (data) => {
       // Throttle UI re-renders on mobile; always allow on desktop
@@ -425,5 +431,6 @@ export const useTradeStore = defineStore('trade', () => {
     connect,
     checkSessionStatus,
     socket,
+    forceLogout,
   }
 })

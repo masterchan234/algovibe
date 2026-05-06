@@ -36,6 +36,12 @@ const isAuthenticated = computed(() => {
   return _parseToken(token.value) !== null
 })
 
+/** Return the session_id embedded in the current JWT, or null. */
+const sessionId = computed(() => {
+  const payload = _parseToken(token.value)
+  return payload?.session_id || null
+})
+
 function getAuthHeaders() {
   if (!token.value) return {}
   return { Authorization: `Bearer ${token.value}` }
@@ -112,6 +118,7 @@ export function useAuth() {
   return {
     token,
     userInfo,
+    sessionId,
     isAuthenticated,
     getAuthHeaders,
     login,

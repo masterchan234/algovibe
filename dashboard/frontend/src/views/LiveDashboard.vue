@@ -122,7 +122,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useTradeStore } from '../stores/trade'
 import { useAuth } from '../composables/useAuth'
 import Header from '../components/Header.vue'
@@ -131,6 +132,7 @@ import RiskGuardPopup from '../components/RiskGuardPopup.vue'
 import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
 
 const store = useTradeStore()
+const router = useRouter()
 const { getAuthHeaders } = useAuth()
 
 const backendUrl = import.meta.env.DEV
@@ -185,6 +187,13 @@ onMounted(() => {
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
 })
 onUnmounted(() => clearInterval(pollInt))
+
+// Global FORCE_LOGOUT listener — redirect to login when session is invalidated
+watch(() => store.forceLogout, (triggered) => {
+  if (triggered) {
+    router.push('/login')
+  }
+})
 </script>
 
 <style scoped>

@@ -156,6 +156,13 @@ onMounted(() => {
   setInterval(() => { now.value = Date.now() }, 1000)
 })
 
+// Global FORCE_LOGOUT listener — redirect to login when session is invalidated
+watch(() => store.forceLogout, (triggered) => {
+  if (triggered) {
+    router.push('/login')
+  }
+})
+
 onUnmounted(() => {
   // cleanup
 })
