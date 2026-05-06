@@ -74,11 +74,20 @@ def generate_csrf():
 def validate_csrf():
     # Only validate CSRF on POST/PUT/DELETE
     if request.method in ["POST", "PUT", "DELETE"]:
-        # Skip CSRF for login if needed, but better keep it
         # Special case for socket.io path (handled by socketio)
         if request.path.startswith('/socket.io'):
             return
-            
+
+        # JWT Bearer tokens are sent in the Authorization header (not cookies),
+        # so they are inherently CSRF-safe.  Validating the Flask session token
+        # here would always fail for stateless JWT clients because the Flask
+        # session is empty.  Skip CSRF validation when a Bearer token is present.
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer = auth_header[7:]
+            if bearer and _decode_token(bearer) is not None:
+                return
+
         token = request.headers.get("X-CSRFToken")
         if not token or token != session.get("_csrf_token"):
             logging.warning(f"🚫 CSRF Validation Failed for {request.path}")
@@ -1356,9 +1365,15 @@ def get_live_state():
 
 def _is_dry_run() -> bool:
     """Return effective DRY_RUN value for the current request.
-    Respects g._dry_run_override when set by mode-specific aliases."""
+    Respects g._dry_run_override when set by mode-specific aliases.
+    Falls back to cfg.DRY_RUN when called outside a request/app context
+    (e.g. from background tasks like push_data_loop)."""
     import config as _cfg
-    return getattr(g, '_dry_run_override', _cfg.DRY_RUN)
+    try:
+        return getattr(g, '_dry_run_override', _cfg.DRY_RUN)
+    except RuntimeError:
+        # Outside request context (background task) — use global config directly
+        return _cfg.DRY_RUN
 
 @app.route('/api/dry/stats')
 def get_dry_stats():
@@ -2190,7 +2205,7 @@ def _build_stats_payload():
             try:
                 # SQLite CURRENT_TIMESTAMP is UTC
                 dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.utcnow() - dt).total_seconds() < 180:
+                if (datetime.datetime.utcnow() - dt).total_seconds() < 180:
                     is_stale = False
             except: pass
                 
@@ -2268,7 +2283,7 @@ def _build_stats_payload():
         if updated_at:
             try:
                 dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.utcnow() - dt).total_seconds() < 600:
+                if (datetime.datetime.utcnow() - dt).total_seconds() < 600:
                     is_stale_report = False
             except: pass
             

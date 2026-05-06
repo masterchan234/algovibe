@@ -235,7 +235,10 @@ async function initializeECharts() {
   }
 }
 
+import { useAuth } from '../composables/useAuth'
+
 const store = useTradeStore()
+const { getAuthHeaders } = useAuth()
 const stats = computed(() => store.stats)
 const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
 const radarFilter = ref('all')
@@ -297,7 +300,7 @@ async function fetchPnlHistory() {
     : window.location.origin
 
   try {
-    const res = await fetch(`${backendUrl}/api/pnl-history/${tf}`)
+    const res = await fetch(`${backendUrl}/api/pnl-history/${tf}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       // Data format: [{time, pnl}, ...]
@@ -346,9 +349,9 @@ async function fetchAiInsight(pair) {
 
   try {
     // Optional: Trigger fresh analysis
-    fetch(`${backendUrl}/api/analyze/${pairName}`).catch(() => {})
+    fetch(`${backendUrl}/api/analyze/${pairName}`, { headers: getAuthHeaders() }).catch(() => {})
 
-    const res = await fetch(`${backendUrl}/api/reasoning/${pairName}`)
+    const res = await fetch(`${backendUrl}/api/reasoning/${pairName}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       return data.reasoning || 'Tidak ada nalar AI yang tersedia saat ini.'
@@ -481,7 +484,7 @@ async function fetchRadarAudit() {
     : window.location.origin
 
   try {
-    const res = await fetch(`${backendUrl}/api/radar-audit`)
+    const res = await fetch(`${backendUrl}/api/radar-audit`, { headers: getAuthHeaders() })
     if (!res.ok) return
     const data = await res.json()
     radarAudit.value = {
@@ -854,8 +857,8 @@ onUnmounted(() => {
 }
 
 .chart-wrap-integrated {
-  height: 240px;
-  min-height: 240px;
+  height: 290px;
+  min-height: 290px;
   position: relative;
   margin: 12px 0 20px;
   background: #0d1117;
@@ -1200,7 +1203,10 @@ onUnmounted(() => {
 
 /* Radar */
 .radar-section { 
-  flex-shrink: 0; 
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
   border-top: 1px solid #30363d;
   background: #0d1117;
   padding-bottom: 8px;
@@ -1376,7 +1382,9 @@ onUnmounted(() => {
 }
 
 .radar-scroll-wrap {
-  max-height: 280px;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -1555,8 +1563,12 @@ onUnmounted(() => {
   }
   
   .chart-wrap-integrated {
-    height: 200px;
-    min-height: 200px;
+    height: 230px;
+    min-height: 230px;
+  }
+
+  .radar-section {
+    max-height: 280px;
   }
 
   .heatmap-tile {
@@ -1582,12 +1594,12 @@ onUnmounted(() => {
 
 @media (max-width: 480px) {
   .chart-wrap-integrated {
-    height: 170px;
-    min-height: 170px;
+    height: 190px;
+    min-height: 190px;
   }
 
-  .radar-scroll-wrap {
-    max-height: 220px;
+  .radar-section {
+    max-height: 230px;
   }
 
   .radar-list { grid-template-columns: repeat(2, 1fr); }

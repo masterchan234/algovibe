@@ -197,6 +197,9 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
+import { useAuth } from '../composables/useAuth'
+
+const { getAuthHeaders } = useAuth()
 
 const store = useTradeStore()
 const filterMode = ref('all')
@@ -217,12 +220,6 @@ const visiblePositions = computed(() =>
 const activeVisibleCount = computed(() =>
   visiblePositions.value.filter(p => ['OPEN', 'EXITING'].includes(String(p.status || '').toUpperCase())).length
 )
-
-function getCookie(name) {
-  const value = `; ${document.cookie}`
-  const parts = value.split(`; ${name}=`)
-  if (parts.length === 2) return parts.pop().split(';').shift()
-}
 
 function normalizePair(pair) {
   return String(pair || '').toLowerCase()
@@ -274,7 +271,7 @@ async function handleManualExit(pair) {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRFToken': getCookie('csrf_token'),
+        ...getAuthHeaders(),
       },
       body: JSON.stringify({ pair }),
     })

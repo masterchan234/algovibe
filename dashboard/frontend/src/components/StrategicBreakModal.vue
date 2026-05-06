@@ -80,6 +80,9 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useTradeStore } from '../stores/trade'
+import { useAuth } from '../composables/useAuth'
+
+const { getAuthHeaders } = useAuth()
 
 const store = useTradeStore()
 const isLoading = ref(false)
@@ -101,12 +104,6 @@ const backendUrl = import.meta.env.DEV
   ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
   : window.location.origin
 
-function getCookie(name) {
-  const value = `; ${document.cookie}`
-  const parts = value.split(`; ${name}=`)
-  if (parts.length === 2) return parts.pop().split(';').shift()
-}
-
 async function act(action) {
   if (isLoading.value) return
   isLoading.value = true
@@ -117,7 +114,7 @@ async function act(action) {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRFToken': getCookie('csrf_token'),
+        ...getAuthHeaders(),
       },
       body: JSON.stringify({ action }),
     })
