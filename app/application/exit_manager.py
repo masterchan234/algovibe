@@ -351,8 +351,6 @@ class ExitManager:
         if not positions:
             return
 
-        modified_pairs = set()
-
         # --- [AUTO-RECONCILIATION] ---
         # Selalu sinkronkan dengan Indodax: Hapus posisi di DB jika koin sudah tidak ada di exchange.
         # Dijalankan setiap 5 menit agar tidak membebani API rate limit.
@@ -1159,7 +1157,7 @@ class ExitManager:
                                 self.exchange.cancel_order(
                                     old_exit_order_id,
                                     symbol_cancel,
-                                    params={'pair': pair.replace("idr", "_idr"), 'side': 'sell'}
+                                    params={'pair': pair[:-3] + "_idr", 'side': 'sell'}
                                 )
                             except Exception as cancel_err:
                                 log_message(f"⚠️ EXITING fallback cancel skipped {pair}: {cancel_err}")
@@ -1257,7 +1255,7 @@ class ExitManager:
                         try:
                             # [Senior Fix] Standard CCXT Symbol for Validation
                             symbol_cancel = f"{pair[:-3].upper()}/IDR"
-                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair.replace("idr", "_idr"), 'side': 'buy'})
+                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair[:-3] + "_idr", 'side': 'buy'})
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
                             
@@ -1475,7 +1473,7 @@ class ExitManager:
                             self.exchange.cancel_order(
                                 order['id'],
                                 symbol,
-                                params={'pair': pair.replace('idr', '_idr'), 'side': 'buy'},
+                                params={'pair': pair[:-3] + '_idr', 'side': 'buy'},
                             )
                             log_message(
                                 f"🛡️ [DEFENSIVE_CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
@@ -1519,7 +1517,7 @@ class ExitManager:
                         symbol = f"{coin.upper()}/IDR"
                         self.exchange.create_order(
                             symbol, 'market', 'sell', amount, price,
-                            {'pair': pair.replace('idr', '_idr')}
+                            {'pair': pair[:-3] + '_idr'}
                         )
                         log_message(
                             f"🛡️ [DEFENSIVE_CLOSE] Sold orphan {coin} ({amount}) "
@@ -1608,6 +1606,7 @@ class ExitManager:
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
         try:
+            entry_price = float(entry_price or 0)
             # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
@@ -1625,7 +1624,7 @@ class ExitManager:
                 fee_sell_rate = FEE_SELL_MAKER
 
             # [Senior Scaling Fix] PIGGYBACK: Ambil seluruh saldo koin yang tersedia
-            coin = pair.replace('idr', '').upper()
+            coin = pair[:-3].upper()
             try:
                 if not self.dry_run:
                     balance = self.exchange.fetch_balance()
@@ -1648,7 +1647,7 @@ class ExitManager:
                     "symbol": symbol
                 }
             else:
-                params = {'pair': pair.replace("idr", "_idr")}
+                params = {'pair': pair[:-3] + "_idr"}
                 if is_emergency or is_tp_exit:
                     # [Final Fix] Use explicit create_order for market sell
                     order = self.exchange.create_order(symbol, 'market', 'sell', amount, price, params)
@@ -1790,7 +1789,7 @@ class ExitManager:
                 # Eksekusi Limit Buy (Maker) untuk hemat fee: 0.1% vs 0.51% taker
                 # Pasang sedikit di bawah harga pasar agar antri sebagai maker
                 limit_price = current_price * (1 - BUY_MAKER_OFFSET)
-                params = {'pair': pair.replace("idr", "_idr"), 'post_only': True}
+                params = {'pair': pair[:-3] + "_idr", 'post_only': True}
                 order = self.exchange.create_order(
                     symbol, 'limit', 'buy', add_amount_crypto, limit_price, params
                 )
@@ -2484,7 +2483,7 @@ class ExitManager:
                                         # Format Indodax: aih_idr, Format CCXT: AIH/IDR
                                         ccxt_symbol = p.upper().replace("IDR", "/IDR")
                                         # Indodax cancel_order requires 'type' (buy/sell) and 'pair' (with underscore)
-                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': p.replace("idr", "_idr"), 'type': 'sell'})
+                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': p[:-3] + "_idr", 'type': 'sell'})
                                         # Revert to OPEN so the main monitor loop can re-process it (now as Taker due to is_emergency)
                                         pos['status'] = "OPEN"
                                         pos['exit_order_id'] = None
@@ -2540,7 +2539,7 @@ class ExitManager:
                                         open_positions[pair] = adopt_data
                                         
                                     elif o_type == 'sell':
-                                        coin_sym = pair.replace('idr', '')
+                                        coin_sym = pair[:-3]
                                         remain_coin = float(order.get(f'remain_{coin_sym}', 0))
                                         
                                         log_message(f"🔄 Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")

@@ -11,6 +11,7 @@ from app.application.use_cases.pair_pipeline import (
 from app.domain.scoring import calculate_score
 from config import (
     LOG_FILE,
+    ENABLE_FILE_LOGGING,
 )
 import config
 from app.infrastructure.database import db

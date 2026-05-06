@@ -19,8 +19,7 @@ class Database:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
         self._run_integrity_check()
-        self._init_db()
-        run_migrations(self.db_path)
+        self._init_db()  # run_migrations is called at the end of _init_db()
 
     # ── Integrity Check & Auto-Recovery ───────────────────────────────────────
 

@@ -38,7 +38,6 @@ class ScalperBot:
         self.start_day = int(db.get_state("start_day", datetime.now().day))
         self.daily_trades = int(db.get_state("daily_trades", 0))
         self.consecutive_losses = int(db.get_state("consecutive_losses", 0))
-        self.consecutive_shadow_wins = 0 # In-memory only for recovery streak
 
         # [Senior Fix] Stale Halt Recovery: Jika ada loss beruntun tapi trade terakhir sudah lama (> 4 jam), 
         # anggap sesi baru dan bebaskan bot dari PAUSE.

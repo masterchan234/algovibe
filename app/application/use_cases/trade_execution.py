@@ -201,7 +201,6 @@ def execute_trade(
         if config.DRY_RUN:
             # Apply the same slippage_buffer the live adapter models (0.21%) so
             # the simulated entry price is not unrealistically tight.
-            from config import ROUND_TRIP_FEE_PCT
             _sim_slippage = 0.0021  # mirrors IndodaxAdapter.fee_structure['slippage_buffer']
             sim_fill_price = buy_price * (1 + _sim_slippage)
             buy_price = sim_fill_price   # update buy_price so PnL calc uses realistic entry

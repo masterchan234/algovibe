@@ -236,8 +236,8 @@ class MarketDataWS:
             # ── Auth response ──────────────────────────────────────────────────
             if "result" in msg and "client" in msg.get("result", {}):
                 logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
-                # Step 2: Wait 1s for server state to settle before subscribing
-                time.sleep(1)
+                # Step 2: Schedule subscription 1s after auth to let server state settle.
+                # Use threading.Timer to avoid blocking the WS receive thread.
                 req_id = self._next_id()
                 sub_msg = {
                     "method": 1,
@@ -245,7 +245,7 @@ class MarketDataWS:
                     "id": req_id,
                 }
                 self._pending_subs[req_id] = CHANNEL_SUMMARY
-                ws.send(json.dumps(sub_msg))
+                threading.Timer(1.0, lambda: ws.send(json.dumps(sub_msg))).start()
                 return
 
             # ── Subscribe ACK ──────────────────────────────────────────────────
