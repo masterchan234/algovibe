@@ -258,6 +258,8 @@ from config import DB_PATH_LIVE, DB_PATH_DRYRUN, INITIAL_CAPITAL as _IC
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
 CURRENT_WATCH_PAIR = "btcidr"
+# Pair khusus untuk kebutuhan market analysis (tetap BTC, tidak mengikuti watch pair UI)
+ANALYSIS_PAIR = "btcidr"
 
 # Inisialisasi Market WS untuk dashboard — tidak distart di sini; data ticker
 # dibaca dari cache internal saat dibutuhkan oleh endpoint REST.
@@ -856,11 +858,11 @@ def get_stats():
             except Exception:
                 continue
 
-        tech_data = _get_pair_technicals(CURRENT_WATCH_PAIR)
-        ai_reasoning = db.get_state(f"llm_reasoning_{CURRENT_WATCH_PAIR}")
+        tech_data = _get_pair_technicals(ANALYSIS_PAIR)
+        ai_reasoning = db.get_state(f"llm_reasoning_{ANALYSIS_PAIR}")
         # Ambil last_price dari tech_data jika tersedia (hindari query DB ulang)
         _last_price = tech_data.get('last_price')
-        combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
+        combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
 
         import config as cfg
         
@@ -2160,8 +2162,8 @@ def _build_stats_payload():
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
         # Injeksi Harga Realtime (Prioritas: Trade Stream > Summary > DB)
         ws_tickers = mws.get_tickers()
-        ws_trades = mws.get_trades(CURRENT_WATCH_PAIR)
-        tech_data = _get_pair_technicals(CURRENT_WATCH_PAIR)
+        ws_trades = mws.get_trades(ANALYSIS_PAIR)
+        tech_data = _get_pair_technicals(ANALYSIS_PAIR)
         
         # 1. Ambil dari Trade Stream (Paling Cepat / Sub-detik)
         ws_price = 0
@@ -2171,12 +2173,12 @@ def _build_stats_payload():
             
         # 2. Fallback ke Summary Stream
         if ws_price <= 0:
-            ws_price = float(ws_tickers.get(CURRENT_WATCH_PAIR, {}).get('last', 0))
+            ws_price = float(ws_tickers.get(ANALYSIS_PAIR, {}).get('last', 0))
             
         if ws_price > 0:
             tech_data['last_price'] = ws_price
 
-        ai_reasoning, updated_at = db.get_state_with_time(f"llm_reasoning_{CURRENT_WATCH_PAIR}")
+        ai_reasoning, updated_at = db.get_state_with_time(f"llm_reasoning_{ANALYSIS_PAIR}")
         
         # Validasi Kesegaran Analisis (Jika > 3 menit, anggap stale dan gunakan Technical Fallback)
         is_stale = True
@@ -2189,7 +2191,7 @@ def _build_stats_payload():
             except: pass
                 
         _last_price = tech_data.get('last_price')
-        combined_reasoning = ai_reasoning if (ai_reasoning and not is_stale) else _generate_technical_reasoning(CURRENT_WATCH_PAIR, tech_data, _last_price)
+        combined_reasoning = ai_reasoning if (ai_reasoning and not is_stale) else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
 
         history_since = conn.execute(
             "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
@@ -2741,24 +2743,36 @@ def _build_logs_payload():
     finally:
         conn.close()
 
-def _build_market_trades_payload():
-    """Ambil data trades terbaru dari mws untuk watch pair."""
+def _build_market_trades_payload(limit_total: int = 120, limit_per_pair: int = 12):
+    """Ambil data trades terbaru multi-coin dari cache mws."""
     try:
-        trades = mws.get_trades(CURRENT_WATCH_PAIR)
+        with mws._lock:
+            snapshot = {
+                str(pair).lower(): list(rows[:limit_per_pair])
+                for pair, rows in (mws._trades or {}).items()
+                if rows
+            }
+
         results = []
-        for t in trades:
-            try:
-                # Indodax format confirmed: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
-                results.append({
-                    "time": float(t[1]) * 1000, # index 1 is timestamp
-                    "price": float(t[4]),       # index 4 is price
-                    "amount": float(t[6]),      # index 6 is volume coin
-                    "side": str(t[3]).lower(),  # index 3 is side
-                    "id": t[2]                  # index 2 is sequence
-                })
-            except (IndexError, ValueError, TypeError):
-                continue
-        return results
+        for pair, trades in snapshot.items():
+            for t in trades:
+                try:
+                    # Indodax format: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
+                    raw_ts = float(t[1])
+                    ts_ms = int(raw_ts * 1000) if raw_ts < 1_000_000_000_000 else int(raw_ts)
+                    results.append({
+                        "pair": pair,
+                        "time": ts_ms,
+                        "price": float(t[4]),
+                        "amount": float(t[6]),
+                        "side": str(t[3]).lower(),
+                        "id": t[2],
+                    })
+                except (IndexError, ValueError, TypeError):
+                    continue
+
+        results.sort(key=lambda x: float(x.get("time") or 0), reverse=True)
+        return results[:limit_total]
     except Exception as e:
         logging.error(f"Build trades error: {e}")
         return []

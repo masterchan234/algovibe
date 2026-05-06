@@ -76,22 +76,44 @@ class IndodaxProvider(MarketProvider):
         logger.info("[IndodaxProvider] Started.")
 
     def _initial_subscriptions(self) -> None:
-        """Subscribe to essential trade channels on startup."""
+        """Subscribe to essential and active-universe trade channels on startup."""
         time.sleep(2) # Wait for WS connection
         from app.infrastructure.database import db
         watch_pair = db.get_state('current_watch_pair') or 'btcidr'
-        
-        self._mws.subscribe_market_trades('btcidr')
-        if watch_pair != 'btcidr':
-            self._mws.subscribe_market_trades(watch_pair)
-        
+        pairs = {'btcidr', str(watch_pair).lower()}
+
         # Also subscribe to all open positions
         try:
             with db.get_connection() as conn:
                 rows = conn.execute("SELECT pair FROM positions").fetchall()
                 for r in rows:
-                    self._mws.subscribe_market_trades(r['pair'])
-        except Exception: pass
+                    p = str(r['pair'] or '').lower().strip()
+                    if p:
+                        pairs.add(p)
+
+                # Tambahkan universe pair aktif dari ticker_history agar Market Feed tidak BTC-only.
+                # Dibatasi agar tetap ringan saat startup.
+                hist_rows = conn.execute(
+                    "SELECT pair FROM ticker_history ORDER BY updated_at DESC LIMIT 40"
+                ).fetchall()
+                for r in hist_rows:
+                    p = str(r['pair'] or '').lower().strip()
+                    if p:
+                        pairs.add(p)
+        except Exception:
+            pass
+
+        # Subscribe dengan jeda kecil agar tidak burst request ke WS gateway.
+        subscribed = 0
+        for p in sorted(pairs):
+            try:
+                self._mws.subscribe_market_trades(p)
+                subscribed += 1
+                time.sleep(0.03)
+            except Exception:
+                continue
+
+        logger.info(f"[IndodaxProvider] Initial trade subscriptions: {subscribed} pairs")
 
     def stop(self) -> None:
         self._running = False
