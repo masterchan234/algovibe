@@ -44,12 +44,20 @@
           DRY
         </button>
         <button
-          class="mode-btn"
-          :class="{ active: selectedMode === 'live' }"
+          class="mode-btn mode-btn-live"
+          :class="{ active: selectedMode === 'live', holding: isLiveHoldActive }"
           :disabled="isSwitchingMode"
-          @click="handleModeSwitch('live')"
+          :style="liveHoldStyle"
+          @mousedown="startLiveHold"
+          @mouseup="cancelLiveHold"
+          @mouseleave="cancelLiveHold"
+          @touchstart.prevent="startLiveHold"
+          @touchend.prevent="cancelLiveHold"
+          @touchcancel="cancelLiveHold"
+          @click.prevent
+          :title="selectedMode === 'live' ? 'LIVE mode active' : 'Hold to switch to LIVE mode'"
         >
-          LIVE
+          {{ selectedMode === 'live' ? 'LIVE' : (isLiveHoldActive ? 'HOLD…' : 'LIVE') }}
         </button>
       </div>
 
@@ -94,7 +102,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
@@ -112,6 +120,11 @@ const { selectedMode, isLiveMode, selectMode } = useMode()
 
 const isLoggingOut = ref(false)
 const isSwitchingMode = ref(false)
+const isLiveHoldActive = ref(false)
+const liveHoldProgress = ref(0)
+const LIVE_HOLD_MS = 1200
+let liveHoldRaf = null
+let liveHoldStartedAt = 0
 
 const headerClass = computed(() => ({
   'header-live': isLiveMode.value,
@@ -235,6 +248,57 @@ async function handleModeSwitch(mode) {
     isSwitchingMode.value = false
   }
 }
+
+const liveHoldStyle = computed(() => {
+  if (selectedMode.value === 'live') return {}
+  const pct = Math.max(0, Math.min(100, Math.round(liveHoldProgress.value * 100)))
+  return {
+    backgroundImage: `linear-gradient(90deg, rgba(245,166,35,0.35) ${pct}%, rgba(255,255,255,0.02) ${pct}%)`,
+  }
+})
+
+function startLiveHold() {
+  if (isSwitchingMode.value) return
+  if (selectedMode.value === 'live') return
+  if (isLiveHoldActive.value) return
+
+  isLiveHoldActive.value = true
+  liveHoldStartedAt = Date.now()
+  tickLiveHold()
+}
+
+function tickLiveHold() {
+  if (!isLiveHoldActive.value) return
+  const elapsed = Date.now() - liveHoldStartedAt
+  liveHoldProgress.value = Math.min(elapsed / LIVE_HOLD_MS, 1)
+
+  if (liveHoldProgress.value >= 1) {
+    isLiveHoldActive.value = false
+    liveHoldProgress.value = 0
+    if (liveHoldRaf) {
+      cancelAnimationFrame(liveHoldRaf)
+      liveHoldRaf = null
+    }
+    handleModeSwitch('live')
+    return
+  }
+
+  liveHoldRaf = requestAnimationFrame(tickLiveHold)
+}
+
+function cancelLiveHold() {
+  if (!isLiveHoldActive.value) return
+  isLiveHoldActive.value = false
+  liveHoldProgress.value = 0
+  if (liveHoldRaf) {
+    cancelAnimationFrame(liveHoldRaf)
+    liveHoldRaf = null
+  }
+}
+
+onUnmounted(() => {
+  cancelLiveHold()
+})
 </script>
 
 <style scoped>
@@ -397,6 +461,11 @@ async function handleModeSwitch(mode) {
   color: #fff;
   background: rgba(163, 113, 247, 0.22);
   box-shadow: inset 0 0 0 1px rgba(163, 113, 247, 0.45);
+}
+
+.mode-btn-live.holding {
+  color: #fff4d1;
+  box-shadow: inset 0 0 0 1px rgba(245, 166, 35, 0.6), 0 0 10px rgba(245, 166, 35, 0.25);
 }
 
 .header-live .mode-btn.active {
