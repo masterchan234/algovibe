@@ -229,6 +229,21 @@ MIGRATIONS = [
     ("add_ai_prob_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN ai_prob REAL DEFAULT 0.0"),
     ("add_rsi_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN rsi REAL DEFAULT 0.0"),
     ("add_ema_dist_to_trade_analytics", "ALTER TABLE trade_analytics ADD COLUMN ema_dist REAL DEFAULT 0.0"),
+
+    # --- 4. SERVER-SIDE SESSION MANAGEMENT ---
+    ("create_user_sessions", """
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """),
+    ("create_idx_user_sessions_user_id", "CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id)"),
+    ("create_idx_user_sessions_active", "CREATE INDEX IF NOT EXISTS idx_user_sessions_active ON user_sessions(user_id, is_active)"),
 ]
 
 def sync_schema_both_dbs():
