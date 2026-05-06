@@ -231,6 +231,22 @@ async function refreshDashboardState() {
   }
 }
 
+async function waitModeApplied(targetMode) {
+  const targetDry = targetMode === 'dry'
+  const headers = getAuthHeaders()
+  for (let i = 0; i < 6; i += 1) {
+    try {
+      const res = await fetch(`${backendUrl}/api/mode/current`, { headers, credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        if (Boolean(data?.dry_run) === targetDry) return true
+      }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return false
+}
+
 async function handleModeSwitch(mode) {
   if (isSwitchingMode.value) return
   if (mode !== 'dry' && mode !== 'live') return
@@ -239,6 +255,7 @@ async function handleModeSwitch(mode) {
   isSwitchingMode.value = true
   try {
     await selectMode(mode, backendUrl)
+    await waitModeApplied(mode)
     await refreshDashboardState()
     router.push(mode === 'live' ? '/dashboard-live' : '/dashboard-dry')
   } catch (err) {

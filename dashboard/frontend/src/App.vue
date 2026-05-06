@@ -109,6 +109,8 @@ const mobileTab = ref('activity')
 const newsHeadlines = ref([])
 const startTime = ref(Date.now())
 const now = ref(Date.now())
+let newsIntervalId = null
+let clockIntervalId = null
 
 async function fetchNews() {
   try {
@@ -167,8 +169,8 @@ function stopResize() {
 onMounted(() => {
   store.connect()
   fetchNews()
-  setInterval(fetchNews, 5 * 60 * 1000)
-  setInterval(() => { now.value = Date.now() }, 1000)
+  newsIntervalId = setInterval(fetchNews, 5 * 60 * 1000)
+  clockIntervalId = setInterval(() => { now.value = Date.now() }, 1000)
 })
 
 // Global FORCE_LOGOUT listener — redirect to login when session is invalidated
@@ -179,7 +181,16 @@ watch(() => store.forceLogout, (triggered) => {
 })
 
 onUnmounted(() => {
-  // cleanup
+  if (newsIntervalId) {
+    clearInterval(newsIntervalId)
+    newsIntervalId = null
+  }
+  if (clockIntervalId) {
+    clearInterval(clockIntervalId)
+    clockIntervalId = null
+  }
+  // Ensure no dangling listeners when user leaves during drag-resize.
+  stopResize()
 })
 </script>
 

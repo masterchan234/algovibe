@@ -131,6 +131,15 @@ export const useTradeStore = defineStore('trade', () => {
   // Radar data
   const radarPairs = ref([])
 
+  function _selectedModeDryRun() {
+    try {
+      const mode = localStorage.getItem('algovibe_mode')
+      if (mode === 'live') return false
+      if (mode === 'dry') return true
+    } catch {}
+    return null
+  }
+
   function _normalizeLogItem(item, index = 0) {
     const createdAt = item?.created_at || new Date().toISOString()
     const pair = item?.pair || 'SYSTEM'
@@ -255,6 +264,10 @@ export const useTradeStore = defineStore('trade', () => {
       _throttleStats(() => {
         // Skip non-critical updates when page is hidden (Visibility API)
         if (!_pageVisible.value) return
+        const selectedDry = _selectedModeDryRun()
+        if (selectedDry !== null && typeof data?.dry_run === 'boolean' && data.dry_run !== selectedDry) {
+          return
+        }
         lastSocketStatsAt.value = Date.now()
         statsSource.value = 'socket'
         Object.assign(stats, {
@@ -310,8 +323,16 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('trades_update', (data) => {
       _throttleTrades(() => {
-        if (Array.isArray(data)) {
-          positions.value = data
+        const selectedDry = _selectedModeDryRun()
+        const payloadItems = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : null)
+        const payloadDry = typeof data?.dry_run === 'boolean' ? data.dry_run : null
+
+        if (selectedDry !== null && payloadDry !== null && payloadDry !== selectedDry) {
+          return
+        }
+
+        if (Array.isArray(payloadItems)) {
+          positions.value = payloadItems
         }
       })
     })

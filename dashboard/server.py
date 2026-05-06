@@ -810,12 +810,14 @@ def get_stats():
     conn = get_db_connection()
     try:
         import config as cfg
+        dr_val = 1 if _is_dry_run() else 0
         # PnL & Daily Trades
         stats = conn.execute("SELECT * FROM bot_state").fetchall()
         stats_dict = {row['key']: row['value'] for row in stats}
 
         # Open Positions
         positions = conn.execute("SELECT * FROM positions").fetchall()
+        mode_positions = [p for p in positions if int(p['dry_run'] or 0) == dr_val]
 
         # 1. LIVE STATS (Real Money)
         live_stats = conn.execute(
@@ -841,7 +843,7 @@ def get_stats():
 
         # Unrealized PnL estimasi dari ticker_history last price
         unrealized_pnl = 0.0
-        for pos in positions:
+        for pos in mode_positions:
             try:
                 pair = pos['pair']
                 entry_price = float(pos['entry_price'] or 0)
@@ -868,7 +870,7 @@ def get_stats():
         
         # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
         # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
-        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in positions])
+        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in mode_positions])
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
 
@@ -907,7 +909,8 @@ def get_stats():
                 total_equity = idr_total + coin_equity_idr
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
-        utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
+        used_for_utilization = total_used_idr if dr_val == 1 else float(idr_used or 0)
+        utilization_pct = (used_for_utilization / (available_idr + used_for_utilization) * 100) if (available_idr + used_for_utilization) > 0 else 0
         
         # Performance definitions
         perf = db.get_daily_stats()
@@ -928,8 +931,7 @@ def get_stats():
         best_trade = float(best_trade_row[0] or 0)
 
         # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
-        _dr_val = 1 if _is_dry_run() else 0
-        active_positions_count = len([p for p in positions if int(p['dry_run'] or 0) == _dr_val])
+        active_positions_count = len(mode_positions)
 
         return jsonify({
             "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
@@ -1585,7 +1587,7 @@ def select_mode():
     # Push stats_update langsung agar frontend tidak tunggu 5s push loop
     try:
         socketio.emit('stats_update', _build_stats_payload())
-        socketio.emit('trades_update', _build_trades_payload())
+        socketio.emit('trades_update', _build_trades_update_packet())
     except:
         pass
 
@@ -2647,6 +2649,13 @@ def _build_trades_payload():
     finally:
         conn.close()
 
+def _build_trades_update_packet():
+    """Bundle trades with active mode marker to avoid stale cross-mode UI updates."""
+    return {
+        "dry_run": bool(_is_dry_run()),
+        "items": _build_trades_payload(),
+    }
+
 def _build_logs_payload():
     """Ambil log sinyal AI, oracle, dan system events dari DB."""
     conn = get_db_connection()
@@ -2871,7 +2880,7 @@ def push_data_loop():
                 _slow_counter = 0
                 socketio.emit('stats_update',  _build_stats_payload())
                 socketio.emit('radar_update',  _build_radar_payload())
-                socketio.emit('trades_update', _build_trades_payload())
+                socketio.emit('trades_update', _build_trades_update_packet())
                 socketio.emit('logs_update',   _build_logs_payload())
         except Exception as e:
             print(f"WS Error: {e}")
