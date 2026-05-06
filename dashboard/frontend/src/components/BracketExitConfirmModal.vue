@@ -45,11 +45,11 @@
 
           <!-- Action Buttons -->
           <div class="bec-actions">
-            <button class="bec-btn bec-btn-abort" @click="respond('ABORT')">
-              🛡️ ABORT &amp; HOLD
+            <button class="bec-btn bec-btn-abort" @click="respond('ABORT')" :disabled="pending">
+              {{ pending ? '⏳ WAITING...' : '🛡️ ABORT &amp; HOLD' }}
             </button>
-            <button class="bec-btn bec-btn-confirm" @click="respond('CONFIRM')">
-              ✅ CONFIRM EXIT
+            <button class="bec-btn bec-btn-confirm" @click="respond('CONFIRM')" :disabled="pending">
+              {{ pending ? '⏳ WAITING...' : '✅ CONFIRM EXIT' }}
             </button>
           </div>
         </div>
@@ -59,10 +59,11 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useTradeStore } from '../stores/trade'
 
 const store = useTradeStore()
+const pending = ref(false)
 
 const lossText = computed(() => {
   const idr = store.bracketExitConfirm?.projected_pnl ?? 0
@@ -77,12 +78,14 @@ const pairsText = computed(() => {
 
 function respond(decision) {
   const data = store.bracketExitConfirm
-  if (!data) return
+  if (!data || pending.value) return
+  pending.value = true
   store.socket?.emit('bracket_exit_response', {
     exit_id: data.exit_id,
     decision,
   })
-  store.bracketExitConfirm = null
+  // Modal dismisses on bracket_exit_confirm_cleared event (handled in store),
+  // not immediately, so the operator sees visual feedback until server confirms.
 }
 </script>
 

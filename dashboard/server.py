@@ -2718,10 +2718,10 @@ def push_data_loop():
                         and bec.get("exit_id") != _last_bracket_exit_id
                     ):
                         _last_bracket_exit_id = bec.get("exit_id")
-                        socketio.emit('bracket_exit_confirm', bec)
+                        socketio.emit('bracket_exit_confirm', bec, room='authenticated')
                 elif _last_bracket_exit_id is not None:
                     # Resolved — tell frontend to dismiss
-                    socketio.emit('bracket_exit_confirm_cleared', {})
+                    socketio.emit('bracket_exit_confirm_cleared', {}, room='authenticated')
                     _last_bracket_exit_id = None
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
@@ -2778,6 +2778,7 @@ def handle_bracket_exit_response(data):
     try:
         raw = db.get_state("bracket_exit_confirm")
         if not raw:
+            logging.debug(f"[BracketExit] No pending confirmation found for exit_id={exit_id}")
             return
         pending = json.loads(raw)
         if pending.get("exit_id") != exit_id:
