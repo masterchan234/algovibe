@@ -102,6 +102,10 @@ export const useTradeStore = defineStore('trade', () => {
     // Momentum Equity Protection
     momentum_state: 'STALLING',
     net_pnl_velocity: 0,
+    entry_gate_state: '',
+    entry_gate_reason: '',
+    entry_gate_pair: '',
+    entry_gate_at: '',
   })
 
   // Open positions (trades)
@@ -295,6 +299,10 @@ export const useTradeStore = defineStore('trade', () => {
           btc_crash: data.btc_crash ?? false,
           momentum_state: data.momentum_state ?? 'STALLING',
           net_pnl_velocity: data.net_pnl_velocity ?? 0,
+          entry_gate_state: data.entry_gate_state ?? '',
+          entry_gate_reason: data.entry_gate_reason ?? '',
+          entry_gate_pair: data.entry_gate_pair ?? '',
+          entry_gate_at: data.entry_gate_at ?? '',
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })

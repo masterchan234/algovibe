@@ -72,6 +72,29 @@ function clearMode() {
   document.body.classList.remove('theme-live', 'theme-dry')
 }
 
+/**
+ * Fetch the engine's actual mode from DB (source of truth) and align
+ * localStorage + reactive state with it. Called after every login so
+ * the frontend never shows a stale mode from a previous session.
+ */
+async function syncModeFromBackend(backendUrl = '') {
+  const { getAuthHeaders } = useAuth()
+  try {
+    const res = await fetch(`${backendUrl}/api/mode/current`, {
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    const engineMode = data.dry_run ? 'dry' : 'live'
+    selectedMode.value = engineMode
+    localStorage.setItem(_MODE_KEY, engineMode)
+    _applyTheme(engineMode)
+  } catch {
+    // Network error: keep whatever is in localStorage — user will be asked to select
+  }
+}
+
 function _getCookie(name) {
   const value = `; ${document.cookie}`
   const parts = value.split(`; ${name}=`)
@@ -88,5 +111,6 @@ export function useMode() {
     apiBase,
     selectMode,
     clearMode,
+    syncModeFromBackend,
   }
 }

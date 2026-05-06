@@ -1538,6 +1538,21 @@ def trade_manual_exit():
     logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net,0)} IDR)")
     return jsonify({"status": "exit_requested", "pair": pair})
 
+@app.route('/api/mode/current')
+@login_required
+def get_current_mode():
+    """Return the engine's active mode directly from DB — the single source of truth.
+    Frontend calls this on login to sync localStorage with actual engine state."""
+    raw = db.get_state('dry_run')
+    if raw is None:
+        is_dry = True  # safe default
+    else:
+        is_dry = str(raw).lower() in ('1', 'true')
+    return jsonify({
+        'mode': 'DRY' if is_dry else 'LIVE',
+        'dry_run': is_dry,
+    })
+
 @app.route('/api/bot/select-mode', methods=['POST'])
 @login_required
 def select_mode():
@@ -2375,6 +2390,11 @@ def _build_stats_payload():
             # Momentum Equity Protection indicators
             "momentum_state":    db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
+            # Entry gate status (operator visibility for LIVE mode)
+            "entry_gate_state":  stats_dict.get("entry_gate_state", ""),
+            "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
+            "entry_gate_pair":   stats_dict.get("entry_gate_pair", ""),
+            "entry_gate_at":     stats_dict.get("entry_gate_at", ""),
         }
         return payload
     finally:

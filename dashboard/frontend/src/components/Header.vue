@@ -27,6 +27,10 @@
         <span class="bubble-label">Regime</span>
         <span class="bubble-value" :class="regimeClass">{{ stats.regime }}</span>
       </div>
+      <div class="stat-bubble" v-if="isLiveMode && gateBadgeText">
+        <span class="bubble-label">Entry Gate</span>
+        <span class="bubble-value" :class="gateBadgeClass" :title="gateTooltip">{{ gateBadgeText }}</span>
+      </div>
     </div>
 
     <div class="header-right">
@@ -76,6 +80,32 @@ const regimeClass = computed(() => {
   if (r.includes('BULL')) return 'c-bull'
   if (r.includes('BEAR')) return 'c-bear'
   return 'c-neutral'
+})
+
+const gateBadgeText = computed(() => {
+  const state = String(props.stats.entry_gate_state || '')
+  if (!state) return ''
+  if (state === 'GATED') {
+    const pair = String(props.stats.entry_gate_pair || '').toUpperCase()
+    return pair ? `GATED ${pair}` : 'GATED'
+  }
+  if (state === 'LIVE_ENTRY_EXECUTED') return 'ENTRY EXECUTED'
+  return ''
+})
+
+const gateBadgeClass = computed(() => {
+  const state = String(props.stats.entry_gate_state || '')
+  if (state === 'GATED') return 'c-gated'
+  if (state === 'LIVE_ENTRY_EXECUTED') return 'c-bull'
+  return 'c-neutral'
+})
+
+const gateTooltip = computed(() => {
+  const reason = String(props.stats.entry_gate_reason || '').trim()
+  const at = String(props.stats.entry_gate_at || '').trim()
+  if (reason && at) return `${reason} (${at})`
+  if (reason) return reason
+  return 'Entry gate status'
 })
 
 function formatNumber(val) {
@@ -222,6 +252,7 @@ async function handleLogout() {
 
 .c-bull { color: #00ff88; }
 .c-bear { color: #ff3366; }
+.c-gated { color: #f5a623; }
 .c-neutral { color: #888; }
 
 .header-right {

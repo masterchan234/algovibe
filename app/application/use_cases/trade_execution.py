@@ -33,6 +33,25 @@ def execute_trade(
     taker=False,
 ):
     try:
+        def _mark_gate(reason: str):
+            try:
+                db.save_state("entry_gate_state", "GATED")
+                db.save_state("entry_gate_reason", str(reason)[:240])
+                db.save_state("entry_gate_pair", pair)
+                db.save_state("entry_gate_at", datetime.now().isoformat())
+            except Exception:
+                pass
+
+        def _mark_entry_ok():
+            try:
+                state_label = "DRY_ENTRY_EXECUTED" if config.DRY_RUN else "LIVE_ENTRY_EXECUTED"
+                db.save_state("entry_gate_state", state_label)
+                db.save_state("entry_gate_reason", "Entry executed successfully")
+                db.save_state("entry_gate_pair", pair)
+                db.save_state("entry_gate_at", datetime.now().isoformat())
+            except Exception:
+                pass
+
         # --- [Risk Check: Max Positions] ---
         active_count = db.get_active_positions_count(dry_run=1 if config.DRY_RUN else 0)
         
@@ -48,6 +67,7 @@ def execute_trade(
                 
         if active_count >= effective_max_pos:
             log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached for account size.")
+            _mark_gate(f"Max active positions reached ({effective_max_pos})")
             return False
 
         # --- [Risk Check: Dynamic Liquidity Guard] ---
@@ -58,6 +78,7 @@ def execute_trade(
         # 1. Global Minimum check
         if vol_24h < MIN_VOLUME_FILTER:
             log_message(f"⚠️ SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
+            _mark_gate(f"24h volume below minimum filter: {vol_24h:,.0f}")
             return False
 
         # Position sizing: velocity_score and confidence both derived from pure technical probability.
@@ -69,6 +90,7 @@ def execute_trade(
         
         if multiplier <= 0:
             log_message(f"SKIP: Oracle blocked trade ({bot.oracle.get_rationale(pair, 'SKIP_REGIME')})")
+            _mark_gate("Oracle blocked trade for current regime")
             return False
 
         if config.DRY_RUN:
@@ -90,6 +112,7 @@ def execute_trade(
                 dry_balance = INITIAL_CAPITAL
             if dry_balance < MIN_BALANCE_THRESHOLD:
                 log_message(f"STOP DRY: Simulated balance {dry_balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
+                _mark_gate(f"Dry balance below threshold ({dry_balance:.0f})")
                 return False
             target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
             amount_idr = min(target_amount, dry_balance - MIN_BALANCE_THRESHOLD)
@@ -97,6 +120,7 @@ def execute_trade(
             balance = getattr(bot, 'cached_balance', 0)
             if balance < MIN_BALANCE_THRESHOLD:
                 log_message(f"STOP: Balance {balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
+                _mark_gate(f"Live balance below threshold ({balance:.0f})")
                 return False
             # Use real balance as the basis for sizing in LIVE mode
             target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
@@ -126,10 +150,12 @@ def execute_trade(
         required_vol = amount_idr * LIQUIDITY_MULTIPLIER
         if vol_24h < required_vol:
             log_message(f"⚠️ SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
+            _mark_gate(f"Insufficient liquidity: need {required_vol:,.0f}, got {vol_24h:,.0f}")
             return False
 
         if amount_idr < MIN_TRADE_IDR:
             log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
+            _mark_gate(f"Capital below minimum trade ({amount_idr:.0f})")
             return False
 
         from config import TP_PCT, SL_PCT, ROUND_TRIP_FEE_PCT
@@ -148,6 +174,7 @@ def execute_trade(
                 f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
                 f"Perlu trade lebih besar atau TP lebih tinggi."
             )
+            _mark_gate("Fee viability guard blocked trade")
             return False
 
         history = list(bot.price_history[pair])
@@ -292,9 +319,17 @@ def execute_trade(
         }
 
         db.upsert_position(pair, data)
+        _mark_entry_ok()
         return True
     except Exception as e:
         log_message(f"Trade Error: {e}")
+        try:
+            db.save_state("entry_gate_state", "ERROR")
+            db.save_state("entry_gate_reason", f"Trade execution error: {e}"[:240])
+            db.save_state("entry_gate_pair", pair)
+            db.save_state("entry_gate_at", datetime.now().isoformat())
+        except Exception:
+            pass
         return False
 
 

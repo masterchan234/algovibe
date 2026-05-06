@@ -57,10 +57,12 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
+import { useMode } from '../composables/useMode'
 
 const router = useRouter()
 const route = useRoute()
 const { login } = useAuth()
+const { syncModeFromBackend } = useMode()
 
 const username = ref('')
 const password = ref('')
@@ -87,6 +89,9 @@ async function handleLogin() {
   
   try {
     await login(username.value, password.value, backendUrl)
+    // Sync mode from engine DB before routing so localStorage always
+    // reflects the actual engine state, not a stale previous-session value.
+    await syncModeFromBackend(backendUrl)
     const redirectPath = getSafeRedirectPath(route.query.redirect)
     router.replace(redirectPath || '/mode-select')
   } catch (err) {
