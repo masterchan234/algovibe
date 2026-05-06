@@ -1787,7 +1787,7 @@ def get_radar_data():
                     "volatility": float(row['volatility'] or 0),
                     "score": float(row['score'] or 0),
                     "prediction": float(row['prediction_prob'] or 0.0),
-                    "trend": row['trend'] or 'N/A'
+                    "trend": row['trend'] if row['trend'] not in ('BACKFILLED', None, '') else 'N/A'
                 })
             except: continue
         return jsonify(results)

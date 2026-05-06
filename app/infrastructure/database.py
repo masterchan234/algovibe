@@ -384,7 +384,7 @@ class Database:
             cursor.executemany('''
                 INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                           ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                VALUES (?, ?, 0.0, 'BACKFILLED', 'HOLD', ?, ?, ?, 0.0, 0.0, CURRENT_TIMESTAMP)
+                VALUES (?, ?, 0.0, 'N/A', 'HOLD', ?, ?, ?, 0.0, 0.0, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
                     ch_5m=excluded.ch_5m,

@@ -432,10 +432,10 @@ class BrainInferenceService:
                 logger.error(f"[brain-inference] Signal scan error for {pair}: {e}")
 
     def _update_ticker_history(self, ranked):
-        """Calculate technicals for top pairs and update the ticker_history table."""
+        """Calculate technicals for ALL ranked pairs and update the ticker_history table."""
         updates = []
-        # Process top 50 pairs for the radar
-        for r in ranked[:50]:
+        # Process all ranked pairs so no coin stays stuck with stale/N/A trend
+        for r in ranked:
             pair = r['pair'].lower()
             hist = list(self._history.get(pair, []))
             if len(hist) < 5:
