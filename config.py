@@ -110,7 +110,7 @@ HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
 # NET-ZERO SURVIVAL GUARD
 # ==========================================
 # Master switch — set to False to fully disable the guard without removing code.
-NET_ZERO_SURVIVAL_ENABLED = True
+NET_ZERO_SURVIVAL_ENABLED = False
 
 # PnL velocity (IDR / second) below which the portfolio is considered to be DROPPING.
 # Net-Zero Survival only fires when the most recent velocity sample is at or below
@@ -278,7 +278,7 @@ MIN_PRICE_FILTER = 10
 # AUTO-TRAINER (Background Self-Training)
 # ==========================================
 AUTO_TRAIN_ENABLED         = True
-AUTO_TRAIN_INTERVAL_HOURS  = 6      # Retrain setiap 6 jam
+AUTO_TRAIN_INTERVAL_HOURS  = 1      # Retrain setiap 6 jam
 AUTO_TRAIN_MIN_SAMPLES     = 300    # Minimal closed trades sebelum training diizinkan
 AUTO_TRAIN_MIN_ACCURACY    = 0.55   # Floor accuracy — model baru tidak di-deploy jika di bawah ini
 AUTO_TRAIN_MIN_DELTA       = 0.01   # Model baru harus >= model lama + 1% agar menggantikan
