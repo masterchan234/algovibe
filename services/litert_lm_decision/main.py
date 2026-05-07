@@ -59,6 +59,8 @@ _MIN_REASON_LENGTH = 8
 _MIN_TRUE_CONDITIONS = 2
 _MIN_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
+# Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
+_LLM_TIMEOUT_SEC = 15
 
 
 class LiteRTLmDecisionService:
@@ -76,6 +78,7 @@ class LiteRTLmDecisionService:
         self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "45"))
         self._min_confidence = float(os.getenv("LLM_EXIT_MIN_CONFIDENCE", "80"))
         self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "4"))
+        self._timeout_sec = float(os.getenv("LLM_EXIT_TIMEOUT_SEC", str(_LLM_TIMEOUT_SEC)))
 
         self._engine = None
         self._engine_enabled = self._init_engine()
@@ -167,9 +170,9 @@ class LiteRTLmDecisionService:
             return
 
         now = time.time()
-        evaluated = 0
+        candidates = []
         for pair, pos in open_positions.items():
-            if evaluated >= self._max_pairs_per_cycle:
+            if len(candidates) >= self._max_pairs_per_cycle:
                 break
             if not isinstance(pos, dict):
                 continue
@@ -179,32 +182,60 @@ class LiteRTLmDecisionService:
                 continue
             if (now - self._last_emitted.get(pair, 0)) < self._pair_cooldown_sec:
                 continue
-
             ctx = self._build_pair_context(pair, pos)
-            if not ctx:
+            if ctx:
+                candidates.append((pair, ctx))
+
+        if not candidates:
+            return
+
+        # Evaluasi semua kandidat secara concurrent untuk meminimalkan total latency
+        results = await asyncio.gather(
+            *[self._evaluate_pair(pair, ctx) for pair, ctx in candidates],
+            return_exceptions=True,
+        )
+        for (pair, ctx), result in zip(candidates, results):
+            if isinstance(result, Exception):
+                logger.warning("[litert-lm-decision] Pair %s error: %s", pair, result)
                 continue
-
-            decision = await asyncio.get_running_loop().run_in_executor(None, self._ask_llm, ctx)
-            verdict = self._validate_decision(ctx, decision)
-            evaluated += 1
-
-            if verdict["action"] != "SELL":
+            if result["action"] != "SELL":
                 continue
-
-            self._publish_sell_signal(pair, verdict["confidence"])
+            self._publish_sell_signal(pair, result["confidence"])
             self._last_emitted[pair] = now
             logger.info(
-                "[litert-lm-decision] 🔻 SELL %s (%s%%) | %s",
+                "[litert-lm-decision] 🔻 SELL %s (%.0f%%) | %s",
                 pair,
-                verdict["confidence"],
-                verdict["reason"],
+                result["confidence"],
+                result["reason"],
             )
             db.log_system_event(
                 pair,
                 "LLM_EXIT_SIGNAL",
-                f"[{verdict['confidence']:.0f}%] {verdict['reason']}",
+                f"[{result['confidence']:.0f}%] {result['reason']}",
                 "WARNING",
             )
+
+    async def _evaluate_pair(self, pair: str, ctx: dict) -> dict:
+        """Jalankan inferensi LLM untuk satu pair dengan timeout dan logging latency."""
+        loop = asyncio.get_running_loop()
+        t0 = time.perf_counter()
+        try:
+            decision = await asyncio.wait_for(
+                loop.run_in_executor(None, self._ask_llm, ctx),
+                timeout=self._timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            logger.warning(
+                "[litert-lm-decision] ⏱ Timeout %s setelah %.0f ms (limit %.0f s) — HOLD",
+                pair, elapsed_ms, self._timeout_sec,
+            )
+            return {"action": "HOLD", "confidence": 0.0, "reason": "llm_timeout"}
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.debug("[litert-lm-decision] %s inferensi %.0f ms", pair, elapsed_ms)
+        if elapsed_ms > 5000:
+            logger.warning("[litert-lm-decision] ⚠ Inferensi lambat %s: %.0f ms", pair, elapsed_ms)
+        return self._validate_decision(ctx, decision)
 
     def _build_pair_context(self, pair: str, pos: dict) -> dict | None:
         ticker = self._tickers.get(pair, {})
@@ -297,7 +328,7 @@ class LiteRTLmDecisionService:
             text = self._extract_text(raw)
             return self._parse_json(text)
         except Exception as exc:
-            logger.debug("[litert-lm-decision] LLM call failed: %s", exc)
+            logger.warning("[litert-lm-decision] LLM call failed: %s", exc)
             return {"action": "HOLD", "confidence": 0, "reason": "llm_error", "evidence": []}
 
     @staticmethod
