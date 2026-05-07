@@ -583,7 +583,7 @@ function formatIdr(val) {
 .stream-tabs button { flex: 1; background: transparent; border: none; padding: 14px 0; color: #8b949e; font-size: 11px; font-weight: 800; cursor: pointer; }
 .stream-tabs button.active { color: #e6edf3; }
 
-.tab-indicator { position: absolute; bottom: 0; height: 2px; width: 33.33%; transition: all 0.3s; }
+.tab-indicator { position: absolute; bottom: 0; height: 2px; width: calc(100% / 3); transition: all 0.3s; }
 .tab-indicator.market  { transform: translateX(0);   background: #58a6ff; }
 .tab-indicator.analisa { transform: translateX(100%); background: #a371f7; }
 .tab-indicator.llm     { transform: translateX(200%); background: #ff3366; }
