@@ -110,8 +110,6 @@ class BrainInferenceService:
         
         # Load blacklist
         self.blacklist = set(db.get_blacklist())
-        self.daily_trades = int(db.get_state("daily_trades", 0) or 0)
-        self.start_day = int(db.get_state("start_day", datetime.now().day) or datetime.now().day)
 
     async def start(self) -> None:
         self._running = True
@@ -325,17 +323,6 @@ class BrainInferenceService:
         if not ranked:
             return
 
-        # Monolith parity: reset daily counters on calendar day rollover.
-        current_day = datetime.now().day
-        if current_day != self.start_day:
-            self.daily_trades = 0
-            self.start_day = current_day
-            db.save_state("daily_trades", 0)
-            db.save_state("start_day", current_day)
-            db.save_state("session_mode", "NORMAL")
-            db.save_state("session_buy_enabled", "true")
-            db.save_state("session_latched", "false")
-
         regime = self.oracle.get_market_regime()
         open_positions = db.get_open_positions()
 
@@ -388,9 +375,6 @@ class BrainInferenceService:
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
             try:
-                if self.daily_trades >= config.MAX_TRADES_PER_DAY:
-                    break
-
                 # Prepare mock for enrichment/gates
                 bot_mock.price_history[pair] = self._history.get(pair, deque())
                 
@@ -423,8 +407,6 @@ class BrainInferenceService:
                     
                     # Use "signal" topic for ZMQ multipart
                     self._signal_pub.send(sig.SerializeToString(), topic="signal")
-                    self.daily_trades += 1
-                    db.save_state("daily_trades", self.daily_trades)
                     if recovery_mode:
                         recovery_new_positions += 1
                     
