@@ -54,6 +54,11 @@ _ALLOWED_EVIDENCE = {
     "FEE_HEADWIND",
 }
 
+_MIN_TECH_SELL_SCORE = 5.0
+_MIN_REASON_LENGTH = 8
+_MIN_TRUE_CONDITIONS = 2
+_MIN_SUPPORTED_EVIDENCE = 1
+
 
 class LiteRTLmDecisionService:
     def __init__(self):
@@ -173,7 +178,7 @@ class LiteRTLmDecisionService:
             if not ctx:
                 continue
 
-            decision = await asyncio.get_event_loop().run_in_executor(
+            decision = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: self._ask_llm(ctx)
             )
             verdict = self._validate_decision(ctx, decision)
@@ -328,7 +333,7 @@ class LiteRTLmDecisionService:
         conditions = {
             "TECH_SELL": (
                 str(ctx["tech_sig"].get("verdict", "")).upper() == "SELL"
-                and float(ctx["tech_sig"].get("sell_score", 0) or 0) >= 5.0
+                and float(ctx["tech_sig"].get("sell_score", 0) or 0) >= _MIN_TECH_SELL_SCORE
             ),
             "NEGATIVE_PNL_AFTER_FEES": ctx["net_pnl_pct"] <= 0.0,
             "MOMENTUM_DOWN": ctx["ch_5m"] < 0 and ctx["ch_15m"] <= 0,
@@ -341,9 +346,9 @@ class LiteRTLmDecisionService:
         if (
             action == "SELL"
             and confidence >= self._min_confidence
-            and len(reason) >= 8
-            and len(true_conditions) >= 2
-            and len(supported) >= 1
+            and len(reason) >= _MIN_REASON_LENGTH
+            and len(true_conditions) >= _MIN_TRUE_CONDITIONS
+            and len(supported) >= _MIN_SUPPORTED_EVIDENCE
         ):
             return {
                 "action": "SELL",
@@ -386,4 +391,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

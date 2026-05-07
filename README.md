@@ -116,6 +116,13 @@ python3 -m services.litert_lm_decision.main
 python3 -m dashboard.server
 ```
 
+Konfigurasi opsional untuk `litert-lm-decision` (via `.env`):
+
+- `LLM_EXIT_INTERVAL_SEC` (default: `20`)
+- `LLM_EXIT_COOLDOWN_SEC` (default: `45`)
+- `LLM_EXIT_MIN_CONFIDENCE` (default: `80`)
+- `LLM_EXIT_MAX_PAIRS` (default: `4`)
+
 ---
 
 ## 🎭 Kecerdasan Oracle: Market Regimes
