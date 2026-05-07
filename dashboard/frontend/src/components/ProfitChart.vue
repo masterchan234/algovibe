@@ -15,6 +15,13 @@
           <span class="momentum-label">{{ stats.momentum_state || 'STALLING' }}</span>
         </div>
         <div class="momentum-velocity">{{ stats.net_pnl_velocity >= 0 ? '+' : '' }}{{ (stats.net_pnl_velocity || 0).toFixed(1) }} IDR/s</div>
+        <button
+          v-if="stats.consecutive_losses >= 3"
+          class="unblock-btn"
+          :disabled="isUnblocking"
+          @click="handleUnblock"
+          :title="`Bot di-pause karena ${stats.consecutive_losses} losses berturut-turut. Klik untuk reset.`"
+        >{{ isUnblocking ? '...' : `⛔ UNBLOCK (${stats.consecutive_losses}×)` }}</button>
       </div>
       <div class="kpi-item">
         <div class="kpi-label">Unrealized</div>
@@ -390,6 +397,35 @@ const momentumIcon = computed(() => {
     default:          return '—'
   }
 })
+
+const isUnblocking = ref(false)
+
+async function handleUnblock() {
+  if (isUnblocking.value) return
+  const losses = stats.value?.consecutive_losses ?? 0
+  if (!confirm(`Reset ${losses} consecutive losses dan cabut GLOBAL PAUSE? Bot akan kembali mencari entry.`)) return
+  isUnblocking.value = true
+  try {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    const res = await fetch(`${backendUrl}/api/bot/unblock`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      credentials: 'include',
+    })
+    const data = await res.json()
+    if (data.success) {
+      store.stats.consecutive_losses = 0
+    } else {
+      alert(data.message || 'Unblock gagal.')
+    }
+  } catch (e) {
+    alert('Gagal terhubung ke server.')
+  } finally {
+    isUnblocking.value = false
+  }
+}
 
 function itemClass(pair) {
   const s = pair.score || 0
@@ -862,6 +898,28 @@ onUnmounted(() => {
 .momentum-kpi.momentum-improving { background: rgba(63, 185, 80, 0.04); }
 .momentum-kpi.momentum-dropping  { background: rgba(248, 81, 73, 0.04); }
 .momentum-kpi.momentum-stalling  { background: rgba(210, 153, 34, 0.04); }
+
+.unblock-btn {
+  margin-top: 5px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  border-radius: 4px;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.15s, opacity 0.15s;
+}
+.unblock-btn:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.3);
+}
+.unblock-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 .regime-badge {
   font-size: 10px;

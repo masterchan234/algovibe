@@ -1281,8 +1281,8 @@ class Oracle:
         """
         Analyze global market sentiment across all tracked pairs.
         """
-        # Update regime every 1 minute
-        if datetime.now() - self.last_regime_update < timedelta(minutes=1):
+        # Update regime every 10 seconds (low-latency)
+        if datetime.now() - self.last_regime_update < timedelta(seconds=10):
             return self.last_regime
             
         tickers = self.market_ws.get_tickers()

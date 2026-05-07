@@ -1634,6 +1634,25 @@ def toggle_loose_gates():
     logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
     return jsonify({"success": True, "loose_gates": new_val})
 
+@app.route('/api/bot/unblock', methods=['POST'])
+@login_required
+def unblock_bot():
+    """Reset consecutive_losses counter to lift GLOBAL PAUSE and allow new entries."""
+    try:
+        current = int(db.get_state("consecutive_losses", 0) or 0)
+        db.save_state("consecutive_losses", "0")
+        mode = "DRY" if _is_dry_run() else "LIVE"
+        logging.info(f"[Dashboard] ✅ Bot unblocked ({mode}): consecutive_losses reset from {current} → 0")
+        # Push fresh stats so the frontend badge clears immediately
+        try:
+            socketio.emit('stats_update', _build_stats_payload())
+        except Exception:
+            pass
+        return jsonify({"success": True, "prev_losses": current, "consecutive_losses": 0, "mode": mode})
+    except Exception as e:
+        logging.error(f"[Dashboard] Unblock failed: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/api/bot-status')
 @login_required
 def get_bot_status():
@@ -2419,6 +2438,7 @@ def _build_stats_payload():
             # Momentum Equity Protection indicators
             "momentum_state":    db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
+            "consecutive_losses": int(db.get_state("consecutive_losses", 0) or 0),
             # Entry gate status (operator visibility for LIVE mode)
             "entry_gate_state":  stats_dict.get("entry_gate_state", ""),
             "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
@@ -2927,6 +2947,19 @@ def push_data_loop():
                     _last_bracket_exit_id = None
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
+
+            # Fast: regime update setiap 1s (low-latency)
+            try:
+                _regime_now = db.get_state("market_regime") or "CHOPPY"
+                _sentiment_now = int(db.get_state("market_sentiment_index") or 50)
+                _regime_leader_now = db.get_state("regime_leader") or ""
+                socketio.emit('regime_update', {
+                    "regime": _regime_now,
+                    "market_sentiment_index": _sentiment_now,
+                    "regime_leader": _regime_leader_now,
+                })
+            except Exception as _re:
+                logging.warning(f"[push_data_loop] regime_update error: {_re}")
 
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
