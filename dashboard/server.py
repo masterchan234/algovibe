@@ -109,6 +109,7 @@ def set_csrf_cookie(response):
 
 @socketio.on('ping_latency')
 def handle_ping_latency(data):
+    # logger.debug(f"Ping latency received: {data}")
     emit('pong_latency', data)
 
 @socketio.on('connect')
@@ -987,7 +988,7 @@ def get_stats():
             "quant_audit": quant_audit,
             "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
             "backfill_status": stats_dict.get('backfill_status', 'N/A'),
-            "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',
+            "history_since": conn.execute("SELECT TO_CHAR(MIN(updated_at), 'DD/MM HH24:MI') FROM ticker_history").fetchone()[0] or '--/-- --:--',
             "new_listings": db.get_new_listings(),
             "dry_run": bool(_is_dry_run()),
             "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
@@ -1095,13 +1096,13 @@ def get_pnl_history_api(tf):
         interval = tf_map.get(tf, '-24 hours')
         
         base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
             (interval, dr_val)
         ).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
         trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
             (interval, dr_val)
         ).fetchall()
         
@@ -2249,7 +2250,7 @@ def _build_stats_payload():
         combined_reasoning = ai_reasoning if (ai_reasoning and not is_stale) else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
 
         history_since = conn.execute(
-            "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
+            "SELECT TO_CHAR(MIN(updated_at), 'DD/MM HH24:MI') FROM ticker_history"
         ).fetchone()[0] or '--/-- --:--'
 
         import config as cfg
@@ -2816,7 +2817,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             FROM system_events
             WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()

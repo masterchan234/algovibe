@@ -12,6 +12,11 @@ services:
     volumes:
       - algovibe_pgdata:/var/lib/postgresql/data
       - ./init-pg.sh:/docker-entrypoint-initdb.d/init-pg.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algovibe -d algovibe_live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
     networks:
       - default
@@ -130,6 +135,9 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
@@ -179,6 +187,8 @@ services:
     env_file:
       - .env
     environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
       - GLOG_minloglevel=2          # Suppress C++ glog WARNING from litert/MediaPipe (mel_filterbank etc.)
     volumes:
       - algovibe_data:/app/data
@@ -223,6 +233,8 @@ services:
     env_file:
       - .env
     environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
       - GLOG_minloglevel=2          # Suppress C++ glog WARNING from litert/MediaPipe (mel_filterbank etc.)
     volumes:
       - algovibe_data:/app/data
@@ -262,6 +274,9 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
     ports:
       - "8080:8080"
     volumes:
@@ -310,6 +325,9 @@ services:
         condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
     ports:
       - "8080:8080"
     volumes:

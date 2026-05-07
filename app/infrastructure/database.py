@@ -10,8 +10,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN
+from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN, DATA_PATH
 from .migrations import run_migrations
+import subprocess
+import re
 
 # ── DB Backup Configuration ────────────────────────────────────────────────────
 _DB_BACKUP_INTERVAL_SEC = 6 * 3600   # 6 hours
@@ -649,7 +651,7 @@ class Database:
                     """
                     SELECT COUNT(*) as total
                     FROM trade_history
-                    WHERE created_at >= datetime('now', %s) AND dry_run = %s
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
                     """,
                     (f'-{active_window_hours} hours', int(dry_run))
                 ).fetchone()
@@ -670,7 +672,7 @@ class Database:
                         AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
                         AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
                     FROM trade_history
-                    WHERE created_at >= datetime('now', %s) AND dry_run = %s
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
                     """,
                     (f'-{active_window_hours} hours', int(dry_run))
                 ).fetchone()
@@ -689,7 +691,7 @@ class Database:
                         SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins
                     FROM trade_analytics
                     WHERE status = 'CLOSED'
-                      AND entry_timestamp >= datetime('now', %s)
+                      AND entry_timestamp >= NOW() + (%s)::interval
                       AND dry_run = %s
                     GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
                     """,
@@ -715,7 +717,7 @@ class Database:
                         COUNT(*) as cnt,
                         AVG(pnl_idr) as avg_loss
                     FROM trade_history
-                    WHERE created_at >= datetime('now', %s)
+                    WHERE created_at >= NOW() + (%s)::interval
                       AND dry_run = %s
                       AND pnl_idr < 0
                     GROUP BY reason
@@ -806,15 +808,12 @@ class Database:
         try:
             with self.get_connection() as conn:
                 # Hapus ticker history > 3 hari (karena kita hanya butuh 40 candle terbaru)
-                conn.execute("DELETE FROM ticker_history WHERE updated_at < datetime('now', '-3 days')")
-                # Hapus analytics > 7 hari
-                conn.execute("DELETE FROM trade_analytics WHERE entry_timestamp < datetime('now', '-7 days')")
-                # Hapus sector history > 7 hari
-                conn.execute("DELETE FROM sector_history WHERE timestamp < datetime('now', '-7 days')")
-                # Hapus order logs > 7 hari
-                conn.execute("DELETE FROM order_logs WHERE created_at < datetime('now', '-7 days')")
+                conn.execute("DELETE FROM ticker_history WHERE updated_at < NOW() - INTERVAL '3 days'")
+                conn.execute("DELETE FROM trade_analytics WHERE entry_timestamp < NOW() - INTERVAL '7 days'")
+                conn.execute("DELETE FROM sector_history WHERE timestamp < NOW() - INTERVAL '7 days'")
+                conn.execute("DELETE FROM order_logs WHERE created_at < NOW() - INTERVAL '7 days'")
                 
-                conn.execute("VACUUM") # Kompres file database
+                # conn.execute("VACUUM") # Not needed in Postgres (autovacuum handles it)
                 print(f"Database Cleanup: Old data purged (>{days} days).")
         except Exception as e:
             print(f"Cleanup Error: {e}")
@@ -903,13 +902,67 @@ class Database:
         except Exception:
             return {"bids":[], "asks":[]}
 
+    def create_snapshot(self):
+        """Create a SQL dump of the database using pg_dump."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        db_name = self.db_url.split('/')[-1]
+        filename = f"snapshot_{db_name}_{timestamp}.sql"
+        filepath = os.path.join(DATA_PATH, "backups", filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Parse connection info from self.db_url
+        match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', self.db_url)
+        if not match:
+            logging.error(f"[DB] Could not parse DB URL for backup: {self.db_url}")
+            return None
+        
+        user, password, host, port, dbname = match.groups()
+        
+        try:
+            # Try native pg_dump first
+            try:
+                env = os.environ.copy()
+                env["PGPASSWORD"] = password
+                cmd = [
+                    "pg_dump",
+                    "-h", host,
+                    "-p", port,
+                    "-U", user,
+                    "-f", filepath,
+                    dbname
+                ]
+                subprocess.run(cmd, env=env, check=True, capture_output=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Fallback to docker exec on algovibe-timescaledb container
+                logging.info("[DB] Native pg_dump missing, trying docker exec fallback...")
+                cmd = [
+                    "docker", "exec", "-e", f"PGPASSWORD={password}",
+                    "algovibe-timescaledb",
+                    "pg_dump", "-U", user, dbname
+                ]
+                with open(filepath, "w") as f:
+                    subprocess.run(cmd, stdout=f, check=True)
+            
+            # Prune old snapshots
+            backups_dir = os.path.dirname(filepath)
+            all_backups = sorted([os.path.join(backups_dir, f) for f in os.listdir(backups_dir) if f.startswith(f"snapshot_{db_name}_")])
+            if len(all_backups) > _DB_BACKUP_MAX_SNAPSHOTS:
+                for old_file in all_backups[:-_DB_BACKUP_MAX_SNAPSHOTS]:
+                    os.remove(old_file)
+                    
+            logging.info(f"[DB] Backup created: {filepath}")
+            return filepath
+        except Exception as e:
+            logging.error(f"[DB] Backup failed: {e}")
+            return None
+
     def prune_old_data(self, hours=24):
         """Hapus log sistem yang lebih lama dari X jam agar DB tidak bengkak."""
         try:
             with self.get_connection() as conn:
                 # 1. Prune system_events (logs)
                 res1 = conn.execute(
-                    "DELETE FROM system_events WHERE created_at < datetime('now', %s)",
+                    "DELETE FROM system_events WHERE created_at < NOW() + (%s)::interval",
                     (f'-{hours} hours',)
                 )
                 # 2. Prune market_depth (data orderbook lama yang tidak relevan)

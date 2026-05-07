@@ -78,7 +78,7 @@
       <div class="footer-right hide-mobile">
         <div class="system-stats">
           <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
-          <span class="stat-item">LATENCY: <span class="v">{{ store.latency }}ms</span></span>
+          <span class="stat-item">LATENCY: <span class="v">{{ store.latency || 0 }}ms</span></span>
         </div>
       </div>
     </footer>

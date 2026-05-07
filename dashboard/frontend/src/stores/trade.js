@@ -69,6 +69,7 @@ export const useTradeStore = defineStore('trade', () => {
     win_rate: 0,
     active_positions: 0,
     unrealized_pnl: 0,
+    net_pnl: 0,
     regime: 'CHOPPY',
     regime_leader: '',
     market_sentiment_index: 50,

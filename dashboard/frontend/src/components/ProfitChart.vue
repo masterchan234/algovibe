@@ -3,7 +3,13 @@
     <!-- KPI Bar -->
     <div class="kpi-bar">
       <div class="kpi-item">
-        <div class="kpi-label">Total PnL</div>
+        <div class="kpi-label">Net PnL (All-Time)</div>
+        <div class="kpi-value" :class="stats.net_pnl >= 0 ? 'positive' : 'negative'">
+          {{ formatIdr(stats.net_pnl) }}
+        </div>
+      </div>
+      <div class="kpi-item">
+        <div class="kpi-label">Realized</div>
         <div class="kpi-value" :class="stats.daily_pnl >= 0 ? 'positive' : 'negative'">
           {{ formatIdr(stats.daily_pnl) }}
         </div>
@@ -73,8 +79,8 @@
             <button :class="{ active: timeframe === '1h' }" @click="setTimeframe('1h')">1H</button>
             <button :class="{ active: timeframe === '24h' }" @click="setTimeframe('24h')">24H</button>
           </div>
-          <div class="intel-chip" :class="stats.daily_pnl >= 0 ? 'bullish' : 'bearish'">
-            {{ stats.daily_pnl >= 0 ? 'WINNING SESSION' : 'RECOVERY MODE' }}
+          <div class="intel-chip" :class="stats.net_pnl >= 0 ? 'bullish' : 'bearish'">
+            {{ stats.net_pnl >= 0 ? 'NET GAIN' : 'NET RECOVERY' }}
           </div>
         </div>
       </div>

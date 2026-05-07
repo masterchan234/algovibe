@@ -209,6 +209,7 @@ async function refreshDashboardState() {
       win_rate: data.win_rate ?? 0,
       active_positions: data.active_positions ?? 0,
       unrealized_pnl: data.unrealized_pnl ?? 0,
+      net_pnl: data.net_pnl ?? 0,
       regime: data.regime ?? 'CHOPPY',
       latest_llm_insight: data.latest_llm_insight ?? '',
       hero_ai_insight: data.hero_ai_insight ?? 'Waiting for AI analysis...',

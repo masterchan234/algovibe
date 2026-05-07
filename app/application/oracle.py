@@ -126,7 +126,7 @@ class Oracle:
             # ── Tier 2a: Per-Pair Win/Loss History ─────────────────────────
             try:
                 recent_pair_trades = conn.execute(
-                    "SELECT pnl_idr FROM trade_history WHERE pair = ? "
+                    "SELECT pnl_idr FROM trade_history WHERE pair = %s "
                     "AND reason != 'BACKTEST' ORDER BY id DESC LIMIT 5",
                     (pair,)
                 ).fetchall()
@@ -157,7 +157,7 @@ class Oracle:
             # ── Tier 2c: Price Momentum (5m, 15m, 1h) ──────────────────────
             try:
                 ticker_row = conn.execute(
-                    "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = ?",
+                    "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = %s",
                     (pair,)
                 ).fetchone()
                 if ticker_row:
@@ -264,7 +264,7 @@ class Oracle:
 
             # 1. Ticker History
             row = conn.execute(
-                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
             ).fetchone()
             prices = json.loads(row['history_json']) if (row and row['history_json']) else []
             
@@ -278,7 +278,7 @@ class Oracle:
 
             # 3. Order Book Microstructure
             depth_rows = conn.execute(
-                "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
+                "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s", (pair,)
             ).fetchall()
             bids = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 1]
             asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
@@ -406,14 +406,14 @@ class Oracle:
                 conn = db.get_raw_connection()
                 try:
                     row = conn.execute(
-                        "SELECT history_json FROM ticker_history WHERE pair = ?",
+                        "SELECT history_json FROM ticker_history WHERE pair = %s",
                         (on_demand_pair,)
                     ).fetchone()
                     prices = json.loads(row['history_json']) if (row and row['history_json']) else []
                     tech = get_technical_summary(prices)
 
                     depth = conn.execute(
-                        "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?",
+                        "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s",
                         (on_demand_pair,)
                     ).fetchall()
                     bids = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 1]
