@@ -54,10 +54,21 @@ _ALLOWED_EVIDENCE = {
     "FEE_HEADWIND",
 }
 
+_ALLOWED_ENTRY_EVIDENCE = {
+    "TECH_BUY",
+    "MOMENTUM_UP",
+    "ORDERBOOK_BID_DOMINANCE",
+    "VOLUME_SURGE",
+    "SPREAD_OK",
+}
+
 _MIN_TECH_SELL_SCORE = 5.0
+_MIN_TECH_BUY_SCORE = 4.0
 _MIN_REASON_LENGTH = 8
 _MIN_TRUE_CONDITIONS = 2
 _MIN_SUPPORTED_EVIDENCE = 1
+_MIN_ENTRY_TRUE_CONDITIONS = 2
+_MIN_ENTRY_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
 # Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
 _LLM_TIMEOUT_SEC = 15
@@ -79,6 +90,13 @@ class LiteRTLmDecisionService:
         self._min_confidence = float(os.getenv("LLM_EXIT_MIN_CONFIDENCE", "80"))
         self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "4"))
         self._timeout_sec = float(os.getenv("LLM_EXIT_TIMEOUT_SEC", str(_LLM_TIMEOUT_SEC)))
+
+        # Konfigurasi scan entry realtime (300+ pair)
+        self._scan_interval_sec = int(os.getenv("LLM_SCAN_INTERVAL_SEC", "30"))
+        self._scan_max_pairs = int(os.getenv("LLM_SCAN_MAX_PAIRS", "5"))
+        self._scan_min_confidence = float(os.getenv("LLM_SCAN_MIN_CONFIDENCE", "75"))
+        self._scan_min_vol_idr = float(os.getenv("LLM_SCAN_MIN_VOL_IDR", "1000000"))
+        self._last_scanned: dict = {}  # {pair: timestamp} cooldown untuk scan entry
 
         self._engine = None
         self._engine_enabled = self._init_engine()
@@ -109,6 +127,7 @@ class LiteRTLmDecisionService:
         await asyncio.gather(
             self._consume_ticks(),
             self._decision_loop(),
+            self._scan_loop(),
             self._stop_event.wait(),
         )
 
@@ -160,6 +179,103 @@ class LiteRTLmDecisionService:
             except Exception as exc:
                 logger.error("[litert-lm-decision] Decision cycle error: %s", exc)
             await asyncio.sleep(self._interval_sec)
+
+    async def _scan_loop(self):
+        """Loop scan entry realtime untuk 300+ pair dari WebSocket."""
+        while self._running:
+            try:
+                await self._scan_cycle()
+            except Exception as exc:
+                logger.error("[litert-lm-decision] Scan cycle error: %s", exc)
+            await asyncio.sleep(self._scan_interval_sec)
+
+    async def _scan_cycle(self):
+        """
+        Pre-filter 300+ pair via technical indicators (tanpa LLM), ambil top N
+        kandidat terkuat, lalu kirim ke LLM untuk konfirmasi entry secara concurrent.
+        """
+        if not self._engine_enabled:
+            return
+        if not self._tickers:
+            return
+
+        now = time.time()
+        open_positions = db.get_open_positions() or {}
+
+        # --- Fase 1: pre-filter cepat tanpa LLM ---
+        pre_candidates = []
+        for pair, ticker in self._tickers.items():
+            # Lewati pair yang sudah dalam posisi terbuka
+            if pair in open_positions:
+                continue
+            # Cooldown: hindari spam LLM untuk pair yang baru saja di-scan
+            if (now - self._last_scanned.get(pair, 0)) < self._pair_cooldown_sec:
+                continue
+            # Filter volume minimum
+            vol_idr = float(ticker.get("vol_idr", 0) or 0)
+            if vol_idr < self._scan_min_vol_idr:
+                continue
+
+            prices = list(self._history.get(pair, []))
+            if len(prices) < 30:
+                continue
+
+            tech = get_technical_summary(prices)
+            tech_sig = derive_trade_signal(tech)
+            buy_score = float(tech_sig.get("buy_score", 0) or 0)
+            if buy_score < _MIN_TECH_BUY_SCORE:
+                continue
+
+            pre_candidates.append((pair, buy_score, ticker, prices, tech, tech_sig))
+
+        if not pre_candidates:
+            return
+
+        # Ambil top N berdasarkan buy_score tertinggi
+        pre_candidates.sort(key=lambda x: x[1], reverse=True)
+        pre_candidates = pre_candidates[: self._scan_max_pairs]
+
+        # --- Fase 2: bangun konteks dan jalankan LLM concurrent ---
+        ctx_list = []
+        for pair, _score, ticker, prices, tech, tech_sig in pre_candidates:
+            ctx = self._build_scan_context(pair, ticker, prices, tech, tech_sig)
+            if ctx:
+                ctx_list.append((pair, ctx))
+
+        if not ctx_list:
+            return
+
+        logger.debug(
+            "[litert-lm-decision] Scan: %d kandidat dikirim ke LLM",
+            len(ctx_list),
+        )
+
+        results = await asyncio.gather(
+            *[self._evaluate_scan_pair(pair, ctx) for pair, ctx in ctx_list],
+            return_exceptions=True,
+        )
+
+        for (pair, ctx), result in zip(ctx_list, results):
+            # Catat waktu scan agar cooldown berjalan (terlepas dari hasilnya)
+            self._last_scanned[pair] = now
+            if isinstance(result, Exception):
+                logger.warning("[litert-lm-decision] Scan %s error: %s", pair, result)
+                continue
+            if result["action"] != "BUY":
+                continue
+            self._publish_buy_signal(pair, result["confidence"])
+            logger.info(
+                "[litert-lm-decision] 🟢 BUY %s (%.0f%%) | %s",
+                pair,
+                result["confidence"],
+                result["reason"],
+            )
+            db.log_system_event(
+                pair,
+                "LLM_ENTRY_SIGNAL",
+                f"[{result['confidence']:.0f}%] {result['reason']}",
+                "INFO",
+            )
 
     async def _evaluate_cycle(self):
         if not self._engine_enabled:
@@ -297,6 +413,50 @@ class LiteRTLmDecisionService:
             "ch_15m": ch_15m,
         }
 
+    def _build_scan_context(
+        self,
+        pair: str,
+        ticker: dict,
+        prices: list,
+        tech: dict,
+        tech_sig: dict,
+    ) -> dict | None:
+        """Bangun konteks market untuk analisa entry (tanpa data posisi terbuka)."""
+        current_price = float(ticker.get("last") or 0)
+        if current_price <= 0 or len(prices) < 30:
+            return None
+
+        vol_idr = float(ticker.get("vol_idr", 0) or 0)
+        bid = float(ticker.get("bid", current_price) or current_price)
+        ask = float(ticker.get("ask", current_price) or current_price)
+        spread_pct = ((ask - bid) / bid * 100.0) if bid > 0 else 0.0
+
+        depth = db.get_market_depth(pair)
+        bids = depth.get("bids", []) if isinstance(depth, dict) else []
+        asks = depth.get("asks", []) if isinstance(depth, dict) else []
+        total_bid = sum(float(b.get("vol", 0) or 0) for b in bids)
+        total_ask = sum(float(a.get("vol", 0) or 0) for a in asks)
+        total_depth = total_bid + total_ask
+        buy_pressure = (total_bid / total_depth * 100.0) if total_depth > 0 else 50.0
+        imbalance = (total_bid / total_ask) if total_ask > 0 else 1.0
+
+        ch_5m = float(tech.get("ch_5m", 0) or 0)
+        ch_15m = float(tech.get("ch_15m", 0) or 0)
+
+        return {
+            "pair": pair,
+            "current_price": current_price,
+            "vol_idr": vol_idr,
+            "spread_pct": spread_pct,
+            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT * 100.0,
+            "tech": tech,
+            "tech_sig": tech_sig,
+            "buy_pressure": buy_pressure,
+            "imbalance": imbalance,
+            "ch_5m": ch_5m,
+            "ch_15m": ch_15m,
+        }
+
     def _prompt(self, ctx: dict) -> str:
         return (
             "Anda risk-engine trading. Gunakan HANYA data numerik berikut.\n"
@@ -329,6 +489,59 @@ class LiteRTLmDecisionService:
             return self._parse_json(text)
         except Exception as exc:
             logger.warning("[litert-lm-decision] LLM call failed: %s", exc)
+            return {"action": "HOLD", "confidence": 0, "reason": "llm_error", "evidence": []}
+
+    async def _evaluate_scan_pair(self, pair: str, ctx: dict) -> dict:
+        """Jalankan inferensi LLM entry untuk satu pair dengan timeout."""
+        loop = asyncio.get_running_loop()
+        t0 = time.perf_counter()
+        try:
+            decision = await asyncio.wait_for(
+                loop.run_in_executor(None, self._ask_llm_entry, ctx),
+                timeout=self._timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            logger.warning(
+                "[litert-lm-decision] ⏱ Scan timeout %s setelah %.0f ms — HOLD",
+                pair, elapsed_ms,
+            )
+            return {"action": "HOLD", "confidence": 0.0, "reason": "llm_timeout"}
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.debug("[litert-lm-decision] scan %s inferensi %.0f ms", pair, elapsed_ms)
+        if elapsed_ms > 5000:
+            logger.warning("[litert-lm-decision] ⚠ Scan inferensi lambat %s: %.0f ms", pair, elapsed_ms)
+        return self._validate_entry_decision(ctx, decision)
+
+    def _prompt_entry(self, ctx: dict) -> str:
+        return (
+            "Anda risk-engine trading. Gunakan HANYA data numerik berikut.\n"
+            "JANGAN asumsi data luar. Jika data kurang/kontradiktif, pilih HOLD.\n"
+            "Balas hanya JSON valid (tanpa markdown):\n"
+            '{"action":"BUY|HOLD","confidence":0-100,"reason":"...","evidence":["TECH_BUY","MOMENTUM_UP","ORDERBOOK_BID_DOMINANCE","VOLUME_SURGE","SPREAD_OK"]}\n\n'
+            f"PAIR={ctx['pair']}\n"
+            f"PRICE={ctx['current_price']:.8f}\n"
+            f"VOL_IDR={ctx['vol_idr']:.0f}\n"
+            f"ROUND_TRIP_FEE_PCT={ctx['round_trip_fee_pct']:.4f}\n"
+            f"TECH_VERDICT={ctx['tech_sig'].get('verdict', 'HOLD')}\n"
+            f"TECH_BUY_SCORE={float(ctx['tech_sig'].get('buy_score', 0) or 0):.2f}\n"
+            f"TECH_SELL_SCORE={float(ctx['tech_sig'].get('sell_score', 0) or 0):.2f}\n"
+            f"MOMENTUM_5M={ctx['ch_5m']:.4f}\n"
+            f"MOMENTUM_15M={ctx['ch_15m']:.4f}\n"
+            f"ORDERBOOK_IMBALANCE={ctx['imbalance']:.4f}\n"
+            f"BUY_PRESSURE_PCT={ctx['buy_pressure']:.2f}\n"
+            f"SPREAD_PCT={ctx['spread_pct']:.4f}\n"
+        )
+
+    def _ask_llm_entry(self, ctx: dict) -> dict:
+        try:
+            prompt = self._prompt_entry(ctx)
+            with self._engine.create_conversation() as conv:
+                raw = conv.send_message(prompt)
+            text = self._extract_text(raw)
+            return self._parse_json(text)
+        except Exception as exc:
+            logger.warning("[litert-lm-decision] LLM entry call failed: %s", exc)
             return {"action": "HOLD", "confidence": 0, "reason": "llm_error", "evidence": []}
 
     @staticmethod
@@ -405,6 +618,46 @@ class LiteRTLmDecisionService:
 
         return {"action": "HOLD", "confidence": 0.0, "reason": "guard_rejected"}
 
+    def _validate_entry_decision(self, ctx: dict, llm: dict) -> dict:
+        """Validasi keputusan LLM untuk entry BUY dengan guard ketat."""
+        action = str(llm.get("action", "HOLD") or "HOLD").upper().strip()
+        reason = str(llm.get("reason", "") or "").strip()[:_MAX_REASON_LENGTH]
+        confidence = float(llm.get("confidence", 0) or 0)
+        evidence = llm.get("evidence") if isinstance(llm.get("evidence"), list) else []
+        evidence = [
+            str(x).strip().upper()
+            for x in evidence
+            if str(x).strip().upper() in _ALLOWED_ENTRY_EVIDENCE
+        ]
+
+        conditions = {
+            "TECH_BUY": (
+                str(ctx["tech_sig"].get("verdict", "")).upper() == "BUY"
+                and float(ctx["tech_sig"].get("buy_score", 0) or 0) >= _MIN_TECH_BUY_SCORE
+            ),
+            "MOMENTUM_UP": ctx["ch_5m"] > 0 and ctx["ch_15m"] >= 0,
+            "ORDERBOOK_BID_DOMINANCE": ctx["imbalance"] > 1.1 and ctx["buy_pressure"] > 55.0,
+            "VOLUME_SURGE": ctx["vol_idr"] > self._scan_min_vol_idr,
+            "SPREAD_OK": ctx["spread_pct"] < 1.0,
+        }
+        true_conditions = {k for k, v in conditions.items() if v}
+        supported = true_conditions.intersection(set(evidence))
+
+        if (
+            action == "BUY"
+            and confidence >= self._scan_min_confidence
+            and len(reason) >= _MIN_REASON_LENGTH
+            and len(true_conditions) >= _MIN_ENTRY_TRUE_CONDITIONS
+            and len(supported) >= _MIN_ENTRY_SUPPORTED_EVIDENCE
+        ):
+            return {
+                "action": "BUY",
+                "confidence": min(100.0, max(0.0, confidence)),
+                "reason": f"{reason} | support={','.join(sorted(supported))}",
+            }
+
+        return {"action": "HOLD", "confidence": 0.0, "reason": "entry_guard_rejected"}
+
     def _publish_sell_signal(self, pair: str, confidence: float):
         sig = Signal()
         sig.symbol = pair
@@ -412,6 +665,16 @@ class LiteRTLmDecisionService:
         sig.confidence = float(confidence)
         # TODO: update protobuf SignalSource dengan SOURCE_LLM_EXIT saat skema di-upgrade.
         # Saat ini gunakan SOURCE_ORACLE agar kompatibel dengan pipeline yang ada.
+        sig.source = SignalSource.Value("SOURCE_ORACLE")
+        sig.timestamp = int(time.time() * 1000)
+        self._signal_pub.send(sig.SerializeToString(), topic="signal")
+
+    def _publish_buy_signal(self, pair: str, confidence: float):
+        sig = Signal()
+        sig.symbol = pair
+        sig.action = SignalAction.Value("ACTION_BUY")
+        # Normalisasi ke 0–1 agar kompatibel dengan consumer (brain_inference / executive_core)
+        sig.confidence = float(confidence) / 100.0
         sig.source = SignalSource.Value("SOURCE_ORACLE")
         sig.timestamp = int(time.time() * 1000)
         self._signal_pub.send(sig.SerializeToString(), topic="signal")
