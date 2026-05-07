@@ -180,7 +180,47 @@ services:
       - default
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # [Microservice 4] dashboard-api — Flask REST + SocketIO Dashboard
+  # [Microservice 4] litert-lm-decision — Grounded LLM Exit Signals
+  # Reads open-position context (technical + orderbook + fee + PnL),
+  # then publishes SELL signals for ExitManager execution.
+  # ─────────────────────────────────────────────────────────────────────────────
+  litert-lm-decision:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-litert-lm-decision
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully
+      market-pipe:
+        condition: service_healthy
+      executive-core:
+        condition: service_started
+    env_file:
+      - .env
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
+      - algovibe_ipc:/tmp
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    shm_size: 256mb
+    command: ["python", "-m", "services.litert_lm_decision.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # [Microservice 5] dashboard-api — Flask REST + SocketIO Dashboard
   # Serves the Vue.js SPA and exposes /api/* endpoints.
   # Read-only view of the shared SQLite DB.
   # ─────────────────────────────────────────────────────────────────────────────

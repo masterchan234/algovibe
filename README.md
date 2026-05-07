@@ -6,8 +6,9 @@
 
 ## 🎯 Fitur Utama
 
-- **Microservice Architecture:** Terbagi menjadi 4 layanan independen (Market-Pipe, Brain-Inference, Executive-Core, Dashboard-API) untuk skalabilitas dan stabilitas tinggi.
+- **Microservice Architecture:** Terbagi menjadi 5 layanan independen (Market-Pipe, Brain-Inference, LiteRT-LM-Decision, Executive-Core, Dashboard-API) untuk skalabilitas dan stabilitas tinggi.
 - **Autonomous AI Reasoning:** Terintegrasi dengan **LiteRT-LM** untuk analisis mikro-struktur pasar dan narasi teknikal otomatis.
+- **Grounded LLM Exit Service:** Service `litert-lm-decision` membaca indikator teknikal, order book, fee round-trip, dan PnL lalu mengirim sinyal SELL terstruktur agar eksekusi tetap dilakukan ExitManager.
 - **Market Regime Detection:** Oracle sentral yang mendeteksi fase market (Bullish, Bearish, Choppy) dan menyesuaikan strategi secara dinamis.
 - **ZMQ-Driven Data Bus:** Komunikasi antar-layanan menggunakan ZeroMQ (IPC) untuk latency minimal.
 - **Indodax Tax Compliant:** Kalkulasi PnL akurat yang sudah termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
@@ -56,6 +57,7 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
 services/
 ├── market_pipe/        # Ingress: Indodax WS -> ZMQ Protobuf
 ├── brain_inference/    # Analysis: Technical Scoring, Oracle, AI Inference
+├── litert_lm_decision/ # Grounded LiteRT-LM Exit Signal Publisher (SELL only)
 ├── executive_core/     # Execution: Risk Checks, P&L, Order Placement
 └── dashboard_api/      # UI: Flask Server + SocketIO
 
@@ -107,7 +109,10 @@ python3 -m services.brain_inference.main
 # Terminal 3: Executive Core
 python3 -m services.executive_core.main
 
-# Terminal 4: Dashboard
+# Terminal 4: LiteRT-LM Decision Service
+python3 -m services.litert_lm_decision.main
+
+# Terminal 5: Dashboard
 python3 -m dashboard.server
 ```
 
