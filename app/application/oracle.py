@@ -1879,10 +1879,12 @@ class Oracle:
         has_quality_features = n_valid >= 3
         
         if not has_quality_features:
-            # Feature-blind K-NN — tidak bisa dipercaya.
-            # Gunakan nilai netral (50%) agar gate downstream memutuskan berdasarkan indikator lain.
-            confidence = min(base_confidence, 50.0) if base_confidence > 0 else 50.0
-            reason = f"K-NN Feature-Blind Fallback (netral 50%, raw={base_confidence:.0f}%)"
+            # Feature-blind K-NN — fitur rsi/ema_dist belum tersimpan di DNA historis lama.
+            # Gunakan win rate K-NN mentah tanpa cap 50%, agar gate downstream tetap bisa memutuskan.
+            # Cap 50% sebelumnya menyebabkan deadlock: bot tidak bisa entry → DNA tidak terakumulasi
+            # → K-NN terus feature-blind → tidak pernah ada sinyal.
+            confidence = base_confidence if base_confidence > 0 else 60.0
+            reason = f"K-NN Feature-Blind (raw WinRate={base_confidence:.0f}%, fitur historis belum lengkap)"
         elif is_strong_setup:
             # Deep oversold (RSI < 35): bisa sedikit boost karena mean-reversion lebih kuat,
             # tapi tetap tidak melebihi 70% agar gate downstream masih efektif.
