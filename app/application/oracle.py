@@ -254,15 +254,13 @@ class Oracle:
         merakitnya menjadi prompt kaya untuk LLM.
         """
         from app.domain.technicals import get_technical_summary, derive_trade_signal
-        import sqlite3
         import json
 
         pair = pair.lower()
         conn = None
         try:
-            # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
-            conn = sqlite3.connect(db.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            # Gunakan connection postgres dari pool
+            conn = db.get_raw_connection()
 
             # 1. Ticker History
             row = conn.execute(
@@ -320,7 +318,7 @@ class Oracle:
             last_price = float(prices[-1]) if prices else 0
             
             return self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type=task_type)
-        except sqlite3.DatabaseError as e:
+        except Exception as e:
             # Fail-safe: jika SQLite korup/malformed, jangan matikan bot.
             err = str(e).lower()
             if "malformed" in err or "database disk image is malformed" in err:
@@ -368,7 +366,6 @@ class Oracle:
         self.last_buy_signal_queue = now
 
         from app.domain.technicals import get_technical_summary, derive_trade_signal
-        import sqlite3
 
         # Ambil top 5 koin dengan verdict BUY dan confidence tertinggi
         buy_candidates = sorted(
@@ -404,11 +401,9 @@ class Oracle:
         if on_demand_pair and isinstance(on_demand_pair, str) and on_demand_pair.strip().lower() not in ('', 'none'):
             db.save_state("trigger_analysis_pair", None)
             try:
-                import sqlite3
                 from app.domain.technicals import get_technical_summary
-                # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
-                conn = sqlite3.connect(db.db_path, timeout=30)
-                conn.row_factory = sqlite3.Row
+                # Gunakan connection postgres dari pool
+                conn = db.get_raw_connection()
                 try:
                     row = conn.execute(
                         "SELECT history_json FROM ticker_history WHERE pair = ?",

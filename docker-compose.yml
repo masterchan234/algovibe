@@ -1,5 +1,21 @@
 services:
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: algovibe-timescaledb
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=algovibe
+      - POSTGRES_PASSWORD=secretpassword
+    volumes:
+      - algovibe_pgdata:/var/lib/postgresql/data
+      - ./init-pg.sh:/docker-entrypoint-initdb.d/init-pg.sh
+
+    networks:
+      - default
+
   # ─────────────────────────────────────────────────────────────────────────────
   # [Init Service] Model Downloader
   # Tugas satu kali: Download model AI ke volume algovibe_models.
@@ -108,6 +124,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
+      timescaledb:
+        condition: service_healthy
       market-pipe:
         condition: service_started
     env_file:
@@ -152,6 +170,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 15s
     depends_on:
+      timescaledb:
+        condition: service_healthy
       model-downloader:
         condition: service_completed_successfully
       market-pipe:
@@ -192,6 +212,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 15s
     depends_on:
+      timescaledb:
+        condition: service_healthy
       model-downloader:
         condition: service_completed_successfully
       market-pipe:
@@ -234,6 +256,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 10s
     depends_on:
+      timescaledb:
+        condition: service_healthy
       executive-core:
         condition: service_started
     env_file:
@@ -280,6 +304,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
+      timescaledb:
+        condition: service_healthy
       model-downloader:
         condition: service_completed_successfully
     env_file:
@@ -319,6 +345,7 @@ networks:
 volumes:
   algovibe_data:
   algovibe_models:
+  algovibe_pgdata:
   # Shared /tmp volume — mounts as /tmp in every service so ZMQ IPC sockets
   # (ipc:///tmp/*.ipc) are accessible across all containers.
   # Security: this is a Docker-managed named tmpfs volume, NOT the host /tmp.

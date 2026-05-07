@@ -11,7 +11,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-import sqlite3
+import psycopg2
 import json
 import jwt as pyjwt
 from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template, g
@@ -298,8 +298,7 @@ def get_db_connection():
     """Membuka koneksi SQLite ke DB aktif melalui DatabaseRouter."""
     # Ambil path dari database yang sedang aktif (live/dryrun)
     active_db = db._active()
-    conn = sqlite3.connect(active_db.db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    conn = active_db.get_raw_connection()
     return conn
 
 # [Project Predator] Sync Trade Streams for Open Positions on Startup
@@ -456,7 +455,7 @@ def _get_pair_technicals(pair):
     try:
         # 1. Price-based technicals (Diberikan sebagai JSON list di tabel ini)
         row = conn.execute(
-            "SELECT history_json FROM ticker_history WHERE pair = ?",
+            "SELECT history_json FROM ticker_history WHERE pair = %s",
             (pair,)
         ).fetchone()
         
@@ -467,7 +466,7 @@ def _get_pair_technicals(pair):
         tech = get_technical_summary(prices)
         
         # 2. Orderbook-based technicals (Imbalance & Spread)
-        depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)).fetchall()
+        depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
         bids = [r for r in depth if r['is_bid'] == 1]
         asks = [r for r in depth if r['is_bid'] == 0]
         
@@ -511,18 +510,18 @@ def _get_trade_history_summary():
                 ROUND(MIN(pnl_idr), 0) as worst_trade,
                 ROUND(SUM(pnl_idr), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
         """, (dry_val,)).fetchone()
 
         exits = conn.execute("""
             SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY reason ORDER BY cnt DESC LIMIT 6
         """, (dry_val,)).fetchall()
 
         top_pairs = conn.execute("""
             SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
         """, (dry_val,)).fetchall()
 
@@ -865,7 +864,7 @@ def get_stats():
                 amount_crypto = float(pos['amount_crypto'] or 0)
                 # Ambil harga terakhir dari ticker_history
                 row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
                 ).fetchone()
                 if row and row['history_json']:
                     history = json.loads(row['history_json'])
@@ -1022,7 +1021,7 @@ def get_positions():
             pnl_pct = 0.0
             try:
                 row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
                 ).fetchone()
                 if row and row['history_json']:
                     history = json.loads(row['history_json'])
@@ -1096,13 +1095,13 @@ def get_pnl_history_api(tf):
         interval = tf_map.get(tf, '-24 hours')
         
         base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'",
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
             (interval, dr_val)
         ).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
         trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
             (interval, dr_val)
         ).fetchall()
         
@@ -1177,7 +1176,7 @@ def get_positions_summary():
 
             try:
                 row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
                 ).fetchone()
                 if row and row['history_json']:
                     history = json.loads(row['history_json'])
@@ -1311,8 +1310,7 @@ def sync_wallet():
 def get_orders():
     """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
     try:
-        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
-        live_conn.row_factory = sqlite3.Row
+        live_conn = active_db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT order_id, pair, side, price, amount, status, created_at, updated_at "
             "FROM order_book ORDER BY created_at DESC LIMIT 20"
@@ -1333,8 +1331,7 @@ def get_live_state():
     regardless of which mode the dashboard is currently displaying.
     """
     try:
-        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
-        live_conn.row_factory = sqlite3.Row
+        live_conn = active_db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT key, value FROM bot_state WHERE key IN "
             "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
@@ -1449,7 +1446,7 @@ def get_market_context(pair):
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT price, vol, is_bid FROM market_depth WHERE pair = ? ORDER BY price DESC", 
+            "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s ORDER BY price DESC", 
             (pair,)
         ).fetchall()
         
@@ -1496,7 +1493,7 @@ def get_pair_reasoning(pair):
         # Fallback ke technical reasoning jika LLM belum ada
         conn = get_db_connection()
         try:
-            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (p,)).fetchone()
+            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (p,)).fetchone()
             prices = json.loads(row['history_json']) if row and row['history_json'] else []
             from app.domain.technicals import get_technical_summary
             tech = get_technical_summary(prices)
@@ -1544,7 +1541,7 @@ def trade_manual_exit():
         try:
             conn = get_db_connection()
             row = conn.execute(
-                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
             ).fetchone()
             conn.close()
             if row and row['history_json']:
@@ -1713,7 +1710,7 @@ def get_bot_status():
 def get_pair_history(pair):
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
         if row and row['history_json']:
             return jsonify(json.loads(row['history_json']))
         return jsonify([])
@@ -2204,7 +2201,7 @@ def _build_stats_payload():
             if last_price <= 0:
                 # Fallback terakhir ke DB history
                 try:
-                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
                     if row and row['history_json']:
                         history = json.loads(row['history_json'])
                         if history: last_price = float(history[-1])
@@ -2268,13 +2265,13 @@ def _build_stats_payload():
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "WHERE reason != 'BACKTEST' AND dry_run = %s "
             "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1", (dr_val,)
         ).fetchone()
         
         contribution_rows = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "WHERE reason != 'BACKTEST' AND dry_run = %s "
             "GROUP BY pair ORDER BY total_pnl DESC", (dr_val,)
         ).fetchall()
         
@@ -2288,7 +2285,7 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ?", (dr_val,)
+            "WHERE reason != 'BACKTEST' AND dry_run = %s", (dr_val,)
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
@@ -2353,7 +2350,7 @@ def _build_stats_payload():
                 SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
                        pnl_idr, pnl_pct, reason, duration_seconds, created_at
                 FROM trade_history
-                WHERE reason != 'BACKTEST' AND dry_run = ?
+                WHERE reason != 'BACKTEST' AND dry_run = %s
                 ORDER BY created_at DESC LIMIT 20
             """, (int(dr_val),)).fetchall()
             for r in recent_trades_rows:
@@ -2633,7 +2630,7 @@ def _build_trades_payload():
                 
                 if last_price <= 0:
                     try:
-                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
                         if row and row['history_json']:
                             history = json.loads(row['history_json'])
                             if history: last_price = float(history[-1])

@@ -18,9 +18,8 @@ MODEL_CACHE_DIR = "models/cache"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
 DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
 EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED
-DB_PATH         = f"{DATA_PATH}/algotrade.db"
-DB_PATH_LIVE    = f"{DATA_PATH}/algotrade_live.db"
-DB_PATH_DRYRUN  = f"{DATA_PATH}/algotrade_dryrun.db"
+DATABASE_URL_LIVE   = os.getenv("DATABASE_URL_LIVE", "postgresql://algovibe:secretpassword@localhost:5432/algovibe_live")
+DATABASE_URL_DRYRUN = os.getenv("DATABASE_URL_DRYRUN", "postgresql://algovibe:secretpassword@localhost:5432/algovibe_dryrun")
 
 # ==========================================
 # 2. TRADING RULES & SIZING

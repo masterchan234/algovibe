@@ -91,7 +91,7 @@ def calculate_score(args):
                 import json
                 row_h = None
                 try:
-                    import sqlite3
+                    import psycopg2
                     with _db.get_connection() as _conn:
                         row_h = _conn.execute(
                             "SELECT history_json FROM ticker_history WHERE pair = ?", (pair.lower(),)

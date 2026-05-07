@@ -14,7 +14,7 @@ Setiap AUTO_TRAIN_INTERVAL_HOURS jam, trainer akan:
 import os
 import sys
 import time
-import sqlite3
+import psycopg2
 import logging
 from logging.handlers import RotatingFileHandler
 import joblib
@@ -78,7 +78,7 @@ def _load_training_data(db_path: str) -> pd.DataFrame:
     Ambil data training dari trade_analytics.
     Menggunakan sliding window 5000 trade terbaru (data paling relevan).
     """
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = psycopg2.connect(DATABASE_URL_LIVE)
     query = """
         SELECT
             ai_prob, whale_boost, sector_sentiment, imbalance,
