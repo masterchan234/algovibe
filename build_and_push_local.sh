@@ -44,6 +44,8 @@ docker push $IMAGE_NAME
 
 echo ""
 echo "🚀 Step 4: Starting containers with Docker Compose..."
+docker compose down  # Pastikan tidak ada container lama yang berjalan
+docker compose pull  # Pastikan semua image terbaru diambil
 docker compose up -d
 
 echo ""
