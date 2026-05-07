@@ -287,6 +287,7 @@ function formatPrice(val) { return Number(val || 0).toLocaleString('id-ID') }
 function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase() : '-' }
 
 let pollInt = null
+let llmPollInt = null
 onMounted(() => {
   // Live dashboard membutuhkan stream stats_update untuk mengisi pnlHistory/chart.
   // Tanpa koneksi socket ini, chart akan terus "Waiting for data".
@@ -295,8 +296,13 @@ onMounted(() => {
   fetchOrders()
   fetchLlmDecisions()
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
+  // Re-poll LLM decisions setiap 30 detik sebagai fallback jika socket putus
+  llmPollInt = setInterval(fetchLlmDecisions, 30_000)
 })
-onUnmounted(() => clearInterval(pollInt))
+onUnmounted(() => {
+  clearInterval(pollInt)
+  clearInterval(llmPollInt)
+})
 
 // Global FORCE_LOGOUT listener — redirect to login when session is invalidated
 watch(() => store.forceLogout, (triggered) => {

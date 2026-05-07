@@ -343,11 +343,7 @@ const filteredStream = computed(() => {
   return items.filter((item) => String(item?.source || '').toUpperCase() !== 'MARKET_WS')
 })
 
-const llmExitCount = computed(() =>
-  store.activityFeed.filter(
-    (item) => String(item?.side || '').toUpperCase() === 'LLM_EXIT_SIGNAL'
-  ).length
-)
+const llmExitCount = computed(() => store.llmDecisions.length)
 
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
