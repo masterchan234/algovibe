@@ -102,6 +102,7 @@ export const useTradeStore = defineStore('trade', () => {
     // Momentum Equity Protection
     momentum_state: 'STALLING',
     net_pnl_velocity: 0,
+    consecutive_losses: 0,
     entry_gate_state: '',
     entry_gate_reason: '',
     entry_gate_pair: '',
@@ -123,6 +124,10 @@ export const useTradeStore = defineStore('trade', () => {
   // Activity feed (logs)
   const activityFeed = ref([])
   const MAX_FEED_ITEMS = 100
+
+  // LiteRT-LM Exit Decisions
+  const llmDecisions = ref([])
+  const MAX_LLM_ITEMS = 40
 
   // Profit history for line chart: [{time, pnl}]
   // Capacity is adaptive: 75 pts on mobile, 300 on desktop
@@ -312,6 +317,7 @@ export const useTradeStore = defineStore('trade', () => {
           btc_crash: data.btc_crash ?? false,
           momentum_state: data.momentum_state ?? 'STALLING',
           net_pnl_velocity: data.net_pnl_velocity ?? 0,
+          consecutive_losses: data.consecutive_losses ?? 0,
           entry_gate_state: data.entry_gate_state ?? '',
           entry_gate_reason: data.entry_gate_reason ?? '',
           entry_gate_pair: data.entry_gate_pair ?? '',
@@ -343,9 +349,23 @@ export const useTradeStore = defineStore('trade', () => {
       }
     })
 
+    s.on('llm_decisions_update', (data) => {
+      if (Array.isArray(data)) {
+        llmDecisions.value = data.slice(0, MAX_LLM_ITEMS)
+      }
+    })
+
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
         radarPairs.value = data
+      }
+    })
+
+    s.on('regime_update', (data) => {
+      if (data && data.regime) {
+        stats.value.regime = data.regime
+        if (data.market_sentiment_index !== undefined) stats.value.market_sentiment_index = data.market_sentiment_index
+        if (data.regime_leader !== undefined) stats.value.regime_leader = data.regime_leader
       }
     })
 
@@ -445,6 +465,7 @@ export const useTradeStore = defineStore('trade', () => {
     strategicBreak,
     bracketExitConfirm,
     activityFeed,
+    llmDecisions,
     pnlHistory,
     radarPairs,
     connect,

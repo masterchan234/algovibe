@@ -1060,6 +1060,14 @@ def get_positions():
     finally:
         conn.close()
 
+
+@app.route('/api/llm-decisions')
+@login_required
+def get_llm_decisions():
+    """Riwayat keputusan LiteRT-LM (LLM_EXIT_SIGNAL dari system_events)."""
+    return jsonify(_build_llm_decisions_payload())
+
+
 @app.route('/api/pnl-history/<tf>')
 @login_required
 def get_pnl_history_api(tf):
@@ -1625,6 +1633,25 @@ def toggle_loose_gates():
     cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
     logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
     return jsonify({"success": True, "loose_gates": new_val})
+
+@app.route('/api/bot/unblock', methods=['POST'])
+@login_required
+def unblock_bot():
+    """Reset consecutive_losses counter to lift GLOBAL PAUSE and allow new entries."""
+    try:
+        current = int(db.get_state("consecutive_losses", 0) or 0)
+        db.save_state("consecutive_losses", "0")
+        mode = "DRY" if _is_dry_run() else "LIVE"
+        logging.info(f"[Dashboard] ✅ Bot unblocked ({mode}): consecutive_losses reset from {current} → 0")
+        # Push fresh stats so the frontend badge clears immediately
+        try:
+            socketio.emit('stats_update', _build_stats_payload())
+        except Exception:
+            pass
+        return jsonify({"success": True, "prev_losses": current, "consecutive_losses": 0, "mode": mode})
+    except Exception as e:
+        logging.error(f"[Dashboard] Unblock failed: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/bot-status')
 @login_required
@@ -2411,6 +2438,7 @@ def _build_stats_payload():
             # Momentum Equity Protection indicators
             "momentum_state":    db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
+            "consecutive_losses": int(db.get_state("consecutive_losses", 0) or 0),
             # Entry gate status (operator visibility for LIVE mode)
             "entry_gate_state":  stats_dict.get("entry_gate_state", ""),
             "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
@@ -2769,6 +2797,37 @@ def _build_logs_payload():
     finally:
         conn.close()
 
+def _build_llm_decisions_payload(limit: int = 20):
+    """Kembalikan riwayat keputusan LiteRT-LM dari system_events."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pair, message, level, created_at
+            FROM system_events
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"] or 0),
+                "pair": (r["pair"] or "").upper(),
+                "message": r["message"] or "",
+                "level": r["level"] or "WARNING",
+                "created_at": str(r["created_at"]),
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logging.warning(f"[llm-decisions] payload error: {exc}")
+        return []
+    finally:
+        conn.close()
+
+
 def _build_market_trades_payload(limit_total: int = 120, limit_per_pair: int = 12):
     """Ambil data trades terbaru multi-coin dari cache mws."""
     try:
@@ -2889,14 +2948,28 @@ def push_data_loop():
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
 
+            # Fast: regime update setiap 1s (low-latency)
+            try:
+                _regime_now = db.get_state("market_regime") or "CHOPPY"
+                _sentiment_now = int(db.get_state("market_sentiment_index") or 50)
+                _regime_leader_now = db.get_state("regime_leader") or ""
+                socketio.emit('regime_update', {
+                    "regime": _regime_now,
+                    "market_sentiment_index": _sentiment_now,
+                    "regime_leader": _regime_leader_now,
+                })
+            except Exception as _re:
+                logging.warning(f"[push_data_loop] regime_update error: {_re}")
+
             # Slow: setiap 5 iterasi (~5 detik)
             _slow_counter += 1
             if _slow_counter >= 5:
                 _slow_counter = 0
-                socketio.emit('stats_update',  _build_stats_payload())
-                socketio.emit('radar_update',  _build_radar_payload())
-                socketio.emit('trades_update', _build_trades_update_packet())
-                socketio.emit('logs_update',   _build_logs_payload())
+                socketio.emit('stats_update',          _build_stats_payload())
+                socketio.emit('radar_update',          _build_radar_payload())
+                socketio.emit('trades_update',         _build_trades_update_packet())
+                socketio.emit('logs_update',           _build_logs_payload())
+                socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)
