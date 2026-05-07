@@ -58,6 +58,7 @@ _MIN_TECH_SELL_SCORE = 5.0
 _MIN_REASON_LENGTH = 8
 _MIN_TRUE_CONDITIONS = 2
 _MIN_SUPPORTED_EVIDENCE = 1
+_MAX_REASON_LENGTH = 200
 
 
 class LiteRTLmDecisionService:
@@ -314,18 +315,21 @@ class LiteRTLmDecisionService:
         try:
             return json.loads(text)
         except Exception:
-            try:
-                start = text.find("{")
-                end = text.rfind("}")
-                if start >= 0 and end > start:
-                    return json.loads(text[start : end + 1])
-            except Exception:
-                pass
+            decoder = json.JSONDecoder()
+            for idx, ch in enumerate(text):
+                if ch != "{":
+                    continue
+                try:
+                    obj, _end = decoder.raw_decode(text[idx:])
+                    if isinstance(obj, dict):
+                        return obj
+                except Exception:
+                    continue
         return {"action": "HOLD", "confidence": 0, "reason": "invalid_json", "evidence": []}
 
     def _validate_decision(self, ctx: dict, llm: dict) -> dict:
         action = str(llm.get("action", "HOLD") or "HOLD").upper().strip()
-        reason = str(llm.get("reason", "") or "").strip()[:200]
+        reason = str(llm.get("reason", "") or "").strip()[:_MAX_REASON_LENGTH]
         confidence = float(llm.get("confidence", 0) or 0)
         evidence = llm.get("evidence") if isinstance(llm.get("evidence"), list) else []
         evidence = [str(x).strip().upper() for x in evidence if str(x).strip().upper() in _ALLOWED_EVIDENCE]
@@ -363,6 +367,7 @@ class LiteRTLmDecisionService:
         sig.symbol = pair
         sig.action = SignalAction.Value("ACTION_SELL")
         sig.confidence = float(confidence)
+        # Proto enum belum memiliki SOURCE_LLM_EXIT, gunakan SOURCE_ORACLE untuk kompatibilitas.
         sig.source = SignalSource.Value("SOURCE_ORACLE")
         sig.timestamp = int(time.time() * 1000)
         self._signal_pub.send(sig.SerializeToString(), topic="signal")
