@@ -18,7 +18,7 @@ MIN_VOL_PCT     = 0.3       # Skip koin dengan candle volatilitas < 0.3%
 MIN_VOLUME_IDR  = 10_000_000  # Min Rp 10 Juta volume 24h (filter koin zombie)
 MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin terlikuid)
 
-from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, BLACKLIST_COINS
+from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, DEFAULT_BLACKLIST_COINS as BLACKLIST_COINS
 CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
 
 

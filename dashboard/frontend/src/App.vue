@@ -114,7 +114,7 @@ let clockIntervalId = null
 
 async function fetchNews() {
   try {
-    const resp = await fetch('/api/news')
+    const resp = await fetch('/api/news', { headers: getAuthHeaders() })
     if (resp.ok) {
       const items = await resp.json()
       if (Array.isArray(items)) newsHeadlines.value = items
