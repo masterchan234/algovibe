@@ -70,6 +70,7 @@ class LiteRTLmDecisionService:
         self._tickers = {}
         self._history = defaultdict(lambda: deque(maxlen=120))
         self._last_emitted = {}  # {pair: timestamp}
+        self._stopped = False
 
         self._interval_sec = int(os.getenv("LLM_EXIT_INTERVAL_SEC", "20"))
         self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "45"))
@@ -95,6 +96,7 @@ class LiteRTLmDecisionService:
             return False
 
     async def start(self):
+        self._stopped = False
         self._running = True
         self._tick_sub.start()
         self._signal_pub.start()
@@ -108,6 +110,9 @@ class LiteRTLmDecisionService:
         )
 
     def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
         self._running = False
         self._tick_sub.stop()
         self._signal_pub.stop()
@@ -179,9 +184,7 @@ class LiteRTLmDecisionService:
             if not ctx:
                 continue
 
-            decision = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: self._ask_llm(ctx)
-            )
+            decision = await asyncio.get_running_loop().run_in_executor(None, self._ask_llm, ctx)
             verdict = self._validate_decision(ctx, decision)
             evaluated += 1
 
@@ -229,8 +232,12 @@ class LiteRTLmDecisionService:
         total_depth = total_bid + total_ask
         buy_pressure = (total_bid / total_depth * 100.0) if total_depth > 0 else 50.0
         imbalance = (total_bid / total_ask) if total_ask > 0 else 1.0
-        best_bid = float(bids[0].get("price", 0) if bids else ticker.get("bid", current_price))
-        best_ask = float(asks[0].get("price", 0) if asks else ticker.get("ask", current_price))
+        best_bid = float(ticker.get("bid", current_price))
+        best_ask = float(ticker.get("ask", current_price))
+        if bids:
+            best_bid = float(bids[0].get("price", best_bid) or best_bid)
+        if asks:
+            best_ask = float(asks[0].get("price", best_ask) or best_ask)
         spread_pct = ((best_ask - best_bid) / best_bid * 100.0) if best_bid > 0 else 0.0
 
         ch_5m = float(tech.get("ch_5m", 0) or 0)
@@ -367,7 +374,8 @@ class LiteRTLmDecisionService:
         sig.symbol = pair
         sig.action = SignalAction.Value("ACTION_SELL")
         sig.confidence = float(confidence)
-        # Proto enum belum memiliki SOURCE_LLM_EXIT, gunakan SOURCE_ORACLE untuk kompatibilitas.
+        # TODO: update protobuf SignalSource dengan SOURCE_LLM_EXIT saat skema di-upgrade.
+        # Saat ini gunakan SOURCE_ORACLE agar kompatibel dengan pipeline yang ada.
         sig.source = SignalSource.Value("SOURCE_ORACLE")
         sig.timestamp = int(time.time() * 1000)
         self._signal_pub.send(sig.SerializeToString(), topic="signal")
