@@ -48,6 +48,16 @@
           <span class="sentiment-num">{{ stats.market_sentiment_index }}</span>
         </div>
       </div>
+      <div class="kpi-item">
+        <div class="kpi-label">Loose Gates</div>
+        <button
+          class="loose-gates-btn"
+          :class="{ active: stats.dry_run_loose_gates }"
+          :disabled="isTogglingGates"
+          @click="handleToggleLooseGates"
+          :title="stats.dry_run_loose_gates ? 'LOOSE GATES aktif — klik untuk menonaktifkan' : 'Aktifkan LOOSE GATES (lewati filter ketat)'"
+        >{{ isTogglingGates ? '...' : (stats.dry_run_loose_gates ? '🔓 ON' : '🔒 OFF') }}</button>
+      </div>
     </div>
 
     <!-- UNIFIED EQUITY PERFORMANCE ORACLE -->
@@ -399,6 +409,36 @@ const momentumIcon = computed(() => {
 })
 
 const isUnblocking = ref(false)
+const isTogglingGates = ref(false)
+
+async function handleToggleLooseGates() {
+  if (isTogglingGates.value) return
+  const current = stats.value?.dry_run_loose_gates ?? false
+  const action = current ? 'nonaktifkan' : 'aktifkan'
+  if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} LOOSE GATES? ${current ? 'Filter entry ketat akan aktif kembali.' : 'Semua filter entry ketat akan dilewati.'}`)) return
+  isTogglingGates.value = true
+  try {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    const res = await fetch(`${backendUrl}/api/bot/toggle-loose-gates`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      credentials: 'include',
+    })
+    const data = await res.json()
+    if (data.success) {
+      store.stats.dry_run_loose_gates = data.loose_gates
+    } else {
+      alert('Gagal toggle loose gates.')
+    }
+  } catch (err) {
+    console.error('Toggle loose gates error:', err)
+    alert('Error saat toggle loose gates.')
+  } finally {
+    isTogglingGates.value = false
+  }
+}
 
 async function handleUnblock() {
   if (isUnblocking.value) return
@@ -917,6 +957,36 @@ onUnmounted(() => {
   background: rgba(248, 81, 73, 0.3);
 }
 .unblock-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.loose-gates-btn {
+  margin-top: 5px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(139, 148, 158, 0.12);
+  color: #8b949e;
+  border: 1px solid rgba(139, 148, 158, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.15s, opacity 0.15s, color 0.15s;
+}
+.loose-gates-btn.active {
+  background: rgba(210, 153, 34, 0.18);
+  color: #d29922;
+  border-color: rgba(210, 153, 34, 0.5);
+}
+.loose-gates-btn:hover:not(:disabled) {
+  background: rgba(139, 148, 158, 0.25);
+}
+.loose-gates-btn.active:hover:not(:disabled) {
+  background: rgba(210, 153, 34, 0.3);
+}
+.loose-gates-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

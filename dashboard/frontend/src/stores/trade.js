@@ -363,9 +363,9 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('regime_update', (data) => {
       if (data && data.regime) {
-        stats.value.regime = data.regime
-        if (data.market_sentiment_index !== undefined) stats.value.market_sentiment_index = data.market_sentiment_index
-        if (data.regime_leader !== undefined) stats.value.regime_leader = data.regime_leader
+        stats.regime = data.regime
+        if (data.market_sentiment_index !== undefined) stats.market_sentiment_index = data.market_sentiment_index
+        if (data.regime_leader !== undefined) stats.regime_leader = data.regime_leader
       }
     })
 

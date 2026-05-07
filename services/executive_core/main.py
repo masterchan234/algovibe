@@ -37,6 +37,7 @@ from shared.transport import (
     IPC_MARKET,
     IPC_EQUITY,
     IPC_SIGNAL,
+    IPC_LLM_SIGNAL,
     IPC_COMMAND,
     install_uvloop,
 )
@@ -74,6 +75,7 @@ class ExecutiveCoreService:
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
         self._equity_sub = ZMQSubscriber(IPC_EQUITY)
         self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
+        self._llm_signal_sub = ZMQSubscriber(IPC_LLM_SIGNAL)
         self._command_sub = ZMQSubscriber(IPC_COMMAND)
         self._equity_pub = ZMQPublisher(IPC_EQUITY)
 
@@ -183,6 +185,7 @@ class ExecutiveCoreService:
         self._running = True
         self._tick_sub.start()
         self._signal_sub.start()
+        self._llm_signal_sub.start()
         self._command_sub.start()
         self._equity_pub.start()
         if self._private_ws:
@@ -207,6 +210,7 @@ class ExecutiveCoreService:
         await asyncio.gather(
             self._consume_ticks(),
             self._consume_signals(),
+            self._consume_llm_signals(),
             self._consume_commands(),
             self._order_processor(),
             self._equity_broadcast_loop(),
@@ -217,6 +221,7 @@ class ExecutiveCoreService:
         self._running = False
         self._tick_sub.stop()
         self._signal_sub.stop()
+        self._llm_signal_sub.stop()
         self._command_sub.stop()
         self._equity_pub.stop()
         if self._private_ws:
@@ -406,6 +411,61 @@ class ExecutiveCoreService:
                             )
             except Exception as exc:
                 logger.error(f"[executive-core] Failed to parse signal: {exc}")
+
+    async def _consume_llm_signals(self) -> None:
+        """Consume Signal messages from litert-lm-decision (LLM signals)."""
+        async for raw in self._llm_signal_sub.aiter_messages():
+            if not self._running:
+                break
+            try:
+                sig = Signal()
+                sig.ParseFromString(raw)
+                if sig.action == 1:  # BUY
+                    logger.info(f"[executive-core] 🤖 Received LLM BUY signal for {sig.symbol} (conf: {sig.confidence:.1f}%)")
+                    from app.application.use_cases.trade_execution import execute_trade
+                    tq_prob = float(sig.confidence or 0.0)
+                    if tq_prob > 1.0:
+                        tq_prob /= 100.0
+                    tq_prob = max(0.0, min(1.0, tq_prob))
+                    tick_obj = self._ticks.get(sig.symbol)
+                    entry_price = float(tick_obj.price) if tick_obj and float(tick_obj.price) > 0 else 0.0
+                    if entry_price <= 0:
+                        logger.warning(f"[executive-core] LLM BUY signal ignored for {sig.symbol}: no valid tick price yet")
+                        continue
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: execute_trade(
+                            self,
+                            sig.symbol,
+                            entry_price,
+                            trend="LLM_SIGNAL",
+                            tq_prob=tq_prob,
+                            taker=True,
+                        )
+                    )
+                elif sig.action == 2:  # SELL
+                    pair = str(sig.symbol or "").lower()
+                    logger.info(f"[executive-core] 🤖🔻 Received LLM SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    pos = db.get_position(pair)
+                    if pos and pos.get("status") == "OPEN":
+                        tick = self._ticks.get(pair)
+                        px = float(tick.price) if tick and tick.price > 0 else float(pos.get("entry_price") or 0)
+                        if px > 0:
+                            await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: self.exit_manager.execute_exit(
+                                    pair=pair,
+                                    amount=float(pos.get("amount_crypto") or 0),
+                                    price=px,
+                                    reason="LLM_SIGNAL_SELL",
+                                    entry_price=float(pos.get("entry_price") or 0),
+                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    position_data=pos,
+                                ),
+                            )
+            except Exception as exc:
+                logger.error(f"[executive-core] Failed to parse LLM signal: {exc}")
 
     # ── Command consumer ───────────────────────────────────────────────────────
 

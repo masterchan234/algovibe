@@ -36,7 +36,7 @@ from config import (
     SMART_BREAK_EVEN_PCT,
 )
 from shared.algovibe_pb2 import Signal, SignalAction, SignalSource, Tick  # type: ignore[attr-defined]
-from shared.transport import IPC_MARKET, IPC_SIGNAL, ZMQPublisher, ZMQSubscriber, install_uvloop
+from shared.transport import IPC_MARKET, IPC_LLM_SIGNAL, ZMQPublisher, ZMQSubscriber, install_uvloop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,7 +77,7 @@ _LLM_TIMEOUT_SEC = 15
 class LiteRTLmDecisionService:
     def __init__(self):
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
-        self._signal_pub = ZMQPublisher(IPC_SIGNAL)
+        self._signal_pub = ZMQPublisher(IPC_LLM_SIGNAL)
         self._running = False
 
         self._tickers = {}

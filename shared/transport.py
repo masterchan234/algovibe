@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 # ── IPC address constants ──────────────────────────────────────────────────────
 IPC_MARKET = "ipc:///tmp/market_stream.ipc"
 IPC_SIGNAL = "ipc:///tmp/signal_stream.ipc"
+IPC_LLM_SIGNAL = "ipc:///tmp/llm_signal_stream.ipc"
 IPC_EQUITY = "ipc:///tmp/equity_stream.ipc"
 IPC_COMMAND = "ipc:///tmp/command_stream.ipc"
 
