@@ -567,8 +567,11 @@ class ExecutiveCoreService:
         else:
             positions_iter = open_positions
 
+        current_dr_val = 1 if db.is_dry_run() else 0
         total_unrealized = 0.0
         for pos in positions_iter:
+            if int(pos.get("dry_run", 0)) != current_dr_val:
+                continue
             pair = pos.get("pair") or pos.get("symbol", "")
             tick = self._ticks.get(pair)
             if not tick or tick.price <= 0:
@@ -594,7 +597,7 @@ class ExecutiveCoreService:
                 bal_data = await loop.run_in_executor(None, self._exchange.fetch_balance)
                 self.cached_balance = float(bal_data.get('free', {}).get('IDR', 0))
             
-            stats = db.get_daily_stats()
+            stats = db.get_all_time_stats()
             self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
         except Exception as e:
             logger.debug(f"[executive-core] Balance/Stats fetch skip: {e}")
@@ -776,7 +779,10 @@ class ExecutiveCoreService:
         try:
             positions = db.get_open_positions()
             positions_iter = positions.values() if isinstance(positions, dict) else positions
+            current_dr_val = 1 if db.is_dry_run() else 0
             for pos in positions_iter:
+                if int(pos.get("dry_run", 0)) != current_dr_val:
+                    continue
                 pair = pos.get("pair") or pos.get("symbol", "")
                 tick = self._ticks.get(pair)
                 price = tick.price if tick and tick.price > 0 else None

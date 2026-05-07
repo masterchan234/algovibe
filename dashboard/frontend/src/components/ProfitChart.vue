@@ -3,7 +3,7 @@
     <!-- KPI Bar -->
     <div class="kpi-bar">
       <div class="kpi-item">
-        <div class="kpi-label">PnL Hari Ini</div>
+        <div class="kpi-label">Total PnL</div>
         <div class="kpi-value" :class="stats.daily_pnl >= 0 ? 'positive' : 'negative'">
           {{ formatIdr(stats.daily_pnl) }}
         </div>

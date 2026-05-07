@@ -107,6 +107,10 @@ def set_csrf_cookie(response):
     response.set_cookie('csrf_token', generate_csrf(), samesite='Lax', httponly=False) # Frontend needs to read this
     return response
 
+@socketio.on('ping_latency')
+def handle_ping_latency(data):
+    emit('pong_latency', data)
+
 @socketio.on('connect')
 def handle_connect(auth=None):
     # Handshake: try JWT-based auth first (primary), then view-token (guest), then Flask session (legacy).
@@ -829,11 +833,13 @@ def get_stats():
         mode_positions = [p for p in positions if int(p['dry_run'] or 0) == dr_val]
 
         # 1. LIVE STATS (Real Money)
+        live_stats_24h = db.get_daily_stats(dry_run=0)
         live_stats = conn.execute(
             "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
         ).fetchone()
         
         # 2. DRY RUN STATS (Live Simulation)
+        dry_stats_24h = db.get_daily_stats(dry_run=1)
         dry_stats = conn.execute(
             "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
         ).fetchone()
@@ -865,7 +871,10 @@ def get_stats():
                     history = json.loads(row['history_json'])
                     if history and entry_price > 0:
                         last_price = float(history[-1])
-                        unrealized_pnl += (last_price - entry_price) * amount_crypto
+                        gross = (last_price - entry_price) * amount_crypto
+                        fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
+                        fee_sell = amount_crypto * last_price * cfg.FEE_SELL_TAKER
+                        unrealized_pnl += gross - fee_buy - fee_sell
             except Exception:
                 continue
 
@@ -886,7 +895,7 @@ def get_stats():
         if _is_dry_run():
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             idr_used = total_used_idr
-            active_pnl = realized_pnl_dry
+            active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
             # Dry Run Equity = Sisa Dana + Modal Terpakai + PnL Mengambang
             total_equity = available_idr + total_used_idr + unrealized_pnl
@@ -906,7 +915,7 @@ def get_stats():
                 # [Senior Fix] Total Equity LIVE = (Free IDR + Used IDR) + Market Value Seluruh Koin
                 total_equity = idr_total + coin_equity_idr
                 
-                active_pnl = realized_pnl_live
+                active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
                 active_win_rate = win_rate
             else:
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
@@ -916,7 +925,7 @@ def get_stats():
                     _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
                 )
                 total_equity = idr_total + coin_equity_idr
-                active_pnl = realized_pnl_live
+                active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
                 active_win_rate = win_rate
         used_for_utilization = total_used_idr if dr_val == 1 else float(idr_used or 0)
         utilization_pct = (used_for_utilization / (available_idr + used_for_utilization) * 100) if (available_idr + used_for_utilization) > 0 else 0
@@ -2202,7 +2211,10 @@ def _build_stats_payload():
                 except: pass
 
             if last_price > 0:
-                unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
+                gross = (last_price - ep) * float(pos['amount_crypto'] or 0)
+                fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
+                fee_sell = float(pos['amount_crypto'] or 0) * last_price * cfg.FEE_SELL_TAKER
+                unrealized_pnl += gross - fee_buy - fee_sell
 
         total_equity = total_equity_val
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
@@ -2803,7 +2815,7 @@ def _build_llm_decisions_payload(limit: int = 20):
     try:
         rows = conn.execute(
             """
-            SELECT id, pair, message, level, created_at
+            SELECT id, pair, message, type as side, level, created_at
             FROM system_events
             WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
             ORDER BY created_at DESC
@@ -2815,6 +2827,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             {
                 "id": int(r["id"] or 0),
                 "pair": (r["pair"] or "").upper(),
+                "side": r["side"] or "LLM_EXIT_SIGNAL",
                 "message": r["message"] or "",
                 "level": r["level"] or "WARNING",
                 "created_at": str(r["created_at"]),

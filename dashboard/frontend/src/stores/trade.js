@@ -41,6 +41,7 @@ export const useTradeStore = defineStore('trade', () => {
   const socket = ref(null)
   const lastSocketStatsAt = ref(0)
   const statsSource = ref('none')
+  const latency = ref(0)
 
   // Force-logout flag: set to true when the server invalidates this session
   const forceLogout = ref(false)
@@ -242,9 +243,23 @@ export const useTradeStore = defineStore('trade', () => {
     
     socket.value = s
 
-    s.on('connect', () => { connected.value = true })
+    let pingInterval = null
+    
+    s.on('connect', () => { 
+      connected.value = true 
+      if (pingInterval) clearInterval(pingInterval)
+      pingInterval = setInterval(() => {
+        if (s.connected) s.emit('ping_latency', Date.now())
+      }, 5000)
+    })
+    
+    s.on('pong_latency', (start) => {
+      latency.value = Date.now() - start
+    })
+    
     s.on('disconnect', () => {
       connected.value = false
+      if (pingInterval) clearInterval(pingInterval)
       if (statsSource.value === 'socket') {
         statsSource.value = 'none'
       }
@@ -474,5 +489,6 @@ export const useTradeStore = defineStore('trade', () => {
     markApiStatsUsed,
     socket,
     forceLogout,
+    latency,
   }
 })

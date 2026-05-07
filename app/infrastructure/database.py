@@ -363,6 +363,40 @@ class Database:
             
             return stats
 
+    def get_all_time_stats(self, dry_run=None):
+        """Ambil statistik performa all-time dari trade_history."""
+        if dry_run is None:
+            dry_run = 1 if self.is_dry_run() else 0
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = '''
+                SELECT 
+                    COUNT(*) as total_trades,
+                    SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as loss_count,
+                    SUM(pnl_idr) as total_pnl_idr,
+                    AVG(pnl_pct) as avg_pnl_pct,
+                    SUM(CASE WHEN pnl_idr > 0 THEN pnl_idr ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
+                    SUM(amount_idr) as total_volume_idr
+                FROM trade_history
+                WHERE dry_run = ?
+            '''
+            cursor.execute(query, (int(dry_run),))
+            row = cursor.fetchone()
+            
+            stats = dict(row) if row else {}
+            stats['total_trades'] = stats.get('total_trades') or 0
+            stats['win_count'] = stats.get('win_count') or 0
+            stats['loss_count'] = stats.get('loss_count') or 0
+            stats['total_pnl_idr'] = stats.get('total_pnl_idr') or 0.0
+            stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
+            stats['gross_profit'] = stats.get('gross_profit') or 0.0
+            stats['gross_loss'] = stats.get('gross_loss') or 0.0
+            stats['total_volume_idr'] = stats.get('total_volume_idr') or 0.0
+            
+            return stats
+
     def get_recent_trades(self, limit=10):
         with self.get_connection() as conn:
             cursor = conn.cursor()

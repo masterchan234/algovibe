@@ -37,7 +37,7 @@ LIQUIDITY_MULTIPLIER   = 50        # [DYNAMIC] Volume 24h harus minimal 50x besa
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih banyak posisi dari modal sama
-MAX_OPEN_POSITIONS = 25          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
+MAX_OPEN_POSITIONS = 100          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
@@ -110,7 +110,7 @@ HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
 # NET-ZERO SURVIVAL GUARD
 # ==========================================
 # Master switch — set to False to fully disable the guard without removing code.
-NET_ZERO_SURVIVAL_ENABLED = False
+NET_ZERO_SURVIVAL_ENABLED = True
 
 # PnL velocity (IDR / second) below which the portfolio is considered to be DROPPING.
 # Net-Zero Survival only fires when the most recent velocity sample is at or below
@@ -146,7 +146,7 @@ NET_ZERO_MIN_POSITIONS = 2              # need at least 2 open positions
 # Seconds after the guard fires before buys can be auto-re-enabled, provided the
 # combined Net PnL has recovered above NET_ZERO_PNL_FLOOR_IDR.
 # Set to 0 to require manual re-enable via the dashboard (old behaviour).
-NET_ZERO_AUTO_RESET_SEC = 1800          # 30-minute auto-recovery cooldown
+NET_ZERO_AUTO_RESET_SEC = 10 #1800          # 30-minute auto-recovery cooldown
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
