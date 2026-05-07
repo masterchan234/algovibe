@@ -662,7 +662,8 @@ class LiteRTLmDecisionService:
         sig = Signal()
         sig.symbol = pair
         sig.action = SignalAction.Value("ACTION_SELL")
-        sig.confidence = float(confidence)
+        # Normalisasi ke 0–1 agar konsisten dengan ACTION_BUY dan brain_inference
+        sig.confidence = float(confidence) / 100.0
         # TODO: update protobuf SignalSource dengan SOURCE_LLM_EXIT saat skema di-upgrade.
         # Saat ini gunakan SOURCE_ORACLE agar kompatibel dengan pipeline yang ada.
         sig.source = SignalSource.Value("SOURCE_ORACLE")

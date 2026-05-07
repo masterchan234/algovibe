@@ -2785,7 +2785,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             """
             SELECT id, pair, message, level, created_at
             FROM system_events
-            WHERE type = 'LLM_EXIT_SIGNAL'
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
             ORDER BY created_at DESC
             LIMIT ?
             """,
