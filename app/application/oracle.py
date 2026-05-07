@@ -1796,8 +1796,15 @@ class Oracle:
                 d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 2.0
                 d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 1.5
                 d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 20.0
-                d_rsi = (current_dna.get('rsi', 50) - h.get('rsi', 50)) / 15.0
-                d_ema = (current_dna.get('ema_dist', 0) - h.get('ema_dist', 0)) / 0.1  # Scale dinaikkan
+                # Gunakan fallback default jika rsi/ema_dist NULL (DNA historis lama).
+                # Tanpa ini, record dengan NULL akan throw TypeError dan di-skip oleh except,
+                # sehingga K-NN hanya melihat subset kecil yang bias (bisa artifisial 100%).
+                _h_rsi = h['rsi'] if h.get('rsi') is not None else 50.0
+                _h_ema = h['ema_dist'] if h.get('ema_dist') is not None else 0.0
+                _c_rsi = current_dna['rsi'] if current_dna.get('rsi') is not None else 50.0
+                _c_ema = current_dna['ema_dist'] if current_dna.get('ema_dist') is not None else 0.0
+                d_rsi = (_c_rsi - _h_rsi) / 15.0
+                d_ema = (_c_ema - _h_ema) / 0.1  # Scale dinaikkan
                 
                 # Weighted Manhattan: ema_dist bobot 2.5x (vs sebelumnya 0.8x)
                 # RSI diturunkan ke 0.6x (backtest: RSI hampir sama antara WIN dan LOSE)
@@ -1830,21 +1837,32 @@ class Oracle:
         win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
         win_rate = win_count / len(top_matches) if top_matches else 0
         win_rate_knn = win_rate
-        
+
+        # Resolve current_rsi/ema_dist here so they're available for prompt AND heuristic.
+        # Must be done before history_details loop to avoid UnboundLocalError.
+        current_rsi = current_dna.get('rsi')
+        current_rsi = float(current_rsi) if current_rsi is not None else 50.0
+        current_ema_dist = current_dna.get('ema_dist')
+        current_ema_dist = float(current_ema_dist) if current_ema_dist is not None else 0.0
+
         history_details = []
         for t in top_matches:
             outcome = "WIN" if t.get('pnl_idr', 0) > 0 else "LOSS"
+            _t_rsi = t['rsi'] if t.get('rsi') is not None else 50
+            _t_ema = t['ema_dist'] if t.get('ema_dist') is not None else 0.0
+            _t_vol = t['volatility'] if t.get('volatility') is not None else 0.0
+            _t_pnl = t['pnl_pct'] if t.get('pnl_pct') is not None else 0.0
             history_details.append(
-                f"- {outcome} ({t.get('pnl_pct', 0):.2f}%): RSI={t.get('rsi', 50)}, "
-                f"EMA_Dist={t.get('ema_dist', 0):.4f}, Vol={t.get('volatility', 0):.2f}%"
+                f"- {outcome} ({_t_pnl:.2f}%): RSI={_t_rsi}, "
+                f"EMA_Dist={_t_ema:.4f}, Vol={_t_vol:.2f}%"
             )
         
         history_text = "\n".join(history_details)
         
         prompt = (
             f"URGENT TRADE ANALYSIS FOR {pair.upper()} (MEAN REVERSION / BTD MODE).\n"
-            f"Current DNA: RSI={current_dna.get('rsi', 50)}, EMA_Dist={current_dna.get('ema_dist', 0):.4f}, "
-            f"Volatility={current_dna.get('volatility', 0):.2f}%, Imbalance={current_dna.get('imbalance', 1):.2f}.\n"
+            f"Current DNA: RSI={current_rsi}, EMA_Dist={current_ema_dist:.4f}, "
+            f"Volatility={current_dna.get('volatility') or 0.0:.2f}%, Imbalance={current_dna.get('imbalance') or 1.0:.2f}.\n"
             f"\nCompare with 5 similar patterns (STRATEGY: BUY THE DIP AT EMA-20, TARGET: 4% TP):\n{history_text}\n"
             f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
             "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "
@@ -1857,10 +1875,7 @@ class Oracle:
         # [Senior Refactor] Removed Hard Veto (AVOID) per user request.
         # K-NN now acts as a 'Confidence Weight' rather than a blocker.
         # If history is bad, it just gives low confidence instead of Vetoing.
-        
-        current_rsi = current_dna.get('rsi', 50)
-        current_ema_dist = current_dna.get('ema_dist', 0)
-        
+
         # "Strong setup" hanya untuk oversold dalam (RSI < 35), bukan sekadar dip biasa.
         # RSI < 35 lebih jarang terjadi sehingga lebih selektif dan lebih andal sebagai sinyal.
         is_strong_setup = current_rsi < 35 or current_ema_dist > 0.10
@@ -1877,19 +1892,19 @@ class Oracle:
         # mencerminkan data historis nyata, bukan angka yang dimanipulasi.
         n_valid = sum(1 for t in top_matches if t.get('rsi') is not None or t.get('ema_dist') is not None)
         has_quality_features = n_valid >= 3
-        
+
         if not has_quality_features:
-            # Feature-blind K-NN — fitur rsi/ema_dist belum tersimpan di DNA historis lama.
-            # Gunakan win rate K-NN mentah tanpa cap 50%, agar gate downstream tetap bisa memutuskan.
-            # Cap 50% sebelumnya menyebabkan deadlock: bot tidak bisa entry → DNA tidak terakumulasi
-            # → K-NN terus feature-blind → tidak pernah ada sinyal.
-            confidence = base_confidence if base_confidence > 0 else 60.0
-            reason = f"K-NN Feature-Blind (raw WinRate={base_confidence:.0f}%, fitur historis belum lengkap)"
+            # Fitur rsi/ema_dist belum lengkap di DNA historis — K-NN kurang akurat.
+            # Gunakan confidence netral 60% agar gate tetap bisa memutuskan tanpa
+            # over-confident (sebelumnya bisa 100% karena NULL menyaring ke 2/2 WIN).
+            confidence = 60.0
+            reason = f"K-NN Feature-Blind (fitur historis belum lengkap, WinRate={base_confidence:.0f}%)"
         elif is_strong_setup:
             # Deep oversold (RSI < 35): bisa sedikit boost karena mean-reversion lebih kuat,
             # tapi tetap tidak melebihi 70% agar gate downstream masih efektif.
             confidence = min(max(base_confidence, 55.0), 70.0)
-            reason = f"Deep-Oversold Mode (RSI {current_rsi:.0f}, k-NN WinRate: {win_rate_knn*100:.0f}%)"
+            _rsi_display = f"{current_rsi:.0f}" if current_rsi is not None else "N/A"
+            reason = f"Deep-Oversold Mode (RSI {_rsi_display}, k-NN WinRate: {win_rate_knn*100:.0f}%)"
         else:
             confidence = base_confidence
             reason = f"Historical Weighted (k-NN WinRate: {win_rate_knn*100:.0f}%)"

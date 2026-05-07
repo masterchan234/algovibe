@@ -99,6 +99,10 @@ class LiteRTLmDecisionService:
         self._last_scanned: dict = {}  # {pair: timestamp} cooldown untuk scan entry
 
         self._engine = None
+        # LiteRT hanya support satu session sekaligus.
+        # Lock ini mencegah session conflict saat _decision_loop dan _scan_loop
+        # memanggil run_in_executor secara concurrent.
+        self._engine_lock = __import__('threading').Lock()
         self._engine_enabled = self._init_engine()
 
     def _init_engine(self) -> bool:
@@ -483,8 +487,9 @@ class LiteRTLmDecisionService:
     def _ask_llm(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt(ctx)
-            with self._engine.create_conversation() as conv:
-                raw = conv.send_message(prompt)
+            with self._engine_lock:
+                with self._engine.create_conversation() as conv:
+                    raw = conv.send_message(prompt)
             text = self._extract_text(raw)
             return self._parse_json(text)
         except Exception as exc:
@@ -536,8 +541,9 @@ class LiteRTLmDecisionService:
     def _ask_llm_entry(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt_entry(ctx)
-            with self._engine.create_conversation() as conv:
-                raw = conv.send_message(prompt)
+            with self._engine_lock:
+                with self._engine.create_conversation() as conv:
+                    raw = conv.send_message(prompt)
             text = self._extract_text(raw)
             return self._parse_json(text)
         except Exception as exc:
