@@ -124,6 +124,10 @@ export const useTradeStore = defineStore('trade', () => {
   const activityFeed = ref([])
   const MAX_FEED_ITEMS = 100
 
+  // LiteRT-LM Exit Decisions
+  const llmDecisions = ref([])
+  const MAX_LLM_ITEMS = 40
+
   // Profit history for line chart: [{time, pnl}]
   // Capacity is adaptive: 75 pts on mobile, 300 on desktop
   const pnlHistory = ref([])
@@ -343,6 +347,12 @@ export const useTradeStore = defineStore('trade', () => {
       }
     })
 
+    s.on('llm_decisions_update', (data) => {
+      if (Array.isArray(data)) {
+        llmDecisions.value = data.slice(0, MAX_LLM_ITEMS)
+      }
+    })
+
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
         radarPairs.value = data
@@ -445,6 +455,7 @@ export const useTradeStore = defineStore('trade', () => {
     strategicBreak,
     bracketExitConfirm,
     activityFeed,
+    llmDecisions,
     pnlHistory,
     radarPairs,
     connect,

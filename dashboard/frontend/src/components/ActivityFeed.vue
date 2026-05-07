@@ -155,7 +155,7 @@
       </div>
     </div>
 
-    <!-- Live Intelligence Stream (Market / Analisa) -->
+    <!-- Live Intelligence Stream (Market / Analisa / LLM Exit) -->
     <div class="stream-container">
       <div class="stream-tabs">
         <button 
@@ -169,6 +169,13 @@
           @click="activeStreamTab = 'analisa'"
         >
           <span class="tab-icon">🧠</span> Analisa AI
+        </button>
+        <button
+          :class="{ active: activeStreamTab === 'llm' }"
+          @click="activeStreamTab = 'llm'"
+        >
+          <span class="tab-icon">🤖</span> LLM Exit
+          <span v-if="llmExitCount > 0" class="tab-count llm">{{ llmExitCount }}</span>
         </button>
         <div class="tab-indicator" :class="activeStreamTab"></div>
       </div>
@@ -327,13 +334,24 @@ const filteredStream = computed(() => {
     const side = String(item?.side || '').toUpperCase()
     return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
   })
+  const llmItems = items.filter((item) =>
+    String(item?.side || '').toUpperCase() === 'LLM_EXIT_SIGNAL'
+  )
 
   if (activeStreamTab.value === 'market') return marketItems
+  if (activeStreamTab.value === 'llm') return llmItems
   return items.filter((item) => String(item?.source || '').toUpperCase() !== 'MARKET_WS')
 })
 
+const llmExitCount = computed(() =>
+  store.activityFeed.filter(
+    (item) => String(item?.side || '').toUpperCase() === 'LLM_EXIT_SIGNAL'
+  ).length
+)
+
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
+  if (side === 'LLM_EXIT_SIGNAL') return 'type-llm'
   if (side === 'BUY' || side === 'LONG') return 'type-buy'
   if (side === 'SELL' || side === 'SHORT') return 'type-sell'
   if (side.includes('AI') || side.includes('ORACLE')) return 'type-ai'
@@ -343,6 +361,7 @@ function itemClass(item) {
 
 function tagClass(item) {
   const side = (item.side || '').toUpperCase()
+  if (side === 'LLM_EXIT_SIGNAL') return 'tag-llm'
   if (side === 'BUY' || side === 'LONG') return 'tag-buy'
   if (side === 'SELL' || side === 'SHORT') return 'tag-sell'
   if (side.includes('AI') || side.includes('ORACLE')) return 'tag-ai'
@@ -441,6 +460,7 @@ function formatIdr(val) {
 
 .tab-count { background: #f85149; color: white; font-size: 9px; padding: 1px 5px; border-radius: 10px; margin-left: 5px; }
 .tab-count.history { background: #30363d; color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.2); }
+.tab-count.llm { background: rgba(255, 51, 102, 0.15); color: #ff3366; border: 1px solid rgba(255, 51, 102, 0.25); }
 
 .context-panel { background: #0d1117; max-height: 60%; overflow-y: auto; border-bottom: 1px solid #30363d; transition: all 0.3s; }
 .context-panel.collapsed { max-height: 0; border-bottom: none; }
@@ -563,22 +583,25 @@ function formatIdr(val) {
 .stream-tabs button { flex: 1; background: transparent; border: none; padding: 14px 0; color: #8b949e; font-size: 11px; font-weight: 800; cursor: pointer; }
 .stream-tabs button.active { color: #e6edf3; }
 
-.tab-indicator { position: absolute; bottom: 0; height: 2px; width: 50%; transition: all 0.3s; }
-.tab-indicator.market { transform: translateX(0); background: #58a6ff; }
+.tab-indicator { position: absolute; bottom: 0; height: 2px; width: 33.33%; transition: all 0.3s; }
+.tab-indicator.market  { transform: translateX(0);   background: #58a6ff; }
 .tab-indicator.analisa { transform: translateX(100%); background: #a371f7; }
+.tab-indicator.llm     { transform: translateX(200%); background: #ff3366; }
 
 .events-list { flex: 1; overflow-y: auto; background: #0d1117; }
 .feed-item { padding: 10px 20px; border-bottom: 1px solid rgba(48, 54, 61, 0.1); border-left: 3px solid transparent; }
-.feed-item.type-buy { border-left-color: #3fb950; }
+.feed-item.type-buy  { border-left-color: #3fb950; }
 .feed-item.type-sell { border-left-color: #f85149; }
-.feed-item.type-ai { border-left-color: #a371f7; }
+.feed-item.type-ai   { border-left-color: #a371f7; }
+.feed-item.type-llm  { border-left-color: #ff3366; background: rgba(255, 51, 102, 0.03); }
 
 .feed-top { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
 .feed-time { color: #8b949e; font-size: 10px; }
 .feed-tag { font-size: 9px; font-weight: 900; padding: 1px 4px; border-radius: 3px; }
-.tag-buy { background: rgba(63, 185, 80, 0.1); color: #3fb950; }
-.tag-sell { background: rgba(248, 81, 73, 0.1); color: #f85149; }
-.tag-ai { background: rgba(163, 113, 247, 0.1); color: #a371f7; }
+.tag-buy  { background: rgba(63, 185, 80, 0.1);   color: #3fb950; }
+.tag-sell { background: rgba(248, 81, 73, 0.1);  color: #f85149; }
+.tag-ai   { background: rgba(163, 113, 247, 0.1); color: #a371f7; }
+.tag-llm  { background: rgba(255, 51, 102, 0.1);  color: #ff3366; font-size: 8px; }
 .feed-pair { color: #58a6ff; font-weight: 800; font-size: 11px; }
 .feed-msg { color: #c9d1d9; font-size: 12px; }
 .mono-text { font-family: monospace; font-size: 11px; }

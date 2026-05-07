@@ -1060,6 +1060,14 @@ def get_positions():
     finally:
         conn.close()
 
+
+@app.route('/api/llm-decisions')
+@login_required
+def get_llm_decisions():
+    """Riwayat keputusan LiteRT-LM (LLM_EXIT_SIGNAL dari system_events)."""
+    return jsonify(_build_llm_decisions_payload())
+
+
 @app.route('/api/pnl-history/<tf>')
 @login_required
 def get_pnl_history_api(tf):
@@ -2769,6 +2777,37 @@ def _build_logs_payload():
     finally:
         conn.close()
 
+def _build_llm_decisions_payload(limit: int = 20):
+    """Kembalikan riwayat keputusan LiteRT-LM dari system_events."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pair, message, level, created_at
+            FROM system_events
+            WHERE type = 'LLM_EXIT_SIGNAL'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"] or 0),
+                "pair": (r["pair"] or "").upper(),
+                "message": r["message"] or "",
+                "level": r["level"] or "WARNING",
+                "created_at": str(r["created_at"]),
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logging.warning(f"[llm-decisions] payload error: {exc}")
+        return []
+    finally:
+        conn.close()
+
+
 def _build_market_trades_payload(limit_total: int = 120, limit_per_pair: int = 12):
     """Ambil data trades terbaru multi-coin dari cache mws."""
     try:
@@ -2893,10 +2932,11 @@ def push_data_loop():
             _slow_counter += 1
             if _slow_counter >= 5:
                 _slow_counter = 0
-                socketio.emit('stats_update',  _build_stats_payload())
-                socketio.emit('radar_update',  _build_radar_payload())
-                socketio.emit('trades_update', _build_trades_update_packet())
-                socketio.emit('logs_update',   _build_logs_payload())
+                socketio.emit('stats_update',          _build_stats_payload())
+                socketio.emit('radar_update',          _build_radar_payload())
+                socketio.emit('trades_update',         _build_trades_update_packet())
+                socketio.emit('logs_update',           _build_logs_payload())
+                socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)

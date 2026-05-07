@@ -146,6 +146,14 @@
       </section>
     </main>
 
+    <!-- LLM Exit Decision Panel — full-width below main, 4th mobile tab -->
+    <section
+      class="ld-panel llm-section"
+      :class="{ 'mob-hidden': mobileTab !== 'llm' }"
+    >
+      <LlmDecisionPanel />
+    </section>
+
     <!-- Mobile Bottom Navigation -->
     <nav class="mob-bottom-nav">
       <button class="mob-nav-btn" :class="{ active: mobileTab === 'positions' }" @click="mobileTab = 'positions'">
@@ -160,6 +168,11 @@
       <button class="mob-nav-btn" :class="{ active: mobileTab === 'orders' }" @click="mobileTab = 'orders'">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1" ry="1"/></svg>
         <span>Orders</span>
+      </button>
+      <button class="mob-nav-btn" :class="{ active: mobileTab === 'llm' }" @click="mobileTab = 'llm'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>
+        <span>LLM</span>
+        <span v-if="store.llmDecisions.length" class="mob-badge">{{ store.llmDecisions.length }}</span>
       </button>
     </nav>
 
@@ -179,6 +192,7 @@ import Header from '../components/Header.vue'
 import ProfitChart from '../components/ProfitChart.vue'
 import RiskGuardPopup from '../components/RiskGuardPopup.vue'
 import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
+import LlmDecisionPanel from '../components/LlmDecisionPanel.vue'
 
 const store = useTradeStore()
 const router = useRouter()
@@ -256,6 +270,18 @@ async function fetchOrders() {
   } catch {}
 }
 
+async function fetchLlmDecisions() {
+  try {
+    const res = await fetch(`${backendUrl}/api/llm-decisions`, { headers: getAuthHeaders() })
+    if (res.ok) {
+      const data = await res.json()
+      if (Array.isArray(data)) {
+        store.llmDecisions = data
+      }
+    }
+  } catch {}
+}
+
 function formatNumber(val) { return Number(val || 0).toLocaleString('id-ID') }
 function formatPrice(val) { return Number(val || 0).toLocaleString('id-ID') }
 function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase() : '-' }
@@ -267,6 +293,7 @@ onMounted(() => {
   store.connect()
   fetchLiveState()
   fetchOrders()
+  fetchLlmDecisions()
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
 })
 onUnmounted(() => clearInterval(pollInt))
@@ -657,5 +684,28 @@ td {
   .mobile-only { display: none !important; }
   .mob-bottom-nav { display: none !important; }
   .mob-hidden { display: flex !important; }
+}
+
+/* ─── LLM Section (desktop strip + mobile full) ────── */
+.llm-section {
+  margin: 0 16px 16px;
+  max-height: 220px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  /* On mobile 'llm' tab: show LLM panel fullscreen, hide ld-main */
+  .tab-llm .ld-main { display: none !important; }
+  .tab-llm .llm-section {
+    display: flex !important;
+    flex-direction: column;
+    flex: 1;
+    margin: 0;
+    max-height: none;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+  }
 }
 </style>

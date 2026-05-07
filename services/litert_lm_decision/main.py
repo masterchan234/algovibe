@@ -199,7 +199,12 @@ class LiteRTLmDecisionService:
                 verdict["confidence"],
                 verdict["reason"],
             )
-            db.log_system_event(pair, "LLM_EXIT_SIGNAL", verdict["reason"], "WARNING")
+            db.log_system_event(
+                pair,
+                "LLM_EXIT_SIGNAL",
+                f"[{verdict['confidence']:.0f}%] {verdict['reason']}",
+                "WARNING",
+            )
 
     def _build_pair_context(self, pair: str, pos: dict) -> dict | None:
         ticker = self._tickers.get(pair, {})
