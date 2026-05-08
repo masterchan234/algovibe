@@ -47,6 +47,24 @@ exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 
+# ── Pentest Fix: Custom JSON Encoder for Datetime ──
+class CustomJSONProvider(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime.date, datetime.datetime)):
+            return obj.isoformat()
+        return super().default(obj)
+
+app.json_encoder = CustomJSONProvider
+
+# ── Pentest Fix: Custom JSON for SocketIO ──
+class JSONUtil:
+    @staticmethod
+    def dumps(obj, **kwargs):
+        return json.dumps(obj, cls=CustomJSONProvider, **kwargs)
+    @staticmethod
+    def loads(s, **kwargs):
+        return json.loads(s, **kwargs)
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     # Log the full traceback
@@ -71,7 +89,7 @@ app.config.update(
 # Exclude SocketIO from CSRF as it has its own mechanism
 # but keep it for normal API routes
 CORS(app, supports_credentials=True)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5, json=JSONUtil)
 
 # --- [Manual CSRF Protection] ---
 def generate_csrf():

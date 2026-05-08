@@ -293,6 +293,8 @@ class ExecutiveCoreService:
     def _warmup_market_snapshot(self) -> None:
         """Seed _ticks from exchange 24h ticker snapshot for all IDR pairs."""
         try:
+            # Add timeout to prevent hanging if exchange API is laggy
+            self._exchange.timeout = 30000 # 30s
             raw_tickers = self._exchange.fetch_tickers()
         except Exception as exc:
             logger.warning(f"[executive-core] Warmup fetch_tickers failed: {exc}")
@@ -808,6 +810,9 @@ def main() -> None:
 
     pid_lock = PidLock()
     pid_lock.acquire()
+    
+    # Explicitly run migrations before starting service
+    db.run_migrations()
 
     service = ExecutiveCoreService()
     _shutdown = False

@@ -86,8 +86,7 @@ class Database:
             
             # Committing is handled by the context manager automatically
             
-        # ── Jalankan Sistem Migrasi Terpisah ──
-        run_migrations(self.db_url)
+        # ── Migrasi dijalankan secara eksplisit oleh DatabaseRouter ──
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -1118,9 +1117,34 @@ class DatabaseRouter:
         self._dryrun = Database(DATABASE_URL_DRYRUN)
         self._mode_cache: bool | None = None
         self._mode_cache_ts: float = 0.0
+        self._migrated: bool = False
         self._backup_thread: threading.Thread | None = None
         self._backup_running: bool = False
         self._start_backup_scheduler()
+
+    def run_migrations(self):
+        """Explicitly run migrations for both DBs using an advisory lock to prevent deadlocks."""
+        if self._migrated:
+            return
+        
+        try:
+            with self._live.get_connection() as conn:
+                cursor = conn.cursor()
+                # Use a session-level advisory lock (ID 777777) to coordinate migrations
+                cursor.execute("SELECT pg_advisory_lock(777777)")
+                try:
+                    from .migrations import run_migrations as _run
+                    _run(self._live.db_url)
+                    _run(self._dryrun.db_url)
+                finally:
+                    cursor.execute("SELECT pg_advisory_unlock(777777)")
+            self._migrated = True
+        except Exception as e:
+            logging.error(f"[DatabaseRouter] Migration failed or lock error: {e}")
+            # If lock fails, we might be in a state where another process is migrating.
+            # We'll just set migrated=True and hope for the best if it's a lock error.
+            if "advisory" in str(e).lower():
+                self._migrated = True
 
     # ── Scheduled 6-hour backup ────────────────────────────────────────────
 

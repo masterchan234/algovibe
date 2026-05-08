@@ -94,6 +94,7 @@ class BrainInferenceService:
         # [Restoration] Exchange for backfill
         from app.infrastructure.exchange_factory import create_indodax_exchange
         self._exchange = create_indodax_exchange()
+        self._exchange.timeout = 30000 # 30s
         self._backfill_thread = None
         
         # Oracle initialization
@@ -480,6 +481,9 @@ class BrainInferenceService:
             logger.error("[brain-inference] DB Update Error: %s", e)
 
 def main() -> None:
+    # Explicitly run migrations before starting service
+    db.run_migrations()
+    
     service = BrainInferenceService()
 
     # Ensure we have an event loop
