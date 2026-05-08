@@ -84,23 +84,9 @@ class AlgovibeBacktester:
         pair_id = pair.replace('/', '').lower()
         print(f"  Analysing data availability for {pair}...")
         
-        # [Smart Sync] Cek apakah data sudah ada di database lokal (Shared dengan Live Bot)
-        db_history = db.get_ticker_history(pair_id, limit=1000)
-        if db_history and len(db_history) >= 200:
-            print(f"  ✅ Reusing {len(db_history)} local data points from DB (Redundancy Eliminated)")
-            # Format data dari DB ke DataFrame
-            # Urutan di DB biasanya DESC, kita butuh ASC untuk simulasi
-            prices = [h['last'] for h in reversed(db_history)]
-            # Generate placeholder timestamps (local data dari DB tidak punya timestamp akurat)
-            import datetime as dt
-            now = dt.datetime.now()
-            timestamps = [now - dt.timedelta(hours=len(prices)-i) for i in range(len(prices))]
-            df = pd.DataFrame({
-                'timestamp': timestamps,
-                'close': prices,
-                'open': prices, 'high': prices, 'low': prices, 'volume': [0]*len(prices) # Fallback
-            })
-            return df
+        # [Force Sync] Selalu fetch dari exchange untuk memastikan integritas data 90 hari
+        # (Melewati cache DB lokal agar tidak terjebak di data 1000 poin)
+        pass
 
         # Jika data di DB tidak ada atau kurang, barulah fetch dari exchange
         print(f"  ☁️ Fetching fresh data from Exchange for {pair}...")

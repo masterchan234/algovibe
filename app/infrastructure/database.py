@@ -257,6 +257,7 @@ class Database:
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
                         pnl_idr, pnl_pct, reason, duration_seconds, dry_run
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    ON CONFLICT (pair, entry_price, exit_price, pnl_idr, created_at) DO NOTHING
                 ''', (
                     pair, _c(entry_price), _c(exit_price), _c(amount_idr/entry_price), _c(amount_idr),
                     _c(pnl_idr), _c(pnl_pct), 'BACKTEST', _c(duration_seconds)

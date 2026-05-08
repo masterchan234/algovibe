@@ -148,6 +148,7 @@ services:
       - ./shared:/app/shared
       - ./utils:/app/utils
       - ./config.py:/app/config.py
+      - ./backtester.py:/app/backtester.py
     shm_size: 256mb
     # Elevate CPU priority so exit logic is never starved
     cpu_shares: 2048               # 2× the default 1024 — highest priority among services
