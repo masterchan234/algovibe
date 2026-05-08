@@ -1,34 +1,24 @@
 import os
 import sys
-import sqlite3
-
-# Import DB path dari infrastruktur bot agar selalu sinkron
-try:
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from app.infrastructure.database import db
-    DB_PATH = db.db_path
-except ImportError:
-    DB_PATH = 'data/algotrade.db'
+import psycopg2
+from config import DATABASE_URL_DRYRUN
 
 def reset_dry_run_data():
-    if not os.path.exists(DB_PATH):
-        print(f"❌ Database tidak ditemukan di: {DB_PATH}")
-        return
-
-    print(f"🚀 Memulai pembersihan DRY RUN (Clean Slate) pada: {DB_PATH}")
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    print(f"🚀 Memulai pembersihan DRY RUN (Clean Slate) pada database PostgreSQL")
 
     try:
-        # 1. Tabel dengan kolom dry_run — filter hanya data simulasi
-        cursor.execute("DELETE FROM trade_history WHERE dry_run = 1")
+        conn = psycopg2.connect(DATABASE_URL_DRYRUN)
+        conn.autocommit = False
+        cursor = conn.cursor()
+
+        # 1. Tabel dengan kolom dry_run — filter hanya data simulasi (TRUE)
+        cursor.execute("DELETE FROM trade_history WHERE dry_run = TRUE")
         deleted_history = cursor.rowcount
 
-        cursor.execute("DELETE FROM trade_analytics WHERE dry_run = 1")
+        cursor.execute("DELETE FROM trade_analytics WHERE dry_run = TRUE")
         deleted_analytics = cursor.rowcount
 
-        cursor.execute("DELETE FROM positions WHERE dry_run = 1")
+        cursor.execute("DELETE FROM positions WHERE dry_run = TRUE")
         deleted_positions = cursor.rowcount
 
         # 2. shadow_orders — 100% milik simulasi, hapus semua
@@ -82,24 +72,15 @@ def reset_dry_run_data():
         print("🔓 Global Pause direset. Bot siap tempur!")
 
     except Exception as e:
-        conn.rollback()
+        if 'conn' in locals(): conn.rollback()
         print(f"❌ Gagal melakukan reset: {e}")
     finally:
-        conn.close()
-
-    # VACUUM harus di luar transaksi (koneksi terpisah)
-    try:
-        vconn = sqlite3.connect(DB_PATH)
-        vconn.execute("VACUUM")
-        vconn.close()
-        print("✅ Database dioptimalkan (VACUUM).")
-    except Exception as e:
-        print(f"⚠️ VACUUM gagal (tidak kritikal): {e}")
+        if 'conn' in locals(): conn.close()
 
     print("\n✨ Sistem Algovibe Dry Run Clean Slate BERHASIL.")
 
 if __name__ == "__main__":
-    print(f"Target DB: {os.path.abspath(DB_PATH)}")
+    print(f"Target DB: {DATABASE_URL_DRYRUN}")
     print("⚠️  Pastikan service bot sudah DISTOP sebelum reset:")
     print("    systemctl --user stop indodax-scalper.service indodax-dashboard.service")
     confirm = input("⚠️ Apakah Anda yakin ingin MENGHAPUS SEMUA data dry run? (y/n): ")

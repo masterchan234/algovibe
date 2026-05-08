@@ -459,7 +459,7 @@ class BrainInferenceService:
                     cursor.execute('''
                         INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                                   ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         ON CONFLICT(pair) DO UPDATE SET
                             history_json=excluded.history_json,
                             prediction_prob=excluded.prediction_prob,

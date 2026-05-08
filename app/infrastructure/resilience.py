@@ -514,7 +514,7 @@ class ShadowSync:
                         conn.execute(
                             """
                             INSERT INTO account_balances (asset, free, used, total, updated_at)
-                            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                             ON CONFLICT(asset) DO UPDATE SET
                                 free       = excluded.free,
                                 used       = excluded.used,

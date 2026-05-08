@@ -1,12 +1,22 @@
+import sys
+import os
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from app.infrastructure.database import db
-import json
+from contextlib import _GeneratorContextManager
 
-def check():
-    trades = db.get_recent_trades(limit=10)
-    print(f"Total Recent Trades (Recent): {len(trades)}")
-    
-    perf = db.get_daily_performance(dry_run=1)
-    print(f"Daily Performance (Dry Run): {json.dumps(perf, indent=2)}")
+print(f"db.get_raw_connection type: {type(db.get_raw_connection())}")
+conn = db.get_raw_connection()
+if isinstance(conn, _GeneratorContextManager):
+    print("WARNING: get_raw_connection returns a context manager but it's used as a direct connection!")
+else:
+    print("get_raw_connection returns a direct connection wrapper.")
 
-if __name__ == "__main__":
-    check()
+try:
+    print(f"Has execute: {hasattr(conn, 'execute')}")
+    conn.close()
+    print("Closed.")
+except Exception as e:
+    print(f"Error: {e}")

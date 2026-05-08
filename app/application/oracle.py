@@ -323,7 +323,7 @@ class Oracle:
             err = str(e).lower()
             if "malformed" in err or "database disk image is malformed" in err:
                 log_message(
-                    f"⚠️ [Oracle] SQLite malformed on {db.db_path}. Rich prompt fallback aktif untuk {pair}."
+                    f"⚠️ [Oracle] DB error detected. Rich prompt fallback aktif untuk {pair}."
                 )
             else:
                 log_message(f"⚠️ [Oracle] SQLite error in rich prompt for {pair}: {e}")
@@ -799,7 +799,7 @@ class Oracle:
         """
         try:
             regime = self.get_market_regime()
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
 
             total_trades = stats.get('total_trades', 0)
             win_count = stats.get('win_count', 0)
@@ -898,7 +898,7 @@ class Oracle:
             target_raw = db.get_state("daily_profit_target")
             target_idr = float(target_raw) if target_raw else 0.0
 
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
             realized_pnl = float(stats.get('total_pnl_idr', 0))
 
             # ── Unrealized PnL from open positions ───────────────────────────
@@ -1128,7 +1128,7 @@ class Oracle:
         """
         try:
             from config import ROUND_TRIP_FEE_PCT
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
             total_trades    = stats.get('total_trades', 0)
             win_count       = stats.get('win_count', 0)
             gross_profit    = float(stats.get('gross_profit', 0))
@@ -1196,7 +1196,7 @@ class Oracle:
             regime_leader = db.get_state("regime_leader") or "UNKNOWN"
 
             if not recent_stats:
-                recent_stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+                recent_stats = db.get_daily_stats(dry_run=config.DRY_RUN)
 
             win_rate = 0.0
             if recent_stats.get("total_trades", 0) > 0:
@@ -1401,7 +1401,7 @@ class Oracle:
             
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0) # Ambil statistik 24 jam terakhir
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN) # Ambil statistik 24 jam terakhir
             daily_pnl = stats.get('total_pnl_idr', 0)
             
             # 1. Profit-Pause (Proteksi Cuan)

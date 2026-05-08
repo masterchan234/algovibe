@@ -177,8 +177,14 @@
     </nav>
 
     <footer class="ld-footer">
-      <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
-      <span>Bot Status: <strong :class="store.connected ? 'profit' : 'loss'">{{ store.connected ? 'ONLINE' : 'OFFLINE' }}</strong></span>
+      <div class="footer-stats hide-mobile">
+        <span class="stat-item">LATENCY: <span class="v">{{ store.latency || 0 }}ms</span></span>
+        <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
+      </div>
+      <div class="footer-right">
+        <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
+        <span>Bot Status: <strong :class="store.connected ? 'profit' : 'loss'">{{ store.connected ? 'ONLINE' : 'OFFLINE' }}</strong></span>
+      </div>
     </footer>
   </div>
 </template>
@@ -197,6 +203,23 @@ import LlmDecisionPanel from '../components/LlmDecisionPanel.vue'
 const store = useTradeStore()
 const router = useRouter()
 const { getAuthHeaders } = useAuth()
+
+const now = ref(Date.now())
+const startTime = ref(Date.now())
+
+const uptimeStr = computed(() => {
+  const start = store.stats.first_trade_ts || startTime.value
+  const diff = Math.floor((now.value - start) / 1000)
+  if (diff < 0) return '00:00:00'
+  const days = Math.floor(diff / 86400)
+  const hours = Math.floor((diff % 86400) / 3600)
+  const minutes = Math.floor((diff % 3600) / 60)
+  const seconds = diff % 60
+  const h = hours.toString().padStart(2, '0')
+  const m = minutes.toString().padStart(2, '0')
+  const s = seconds.toString().padStart(2, '0')
+  return days > 0 ? `${days}d ${h}:${m}:${s}` : `${h}:${m}:${s}`
+})
 
 // Mobile tab: positions | chart | orders
 const mobileTab = ref('positions')
@@ -288,6 +311,8 @@ function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase(
 
 let pollInt = null
 let llmPollInt = null
+let clockInt = null
+
 onMounted(() => {
   // Live dashboard membutuhkan stream stats_update untuk mengisi pnlHistory/chart.
   // Tanpa koneksi socket ini, chart akan terus "Waiting for data".
@@ -298,10 +323,13 @@ onMounted(() => {
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
   // Re-poll LLM decisions setiap 30 detik sebagai fallback jika socket putus
   llmPollInt = setInterval(fetchLlmDecisions, 30_000)
+  clockInt = setInterval(() => { now.value = Date.now() }, 1000)
 })
+
 onUnmounted(() => {
   clearInterval(pollInt)
   clearInterval(llmPollInt)
+  if (clockInt) clearInterval(clockInt)
 })
 
 // Global FORCE_LOGOUT listener — redirect to login when session is invalidated
@@ -490,16 +518,38 @@ td {
 .gauge-pct { font-size: 12px; font-weight: 800; min-width: 40px; text-align: right; }
 
 .ld-footer {
-  height: 40px;
+  height: 48px;
   background: #0a0c14;
   border-top: 1px solid #1a1c24;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 24px;
-  gap: 24px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  color: #333;
+  color: #555;
+  letter-spacing: 0.5px;
+}
+
+.footer-stats {
+  display: flex;
+  gap: 20px;
+}
+
+.stat-item {
+  font-size: 10px;
+  font-weight: 800;
+  color: #444;
+  letter-spacing: 1px;
+}
+
+.stat-item .v {
+  color: #888;
+}
+
+.footer-right {
+  display: flex;
+  gap: 24px;
 }
 
 .gold { color: #f5a623; }

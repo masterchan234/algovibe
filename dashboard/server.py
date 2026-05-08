@@ -267,7 +267,7 @@ try:
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
-from config import DB_PATH_LIVE, DB_PATH_DRYRUN, INITIAL_CAPITAL as _IC
+from config import INITIAL_CAPITAL as _IC
 # NOTE: cfg.DRY_RUN is imported dynamically inside functions to always read current value
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
@@ -512,19 +512,19 @@ def _get_trade_history_summary():
                 ROUND(SUM(pnl_idr), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
             FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
-        """, (dry_val,)).fetchone()
+        """, (bool(dry_val),)).fetchone()
 
         exits = conn.execute("""
             SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
             FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY reason ORDER BY cnt DESC LIMIT 6
-        """, (dry_val,)).fetchall()
+        """, (bool(dry_val),)).fetchall()
 
         top_pairs = conn.execute("""
             SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
             FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
-        """, (dry_val,)).fetchall()
+        """, (bool(dry_val),)).fetchall()
 
         conn.close()
 
@@ -820,183 +820,16 @@ def user_settings():
 @app.route('/api/stats')
 @login_required
 def get_stats():
-    conn = get_db_connection()
+    """
+    Endpoint utama untuk KPI dashboard. 
+    Menggunakan _build_stats_payload untuk konsistensi antara REST API dan WebSocket.
+    """
     try:
-        import config as cfg
-        dr_val = 1 if _is_dry_run() else 0
-        # PnL & Daily Trades
-        stats = conn.execute("SELECT * FROM bot_state").fetchall()
-        stats_dict = {row['key']: row['value'] for row in stats}
-
-        # Open Positions
-        positions = conn.execute("SELECT * FROM positions").fetchall()
-        mode_positions = [p for p in positions if int(p['dry_run'] or 0) == dr_val]
-
-        # 1. LIVE STATS (Real Money)
-        live_stats_24h = db.get_daily_stats(dry_run=0)
-        live_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
-        ).fetchone()
-        
-        # 2. DRY RUN STATS (Live Simulation)
-        dry_stats_24h = db.get_daily_stats(dry_run=1)
-        dry_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
-        ).fetchone()
-
-        # 3. BACKTEST STATS (AI Knowledge / DNA)
-        dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
-        ).fetchone()
-
-        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
-        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
-        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
-
-        # Sector Sentiment
-        sectors = db.get_all_latest_sector_sentiment()
-
-        # Unrealized PnL estimasi dari ticker_history last price
-        unrealized_pnl = 0.0
-        for pos in mode_positions:
-            try:
-                pair = pos['pair']
-                entry_price = float(pos['entry_price'] or 0)
-                amount_crypto = float(pos['amount_crypto'] or 0)
-                # Ambil harga terakhir dari ticker_history
-                row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
-                ).fetchone()
-                if row and row['history_json']:
-                    history = json.loads(row['history_json'])
-                    if history and entry_price > 0:
-                        last_price = float(history[-1])
-                        gross = (last_price - entry_price) * amount_crypto
-                        fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
-                        fee_sell = amount_crypto * last_price * cfg.FEE_SELL_TAKER
-                        unrealized_pnl += gross - fee_buy - fee_sell
-            except Exception:
-                continue
-
-        tech_data = _get_pair_technicals(ANALYSIS_PAIR)
-        ai_reasoning = db.get_state(f"llm_reasoning_{ANALYSIS_PAIR}")
-        # Ambil last_price dari tech_data jika tersedia (hindari query DB ulang)
-        _last_price = tech_data.get('last_price')
-        combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
-
-        import config as cfg
-        
-        # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
-        # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
-        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in mode_positions])
-        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl'] or 0)
-
-        if _is_dry_run():
-            available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
-            idr_used = total_used_idr
-            active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
-            active_win_rate = dry_win_rate
-            # Dry Run Equity = Sisa Dana + Modal Terpakai + PnL Mengambang
-            total_equity = available_idr + total_used_idr + unrealized_pnl
-        else:
-            # LIVE MODE: Meniru 'Estimated Asset Value' Indodax
-            real_bal = _get_cached_real_balance_bundle()
-            ws_tickers_for_equity = mws.get_tickers()
-            if real_bal is not None:
-                available_idr = float(real_bal.get("free", 0) or 0)
-                idr_used = float(real_bal.get("used", 0) or 0)
-                idr_total = available_idr + idr_used
-                
-                coin_equity_idr = _get_coin_equity_idr(
-                    real_bal.get("coins", {}), ws_tickers_for_equity
-                )
-                
-                # [Senior Fix] Total Equity LIVE = (Free IDR + Used IDR) + Market Value Seluruh Koin
-                total_equity = idr_total + coin_equity_idr
-                
-                active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
-                active_win_rate = win_rate
-            else:
-                available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
-                idr_used = float(_REAL_BALANCE_CACHE.get("used") or 0)
-                idr_total = available_idr + idr_used
-                coin_equity_idr = _get_coin_equity_idr(
-                    _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
-                )
-                total_equity = idr_total + coin_equity_idr
-                active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
-                active_win_rate = win_rate
-        used_for_utilization = total_used_idr if dr_val == 1 else float(idr_used or 0)
-        utilization_pct = (used_for_utilization / (available_idr + used_for_utilization) * 100) if (available_idr + used_for_utilization) > 0 else 0
-        
-        # Performance definitions
-        perf = db.get_daily_stats()
-        import config as cfg
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if _is_dry_run() else 0)
-        
-        top_pair_row = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
-            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
-        ).fetchone()
-        top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
-
-        best_trade_row = conn.execute(
-            "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
-        ).fetchone()
-        best_trade = float(best_trade_row[0] or 0)
-
-        # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
-        active_positions_count = len(mode_positions)
-
-        return jsonify({
-            "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "all_time_pnl_dry": realized_pnl_dry,
-            "available_idr": round(available_idr, 0),
-            "idr_used": round(idr_used, 0),
-            "total_equity": round(total_equity, 0),
-            "utilization": round(utilization_pct, 1),
-            "daily_pnl": active_pnl,
-            "win_rate": round(active_win_rate, 2),
-            "dry_win_rate": round(dry_win_rate, 2),
-            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
-            "total_trades_live": live_stats['trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "live_win_rate": round(win_rate, 2),
-            "live_trades_count": live_stats['trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
-            "backtest_win_rate": round(dna_win_rate, 2),
-            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
-            "active_positions": active_positions_count,
-            "unrealized_pnl": round(unrealized_pnl, 0),
-            "regime": stats_dict.get('market_regime', 'CHOPPY'),
-            "regime_leader": stats_dict.get('regime_leader', ''),
-            "latest_whale": stats_dict.get('latest_whale', ''),
-            "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
-            "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
-            "hero_ai_insight": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'),
-            "hero_ai_insights": [{"message": r[0], "created_at": r[1]} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
-            "active_reasoning": combined_reasoning,
-            "technicals": tech_data,
-            "sectors": sectors,
-            "alpha_contributor": top_pair,
-            "best_trade": best_trade,
-            "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1),
-            "weights": db.get_all_weights(),
-            "quant_audit": quant_audit,
-            "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
-            "backfill_status": stats_dict.get('backfill_status', 'N/A'),
-            "history_since": conn.execute("SELECT TO_CHAR(MIN(updated_at), 'DD/MM HH24:MI') FROM ticker_history").fetchone()[0] or '--/-- --:--',
-            "new_listings": db.get_new_listings(),
-            "dry_run": bool(_is_dry_run()),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
-        })
+        payload = _build_stats_payload()
+        return jsonify(payload)
     except Exception as e:
+        logging.error(f"Error in get_stats route: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route('/api/positions')
 @login_required
@@ -2109,12 +1942,12 @@ def _build_stats_payload():
         perf       = db.get_daily_stats()
         # 1. LIVE STATS (Real Money)
         live_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
         ).fetchone()
         
         # 2. DRY RUN STATS (Live Simulation)
         dry_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
         ).fetchone()
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
@@ -2130,12 +1963,12 @@ def _build_stats_payload():
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
         import config as cfg
-        dr_val = 1 if cfg.DRY_RUN else 0
+        dr_val = bool(cfg.DRY_RUN)
         
         # [NEW] Predator Metrics Calculation
         total_used_idr = 0.0
         for pos in positions:
-            if int(pos['dry_run'] or 0) == dr_val:
+            if bool(pos['dry_run']) == dr_val:
                 total_used_idr += float(pos['amount_idr'] or 0)
 
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
@@ -2182,7 +2015,7 @@ def _build_stats_payload():
 
         # [Senior Audit] Calculate Unrealized PnL
         for pos in positions:
-            if int(pos['dry_run'] or 0) != dr_val:
+            if bool(pos['dry_run']) != dr_val:
                 continue
 
             pair = pos['pair']
@@ -2286,7 +2119,7 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s", (dr_val,)
+            "WHERE reason != 'BACKTEST' AND dry_run = %s", (bool(dr_val),)
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
@@ -2353,7 +2186,7 @@ def _build_stats_payload():
                 FROM trade_history
                 WHERE reason != 'BACKTEST' AND dry_run = %s
                 ORDER BY created_at DESC LIMIT 20
-            """, (int(dr_val),)).fetchall()
+            """, (bool(dr_val),)).fetchall()
             for r in recent_trades_rows:
                 recent_trades.append({
                     "pair":        r['pair'],
@@ -2401,6 +2234,8 @@ def _build_stats_payload():
             "history_count": total_trades_overall,
             "open_count": open_count,
             "daily_pnl": active_pnl,
+            "net_pnl": active_pnl,
+            "all_time_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
@@ -2815,7 +2650,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             """
             SELECT id, pair, message, type as side, level, created_at
             FROM system_events
-            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT')
             ORDER BY created_at DESC
             LIMIT %s
             """,
@@ -3329,7 +3164,7 @@ def _background_wallet_sync_loop():
     dengan database secara otomatis setiap 5 menit (hanya di mode LIVE).
     """
     import config as _cfg
-    from config import TP_PCT, SL_PCT, DB_PATH_LIVE
+    from config import TP_PCT, SL_PCT
     socketio.sleep(30)  # Tunggu 30 detik setelah startup sebelum sync pertama
     while True:
         try:
@@ -3355,7 +3190,7 @@ def _background_wallet_sync_loop():
                 current_positions = {
                     row['pair']: dict(row)
                     for row in conn.execute(
-                        "SELECT * FROM positions WHERE dry_run = 0"
+                        "SELECT * FROM positions WHERE dry_run = FALSE"
                     ).fetchall()
                 }
                 blacklist = set(r['pair'] for r in conn.execute("SELECT pair FROM blacklist").fetchall())

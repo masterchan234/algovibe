@@ -658,6 +658,7 @@ class ExecutiveCoreService:
                 # Persist snapshot to DB for dashboard
                 db.save_state("net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
                 db.save_state("net_pnl_realized",   str(round(self._realized_pnl, 2)))
+                db.save_state("peak_net_pnl_session", str(round(self._peak_equity, 2)))
 
                 # Heartbeat every 5 seconds
                 _heartbeat_counter += 1

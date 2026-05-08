@@ -475,7 +475,7 @@ class TradingBridge:
                 conn.execute(
                     """
                     INSERT INTO account_balances (asset, free, used, total, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(asset) DO UPDATE SET
                         free       = excluded.free,
                         used       = excluded.used,
@@ -514,7 +514,7 @@ class TradingBridge:
             db = self._get_db()
             with db._active().get_connection() as conn:
                 conn.execute(
-                    "UPDATE order_book SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?",
+                    "UPDATE order_book SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE order_id = %s",
                     (status, order_id),
                 )
         except Exception as exc:

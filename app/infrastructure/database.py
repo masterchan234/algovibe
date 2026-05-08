@@ -42,11 +42,9 @@ class ConnectionWrapper:
 class Database:
     def __init__(self, db_url=DATABASE_URL_LIVE):
         self.db_url = db_url
-        self.pool = ThreadedConnectionPool(1, 20, self.db_url)
+        self.pool = ThreadedConnectionPool(1, 100, self.db_url)
         self._init_db()
 
-    @contextmanager
-    
     def get_raw_connection(self):
         raw = self.pool.getconn()
         return ConnectionWrapper(raw, self.pool)
@@ -74,15 +72,15 @@ class Database:
             # Initialize dry_run state from config default if not exists
             from config import DRY_RUN as DEFAULT_DRY_RUN
             try:
-                cursor.execute("INSERT INTO bot_state (key, value) VALUES ('dry_run', %s) ON CONFLICT DO NOTHING ON CONFLICT (key) DO NOTHING", (str(DEFAULT_DRY_RUN),))
+                cursor.execute("INSERT INTO bot_state (key, value) VALUES ('dry_run', %s) ON CONFLICT (key) DO NOTHING", (str(DEFAULT_DRY_RUN),))
             except: pass
 
             # Initialize weights if empty
             try:
-                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
-                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
-                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
-                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0) ON CONFLICT (feature_name) DO NOTHING")
             except: pass
 
             
@@ -99,13 +97,11 @@ class Database:
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
 
-    def get_active_positions_count(self, dry_run=None):
-        """Menghitung jumlah posisi terbuka untuk mode tertentu (Dry Run/Live)."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = %s", (int(dry_run),))
+            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = %s", (dry_run,))
             return cursor.fetchone()[0] or 0
 
     def update_position_after_dca(self, pair, new_price, new_amount_crypto, new_amount_idr, new_tier):
@@ -129,7 +125,7 @@ class Database:
             cursor = conn.cursor()
             
             # Ubah boolean jadi integer untuk SQLite
-            dry_run = 1 if data.get('dry_run') else 0
+            dry_run = bool(data.get('dry_run'))
             trailing_sl_price = data.get('trailing_sl_price')
             highest_price = data.get('highest_price')
             
@@ -190,14 +186,14 @@ class Database:
     def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            dry_run_int = 1 if dry_run else 0
+            dry_run_bool = bool(dry_run)
             
             sql = '''
                 INSERT INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
                     pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id, ai_confidence
                 '''
-            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id, ai_confidence]
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_bool, trade_id, is_manual, exit_order_id, ai_confidence]
             
             if created_at:
                 sql += ", created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
@@ -217,14 +213,14 @@ class Database:
                     '''
                     legacy_params = [
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
-                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int,
+                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_bool,
                     ]
 
                     if created_at:
                         legacy_sql += ", created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                         legacy_params.append(created_at)
                     else:
-                        legacy_sql += ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (pair) DO UPDATE SET history_json=EXCLUDED.history_json, prediction_prob=EXCLUDED.prediction_prob, trend=EXCLUDED.trend, signal=EXCLUDED.signal, ch_5m=EXCLUDED.ch_5m, ch_15m=EXCLUDED.ch_15m, ch_1h=EXCLUDED.ch_1h, volatility=EXCLUDED.volatility, score=EXCLUDED.score, updated_at=CURRENT_TIMESTAMP"
+                        legacy_sql += ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
                     cursor.execute(legacy_sql, tuple(legacy_params))
                 else:
@@ -251,7 +247,7 @@ class Database:
                     INSERT INTO trade_history (
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
                         pnl_idr, pnl_pct, reason, duration_seconds, dry_run
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                 ''', (
                     pair, entry_price, exit_price, amount_idr/entry_price, amount_idr,
                     pnl_idr, pnl_pct, 'BACKTEST', duration_seconds
@@ -262,7 +258,7 @@ class Database:
     def get_daily_stats(self, date_str=None, dry_run=None):
         """Ambil statistik performa harian (24 jam terakhir) dari trade_history."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -286,7 +282,7 @@ class Database:
                 FROM trade_history
                 WHERE {date_filter} AND dry_run = %s
             '''
-            cursor.execute(query, (int(dry_run),))
+            cursor.execute(query, (dry_run,))
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
@@ -305,7 +301,7 @@ class Database:
     def get_all_time_stats(self, dry_run=None):
         """Ambil statistik performa all-time dari trade_history."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = '''
@@ -321,7 +317,7 @@ class Database:
                 FROM trade_history
                 WHERE dry_run = %s
             '''
-            cursor.execute(query, (int(dry_run),))
+            cursor.execute(query, (dry_run,))
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
@@ -612,7 +608,7 @@ class Database:
                      sector_sentiment, dna_data.get('imbalance', 0.0), dna_data.get('volatility', 0.0),
                      dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
                      dna_data.get('llm_verdict', 'HOLD'), dna_data.get('llm_confidence', 0.0),
-                     dna_data.get('llm_reason', ''), 1 if dna_data.get('dry_run', True) else 0)
+                     dna_data.get('llm_reason', ''), bool(dna_data.get('dry_run', True)))
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")
@@ -620,7 +616,7 @@ class Database:
     def get_quant_audit_report(self, window_hours=24, dry_run=None):
         """Menghasilkan laporan audit kuantitatif untuk 24 jam terakhir."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         """
         Laporan audit kuantitatif untuk dashboard:
         - Precision per LLM verdict
@@ -653,7 +649,7 @@ class Database:
                     FROM trade_history
                     WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
                     """,
-                    (f'-{active_window_hours} hours', int(dry_run))
+                    (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
 
                 sample_total = int((sample_row['total'] if sample_row else 0) or 0)
@@ -674,7 +670,7 @@ class Database:
                     FROM trade_history
                     WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
                     """,
-                    (f'-{active_window_hours} hours', int(dry_run))
+                    (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
 
                 report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
@@ -695,7 +691,7 @@ class Database:
                       AND dry_run = %s
                     GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
                     """,
-                                        (f'-{active_window_hours} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', dry_run)
                 ).fetchall()
 
                 for row in verdict_rows:
@@ -724,7 +720,7 @@ class Database:
                     ORDER BY cnt DESC, avg_loss ASC
                     LIMIT 5
                     """,
-                                        (f'-{active_window_hours} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', dry_run)
                 ).fetchall()
 
                 report['dominant_loss_reasons'] = [
@@ -843,13 +839,13 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cursor = conn.execute("""
-                    SELECT pair_id, MIN(updated_at) as first_seen 
+                    SELECT pair, MIN(updated_at) as first_seen 
                     FROM ticker_history 
-                    GROUP BY pair_id 
+                    GROUP BY pair 
                     ORDER BY first_seen DESC 
                     LIMIT 5
                 """)
-                return [{"pair": row['pair_id'], "first_seen": row['first_seen']} for row in cursor.fetchall()]
+                return [{"pair": row['pair'], "first_seen": row['first_seen']} for row in cursor.fetchall()]
         except Exception:
             return []
 

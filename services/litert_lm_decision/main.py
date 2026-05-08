@@ -71,7 +71,7 @@ _MIN_ENTRY_TRUE_CONDITIONS = 2
 _MIN_ENTRY_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
 # Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
-_LLM_TIMEOUT_SEC = 15
+_LLM_TIMEOUT_SEC = 30
 
 
 class LiteRTLmDecisionService:
@@ -85,15 +85,15 @@ class LiteRTLmDecisionService:
         self._last_emitted = {}  # {pair: timestamp}
         self._stopped = False
 
-        self._interval_sec = int(os.getenv("LLM_EXIT_INTERVAL_SEC", "20"))
-        self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "45"))
+        self._interval_sec = int(os.getenv("LLM_EXIT_INTERVAL_SEC", "30"))
+        self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "60"))
         self._min_confidence = float(os.getenv("LLM_EXIT_MIN_CONFIDENCE", "80"))
-        self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "4"))
+        self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "2"))
         self._timeout_sec = float(os.getenv("LLM_EXIT_TIMEOUT_SEC", str(_LLM_TIMEOUT_SEC)))
 
         # Konfigurasi scan entry realtime (300+ pair)
-        self._scan_interval_sec = int(os.getenv("LLM_SCAN_INTERVAL_SEC", "30"))
-        self._scan_max_pairs = int(os.getenv("LLM_SCAN_MAX_PAIRS", "5"))
+        self._scan_interval_sec = int(os.getenv("LLM_SCAN_INTERVAL_SEC", "60"))
+        self._scan_max_pairs = int(os.getenv("LLM_SCAN_MAX_PAIRS", "3"))
         self._scan_min_confidence = float(os.getenv("LLM_SCAN_MIN_CONFIDENCE", "75"))
         self._scan_min_vol_idr = float(os.getenv("LLM_SCAN_MIN_VOL_IDR", "1000000"))
         self._last_scanned: dict = {}  # {pair: timestamp} cooldown untuk scan entry
@@ -319,6 +319,14 @@ class LiteRTLmDecisionService:
                 logger.warning("[litert-lm-decision] Pair %s error: %s", pair, result)
                 continue
             if result["action"] != "SELL":
+                # Log HOLD decisions for visibility in "LLM Exit" dashboard section
+                if result["action"] == "HOLD" and result.get("confidence", 0) > 0:
+                    db.log_system_event(
+                        pair,
+                        "LLM_EXIT_HOLD",
+                        f"[{result.get('confidence', 0):.0f}%] {result.get('reason', 'HOLD')}",
+                        "INFO",
+                    )
                 continue
             self._publish_sell_signal(pair, result["confidence"])
             self._last_emitted[pair] = now
@@ -349,6 +357,12 @@ class LiteRTLmDecisionService:
             logger.warning(
                 "[litert-lm-decision] ⏱ Timeout %s setelah %.0f ms (limit %.0f s) — HOLD",
                 pair, elapsed_ms, self._timeout_sec,
+            )
+            db.log_system_event(
+                pair,
+                "LLM_EXIT_TIMEOUT",
+                f"LiteRT-LM analysis timed out after {elapsed_ms/1000:.1f}s. Action: HOLD",
+                "WARNING",
             )
             return {"action": "HOLD", "confidence": 0.0, "reason": "llm_timeout"}
         elapsed_ms = (time.perf_counter() - t0) * 1000

@@ -48,11 +48,11 @@ def log_message(message: str, telegram: bool = False):
     """
     Fungsi universal untuk mencatat log ke konsol/file dan opsional ke Telegram.
     """
-    clean_msg = message.replace('*', '').replace('_', '').replace('`', '')
-    logger.info(clean_msg)
+    logger.info(message)
     
     if telegram:
-        send_telegram_message(message)
+        clean_msg = message.replace('*', '').replace('_', '').replace('`', '')
+        send_telegram_message(clean_msg)
 
 def run_performance_report(log_fn=None):
     """
