@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from app.infrastructure.database import db
 
 TIMEFRAME       = '15m'
-SINCE_DAYS      = 60
+SINCE_DAYS      = 90
 MIN_VOL_PCT     = 0.3       # Skip koin dengan candle volatilitas < 0.3%
 MIN_VOLUME_IDR  = 10_000_000  # Min Rp 10 Juta volume 24h (filter koin zombie)
 MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin terlikuid)

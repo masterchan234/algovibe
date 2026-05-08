@@ -238,21 +238,22 @@ class Database:
                 return val
 
             with self.get_connection() as conn:
-                # 1. Simpan ke trade_analytics (DNA)
+                # 1. Simpan ke backtest_analytics (DNA)
                 conn.execute('''
-                    INSERT INTO trade_analytics (
+                    INSERT INTO backtest_analytics (
                         pair, entry_timestamp, ai_prob, whale_boost, 
                         sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'CLOSED')
+                    ON CONFLICT (pair, entry_timestamp) DO NOTHING
                 ''', (
                     pair, dna.get('timestamp'), _c(dna.get('ai_prob')), _c(dna.get('whale_boost')),
                     _c(dna.get('sector_sentiment')), _c(dna.get('imbalance')), _c(dna.get('volatility')),
                     _c(dna.get('rsi')), _c(dna.get('ema_dist')), _c(pnl_idr)
                 ))
                 
-                # 2. Simpan ke trade_history (Outcome)
+                # 2. Simpan ke backtest_history (Outcome)
                 conn.execute('''
-                    INSERT INTO trade_history (
+                    INSERT INTO backtest_history (
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
                         pnl_idr, pnl_pct, reason, duration_seconds, dry_run
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
@@ -614,7 +615,8 @@ class Database:
                 conn.execute(
                     """INSERT INTO trade_analytics 
                     (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (pair, entry_timestamp) DO NOTHING""",
                     (pair, datetime.now().isoformat(), ai_prob, dna_data.get('whale_boost', 0.0),
                      sector_sentiment, dna_data.get('imbalance', 0.0), dna_data.get('volatility', 0.0),
                      dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
@@ -790,9 +792,11 @@ class Database:
                 # [Fix] Hapus JOIN ke trade_history — JOIN tersebut hanya menghasilkan 5 record
                 # karena kondisi abs(pnl_idr) < 10 tidak cocok untuk trade dengan nilai berbeda.
                 # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
+                # [Senior Fix] Ambil DNA dari data Live/Dry DAN data Backtest
                 query = """
-                    SELECT * FROM trade_analytics
-                    WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
+                    UNION ALL
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
                     ORDER BY entry_timestamp DESC LIMIT %s
                 """
                 cursor = conn.execute(query, (limit,))

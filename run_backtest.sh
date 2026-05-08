@@ -32,8 +32,8 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}   Data telah disuntikkan ke TimescaleDB (Dry Run).${NC}"
     echo -e "${GREEN}==================================================${NC}"
     
-    echo -e "${BLUE}Rekap Data DNA Baru:${NC}"
-    docker exec -t algovibe-timescaledb psql -U algovibe -d algovibe_dryrun -c "SELECT count(*) FROM trade_analytics WHERE status='CLOSED'"
+    echo -e "${BLUE}Rekap Data DNA Baru (Backtest Storage):${NC}"
+    docker exec -t algovibe-timescaledb psql -U algovibe -d algovibe_dryrun -c "SELECT count(*) FROM backtest_analytics WHERE status='CLOSED'"
 else
     echo -e "${RED}[ERROR] Backtest gagal. Cek log di atas.${NC}"
     exit 1
