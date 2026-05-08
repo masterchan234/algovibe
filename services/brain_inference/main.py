@@ -221,7 +221,8 @@ class BrainInferenceService:
                 
                 # 2. Rank pairs
                 ranked = []
-                for symbol, data in self._tickers.items():
+                # Use list() to avoid "dictionary changed size during iteration" from concurrent tick updates
+                for symbol, data in list(self._tickers.items()):
                     res = calculate_score(((symbol, data), self._adaptive_cfg, regime))
                     if res:
                         ranked.append(res)

@@ -121,15 +121,26 @@ function startTimer() {
 
 function respond(decision) {
   if (!pendingAction.value || isResponding.value) return
-  if (!props.socket || typeof props.socket.emit !== 'function') return
+  
+  // Extreme defensive check for socket existence
+  const s = props.socket
+  if (!s || typeof s.emit !== 'function') {
+    console.warn('🛡️ Risk Guard: Socket unavailable, clearing action locally.')
+    clearAction()
+    return
+  }
   
   isResponding.value = true
   console.log(`🛡️ Risk Guard: Sending response ${decision} for ${pendingAction.value.action_id}`)
   
-  props.socket.emit('approval_response', {
-    action_id: pendingAction.value.action_id,
-    decision: decision
-  })
+  try {
+    s.emit('approval_response', {
+      action_id: pendingAction.value.action_id,
+      decision: decision
+    })
+  } catch (e) {
+    console.error('🛡️ Risk Guard: Failed to emit response', e)
+  }
   
   // Wait for clear event from backend or just clear after small delay
   setTimeout(() => {

@@ -28,6 +28,7 @@ import config as cfg
 import utils.logger # Ensure central logging config is applied
 from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
 from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- [ZMQ COMMAND PUBLISHER] ---
 _ctx = zmq_eventlet.Context()
@@ -46,6 +47,7 @@ def broadcast_command(action, payload=None):
 exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # ── Pentest Fix: Custom JSON Encoder for Datetime ──
 class CustomJSONProvider(json.JSONEncoder):
@@ -55,6 +57,21 @@ class CustomJSONProvider(json.JSONEncoder):
         return super().default(obj)
 
 app.json_encoder = CustomJSONProvider
+
+
+# ── Pentest Fix: Secure Date Parsing ──
+def _parse_iso_date(ts_val):
+    """Safe ISO date parser for both string and datetime objects."""
+    if ts_val is None:
+        return None
+    if isinstance(ts_val, datetime.datetime):
+        return ts_val
+    try:
+        # Handle formats: '2026-05-08 20:00:00', '2026-05-08T20:00:00', etc.
+        s = str(ts_val).replace(' ', 'T').replace('Z', '+00:00')
+        return datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
 
 # ── Pentest Fix: Custom JSON for SocketIO ──
 class JSONUtil:
@@ -117,7 +134,7 @@ def validate_csrf():
 
         token = request.headers.get("X-CSRFToken")
         if not token or token != session.get("_csrf_token"):
-            logging.warning(f"🚫 CSRF Validation Failed for {request.path}")
+            logging.warning(f"🚫 CSRF Validation Failed for {request.method} {request.path}")
             abort(403)
 
 # Provide CSRF token for the frontend
@@ -902,7 +919,7 @@ def get_positions():
             try:
                 ts = pos['timestamp']
                 if ts:
-                    opened_at = datetime.datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+                    opened_at = _parse_iso_date(ts)
                     duration_sec = int((datetime.datetime.now(datetime.timezone.utc) - opened_at).total_seconds())
             except Exception:
                 pass
@@ -1538,7 +1555,7 @@ def get_bot_status():
         if last_state:
             last_heartbeat = str(last_state['updated_at'])
             try:
-                updated = datetime.datetime.fromisoformat(str(last_state['updated_at']))
+                updated = _parse_iso_date(last_state['updated_at'])
                 age_sec = (datetime.datetime.utcnow() - updated).total_seconds()
                 bot_alive = age_sec < 60
             except Exception:
@@ -1731,7 +1748,7 @@ def get_radar_audit():
             ts = r['updated_at']
             if ts and not isinstance(ts, datetime.datetime):
                 try:
-                    ts = datetime.datetime.fromisoformat(str(ts).replace(' ', 'T'))
+                    ts = _parse_iso_date(ts)
                 except Exception:
                     ts = None
             
@@ -1757,7 +1774,7 @@ def get_radar_audit():
                 state = _pair_state(pair)
                 try:
                     # llm_veto_ts_ value is also a timestamp string
-                    v_ts = datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+                    v_ts = _parse_iso_date(val)
                     if v_ts.tzinfo is not None:
                         v_ts = v_ts.replace(tzinfo=None)
                     state['veto_ts'] = v_ts
@@ -2391,7 +2408,7 @@ def _build_radar_payload():
             if not ts_str:
                 return False
             try:
-                ts = datetime.datetime.fromisoformat(str(ts_str))
+                ts = _parse_iso_date(ts_str)
                 return (datetime.datetime.now() - ts).total_seconds() <= max_age_sec
             except Exception:
                 return False # Default
@@ -2403,7 +2420,7 @@ def _build_radar_payload():
             candidates = [text, text.replace(' ', 'T')]
             for c in candidates:
                 try:
-                    return datetime.datetime.fromisoformat(c)
+                    return _parse_iso_date(c)
                 except Exception:
                     continue
             return None
@@ -2615,7 +2632,7 @@ def _build_logs_payload():
         events = conn.execute("""
             SELECT pair, type as side, message as price, level as status, created_at
             FROM system_events
-            ORDER BY created_at DESC LIMIT 20
+            ORDER BY created_at DESC LIMIT 100
         """).fetchall()
 
         # 2. Fetch AI Signals dari ticker_history (Legacy fallback for predictions)
@@ -2874,11 +2891,21 @@ def push_data_loop():
             _slow_counter += 1
             if _slow_counter >= 5:
                 _slow_counter = 0
-                socketio.emit('stats_update',          _build_stats_payload())
-                socketio.emit('radar_update',          _build_radar_payload())
-                socketio.emit('trades_update',         _build_trades_update_packet())
-                socketio.emit('logs_update',           _build_logs_payload())
-                socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                # individual emitters wrapped in try-except to prevent one failure from killing the whole loop
+                try: socketio.emit('stats_update',          _build_stats_payload())
+                except Exception as _e: logging.error(f"stats_update emit error: {_e}")
+
+                try: socketio.emit('radar_update',          _build_radar_payload())
+                except Exception as _e: logging.error(f"radar_update emit error: {_e}")
+
+                try: socketio.emit('trades_update',         _build_trades_update_packet())
+                except Exception as _e: logging.error(f"trades_update emit error: {_e}")
+
+                try: socketio.emit('logs_update',           _build_logs_payload())
+                except Exception as _e: logging.error(f"logs_update emit error: {_e}")
+
+                try: socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                except Exception as _e: logging.error(f"llm_decisions_update emit error: {_e}")
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)

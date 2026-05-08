@@ -446,6 +446,7 @@ class MarketDataWS:
                 self._ws_ref.send(json.dumps(sub_msg))
                 self._ob_subscribed.add(pair)
                 logger.info(f"[MarketWS] Subscribed order-book: {pair}")
+                time.sleep(0.1) # Stagger subscriptions to avoid Indodax rate-limits
             except Exception as e:
                 logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
 

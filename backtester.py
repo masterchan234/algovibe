@@ -21,6 +21,9 @@ MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin ter
 from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, DEFAULT_BLACKLIST_COINS as BLACKLIST_COINS
 CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
 
+import logging
+logging.getLogger('ccxt').setLevel(logging.ERROR)
+
 
 class AlgovibeBacktester:
     def __init__(self):

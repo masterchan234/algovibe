@@ -334,13 +334,19 @@ const filteredStream = computed(() => {
     const side = String(item?.side || '').toUpperCase()
     return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
   })
-  const llmItems = items.filter((item) =>
-    String(item?.side || '').toUpperCase() === 'LLM_EXIT_SIGNAL'
-  )
+  const llmItems = items.filter((item) => {
+    const side = String(item?.side || '').toUpperCase()
+    return side.startsWith('LLM_')
+  })
 
   if (activeStreamTab.value === 'market') return marketItems
-  if (activeStreamTab.value === 'llm') return llmItems
-  return items.filter((item) => String(item?.source || '').toUpperCase() !== 'MARKET_WS')
+  if (activeStreamTab.value === 'llm') return store.llmDecisions
+  
+  // Overview: show everything except dense market data
+  return items.filter((item) => {
+    const src = String(item?.source || '').toUpperCase()
+    return src !== 'MARKET_WS'
+  })
 })
 
 const llmExitCount = computed(() => store.llmDecisions.length)

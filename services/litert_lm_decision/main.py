@@ -71,7 +71,7 @@ _MIN_ENTRY_TRUE_CONDITIONS = 2
 _MIN_ENTRY_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
 # Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
-_LLM_TIMEOUT_SEC = 120
+_LLM_TIMEOUT_SEC = 300
 
 
 class LiteRTLmDecisionService:
@@ -501,7 +501,11 @@ class LiteRTLmDecisionService:
     def _ask_llm(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt(ctx)
+            t_lock = time.perf_counter()
             with self._engine_lock:
+                lock_wait = (time.perf_counter() - t_lock) * 1000
+                if lock_wait > 500:
+                    logger.warning("[litert-lm-decision] ⏳ Lock wait for %s: %.0f ms", ctx.get('pair'), lock_wait)
                 with self._engine.create_conversation() as conv:
                     raw = conv.send_message(prompt)
             text = self._extract_text(raw)
@@ -555,7 +559,11 @@ class LiteRTLmDecisionService:
     def _ask_llm_entry(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt_entry(ctx)
+            t_lock = time.perf_counter()
             with self._engine_lock:
+                lock_wait = (time.perf_counter() - t_lock) * 1000
+                if lock_wait > 500:
+                    logger.warning("[litert-lm-decision] ⏳ Lock wait scan %s: %.0f ms", ctx.get('pair'), lock_wait)
                 with self._engine.create_conversation() as conv:
                     raw = conv.send_message(prompt)
             text = self._extract_text(raw)

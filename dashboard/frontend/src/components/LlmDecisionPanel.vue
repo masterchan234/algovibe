@@ -19,7 +19,9 @@
           <span class="d-confidence" :class="confidenceClass(d.confidence)">
             {{ d.confidence }}%
           </span>
-          <span class="d-action sell">SELL</span>
+          <span class="d-action" :class="d.side.toLowerCase().includes('exit') ? 'sell' : 'buy'">
+            {{ formatSide(d.side) }}
+          </span>
           <span class="d-time">{{ formatTime(d.created_at) }}</span>
         </div>
         <div class="d-reason">{{ d.reason }}</div>
@@ -70,6 +72,10 @@ function confidenceClass(c) {
   if (c >= 90) return 'conf-high'
   if (c >= 80) return 'conf-med'
   return 'conf-low'
+}
+
+function formatSide(side) {
+  return (side || '').replace(/^LLM_/, '').replace(/_/g, ' ').toUpperCase()
 }
 
 function formatPair(pair) {

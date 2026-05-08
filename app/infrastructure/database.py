@@ -232,6 +232,11 @@ class Database:
     def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""
         try:
+            # Cast numpy types to native Python types to avoid "schema np does not exist" errors
+            def _c(val):
+                if hasattr(val, 'item'): return val.item() # for numpy types
+                return val
+
             with self.get_connection() as conn:
                 # 1. Simpan ke trade_analytics (DNA)
                 conn.execute('''
@@ -240,9 +245,9 @@ class Database:
                         sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'CLOSED')
                 ''', (
-                    pair, dna.get('timestamp'), dna.get('ai_prob'), dna.get('whale_boost'),
-                    dna.get('sector_sentiment'), dna.get('imbalance'), dna.get('volatility'),
-                    dna.get('rsi'), dna.get('ema_dist'), pnl_idr
+                    pair, dna.get('timestamp'), _c(dna.get('ai_prob')), _c(dna.get('whale_boost')),
+                    _c(dna.get('sector_sentiment')), _c(dna.get('imbalance')), _c(dna.get('volatility')),
+                    _c(dna.get('rsi')), _c(dna.get('ema_dist')), _c(pnl_idr)
                 ))
                 
                 # 2. Simpan ke trade_history (Outcome)
@@ -252,8 +257,8 @@ class Database:
                         pnl_idr, pnl_pct, reason, duration_seconds, dry_run
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                 ''', (
-                    pair, entry_price, exit_price, amount_idr/entry_price, amount_idr,
-                    pnl_idr, pnl_pct, 'BACKTEST', duration_seconds
+                    pair, _c(entry_price), _c(exit_price), _c(amount_idr/entry_price), _c(amount_idr),
+                    _c(pnl_idr), _c(pnl_pct), 'BACKTEST', _c(duration_seconds)
                 ))
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
@@ -270,7 +275,10 @@ class Database:
             
             if date_str:
                 # Jika spesifik tanggal, gunakan filter tanggal kalender
-                date_filter = f"date(created_at, 'localtime') = date('{date_str}')"
+                date_filter = "created_at::date = %s::date"
+                params = (date_str, dry_run)
+            else:
+                params = (dry_run,)
                 
             query = f'''
                 SELECT 
@@ -283,9 +291,9 @@ class Database:
                     SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
                     SUM(amount_idr) as total_volume_idr
                 FROM trade_history
-                WHERE {date_filter} AND dry_run = %s
+                WHERE {date_filter} AND dry_run = %s AND reason != 'BACKTEST'
             '''
-            cursor.execute(query, (dry_run,))
+            cursor.execute(query, params)
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
@@ -318,7 +326,7 @@ class Database:
                     SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
                     SUM(amount_idr) as total_volume_idr
                 FROM trade_history
-                WHERE dry_run = %s
+                WHERE dry_run = %s AND reason != 'BACKTEST'
             '''
             cursor.execute(query, (dry_run,))
             row = cursor.fetchone()
@@ -338,7 +346,7 @@ class Database:
     def get_recent_trades(self, limit=10):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trade_history ORDER BY created_at DESC LIMIT %s", (limit,))
+            cursor.execute("SELECT * FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT %s", (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
     # ── METODE UNTUK TICKER HISTORY ──
@@ -650,7 +658,7 @@ class Database:
                     """
                     SELECT COUNT(*) as total
                     FROM trade_history
-                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s AND reason != 'BACKTEST'
                     """,
                     (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
@@ -671,7 +679,7 @@ class Database:
                         AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
                         AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
                     FROM trade_history
-                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s AND reason != 'BACKTEST'
                     """,
                     (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
@@ -719,6 +727,7 @@ class Database:
                     WHERE created_at >= NOW() + (%s)::interval
                       AND dry_run = %s
                       AND pnl_idr < 0
+                      AND reason != 'BACKTEST'
                     GROUP BY reason
                     ORDER BY cnt DESC, avg_loss ASC
                     LIMIT 5
@@ -1108,7 +1117,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM open_positions WHERE status = 'OPEN'"
+                    "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'"
                 ).fetchone()
                 return row[0] if row else 0
         except Exception as e:
