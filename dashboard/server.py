@@ -47,6 +47,15 @@ exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Log the full traceback
+    logging.exception(f"Unhandled Exception: {e}")
+    # Return JSON for API routes
+    if request.path.startswith('/api/'):
+        return jsonify({"error": str(e), "path": request.path}), 500
+    return "Internal Server Error", 500
+
 # ── Pentest Fix: Secure Session Configuration ──
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
 WS_SALT = os.getenv("WS_SALT", "algovibe_salt_2024") # Salt rahasia untuk handshake
@@ -1667,16 +1676,18 @@ def get_radar_data():
 @app.route('/api/radar-audit')
 @login_required
 def get_radar_audit():
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         rows = conn.execute(
             """
             SELECT key, value, updated_at
             FROM bot_state
-            WHERE key LIKE 'radar_reco_%'
-               OR key LIKE 'gate_skip_%'
-               OR key LIKE 'llm_veto_ts_%'
-            """
+            WHERE key LIKE %s
+               OR key LIKE %s
+               OR key LIKE %s
+            """,
+            ('radar_reco_%', 'gate_skip_%', 'llm_veto_ts_%')
         ).fetchall()
 
         now = datetime.datetime.now()
@@ -1697,11 +1708,21 @@ def get_radar_audit():
         for r in rows:
             key = str(r['key'] or '')
             val = str(r['value'] or '')
-            ts_text = str(r['updated_at'] or '')
-            try:
-                ts = datetime.datetime.fromisoformat(ts_text.replace(' ', 'T'))
-            except Exception:
+            
+            # Robust datetime extraction from updated_at column
+            ts = r['updated_at']
+            if ts and not isinstance(ts, datetime.datetime):
+                try:
+                    ts = datetime.datetime.fromisoformat(str(ts).replace(' ', 'T'))
+                except Exception:
+                    ts = None
+            
+            if not ts:
                 continue
+                
+            # Normalise to naive for safe comparison with datetime.datetime.now()
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
 
             if key.startswith('radar_reco_'):
                 pair = key.replace('radar_reco_', '', 1)
@@ -1717,7 +1738,11 @@ def get_radar_audit():
                 pair = key.replace('llm_veto_ts_', '', 1)
                 state = _pair_state(pair)
                 try:
-                    state['veto_ts'] = datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+                    # llm_veto_ts_ value is also a timestamp string
+                    v_ts = datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+                    if v_ts.tzinfo is not None:
+                        v_ts = v_ts.replace(tzinfo=None)
+                    state['veto_ts'] = v_ts
                 except Exception:
                     state['veto_ts'] = ts
 
@@ -1769,9 +1794,11 @@ def get_radar_audit():
             "buy_tradable_24h": buy_tradable,
         })
     except Exception as e:
+        logging.exception("Radar Audit Error:")
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 @app.route('/api/logs')
 @login_required
@@ -2073,9 +2100,16 @@ def _build_stats_payload():
         is_stale = True
         if updated_at:
             try:
-                # SQLite CURRENT_TIMESTAMP is UTC
-                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.datetime.utcnow() - dt).total_seconds() < 180:
+                # Handle both string (SQLite legacy) and datetime object (PostgreSQL)
+                if isinstance(updated_at, datetime.datetime):
+                    dt = updated_at
+                else:
+                    dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                
+                # Normalise to naive for comparison
+                if dt.tzinfo: dt = dt.replace(tzinfo=None)
+                
+                if (datetime.datetime.now() - dt).total_seconds() < 180:
                     is_stale = False
             except: pass
                 
@@ -2141,8 +2175,14 @@ def _build_stats_payload():
         first_trade_ts = 0
         if first_trade_row and first_trade_row[0]:
             try:
-                dt_str = first_trade_row[0]
-                dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                dt_raw = first_trade_row[0]
+                if isinstance(dt_raw, datetime.datetime):
+                    dt = dt_raw
+                else:
+                    dt = datetime.datetime.strptime(dt_raw, "%Y-%m-%d %H:%M:%S")
+                
+                # Normalise to UTC for timestamp
+                if not dt.tzinfo: dt = dt.replace(tzinfo=datetime.timezone.utc)
                 first_trade_ts = int(dt.timestamp() * 1000)
             except: pass
 
@@ -2152,8 +2192,13 @@ def _build_stats_payload():
         is_stale_report = True
         if updated_at:
             try:
-                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.datetime.utcnow() - dt).total_seconds() < 600:
+                if isinstance(updated_at, datetime.datetime):
+                    dt = updated_at
+                else:
+                    dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                
+                if dt.tzinfo: dt = dt.replace(tzinfo=None)
+                if (datetime.datetime.now() - dt).total_seconds() < 600:
                     is_stale_report = False
             except: pass
             
@@ -2198,7 +2243,7 @@ def _build_stats_payload():
                     "pnl_idr":     float(r['pnl_idr'] or 0),
                     "pnl_pct":     float(r['pnl_pct'] or 0),
                     "reason":      r['reason'],
-                    "created_at":  r['created_at'],
+                    "created_at":  str(r['created_at'] or ''),
                 })
         except Exception as e:
             print(f"⚠️ History Fetch Error: {e}")
@@ -2254,7 +2299,7 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "hero_ai_insight": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'),
-            "hero_ai_insights": [{"message": r[0], "created_at": r[1]} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
+            "hero_ai_insights": [{"message": r[0], "created_at": str(r[1])} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
             "active_reasoning": combined_reasoning,
             "equity_reasoning": final_equity_report,
             "equity_action_plan": equity_action_plan,
@@ -2414,13 +2459,13 @@ def _build_radar_payload():
                     "radar_reco": str(radar_reco or signal).upper(),
                     "radar_reason": radar_reason,
                     "gate_status": gate_msg,
-                    "gate_updated_at": gate_updated_at,
+                    "gate_updated_at": str(gate_updated_at or ''),
                     "ai_veto": ai_veto,
                     "ai_veto_reason": veto_reason,
                     "ai_veto_confidence": veto_conf,
                     "tradable": not is_blocked,
                     "tradable_reason": tradable_reason,
-                    "updated_at": row["updated_at"] if row else None
+                    "updated_at": str(row["updated_at"] or '') if row else None
                 })
             except Exception:
                 continue
