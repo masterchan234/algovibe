@@ -915,8 +915,8 @@ class Database:
         user, password, host, port, dbname = match.groups()
         
         try:
-            # Try native pg_dump first
-            try:
+            # 1. Try native pg_dump
+            if shutil.which("pg_dump"):
                 env = os.environ.copy()
                 env["PGPASSWORD"] = password
                 cmd = [
@@ -928,8 +928,8 @@ class Database:
                     dbname
                 ]
                 subprocess.run(cmd, env=env, check=True, capture_output=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                # Fallback to docker exec on algovibe-timescaledb container
+            # 2. Fallback to docker exec if pg_dump is missing
+            elif shutil.which("docker"):
                 logging.info("[DB] Native pg_dump missing, trying docker exec fallback...")
                 cmd = [
                     "docker", "exec", "-e", f"PGPASSWORD={password}",
@@ -938,6 +938,13 @@ class Database:
                 ]
                 with open(filepath, "w") as f:
                     subprocess.run(cmd, stdout=f, check=True)
+            else:
+                # No backup tools available in this container
+                static_warn = "[DB] Backup skipped: neither 'pg_dump' nor 'docker' found in path."
+                if not hasattr(self, "_backup_warned"):
+                    logging.warning(static_warn)
+                    self._backup_warned = True
+                return None
             
             # Prune old snapshots
             backups_dir = os.path.dirname(filepath)
