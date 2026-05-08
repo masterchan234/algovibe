@@ -15,6 +15,8 @@ from .migrations import run_migrations
 import subprocess
 import re
 
+logger = logging.getLogger(__name__)
+
 # ── DB Backup Configuration ────────────────────────────────────────────────────
 _DB_BACKUP_INTERVAL_SEC = 6 * 3600   # 6 hours
 _DB_BACKUP_MAX_SNAPSHOTS = 4          # Keep last 4 snapshots (~24 hours)
@@ -50,12 +52,14 @@ class Database:
         return ConnectionWrapper(raw, self.pool)
 
     @contextmanager
-    def get_connection(self):
+    def get_connection(self, autocommit=True):
         raw_conn = self.pool.getconn()
+        raw_conn.autocommit = autocommit
         conn = ConnectionWrapper(raw_conn, self.pool)
         try:
             yield conn
-            conn.commit()
+            if not autocommit:
+                conn.commit()
         except Exception as e:
             conn.rollback()
             raise e
@@ -731,7 +735,6 @@ class Database:
                     for row in loss_rows
                 ]
 
-            return report
         except Exception as e:
             logging.error(f"[DB] get_quant_audit_report error: {e}")
             return report
@@ -1100,6 +1103,18 @@ class Database:
         except Exception as e:
             logging.warning(f"[DB] update_session_activity error: {e}")
 
+    def get_active_positions_count(self) -> int:
+        """Return the number of open positions in this DB."""
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM open_positions WHERE status = 'OPEN'"
+                ).fetchone()
+                return row[0] if row else 0
+        except Exception as e:
+            logging.error(f"[DB] get_active_positions_count error: {e}")
+            return 0
+
 class DatabaseRouter:
     """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
     based on the current dry_run flag in bot_state.
@@ -1123,26 +1138,53 @@ class DatabaseRouter:
         self._start_backup_scheduler()
 
     def run_migrations(self):
-        """Explicitly run migrations for both DBs using an advisory lock to prevent deadlocks."""
-        if self._migrated:
-            return
-        
+        """Skip automatic migrations to prevent startup hangs."""
+        self._migrated = True
+        return
+
+        import os, random, time
+        is_primary = os.getenv("MIGRATION_PRIMARY", "false").lower() == "true"
+        if not is_primary:
+            time.sleep(random.uniform(2.0, 5.0))
+
+        logger.info(f"[DB] Migration check started (Primary: {is_primary})")
+
         try:
             with self._live.get_connection() as conn:
+                conn.autocommit = True
                 cursor = conn.cursor()
-                # Use a session-level advisory lock (ID 777777) to coordinate migrations
-                cursor.execute("SELECT pg_advisory_lock(777777)")
+                
+                # Use non-blocking try_advisory_lock to prevent deadlocks
+                locked = False
+                max_retries = 60 if is_primary else 30
+                for i in range(max_retries):
+                    cursor.execute("SELECT pg_try_advisory_lock(777777)")
+                    if cursor.fetchone()[0]:
+                        locked = True
+                        break
+                    if i % 10 == 0:
+                        logger.info(f"[DB] Waiting for migration lock (attempt {i}/{max_retries})...")
+                    time.sleep(1)
+                
+                if not locked:
+                    if is_primary:
+                        logger.error("[DB] PRIMARY failed to acquire migration lock! Forcing migration anyway...")
+                    else:
+                        logger.warning("[DB] Could not acquire migration lock, assuming other service is handling it.")
+                        self._migrated = True
+                        return
+
                 try:
-                    from .migrations import run_migrations as _run
-                    _run(self._live.db_url)
-                    _run(self._dryrun.db_url)
+                    from .migrations import run_migrations as _run_mig
+                    _run_mig(self._live.db_url)
+                    _run_mig(self._dryrun.db_url)
+                    self._migrated = True
                 finally:
-                    cursor.execute("SELECT pg_advisory_unlock(777777)")
-            self._migrated = True
+                    if locked:
+                        cursor.execute("SELECT pg_advisory_unlock(777777)")
+                        logger.info("[DB] Migration lock released.")
         except Exception as e:
             logging.error(f"[DatabaseRouter] Migration failed or lock error: {e}")
-            # If lock fails, we might be in a state where another process is migrating.
-            # We'll just set migrated=True and hope for the best if it's a lock error.
             if "advisory" in str(e).lower():
                 self._migrated = True
 
@@ -1243,6 +1285,16 @@ class DatabaseRouter:
     @property
     def dryrun(self) -> Database:
         return self._dryrun
+
+    def get_active_positions_count(self, dry_run: int | None = None) -> int:
+        """Route to the correct DB and return open positions count."""
+        if dry_run == 1:
+            db_obj = self._dryrun
+        elif dry_run == 0:
+            db_obj = self._live
+        else:
+            db_obj = self._active()
+        return db_obj.get_active_positions_count()
 
     def __getattr__(self, name: str):
         return getattr(self._active(), name)

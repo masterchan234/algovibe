@@ -71,7 +71,7 @@ _MIN_ENTRY_TRUE_CONDITIONS = 2
 _MIN_ENTRY_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
 # Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
-_LLM_TIMEOUT_SEC = 30
+_LLM_TIMEOUT_SEC = 120
 
 
 class LiteRTLmDecisionService:

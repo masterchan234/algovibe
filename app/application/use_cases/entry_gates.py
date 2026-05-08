@@ -121,6 +121,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     now_ts = time.time()
     if cooldown_until > now_ts:
         remaining_min = int(max(1, (cooldown_until - now_ts) / 60))
+        print(f"[DEBUG-GATE] {pair} REJECTED: Cooldown aktif ({remaining_min}m)", flush=True)
         log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
         return None
 
@@ -138,6 +139,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         boost_str += " 🐳"
     if sector_boost > 1.0:
         boost_str += " 🔥"
+
+    # [DIAGNOSTIC] Log every tracked pair to stdout
+    print(f"[DEBUG-GATE] Evaluating {pair} | Trend: {trend} | Breakout: {breakout} | Prob: {prob_display}", flush=True)
 
     log_message(
         f"Track: {pair:10} | Regime: {regime:8} | Trend: {trend:9} | "
@@ -159,15 +163,18 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # Block jika sinyal SELL dengan skor cukup (multi-confluence, bukan hanya RSI).
     # Threshold diturunkan dari 8.0 → 5.0: skor 5/16.5 sudah cukup membuktikan tekanan jual.
     # Sebelumnya sell_score 7.9 hanya memicu warning dan bot tetap masuk; ini sudah diperbaiki.
-    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
+    # [LATENCY-OPTIMIZATION] Short-circuit if SELL verdict and NOT in loose gates mode
+    if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
         msg = (
             f"⛔ SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
             f"— {tech_sig['reason'][:80]}"
         )
+        print(f"[DEBUG-GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
     elif tech_sig['verdict'] == 'SELL':
+        print(f"[DEBUG-GATE] {pair} WARNING: SELL-WARN but continuing (Loose Gates={config.DRY_RUN_LOOSE_GATES})", flush=True)
         log_message(
             f"⚠️  SELL-WARN [{pair}]: sell_score={tech_sig.get('sell_score',0):.1f} "
             f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
@@ -195,6 +202,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # ── 6. Trend / breakout requirement ───────────────────────────────────
     if not config.DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
         msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
+        print(f"[DEBUG-GATE] {pair} REJECTED: Trend {trend} (no breakout)", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -202,6 +210,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # ── 7. Radar recommendation guard (sinkron dashboard <-> eksekusi bot) ──
     if radar_rec == "SELL":
         msg = f"🚫 RADAR BLOCK: rekomendasi SELL ({radar_reason})"
+        print(f"[DEBUG-GATE] {pair} REJECTED: RADAR SELL ({radar_reason})", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -261,6 +270,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     if knn_decision.get('verdict') == "AVOID":
         msg = "🚫 [K-NN Avoid]: pola historis buruk, skip."
+        print(f"[DEBUG-GATE] {pair} REJECTED: K-NN AVOID", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -274,6 +284,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     if base_confidence < min_base_conf:
         msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"
+        print(f"[DEBUG-GATE] {pair} REJECTED: Base Confidence {base_confidence:.1f}% < Floor {min_base_conf:.1f}%", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
@@ -282,19 +293,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit
 
-    effective_threshold = 0.0 if config.DRY_RUN_LOOSE_GATES else dynamic_threshold
-    if total_confidence < effective_threshold:
-        msg = f"SKIP: Confidence {total_confidence:.1f}% < threshold {effective_threshold:.1f}%"
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
-
-    log_message(
-        f"🚀 [Entry Ready] {pair}: Tech {base_confidence:.1f}% + Boost {boost_credit:.1f}% "
-        f"= {total_confidence:.1f}% (Thresh: {dynamic_threshold:.1f}%)"
-    )
-
-    return {
+    res = {
         "mode": "SHADOW" if is_shadow_mode else "LIVE",
         "radar_rec": radar_rec,
         "radar_reason": radar_reason,
@@ -303,3 +302,6 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         "dynamic_threshold": dynamic_threshold,
         "knn_decision": knn_decision,
     }
+    print(f"[DEBUG-GATE] {pair} PASSED ALL GATES! Result: {res}", flush=True)
+
+    return res

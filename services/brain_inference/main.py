@@ -210,7 +210,7 @@ class BrainInferenceService:
         
         while self._running:
             try:
-                time.sleep(15)  # Run analysis every 15 seconds
+                time.sleep(1)  # Run analysis every 1 second
                 
                 if not self._tickers:
                     continue
@@ -240,14 +240,15 @@ class BrainInferenceService:
                     if abs(change) > 3.0:
                         self.oracle.request_pump_analysis(pair, change)
                 
-                # Process LLM Insights (saves to system_events table)
-                self.oracle.process_llm_insights()
-                
                 # 3.5 [RESTORATION] Scan for trade signals (Entry Logic)
                 self._scan_for_signals(ranked)
-                
+
                 # 4. Technical Scoring and DB Update (Radar data)
                 self._update_ticker_history(ranked)
+                
+                # 5. AI Insights (DISABLED in brain-inference for stability/latency)
+                # litert-lm-decision service handles this now.
+                pass
                 
                 # Heartbeat to DB
                 db.save_state("brain_heartbeat", time.time())
@@ -381,6 +382,7 @@ class BrainInferenceService:
                 
                 enriched = enrich_pair(bot_mock, r, self._tickers)
                 gate = check_entry_gates(bot_mock, r, enriched, regime, adaptive_cfg, open_positions)
+                print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
                 if recovery_mode:
                     total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0

@@ -808,9 +808,6 @@ def main() -> None:
     logger.info("  AlgoVibe Executive-Core Service starting…")
     logger.info("=" * 60)
 
-    pid_lock = PidLock()
-    pid_lock.acquire()
-    
     # Explicitly run migrations before starting service
     db.run_migrations()
 
@@ -830,7 +827,6 @@ def main() -> None:
         asyncio.run(service.start())
     finally:
         service.stop()
-        pid_lock.release()
         logger.info("[executive-core] Exited cleanly.")
 
 

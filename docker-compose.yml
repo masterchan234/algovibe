@@ -138,6 +138,8 @@ services:
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - MIGRATION_PRIMARY=true
+      - MODEL_PATH=/tmp/disabled_model
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
@@ -190,6 +192,7 @@ services:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
       - GLOG_minloglevel=2          # Suppress C++ glog WARNING from litert/MediaPipe (mel_filterbank etc.)
+      - MODEL_PATH=/tmp/disabled_model
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
@@ -236,6 +239,7 @@ services:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
       - GLOG_minloglevel=2          # Suppress C++ glog WARNING from litert/MediaPipe (mel_filterbank etc.)
+      - MODEL_PATH=/tmp/disabled_model
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
