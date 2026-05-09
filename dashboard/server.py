@@ -202,6 +202,12 @@ def handle_connect(auth=None):
         join_room('public')
         logging.info("🔌 Guest User connected (Public/View-only mode)")
 
+    # 4. Anonymous Public Access (Landing Page)
+    else:
+        is_guest = True
+        join_room('public')
+        logging.info("🔌 Anonymous visitor connected (Public/Landing mode)")
+
     if not is_authenticated and not is_guest:
         logging.warning(f"🚫 Unauthorized WS connection attempt")
         return False
@@ -762,6 +768,98 @@ def index():
 @app.route("/favicon.ico")
 def favicon():
     return send_from_directory("static", "favicon.ico", mimetype="image/x-icon")
+
+
+@app.route('/api/public/landing-data', methods=['GET'])
+def public_landing_data():
+    """Provides a public 'teaser' of market signals and AI insights for the landing page."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        
+        # 1. Fetch Top 12 Signals from ticker_history (has scores and trends)
+        rows = conn.execute(
+            "SELECT pair, score, trend, signal FROM ticker_history "
+            "WHERE score IS NOT NULL ORDER BY score DESC LIMIT 12"
+        ).fetchall()
+        
+        signals = []
+        for r in rows:
+            pair_raw = str(r['pair'] or '').upper()
+            signals.append({
+                "pair": pair_raw.replace('IDR', ''),
+                "score": float(r['score'] or 50),
+                "confidence": 70, # Static confidence for landing teaser
+                "trend": str(r['trend'] or 'STABLE').upper()
+            })
+        
+        # Fallback to bot_state if ticker_history is empty
+        if not signals:
+            signals_rows = conn.execute(
+                "SELECT key, value FROM bot_state WHERE key LIKE 'radar_reco_%%' LIMIT 12"
+            ).fetchall()
+            for r in signals_rows:
+                pair = r['key'].replace('radar_reco_', '')
+                try:
+                    val = json.loads(r['value'])
+                    signals.append({
+                        "pair": pair.upper().replace('IDR', ''),
+                        "score": val.get('score', 50),
+                        "confidence": val.get('confidence', 70),
+                        "trend": val.get('trend', 'STABLE')
+                    })
+                except:
+                    signals.append({
+                        "pair": pair.upper().replace('IDR', ''),
+                        "score": 50,
+                        "confidence": 60,
+                        "trend": str(r['value']).upper()
+                    })
+
+        # 2. Latest Unique AI Insights
+        ai_rows = conn.execute(
+            "SELECT DISTINCT ON (message) message, created_at FROM system_events "
+            "WHERE type IN ('AI_INSIGHT', 'AI_ORACLE') "
+            "ORDER BY message, created_at DESC LIMIT 5"
+        ).fetchall()
+        # Re-sort by date after getting unique messages
+        insights = sorted([{"message": r['message'], "created_at": str(r['created_at'])} for r in ai_rows], key=lambda x: x['created_at'], reverse=True)
+
+        # 3. Market Stats
+        sentiment = db.get_state("market_sentiment_index") or 50
+        btc_price = db.get_state("last_price_btcidr") or 0
+        regime = db.get_state("current_market_regime") or "SCANNING"
+        
+        # 4. Intelligence Reports
+        art_rows = conn.execute(
+            "SELECT title, excerpt, category, created_at FROM intelligence_reports "
+            "ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        articles = [{
+            "title": r['title'],
+            "excerpt": r['excerpt'],
+            "category": r['category'],
+            "created_at": str(r['created_at'])
+        } for r in art_rows]
+
+        return jsonify({
+            "success": True,
+            "signals": signals[:8],
+            "insights": insights,
+            "articles": articles,
+            "market": {
+                "sentiment": int(sentiment),
+                "btc_price": float(btc_price),
+                "regime": regime
+            }
+        })
+    except Exception as e:
+        import traceback
+        logging.error(f"[LandingData] Global Error: {e}")
+        logging.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if conn: conn.close()
 
 
 @app.route('/api/login', methods=['GET', 'POST'])
@@ -2784,10 +2882,10 @@ def _build_llm_decisions_payload(limit: int = 20):
     try:
         rows = conn.execute(
             """
-            SELECT id, pair, message, type as side, level, created_at
+            SELECT DISTINCT ON (message) id, pair, message, type as side, level, created_at
             FROM system_events
-            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT')
-            ORDER BY created_at DESC
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT', 'AI_INSIGHT', 'AI_ORACLE')
+            ORDER BY message, created_at DESC
             LIMIT %s
             """,
             (limit,),
@@ -2939,7 +3037,13 @@ def push_data_loop():
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
-                })
+                }, room='public')
+                # Also emit to authenticated room for dashboard users
+                socketio.emit('regime_update', {
+                    "regime": _regime_now,
+                    "market_sentiment_index": _sentiment_now,
+                    "regime_leader": _regime_leader_now,
+                }, room='authenticated')
             except Exception as _re:
                 logging.warning(f"[push_data_loop] regime_update error: {_re}")
 
@@ -2956,16 +3060,26 @@ def push_data_loop():
                 except Exception as _e: 
                     logging.error(f"stats_update emit error: {_e}")
 
-                try: socketio.emit('radar_update',          _build_radar_payload())
+                try: 
+                    _radar_payload = _build_radar_payload()
+                    socketio.emit('radar_update', _radar_payload, room='public')
+                    socketio.emit('radar_update', _radar_payload, room='authenticated')
                 except Exception as _e: logging.error(f"radar_update emit error: {_e}")
 
                 try: socketio.emit('trades_update',         _build_trades_update_packet())
                 except Exception as _e: logging.error(f"trades_update emit error: {_e}")
 
-                try: socketio.emit('logs_update',           _build_logs_payload())
+                try: 
+                    _logs_payload = _build_logs_payload()
+                    socketio.emit('logs_update', _logs_payload, room='authenticated')
+                    # Emit a sanitized version to public
+                    socketio.emit('public_activity', _logs_payload[:10], room='public')
                 except Exception as _e: logging.error(f"logs_update emit error: {_e}")
 
-                try: socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                try: 
+                    _llm_payload = _build_llm_decisions_payload()
+                    socketio.emit('llm_decisions_update', _llm_payload, room='public')
+                    socketio.emit('llm_decisions_update', _llm_payload, room='authenticated')
                 except Exception as _e: logging.error(f"llm_decisions_update emit error: {_e}")
         except Exception as e:
             print(f"WS Error: {e}")
