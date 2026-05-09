@@ -330,10 +330,10 @@ _start_time = time.time()
 from app.infrastructure.migrations import run_migrations, sync_schema_both_dbs
 
 # Ensure both live and dryrun databases have up-to-date schema on startup
-try:
-    sync_schema_both_dbs()
-except Exception as _sync_err:
-    logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
+# try:
+#     sync_schema_both_dbs()
+# except Exception as _sync_err:
+#     logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
 
 # Set untuk track DB path yang sudah dimigrasi di proses ini
 # Prevents redundant migration runs on every request
@@ -1548,6 +1548,21 @@ def update_bot_state():
         return jsonify({"error": "Missing key or value"}), 400
         
     try:
+        if key == 'daily_target_hit' and str(value) == '0':
+            # [Smart Reset] User wants to continue trading.
+            # Move the goalpost so automation doesn't re-latch immediately.
+            try:
+                stats = _build_stats_payload()
+                current_pnl = float(stats.get('net_pnl', 0))
+                # Add a buffer (Rp 10k or 0.1% of capital, whichever is higher)
+                new_target = current_pnl + 10000 
+                db.save_state("daily_profit_target", str(new_target))
+                db.save_state("session_mode", "SCALPING")
+                db.save_state("session_latched", "false")
+                logging.info(f"🎯 [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
+            except Exception as _re:
+                logging.warning(f"Could not move goalpost during reset: {_re}")
+
         db.save_state(key, value)
         # Broadcast command to notify executive-core of state change
         broadcast_command("STATE_UPDATE", {"key": key, "value": value})
@@ -2022,22 +2037,33 @@ def handle_watch_pair(data):
     except Exception as e:
         logging.warning(f"Failed to subscribe dynamic data for {pair}: {e}")
 
-def _build_stats_payload():
+def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
-    conn = get_db_connection()
+    import config as cfg
+    # Determine which mode we are building for
+    dr_val = force_dry if force_dry is not None else bool(cfg.DRY_RUN)
+    
+    # Use the appropriate DB instance
+    db_inst = db.dryrun if dr_val else db.live
+    conn = db_inst.get_raw_connection()
+
     try:
+        # Load bot_state from the TARGET database
         stats_dict = {r['key']: r['value'] for r in conn.execute("SELECT * FROM bot_state").fetchall()}
         positions  = conn.execute("SELECT * FROM positions").fetchall()
-        perf       = db.get_daily_stats()
-        # 1. LIVE STATS (Real Money)
-        live_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
-        ).fetchone()
+        perf       = db_inst.get_daily_stats(dry_run=dr_val)
         
-        # 2. DRY RUN STATS (Live Simulation)
-        dry_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
-        ).fetchone()
+        # 1. LIVE STATS (Real Money) - always from live DB
+        with db.live.get_connection() as live_conn:
+            live_stats = live_conn.execute(
+                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
+            ).fetchone()
+        
+        # 2. DRY RUN STATS (Live Simulation) - always from dryrun DB
+        with db.dryrun.get_connection() as dry_conn:
+            dry_stats = dry_conn.execute(
+                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
+            ).fetchone()
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
@@ -2051,8 +2077,7 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
-        import config as cfg
-        dr_val = bool(cfg.DRY_RUN)
+        # dr_val is already set correctly at the start of the function
         
         # [NEW] Predator Metrics Calculation
         total_used_idr = 0.0
@@ -2063,7 +2088,7 @@ def _build_stats_payload():
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
 
-        if cfg.DRY_RUN:
+        if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
@@ -2185,7 +2210,7 @@ def _build_stats_payload():
         import config as cfg
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
-        if cfg.DRY_RUN:
+        if dr_val:
             active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
@@ -2223,7 +2248,7 @@ def _build_stats_payload():
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
         # Overall engagements (Closed + Open)
-        total_trades_overall = dry_stats['trades'] if cfg.DRY_RUN else live_stats['trades']
+        total_trades_overall = dry_stats['trades'] if dr_val else live_stats['trades']
         open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
         total_engagements = total_trades_overall + open_count
         
@@ -2361,7 +2386,7 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "hero_ai_insight": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'),
-            "hero_ai_insights": [{"message": r[0], "created_at": str(r[1])} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
+            "hero_ai_insights": [{"message": r[0], "created_at": str(r[1])} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}],
             "active_reasoning": combined_reasoning,
             "equity_reasoning": final_equity_report,
             "equity_action_plan": equity_action_plan,
@@ -2374,10 +2399,23 @@ def _build_stats_payload():
             "history_since": history_since,
             "new_listings": db.get_new_listings(),
             "bot_running": True,
-            "dry_run": bool(cfg.DRY_RUN),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
             "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT,
-            # BTC Condition — used by Signal Radar UX
+            
+            # --- Dynamic Session & Gate State (Source of Truth: bot_state) ---
+            "session_mode": stats_dict.get('session_mode', 'SCALPING'),
+            "session_buy_enabled": stats_dict.get('session_buy_enabled', 'true').lower() == 'true',
+            "daily_target_hit": stats_dict.get('daily_target_hit', '0') == '1',
+            "consecutive_losses": int(stats_dict.get('consecutive_losses', 0)),
+            "entry_gate_state": stats_dict.get('entry_gate_state', ''),
+            "entry_gate_pair": stats_dict.get('entry_gate_pair', ''),
+            "entry_gate_reason": stats_dict.get('entry_gate_reason', ''),
+            "entry_gate_at": stats_dict.get('entry_gate_at', ''),
+            "dry_run": bool(dr_val),
+            "dry_run_loose_gates": stats_dict.get('dry_run_loose_gates', 'false').lower() == 'true',
+            "momentum_state": db.get_state("momentum_state") or "STALLING",
+            "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
+            
+            # --- BTC Condition — used by Signal Radar UX ---
             "btc_price":      round(btc_price, 0),
             "btc_change_24h": round(btc_change_24h, 2),
             "btc_ch_5m":      round(btc_ch_5m, 2),
@@ -2387,17 +2425,6 @@ def _build_stats_payload():
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
-            # Momentum Equity Protection indicators
-            "momentum_state":    db.get_state("momentum_state") or "STALLING",
-            "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
-            "consecutive_losses": int(db.get_state("consecutive_losses", 0) or 0),
-            # Entry gate status (operator visibility for LIVE mode)
-            "entry_gate_state":  stats_dict.get("entry_gate_state", ""),
-            "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
-            "entry_gate_pair":   stats_dict.get("entry_gate_pair", ""),
-            "entry_gate_at":     stats_dict.get("entry_gate_at", ""),
-            "session_mode":      stats_dict.get("session_mode", "NORMAL"),
-            "daily_target_hit":  stats_dict.get("daily_target_hit") == "1",
         }
         return payload
     finally:
@@ -2921,8 +2948,13 @@ def push_data_loop():
             if _slow_counter >= 5:
                 _slow_counter = 0
                 # individual emitters wrapped in try-except to prevent one failure from killing the whole loop
-                try: socketio.emit('stats_update',          _build_stats_payload())
-                except Exception as _e: logging.error(f"stats_update emit error: {_e}")
+                # Emit stats for both modes so users on either dashboard see updates
+                try: 
+                    logging.info("📡 Emitting stats_update for DRY and LIVE modes...")
+                    socketio.emit('stats_update', _build_stats_payload(force_dry=True))
+                    socketio.emit('stats_update', _build_stats_payload(force_dry=False))
+                except Exception as _e: 
+                    logging.error(f"stats_update emit error: {_e}")
 
                 try: socketio.emit('radar_update',          _build_radar_payload())
                 except Exception as _e: logging.error(f"radar_update emit error: {_e}")

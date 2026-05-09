@@ -866,19 +866,27 @@ class Database:
             return []
 
     def save_market_depth(self, pair, bids, asks):
-        """Simpan Top 10 Bids & Asks ke DB."""
+        """Simpan Top 10 Bids & Asks ke DB dengan Batch INSERT (Optimized)."""
         try:
             with self.get_connection() as conn:
-                conn.execute("DELETE FROM market_depth WHERE pair = %s", (pair,))
-                # Simpan bids (is_bid=1)
-                for b in bids:
-                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (%s, %s, %s, 1)",
-                               (pair, b['price'], b['vol']))
-                # Simpan asks (is_bid=0)
-                for a in asks:
-                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (%s, %s, %s, 0)",
-                               (pair, a['price'], a['vol']))
-        except Exception: pass
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM market_depth WHERE pair = %s", (pair,))
+                
+                # Combine all rows into one batch insert
+                values = []
+                # Bids (is_bid=1)
+                for b in bids[:10]:
+                    values.append((pair, float(b['price']), float(b['vol']), 1))
+                # Asks (is_bid=0)
+                for a in asks[:10]:
+                    values.append((pair, float(a['price']), float(a['vol']), 0))
+                
+                if values:
+                    # Optimized Multi-row INSERT
+                    args_str = ",".join(cursor.mogrify("(%s, %s, %s, %s)", x).decode('utf-8') for x in values)
+                    cursor.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES " + args_str)
+        except Exception as e:
+            logging.debug(f"[DB] save_market_depth error: {e}")
 
     def upsert_order_book(self, order_id: str, pair: str, side: str, price: float,
                           amount: float, status: str, raw_response: dict = None):

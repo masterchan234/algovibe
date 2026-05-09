@@ -23,12 +23,12 @@
         <span class="bubble-label">Utilization</span>
         <span class="bubble-value" :class="stats.utilization > 80 ? 'c-bear' : 'c-bull'">{{ stats.utilization }}%</span>
       </div>
-      <div class="stat-bubble" v-if="stats.regime">
+      <div class="stat-bubble">
         <span class="bubble-label">Regime</span>
-        <span class="bubble-value" :class="regimeClass">{{ stats.regime }}</span>
+        <span class="bubble-value regime-badge" :class="regimeClass">{{ stats.regime }}</span>
       </div>
       <div class="stat-bubble" v-if="isLiveMode && gateBadgeText">
-        <span class="bubble-label">Entry Gate</span>
+        <span class="bubble-label">Entry State</span>
         <span class="bubble-value" :class="gateBadgeClass" :title="gateTooltip">{{ gateBadgeText }}</span>
       </div>
     </div>
@@ -93,8 +93,8 @@
       <span class="ms-label">Utilization</span>
       <span class="ms-val" :class="stats.utilization > 80 ? 'c-bear' : 'c-bull'">{{ stats.utilization }}%</span>
     </div>
-    <div class="ms-divider" v-if="stats.regime"></div>
-    <div class="ms-item" v-if="stats.regime">
+    <div class="ms-divider" v-if="isLiveMode"></div>
+    <div class="ms-item" v-if="isLiveMode">
       <span class="ms-label">Regime</span>
       <span class="ms-val" :class="regimeClass">{{ stats.regime }}</span>
     </div>
@@ -139,6 +139,34 @@ const regimeClass = computed(() => {
   if (r.includes('BEAR')) return 'c-bear'
   return 'c-neutral'
 })
+
+async function toggleHarvestMode() {
+  const isCurrentlyHarvest = props.stats.session_mode === 'HARVEST_ONLY'
+  const newMode = isCurrentlyHarvest ? 'SCALPING' : 'HARVEST_ONLY'
+  
+  const label = isCurrentlyHarvest ? 'NORMAL SCALPING' : 'HARVEST ONLY'
+  if (!confirm(`Switch Bot to ${label}?`)) return
+  
+  try {
+    await store.updateBotState('session_mode', newMode)
+  } catch (err) {
+    console.error('Failed to toggle harvest mode:', err)
+  }
+}
+
+async function toggleBuyGates() {
+  const isCurrentlyOn = props.stats.session_buy_enabled
+  const newValue = isCurrentlyOn ? 'false' : 'true'
+  
+  const label = isCurrentlyOn ? 'BLOCK ALL NEW BUYS' : 'ENABLE NEW BUYS'
+  if (!confirm(`${label}?`)) return
+  
+  try {
+    await store.updateBotState('session_buy_enabled', newValue)
+  } catch (err) {
+    console.error('Failed to toggle buy gates:', err)
+  }
+}
 
 const gateBadgeText = computed(() => {
   const state = String(props.stats.entry_gate_state || '')
@@ -432,6 +460,45 @@ onUnmounted(() => {
   font-weight: 700;
   color: #ccc;
   margin-top: 2px;
+}
+
+.control-bubble {
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  min-width: 90px;
+}
+
+.bubble-toggle {
+  margin-top: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #666;
+  font-size: 10px;
+  font-weight: 900;
+  padding: 2px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  letter-spacing: 1px;
+}
+
+.bubble-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #aaa;
+}
+
+.bubble-toggle.active {
+  background: rgba(0, 255, 136, 0.15);
+  border-color: rgba(0, 255, 136, 0.4);
+  color: #00ff88;
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.2);
+  text-shadow: 0 0 5px rgba(0, 255, 136, 0.5);
+}
+
+.bubble-toggle:not(.active) {
+  background: rgba(255, 51, 102, 0.1);
+  border-color: rgba(255, 51, 102, 0.3);
+  color: #ff3366;
 }
 
 .bubble-value.highlight {

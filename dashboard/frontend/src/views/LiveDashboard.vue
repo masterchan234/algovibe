@@ -15,51 +15,7 @@
       🛡️ NET-ZERO SURVIVAL ACTIVATED — Emergency exit executed. System Paused.
     </div>
 
-    <!-- [NEW] COMMAND CENTER: Manual Overrides -->
-    <div class="command-center-wrap">
-      <div class="cc-header">
-        <span class="cc-title">COMMAND CENTER</span>
-        <span class="cc-status" :class="store.stats.session_mode === 'HARVEST_ONLY' ? 'mode-harvest' : 'mode-scalping'">
-          BOT IS {{ store.stats.session_mode === 'HARVEST_ONLY' ? 'HARVESTING' : 'SCALPING' }}
-        </span>
-      </div>
-      
-      <div class="cc-controls">
-        <div class="cc-control-item">
-          <div class="cc-label">HARVEST ONLY</div>
-          <button 
-            class="cc-toggle-btn" 
-            :class="{ active: store.stats.session_mode === 'HARVEST_ONLY' }"
-            @click="toggleHarvestMode"
-          >
-            {{ store.stats.session_mode === 'HARVEST_ONLY' ? 'ON' : 'OFF' }}
-          </button>
-        </div>
 
-        <div class="cc-divider"></div>
-
-        <div class="cc-control-item">
-          <div class="cc-label">DAILY TARGET</div>
-          <button 
-            class="cc-action-btn" 
-            :class="{ active: store.stats.daily_target_hit }"
-            @click="resetDailyTarget"
-          >
-            {{ store.stats.daily_target_hit ? 'RESET' : 'CLEAR' }}
-          </button>
-        </div>
-
-        <div class="cc-divider"></div>
-
-        <div class="cc-control-item">
-          <div class="cc-label">LOSS STREAK</div>
-          <div class="cc-value-row">
-            <span class="cc-val" :class="{ 'c-bear': store.stats.consecutive_losses > 0 }">{{ store.stats.consecutive_losses }}</span>
-            <button class="cc-mini-btn" @click="resetLosses" v-if="store.stats.consecutive_losses > 0">RESET</button>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <div
       class="safety-gauge-wrap"
@@ -560,6 +516,7 @@ watch(() => store.forceLogout, (triggered) => {
 }
 
 .ld-main {
+  width: 100%;
   flex: 1;
   display: grid;
   grid-template-columns: 1.2fr 1fr;

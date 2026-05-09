@@ -342,6 +342,7 @@ export const useTradeStore = defineStore('trade', () => {
           entry_gate_at: data.entry_gate_at ?? '',
           session_mode: data.session_mode ?? 'NORMAL',
           daily_target_hit: data.daily_target_hit ?? false,
+          session_buy_enabled: data.session_buy_enabled ?? true,
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })
@@ -492,6 +493,16 @@ export const useTradeStore = defineStore('trade', () => {
         body: JSON.stringify({ key, value })
       })
       if (!res.ok) throw new Error('Failed to update bot state')
+      
+      // [Senior Fix] Optimistic Update: Update local state immediately for better UX
+      if (key === 'session_mode') {
+        stats.session_mode = value
+      } else if (key === 'session_buy_enabled') {
+        stats.session_buy_enabled = (value === 'true' || value === true)
+      } else if (stats[key] !== undefined) {
+        stats[key] = value
+      }
+
       notify({ title: 'System Updated', message: `${key} set to ${value}`, type: 'success' })
       return true
     } catch (err) {

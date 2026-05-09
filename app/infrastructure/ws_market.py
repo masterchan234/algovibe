@@ -91,6 +91,9 @@ class MarketDataWS:
         self._use_hub = os.getenv("USE_MARKET_HUB", "false").lower() == "true"
         self._hub_host = os.getenv("MARKET_HUB_HOST", "127.0.0.1")
         self._hub_port = int(os.getenv("MARKET_HUB_PORT", "5555"))
+        
+        # Database Persistence Config
+        self.write_to_db = False # Only set to True by primary ingress (market-pipe)
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -126,6 +129,16 @@ class MarketDataWS:
         p = pair.lower().replace('/', '')
         with self._lock:
             return list(self._trades.get(p, []))
+
+    def get_market_depth(self, pair: str) -> dict:
+        """Ambil Top 10 Bids & Asks langsung dari cache memori."""
+        p = pair.lower().replace('/', '')
+        with self._lock:
+            t = self._tickers.get(p, {})
+            return {
+                "bids": t.get("bids_list", []),
+                "asks": t.get("asks_list", [])
+            }
 
     def is_connected(self):
         return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
@@ -514,9 +527,13 @@ class MarketDataWS:
             t["bids_list"] = [{"price": self._safe_float(b.get("price")), "vol": self._safe_float(b.get("idr_volume"))} for b in bids[:10]]
             t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
             
-            # ── Push to DB for Dashboard ──
-            from app.infrastructure.database import db
-            db.save_market_depth(pair, t["bids_list"], t["asks_list"])
+            # ── Push to DB for Dashboard if enabled ──
+            if self.write_to_db:
+                try:
+                    from app.infrastructure.database import db
+                    db.save_market_depth(pair, t["bids_list"], t["asks_list"])
+                except Exception as _e:
+                    logger.debug(f"[MarketWS] DB Save error: {_e}")
 
     def _process_trades(self, pair: str, data: list):
         """Parse market:trade-activity-<pair>."""

@@ -37,15 +37,31 @@
       </div>
       <div class="kpi-item">
         <div class="kpi-label">Win Rate</div>
-        <div class="kpi-value">{{ stats.win_rate.toFixed(1) }}%</div>
+        <div class="kpi-value">{{ (stats.win_rate || 0).toFixed(1) }}%</div>
       </div>
       <div class="kpi-item">
         <div class="kpi-label">Posisi</div>
         <div class="kpi-value">{{ stats.active_positions }}</div>
       </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Regime</div>
-        <div class="kpi-value regime-badge" :class="regimeClass">{{ stats.regime }}</div>
+      <div class="kpi-item control-item">
+        <div class="kpi-label">Harvest Mode</div>
+        <button 
+          class="kpi-toggle-btn" 
+          :class="{ active: stats.session_mode === 'HARVEST_ONLY' }"
+          @click="toggleHarvestMode"
+        >
+          {{ stats.session_mode === 'HARVEST_ONLY' ? 'ON' : 'OFF' }}
+        </button>
+      </div>
+      <div class="kpi-item control-item">
+        <div class="kpi-label">Buy Gates</div>
+        <button 
+          class="kpi-toggle-btn" 
+          :class="{ active: stats.session_buy_enabled }"
+          @click="toggleBuyGates"
+        >
+          {{ stats.session_buy_enabled ? 'ON' : 'OFF' }}
+        </button>
       </div>
       <div class="kpi-item">
         <div class="kpi-label">Sentiment</div>
@@ -416,6 +432,40 @@ const momentumIcon = computed(() => {
 
 const isUnblocking = ref(false)
 const isTogglingGates = ref(false)
+
+async function toggleHarvestMode() {
+  const current = stats.value?.session_mode
+  const isTurningOffHarvest = current === 'HARVEST_ONLY'
+  const next = isTurningOffHarvest ? 'SCALPING' : 'HARVEST_ONLY'
+  const label = isTurningOffHarvest ? 'NORMAL SCALPING' : 'HARVEST ONLY'
+  if (!confirm(`Switch Bot to ${label}?`)) return
+  
+  try {
+    await store.updateBotState('session_mode', next)
+    // [Senior Logic] If turning OFF harvest (back to scalping), automatically ENABLE buy gates
+    if (isTurningOffHarvest) {
+      await store.updateBotState('session_buy_enabled', 'true')
+    } else {
+      // If turning ON harvest (harvest only), automatically DISABLE buy gates
+      await store.updateBotState('session_buy_enabled', 'false')
+    }
+  } catch (err) {
+    console.error('Failed to toggle harvest mode:', err)
+  }
+}
+
+async function toggleBuyGates() {
+  const isCurrentlyOn = stats.value?.session_buy_enabled
+  const newValue = isCurrentlyOn ? 'false' : 'true'
+  const label = isCurrentlyOn ? 'BLOCK ALL NEW BUYS' : 'ENABLE NEW BUYS'
+  if (!confirm(`${label}?`)) return
+  
+  try {
+    await store.updateBotState('session_buy_enabled', newValue)
+  } catch (err) {
+    console.error('Failed to toggle buy gates:', err)
+  }
+}
 
 async function handleToggleLooseGates() {
   if (isTogglingGates.value) return
@@ -866,6 +916,7 @@ onUnmounted(() => {
 .chart-panel {
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: 100%;
   background: #161b22;
   border-radius: 12px;
@@ -881,12 +932,15 @@ onUnmounted(() => {
   border-bottom: 1px solid #30363d;
   background: #0d1117;
   flex-shrink: 0;
+  flex-wrap: wrap; /* [Senior Fix] Allow wrapping to prevent cutoff on smaller screens */
 }
 
 .kpi-item {
-  flex: 1;
-  padding: 12px 14px;
+  flex: 1 1 auto; /* Allow items to grow and shrink as needed */
+  min-width: 100px; /* Ensure items have a minimum width to keep labels readable */
+  padding: 10px 12px;
   border-right: 1px solid #21262d;
+  border-bottom: 1px solid #21262d; /* Add bottom border for wrapped items */
 }
 .kpi-item:last-child { border-right: none; }
 
@@ -995,6 +1049,37 @@ onUnmounted(() => {
 .loose-gates-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.kpi-toggle-btn {
+  margin-top: 5px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  background: rgba(139, 148, 158, 0.1);
+  color: #8b949e;
+  border: 1px solid rgba(139, 148, 158, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  width: 100%;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+.kpi-toggle-btn.active {
+  background: rgba(163, 113, 247, 0.15);
+  color: #a371f7;
+  border-color: rgba(163, 113, 247, 0.5);
+  box-shadow: 0 0 12px rgba(163, 113, 247, 0.2);
+}
+.kpi-toggle-btn:hover:not(:disabled) {
+  background: rgba(139, 148, 158, 0.2);
+  color: #e6edf3;
+  border-color: rgba(139, 148, 158, 0.5);
+}
+.kpi-toggle-btn.active:hover:not(:disabled) {
+  background: rgba(163, 113, 247, 0.25);
+  border-color: rgba(163, 113, 247, 0.7);
 }
 
 .regime-badge {

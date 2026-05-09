@@ -228,6 +228,7 @@ body {
 }
 
 .main-grid {
+  width: 100%;
   flex: 1;
   display: flex;
   overflow: hidden;
