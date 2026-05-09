@@ -15,6 +15,52 @@
       🛡️ NET-ZERO SURVIVAL ACTIVATED — Emergency exit executed. System Paused.
     </div>
 
+    <!-- [NEW] COMMAND CENTER: Manual Overrides -->
+    <div class="command-center-wrap">
+      <div class="cc-header">
+        <span class="cc-title">COMMAND CENTER</span>
+        <span class="cc-status" :class="store.stats.session_mode === 'HARVEST_ONLY' ? 'mode-harvest' : 'mode-scalping'">
+          BOT IS {{ store.stats.session_mode === 'HARVEST_ONLY' ? 'HARVESTING' : 'SCALPING' }}
+        </span>
+      </div>
+      
+      <div class="cc-controls">
+        <div class="cc-control-item">
+          <div class="cc-label">HARVEST ONLY</div>
+          <button 
+            class="cc-toggle-btn" 
+            :class="{ active: store.stats.session_mode === 'HARVEST_ONLY' }"
+            @click="toggleHarvestMode"
+          >
+            {{ store.stats.session_mode === 'HARVEST_ONLY' ? 'ON' : 'OFF' }}
+          </button>
+        </div>
+
+        <div class="cc-divider"></div>
+
+        <div class="cc-control-item">
+          <div class="cc-label">DAILY TARGET</div>
+          <button 
+            class="cc-action-btn" 
+            :class="{ active: store.stats.daily_target_hit }"
+            @click="resetDailyTarget"
+          >
+            {{ store.stats.daily_target_hit ? 'RESET' : 'CLEAR' }}
+          </button>
+        </div>
+
+        <div class="cc-divider"></div>
+
+        <div class="cc-control-item">
+          <div class="cc-label">LOSS STREAK</div>
+          <div class="cc-value-row">
+            <span class="cc-val" :class="{ 'c-bear': store.stats.consecutive_losses > 0 }">{{ store.stats.consecutive_losses }}</span>
+            <button class="cc-mini-btn" @click="resetLosses" v-if="store.stats.consecutive_losses > 0">RESET</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div
       class="safety-gauge-wrap"
       :class="{ 'gauge-danger': safetyIsDanger || liveState.net_zero_survival_active }"
@@ -208,18 +254,31 @@ const now = ref(Date.now())
 const startTime = ref(Date.now())
 
 const uptimeStr = computed(() => {
-  const start = store.stats.first_trade_ts || startTime.value
-  const diff = Math.floor((now.value - start) / 1000)
-  if (diff < 0) return '00:00:00'
-  const days = Math.floor(diff / 86400)
-  const hours = Math.floor((diff % 86400) / 3600)
-  const minutes = Math.floor((diff % 3600) / 60)
-  const seconds = diff % 60
-  const h = hours.toString().padStart(2, '0')
-  const m = minutes.toString().padStart(2, '0')
-  const s = seconds.toString().padStart(2, '0')
-  return days > 0 ? `${days}d ${h}:${m}:${s}` : `${h}:${m}:${s}`
+  const sec = store.stats.uptime_sec || 0
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
 })
+
+// --- [Manual Overrides] ---
+async function toggleHarvestMode() {
+  const current = store.stats.session_mode
+  const next = current === 'HARVEST_ONLY' ? 'SCALPING' : 'HARVEST_ONLY'
+  await store.updateBotState('session_mode', next)
+}
+
+async function resetDailyTarget() {
+  if (confirm('Reset daily target status? Bot will resume scalping if target was hit.')) {
+    await store.updateBotState('daily_target_hit', '0')
+    await store.updateBotState('session_mode', 'SCALPING')
+  }
+}
+
+async function resetLosses() {
+  if (confirm('Reset consecutive losses counter?')) {
+    await store.updateBotState('consecutive_losses', '0')
+  }
+}
 
 // Mobile tab: positions | chart | orders
 const mobileTab = ref('positions')
@@ -365,9 +424,139 @@ watch(() => store.forceLogout, (triggered) => {
   color: #ff3366;
   padding: 12px;
   text-align: center;
-  font-size: 13px;
   font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 1px;
   border-bottom: 1px solid rgba(255, 51, 102, 0.2);
+}
+
+/* Command Center Styles */
+.command-center-wrap {
+  margin: 16px 24px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+}
+
+.cc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.cc-title {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #444;
+}
+
+.cc-status {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 20px;
+  letter-spacing: 1px;
+}
+
+.mode-scalping { background: rgba(0, 255, 136, 0.1); color: #00ff88; box-shadow: 0 0 10px rgba(0, 255, 136, 0.1); }
+.mode-harvest { background: rgba(245, 166, 35, 0.1); color: #f5a623; box-shadow: 0 0 10px rgba(245, 166, 35, 0.1); }
+
+.cc-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.cc-control-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cc-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #666;
+  letter-spacing: 1px;
+}
+
+.cc-toggle-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #555;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.cc-toggle-btn.active {
+  background: #f5a623;
+  color: #000;
+  box-shadow: 0 0 15px rgba(245, 166, 35, 0.4);
+  border-color: transparent;
+}
+
+.cc-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #888;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.cc-action-btn.active {
+  color: #fff;
+  border-color: rgba(0, 255, 136, 0.5);
+  background: rgba(0, 255, 136, 0.1);
+}
+
+.cc-divider {
+  width: 1px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cc-value-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cc-val {
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.cc-mini-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 51, 102, 0.3);
+  color: #ff3366;
+  font-size: 8px;
+  font-weight: 900;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.cc-mini-btn:hover {
+  background: #ff3366;
+  color: #fff;
+}
+
+@media (max-width: 768px) {
+  .command-center-wrap { margin: 12px; padding: 12px; }
+  .cc-controls { gap: 12px; overflow-x: auto; padding-bottom: 4px; }
+  .cc-control-item { flex-shrink: 0; }
 }
 
 .ld-main {

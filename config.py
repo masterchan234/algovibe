@@ -30,7 +30,7 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
-LIQUIDITY_MULTIPLIER   = 15        # [DYNAMIC] Volume 24h harus minimal 15x besar modal per trade
+LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan volume sedang 15x besar modal per trade
 
 # ==========================================
 # --- [Risk & Sizing] ---

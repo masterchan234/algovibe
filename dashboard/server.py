@@ -1536,6 +1536,26 @@ def unblock_bot():
     except Exception as e:
         logging.error(f"[Dashboard] Unblock failed: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
+@app.route('/api/bot/update-state', methods=['POST'])
+@login_required
+def update_bot_state():
+    """Manual override for bot state (Harvest Only, reset losses, etc)."""
+    data = request.json
+    key = data.get('key')
+    value = data.get('value')
+    
+    if not key or value is None:
+        return jsonify({"error": "Missing key or value"}), 400
+        
+    try:
+        db.save_state(key, value)
+        # Broadcast command to notify executive-core of state change
+        broadcast_command("STATE_UPDATE", {"key": key, "value": value})
+        
+        logging.info(f"🛠️ [Manual Override] Updated {key} to {value}")
+        return jsonify({"status": "ok", "key": key, "value": value})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/bot-status')
 @login_required
@@ -1570,13 +1590,20 @@ def get_bot_status():
         # LLM Stats
         llm_stats = LLMWorker.get_instance().get_stats()
 
+        # Full Bot State from DB
+        all_states = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM bot_state").fetchall()}
+
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(cfg.DRY_RUN),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
             "last_trade_at": last_trade_at,
-            "llm": llm_stats
+            "llm": llm_stats,
+            "session_mode": all_states.get("session_mode", "N/A"),
+            "consecutive_losses": int(all_states.get("consecutive_losses", 0)),
+            "daily_target_hit": all_states.get("daily_target_hit") == "1",
+            "bot_state": all_states
         })
     except Exception as e:
         return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "uptime_sec": 0})
@@ -2369,6 +2396,8 @@ def _build_stats_payload():
             "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
             "entry_gate_pair":   stats_dict.get("entry_gate_pair", ""),
             "entry_gate_at":     stats_dict.get("entry_gate_at", ""),
+            "session_mode":      stats_dict.get("session_mode", "NORMAL"),
+            "daily_target_hit":  stats_dict.get("daily_target_hit") == "1",
         }
         return payload
     finally:

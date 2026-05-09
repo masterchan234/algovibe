@@ -1428,9 +1428,9 @@ class Oracle:
         dyn = float(base_dynamic_threshold)
 
         # Baseline gate untuk keputusan LLM
-        llm_buy_min_conf = 60.0
-        llm_hold_block_conf = 70.0
-        llm_avoid_block_conf = 60.0
+        llm_buy_min_conf = 50.0
+        llm_hold_block_conf = 60.0
+        llm_avoid_block_conf = 50.0
 
         # Regime-aware adjustments
         if regime == MarketRegime.BULLISH:
@@ -1438,24 +1438,28 @@ class Oracle:
             llm_buy_min_conf = 58.0
             llm_hold_block_conf = 74.0
         elif regime == MarketRegime.BEARISH:
-            dyn += 6.0
-            llm_buy_min_conf = 68.0
-            llm_hold_block_conf = 62.0
-            llm_avoid_block_conf = 55.0
+            dyn += 2.0
+            llm_buy_min_conf = 60.0
+            llm_hold_block_conf = 65.0
+            llm_avoid_block_conf = 50.0
         elif regime == MarketRegime.CHOPPY:
             dyn += 4.0
             llm_buy_min_conf = 65.0
             llm_hold_block_conf = 75.0  # [Loosened] was 66.0
             llm_avoid_block_conf = 65.0 # [Loosened] was 58.0
+            dyn += 2.0
+            llm_buy_min_conf = 60.0
+            llm_hold_block_conf = 70.0
+            llm_avoid_block_conf = 60.0
         elif regime == MarketRegime.RANGING:
-            dyn += 1.0
-            llm_buy_min_conf = 62.0
+            dyn += 0.0
+            llm_buy_min_conf = 55.0
 
         return {
-            "dynamic_threshold": max(50.0, min(85.0, dyn)),
-            "llm_buy_min_conf": max(50.0, min(85.0, llm_buy_min_conf)),
-            "llm_hold_block_conf": max(55.0, min(90.0, llm_hold_block_conf)),
-            "llm_avoid_block_conf": max(50.0, min(90.0, llm_avoid_block_conf)),
+            "dynamic_threshold": max(45.0, min(80.0, dyn)),
+            "llm_buy_min_conf": max(45.0, min(80.0, llm_buy_min_conf)),
+            "llm_hold_block_conf": max(50.0, min(85.0, llm_hold_block_conf)),
+            "llm_avoid_block_conf": max(45.0, min(85.0, llm_avoid_block_conf)),
         }
 
     def get_sizing_multiplier(self, pair: str, velocity_score: float = 0.5, confidence: float = 0.5) -> float:
@@ -1774,10 +1778,13 @@ class Oracle:
         Returns: { 'verdict': 'BUY'/'AVOID', 'target_tp': 0.02, 'target_sl': -0.012, 'confidence': float }
         """
         import math
-        history = db.get_all_closed_dnas(limit=1000)
-        # [Fix Bug#3] Naikkan default confidence ke 60 agar melewati dynamic_threshold (55)
-        # Sebelumnya 50% selalu gagal saat DB kosong (50 < threshold 55 = SEMUA koin di-void)
-        default_resp = {"verdict": "BUY", "target_tp": 0.04, "target_sl": -0.02, "confidence": 60.0}
+        # 1. Fetch historical DNA from both Live and Backtest tables
+        history = db.get_all_closed_dnas(limit=2000)
+        logger.info(f"[DEBUG-ORACLE] Loaded {len(history)} total DNAs for matching.")
+        
+        # [Fix Bug#3] Naikkan default confidence ke 75 agar melewati dynamic_threshold
+        # Sebelumnya 60% masih sering tertahan oleh threshold koin non-uptrend (69%)
+        default_resp = {"verdict": "BUY", "target_tp": 0.04, "target_sl": -0.02, "confidence": 75.0}
         
         if not history or len(history) < 3:
             return default_resp
@@ -1890,9 +1897,9 @@ class Oracle:
 
         if not has_quality_features:
             # Fitur rsi/ema_dist belum lengkap di DNA historis — K-NN kurang akurat.
-            # Gunakan confidence netral 60% agar gate tetap bisa memutuskan tanpa
-            # over-confident (sebelumnya bisa 100% karena NULL menyaring ke 2/2 WIN).
-            confidence = 60.0
+            # Gunakan confidence 75% (Dinaikkan dari 60%) agar gate tetap bisa tembus 
+            # untuk memancing transaksi di awal migrasi data.
+            confidence = 75.0
             reason = f"K-NN Feature-Blind (fitur historis belum lengkap, WinRate={base_confidence:.0f}%)"
         elif is_strong_setup:
             # Deep oversold (RSI < 35): bisa sedikit boost karena mean-reversion lebih kuat,

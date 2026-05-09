@@ -109,6 +109,8 @@ export const useTradeStore = defineStore('trade', () => {
     entry_gate_reason: '',
     entry_gate_pair: '',
     entry_gate_at: '',
+    session_mode: 'NORMAL',
+    daily_target_hit: false,
   })
 
   // Open positions (trades)
@@ -338,6 +340,8 @@ export const useTradeStore = defineStore('trade', () => {
           entry_gate_reason: data.entry_gate_reason ?? '',
           entry_gate_pair: data.entry_gate_pair ?? '',
           entry_gate_at: data.entry_gate_at ?? '',
+          session_mode: data.session_mode ?? 'NORMAL',
+          daily_target_hit: data.daily_target_hit ?? false,
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })
@@ -473,6 +477,29 @@ export const useTradeStore = defineStore('trade', () => {
     }
   }
 
+  async function updateBotState(key, value) {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    
+    try {
+      const res = await fetch(`${backendUrl}/api/bot/update-state`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...useAuth().getAuthHeaders()
+        },
+        body: JSON.stringify({ key, value })
+      })
+      if (!res.ok) throw new Error('Failed to update bot state')
+      notify({ title: 'System Updated', message: `${key} set to ${value}`, type: 'success' })
+      return true
+    } catch (err) {
+      notify({ title: 'Update Error', message: err.message, type: 'error' })
+      return false
+    }
+  }
+
   return {
     connected,
     stats,
@@ -488,6 +515,7 @@ export const useTradeStore = defineStore('trade', () => {
     checkSessionStatus,
     statsSource,
     markApiStatsUsed,
+    updateBotState,
     socket,
     forceLogout,
     latency,

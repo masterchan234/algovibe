@@ -217,15 +217,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 9. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
-    # Threshold dinaikkan (50→55, 60→65) agar bot hanya masuk dengan confidence tinggi.
-    # Dasar: break-even memerlukan win rate ≥ 65%, threshold harus mencerminkan ini.
-    dynamic_threshold = 55.0 # [PROFIT-FOCUS] Dinaikkan dari 50.0
+    # Threshold diturunkan (55→50, 65→60) agar bot lebih agresif bertransaksi.
+    dynamic_threshold = 50.0 
     if current_vol > 2.0:
-        dynamic_threshold = 65.0 # [PROFIT-FOCUS] Dinaikkan dari 60.0
+        dynamic_threshold = 60.0 
     elif current_vol < 0.6:
-        dynamic_threshold = 50.0 # Volatilitas sangat rendah: threshold moderat
+        dynamic_threshold = 45.0 
     if trend != "UP":
-        dynamic_threshold += 4.0
+        dynamic_threshold += 3.0
 
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
