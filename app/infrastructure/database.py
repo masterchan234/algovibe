@@ -1,4 +1,6 @@
-import sqlite3
+import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.extras import DictCursor
 import os
 import logging
 import shutil
@@ -8,124 +10,63 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from config import DB_PATH
+from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN, DATA_PATH
 from .migrations import run_migrations
+import subprocess
+import re
+
+logger = logging.getLogger(__name__)
 
 # ── DB Backup Configuration ────────────────────────────────────────────────────
 _DB_BACKUP_INTERVAL_SEC = 6 * 3600   # 6 hours
 _DB_BACKUP_MAX_SNAPSHOTS = 4          # Keep last 4 snapshots (~24 hours)
 
+
+class ConnectionWrapper:
+    def __init__(self, conn, pool=None):
+        self.conn = conn
+        self.pool = pool
+    def cursor(self):
+        return self.conn.cursor(cursor_factory=DictCursor)
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params or ())
+        return cur
+    def commit(self):
+        self.conn.commit()
+    def rollback(self):
+        self.conn.rollback()
+    def close(self):
+        if self.pool:
+            self.pool.putconn(self.conn)
+
+
 class Database:
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
-        self._run_integrity_check()
-        self._init_db()  # run_migrations is called at the end of _init_db()
+    def __init__(self, db_url=DATABASE_URL_LIVE):
+        self.db_url = db_url
+        self.pool = ThreadedConnectionPool(1, 100, self.db_url)
+        self._init_db()
 
-    # ── Integrity Check & Auto-Recovery ───────────────────────────────────────
-
-    def _run_integrity_check(self) -> None:
-        """Run PRAGMA integrity_check at startup; auto-restore from latest snapshot on failure."""
-        if not os.path.exists(self.db_path):
-            return  # Fresh DB — nothing to check yet.
-        try:
-            with sqlite3.connect(self.db_path, timeout=10) as conn:
-                row = conn.execute("PRAGMA integrity_check;").fetchone()
-            if row and row[0] == "ok":
-                logging.info("[DB] integrity_check passed for %s", self.db_path)
-                return
-            logging.critical(
-                "[DB] integrity_check FAILED for %s: %s — attempting restore from snapshot.",
-                self.db_path, row[0] if row else "unknown",
-            )
-            self._restore_from_snapshot()
-        except Exception as exc:
-            logging.error("[DB] integrity_check error for %s: %s", self.db_path, exc)
-
-    def _restore_from_snapshot(self) -> None:
-        """Replace a corrupt DB with the latest available 6-hour snapshot."""
-        backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
-        if not os.path.isdir(backup_dir):
-            logging.warning("[DB] No backup directory found at %s — cannot restore.", backup_dir)
-            return
-
-        snapshots = sorted(
-            [
-                f for f in os.listdir(backup_dir)
-                if f.startswith("snapshot_") and f.endswith(".db")
-            ],
-            reverse=True,
-        )
-        if not snapshots:
-            logging.warning("[DB] No snapshots found in %s — cannot restore.", backup_dir)
-            return
-
-        latest = os.path.join(backup_dir, snapshots[0])
-        corrupt_path = self.db_path + ".corrupt"
-        try:
-            if os.path.exists(self.db_path):
-                os.rename(self.db_path, corrupt_path)
-            shutil.copy2(latest, self.db_path)
-            logging.critical(
-                "[DB] AUTO-RESTORE completed: %s → %s (corrupt saved as %s)",
-                latest, self.db_path, corrupt_path,
-            )
-        except Exception as exc:
-            logging.critical("[DB] AUTO-RESTORE failed: %s", exc)
-
-    def create_snapshot(self) -> str | None:
-        """Create a consistent snapshot of this DB using the sqlite3 native backup API.
-
-        Uses ``sqlite3.Connection.backup()`` so the snapshot is consistent even
-        while WAL mode is active.  After the copy, old snapshots beyond
-        ``_DB_BACKUP_MAX_SNAPSHOTS`` are pruned from the backups directory.
-
-        Returns the snapshot path on success, None on failure.
-        """
-        backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        stem = os.path.splitext(os.path.basename(self.db_path))[0]
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        snapshot_path = os.path.join(backup_dir, f"snapshot_{stem}_{stamp}.db")
-        try:
-            src = sqlite3.connect(self.db_path, timeout=30)
-            dst = sqlite3.connect(snapshot_path)
-            src.backup(dst)
-            dst.close()
-            src.close()
-            # Prune old snapshots beyond _DB_BACKUP_MAX_SNAPSHOTS
-            all_snaps = sorted(
-                [f for f in os.listdir(backup_dir)
-                 if f.startswith(f"snapshot_{stem}_") and f.endswith(".db")],
-                reverse=True,
-            )
-            for old in all_snaps[_DB_BACKUP_MAX_SNAPSHOTS:]:
-                try:
-                    os.remove(os.path.join(backup_dir, old))
-                except Exception:
-                    pass
-            logging.info("[DB] Snapshot created: %s", snapshot_path)
-            return snapshot_path
-        except Exception as exc:
-            logging.error("[DB] Snapshot failed for %s: %s", self.db_path, exc)
-            return None
+    def get_raw_connection(self):
+        raw = self.pool.getconn()
+        return ConnectionWrapper(raw, self.pool)
 
     @contextmanager
-    def get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.row_factory = sqlite3.Row
+    def get_connection(self, autocommit=True):
+        raw_conn = self.pool.getconn()
+        raw_conn.autocommit = autocommit
+        conn = ConnectionWrapper(raw_conn, self.pool)
         try:
             yield conn
-            conn.commit()
+            if not autocommit:
+                conn.commit()
         except Exception as e:
             conn.rollback()
             raise e
         finally:
-            conn.close()
+            self.pool.putconn(raw_conn)
 
     def _init_db(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -135,22 +76,21 @@ class Database:
             # Initialize dry_run state from config default if not exists
             from config import DRY_RUN as DEFAULT_DRY_RUN
             try:
-                cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('dry_run', ?)", (str(DEFAULT_DRY_RUN),))
+                cursor.execute("INSERT INTO bot_state (key, value) VALUES ('dry_run', %s) ON CONFLICT (key) DO NOTHING", (str(DEFAULT_DRY_RUN),))
             except: pass
 
             # Initialize weights if empty
             try:
-                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0)")
-                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0)")
-                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0)")
-                cursor.execute("INSERT OR IGNORE INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0)")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('ai_prob', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('whale_boost', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('sector_sentiment', 1.0) ON CONFLICT (feature_name) DO NOTHING")
+                cursor.execute("INSERT INTO dynamic_weights (feature_name, weight_value) VALUES ('imbalance', 1.0) ON CONFLICT (feature_name) DO NOTHING")
             except: pass
 
             
             # Committing is handled by the context manager automatically
             
-        # ── Jalankan Sistem Migrasi Terpisah ──
-        run_migrations(self.db_path)
+        # ── Migrasi dijalankan secara eksplisit oleh DatabaseRouter ──
     # ── METODE UNTUK POSITIONS ──
     
     def get_open_positions(self):
@@ -160,13 +100,11 @@ class Database:
             rows = cursor.fetchall()
             return {row['pair']: dict(row) for row in rows}
 
-    def get_active_positions_count(self, dry_run=None):
-        """Menghitung jumlah posisi terbuka untuk mode tertentu (Dry Run/Live)."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = ?", (int(dry_run),))
+            cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = %s", (dry_run,))
             return cursor.fetchone()[0] or 0
 
     def update_position_after_dca(self, pair, new_price, new_amount_crypto, new_amount_idr, new_tier):
@@ -174,14 +112,14 @@ class Database:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE positions 
-                SET entry_price = ?, amount_crypto = ?, amount_idr = ?, dca_tier = ?, timestamp = CURRENT_TIMESTAMP
-                WHERE pair = ?
+                SET entry_price = %s, amount_crypto = %s, amount_idr = %s, dca_tier = %s, timestamp = CURRENT_TIMESTAMP
+                WHERE pair = %s
             ''', (new_price, new_amount_crypto, new_amount_idr, new_tier, pair))
 
     def get_position(self, pair):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM positions WHERE pair = ?", (pair,))
+            cursor.execute("SELECT * FROM positions WHERE pair = %s", (pair,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -190,7 +128,7 @@ class Database:
             cursor = conn.cursor()
             
             # Ubah boolean jadi integer untuk SQLite
-            dry_run = 1 if data.get('dry_run') else 0
+            dry_run = bool(data.get('dry_run'))
             trailing_sl_price = data.get('trailing_sl_price')
             highest_price = data.get('highest_price')
             
@@ -199,7 +137,7 @@ class Database:
                     pair, entry_price, amount_crypto, amount_idr, status, 
                     entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct,
                     trailing_sl_price, highest_price, reason_backup, ai_confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0.0), COALESCE(?, 0.0), ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 0.0), COALESCE(%s, 0.0), %s, %s)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
@@ -236,35 +174,35 @@ class Database:
     def delete_position(self, pair):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM positions WHERE pair = ?", (pair,))
+            cursor.execute("DELETE FROM positions WHERE pair = %s", (pair,))
 
     def update_position_status(self, pair, status, exit_order_id=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             if exit_order_id is not None:
-                cursor.execute("UPDATE positions SET status = ?, exit_order_id = ? WHERE pair = ?", (status, exit_order_id, pair))
+                cursor.execute("UPDATE positions SET status = %s, exit_order_id = %s WHERE pair = %s", (status, exit_order_id, pair))
             else:
-                cursor.execute("UPDATE positions SET status = ? WHERE pair = ?", (status, pair))
+                cursor.execute("UPDATE positions SET status = %s WHERE pair = %s", (status, pair))
 
     # ── METODE UNTUK TRADE HISTORY ──
     
     def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            dry_run_int = 1 if dry_run else 0
+            dry_run_bool = bool(dry_run)
             
             sql = '''
-                INSERT OR IGNORE INTO trade_history (
+                INSERT INTO trade_history (
                     pair, entry_price, exit_price, amount_crypto, amount_idr,
                     pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id, ai_confidence
                 '''
-            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_int, trade_id, is_manual, exit_order_id, ai_confidence]
+            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_bool, trade_id, is_manual, exit_order_id, ai_confidence]
             
             if created_at:
-                sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ", created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 params.append(created_at)
             else:
-                sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                sql += ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             
             try:
                 cursor.execute(sql, tuple(params))
@@ -272,20 +210,20 @@ class Database:
                 # Fallback untuk DB lama yang belum punya kolom trade_id/is_manual/exit_order_id.
                 if "no column named trade_id" in str(e).lower():
                     legacy_sql = '''
-                        INSERT OR IGNORE INTO trade_history (
+                        INSERT INTO trade_history (
                             pair, entry_price, exit_price, amount_crypto, amount_idr,
                             pnl_idr, pnl_pct, reason, duration_seconds, dry_run
                     '''
                     legacy_params = [
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
-                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_int,
+                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_bool,
                     ]
 
                     if created_at:
-                        legacy_sql += ", created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        legacy_sql += ", created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                         legacy_params.append(created_at)
                     else:
-                        legacy_sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        legacy_sql += ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
                     cursor.execute(legacy_sql, tuple(legacy_params))
                 else:
@@ -294,28 +232,35 @@ class Database:
     def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""
         try:
+            # Cast numpy types to native Python types to avoid "schema np does not exist" errors
+            def _c(val):
+                if hasattr(val, 'item'): return val.item() # for numpy types
+                return val
+
             with self.get_connection() as conn:
-                # 1. Simpan ke trade_analytics (DNA)
+                # 1. Simpan ke backtest_analytics (DNA)
                 conn.execute('''
-                    INSERT INTO trade_analytics (
+                    INSERT INTO backtest_analytics (
                         pair, entry_timestamp, ai_prob, whale_boost, 
                         sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED')
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'CLOSED')
+                    ON CONFLICT (pair, entry_timestamp) DO NOTHING
                 ''', (
-                    pair, dna.get('timestamp'), dna.get('ai_prob'), dna.get('whale_boost'),
-                    dna.get('sector_sentiment'), dna.get('imbalance'), dna.get('volatility'),
-                    dna.get('rsi'), dna.get('ema_dist'), pnl_idr
+                    pair, dna.get('timestamp'), _c(dna.get('ai_prob')), _c(dna.get('whale_boost')),
+                    _c(dna.get('sector_sentiment')), _c(dna.get('imbalance')), _c(dna.get('volatility')),
+                    _c(dna.get('rsi')), _c(dna.get('ema_dist')), _c(pnl_idr)
                 ))
                 
-                # 2. Simpan ke trade_history (Outcome)
+                # 2. Simpan ke backtest_history (Outcome)
                 conn.execute('''
-                    INSERT INTO trade_history (
+                    INSERT INTO backtest_history (
                         pair, entry_price, exit_price, amount_crypto, amount_idr,
                         pnl_idr, pnl_pct, reason, duration_seconds, dry_run
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    ON CONFLICT (pair, entry_price, exit_price, pnl_idr, created_at) DO NOTHING
                 ''', (
-                    pair, entry_price, exit_price, amount_idr/entry_price, amount_idr,
-                    pnl_idr, pnl_pct, 'BACKTEST', duration_seconds
+                    pair, _c(entry_price), _c(exit_price), _c(amount_idr/entry_price), _c(amount_idr),
+                    _c(pnl_idr), _c(pnl_pct), 'BACKTEST', _c(duration_seconds)
                 ))
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
@@ -323,16 +268,19 @@ class Database:
     def get_daily_stats(self, date_str=None, dry_run=None):
         """Ambil statistik performa harian (24 jam terakhir) dari trade_history."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
             # Default: Rolling 24 jam terakhir (lebih berguna untuk crypto 24/7)
-            date_filter = "created_at >= datetime('now', '-24 hours')"
+            date_filter = "created_at >= NOW() - INTERVAL '24 hours'"
             
             if date_str:
                 # Jika spesifik tanggal, gunakan filter tanggal kalender
-                date_filter = f"date(created_at, 'localtime') = date('{date_str}')"
+                date_filter = "created_at::date = %s::date"
+                params = (date_str, dry_run)
+            else:
+                params = (dry_run,)
                 
             query = f'''
                 SELECT 
@@ -345,9 +293,9 @@ class Database:
                     SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
                     SUM(amount_idr) as total_volume_idr
                 FROM trade_history
-                WHERE {date_filter} AND dry_run = ?
+                WHERE {date_filter} AND dry_run = %s AND reason != 'BACKTEST'
             '''
-            cursor.execute(query, (int(dry_run),))
+            cursor.execute(query, params)
             row = cursor.fetchone()
             
             stats = dict(row) if row else {}
@@ -363,10 +311,44 @@ class Database:
             
             return stats
 
+    def get_all_time_stats(self, dry_run=None):
+        """Ambil statistik performa all-time dari trade_history."""
+        if dry_run is None:
+            dry_run = self.is_dry_run()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = '''
+                SELECT 
+                    COUNT(*) as total_trades,
+                    SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as loss_count,
+                    SUM(pnl_idr) as total_pnl_idr,
+                    AVG(pnl_pct) as avg_pnl_pct,
+                    SUM(CASE WHEN pnl_idr > 0 THEN pnl_idr ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
+                    SUM(amount_idr) as total_volume_idr
+                FROM trade_history
+                WHERE dry_run = %s AND reason != 'BACKTEST'
+            '''
+            cursor.execute(query, (dry_run,))
+            row = cursor.fetchone()
+            
+            stats = dict(row) if row else {}
+            stats['total_trades'] = stats.get('total_trades') or 0
+            stats['win_count'] = stats.get('win_count') or 0
+            stats['loss_count'] = stats.get('loss_count') or 0
+            stats['total_pnl_idr'] = stats.get('total_pnl_idr') or 0.0
+            stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
+            stats['gross_profit'] = stats.get('gross_profit') or 0.0
+            stats['gross_loss'] = stats.get('gross_loss') or 0.0
+            stats['total_volume_idr'] = stats.get('total_volume_idr') or 0.0
+            
+            return stats
+
     def get_recent_trades(self, limit=10):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trade_history ORDER BY created_at DESC LIMIT ?", (limit,))
+            cursor.execute("SELECT * FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT %s", (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
     # ── METODE UNTUK TICKER HISTORY ──
@@ -383,7 +365,7 @@ class Database:
             cursor.executemany('''
                 INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                           ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                VALUES (?, ?, 0.0, 'N/A', 'HOLD', ?, ?, ?, 0.0, 0.0, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, 0.0, 'N/A', 'HOLD', %s, %s, %s, 0.0, 0.0, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
                     ch_5m=excluded.ch_5m,
@@ -400,7 +382,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                           ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     history_json=excluded.history_json,
                     prediction_prob=excluded.prediction_prob,
@@ -433,7 +415,7 @@ class Database:
         import json
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
             ).fetchone()
             if row and row['history_json']:
                 try:
@@ -453,7 +435,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO bot_state (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT(key) DO UPDATE SET
                     value=excluded.value,
                     updated_at=excluded.updated_at
@@ -462,7 +444,7 @@ class Database:
     def get_state(self, key, default=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+            cursor.execute("SELECT value FROM bot_state WHERE key = %s", (key,))
             row = cursor.fetchone()
             return row['value'] if row else default
 
@@ -470,7 +452,7 @@ class Database:
         """Ambil value dan timestamp updated_at."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT value, updated_at FROM bot_state WHERE key = ?", (key,))
+            cursor.execute("SELECT value, updated_at FROM bot_state WHERE key = %s", (key,))
             row = cursor.fetchone()
             return (row['value'], row['updated_at']) if row else (None, None)
 
@@ -497,7 +479,7 @@ class Database:
                     continue
                 cursor.execute('''
                     INSERT INTO account_balances (asset, free, used, total, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(asset) DO UPDATE SET
                         free=excluded.free,
                         used=excluded.used,
@@ -523,20 +505,20 @@ class Database:
             err_str = str(error) if error else None
             cursor.execute('''
                 INSERT INTO order_logs (pair, side, price, amount, status, response_json, error_msg)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             ''', (pair, side, price, amount, status, resp_str, err_str))
 
     def log_system_event(self, pair, event_type, message, level='INFO'):
         with self.get_connection() as conn:
             conn.execute('''
                 INSERT INTO system_events (pair, type, message, level)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (pair, event_type, message, level))
 
     def add_to_blacklist(self, pair, reason="Manual"):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO blacklist (pair, reason) VALUES (?, ?)", (pair, reason))
+            cursor.execute("INSERT INTO blacklist (pair, reason) VALUES (%s, %s) ON CONFLICT (pair) DO UPDATE SET reason=EXCLUDED.reason", (pair, reason))
 
     def get_blacklist(self):
         with self.get_connection() as conn:
@@ -547,7 +529,7 @@ class Database:
     def is_blacklisted(self, pair):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM blacklist WHERE pair = ?", (pair,))
+            cursor.execute("SELECT 1 FROM blacklist WHERE pair = %s", (pair,))
             return cursor.fetchone() is not None
 
     def initialize_default_blacklist(self, default_coins):
@@ -563,7 +545,7 @@ class Database:
             if count == 0:
                 for pair in default_coins:
                     cursor.execute(
-                        "INSERT INTO blacklist (pair, reason) VALUES (?, ?)",
+                        "INSERT INTO blacklist (pair, reason) VALUES (%s, %s)",
                         (pair, "DEFAULT_STABLECOIN")
                     )
                 logging.info(f"✅ Initialized {len(default_coins)} default blacklist entries")
@@ -573,14 +555,14 @@ class Database:
     def save_sector_sentiment(self, sector, score, momentum=0.0, leader='N/A', leader_ch=0.0):
         with self.get_connection() as conn:
             conn.execute(
-                "INSERT INTO sector_history (sector, sentiment_score, momentum_score, leader_pair, leader_change) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO sector_history (sector, sentiment_score, momentum_score, leader_pair, leader_change) VALUES (%s, %s, %s, %s, %s)",
                 (sector, score, momentum, leader, leader_ch)
             )
 
     def get_latest_sector_sentiment(self, sector):
         with self.get_connection() as conn:
             cursor = conn.execute(
-                "SELECT sentiment_score FROM sector_history WHERE sector = ? ORDER BY timestamp DESC LIMIT 1",
+                "SELECT sentiment_score FROM sector_history WHERE sector = %s ORDER BY timestamp DESC LIMIT 1",
                 (sector,)
             )
             row = cursor.fetchone()
@@ -607,7 +589,7 @@ class Database:
     def upsert_shadow_order(self, pair, order_id, price, amount):
         with self.get_connection() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO shadow_orders (pair, order_id, price, amount, status) VALUES (?, ?, ?, ?, 'OPEN')",
+                "INSERT INTO shadow_orders (pair, order_id, price, amount, status) VALUES (%s, %s, %s, %s, 'OPEN') ON CONFLICT (pair) DO UPDATE SET order_id=EXCLUDED.order_id, price=EXCLUDED.price, amount=EXCLUDED.amount, status=EXCLUDED.status",
                 (pair, order_id, price, amount)
             )
 
@@ -618,7 +600,7 @@ class Database:
 
     def delete_shadow_order(self, pair):
         with self.get_connection() as conn:
-            conn.execute("DELETE FROM shadow_orders WHERE pair = ?", (pair,))
+            conn.execute("DELETE FROM shadow_orders WHERE pair = %s", (pair,))
 
     # ── Learning & Analytics Methods (Evolution) ─────────────────────────
 
@@ -634,12 +616,13 @@ class Database:
                 conn.execute(
                     """INSERT INTO trade_analytics 
                     (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (pair, entry_timestamp) DO NOTHING""",
                     (pair, datetime.now().isoformat(), ai_prob, dna_data.get('whale_boost', 0.0),
                      sector_sentiment, dna_data.get('imbalance', 0.0), dna_data.get('volatility', 0.0),
                      dna_data.get('rsi'), dna_data.get('ema_dist'), dna_data.get('eta_minutes', 15),
                      dna_data.get('llm_verdict', 'HOLD'), dna_data.get('llm_confidence', 0.0),
-                     dna_data.get('llm_reason', ''), 1 if dna_data.get('dry_run', True) else 0)
+                     dna_data.get('llm_reason', ''), bool(dna_data.get('dry_run', True)))
                 )
         except Exception as e:
             print(f"DB Error (save_trade_dna): {e}")
@@ -647,7 +630,7 @@ class Database:
     def get_quant_audit_report(self, window_hours=24, dry_run=None):
         """Menghasilkan laporan audit kuantitatif untuk 24 jam terakhir."""
         if dry_run is None:
-            dry_run = 1 if self.is_dry_run() else 0
+            dry_run = self.is_dry_run()
         """
         Laporan audit kuantitatif untuk dashboard:
         - Precision per LLM verdict
@@ -678,9 +661,9 @@ class Database:
                     """
                     SELECT COUNT(*) as total
                     FROM trade_history
-                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s AND reason != 'BACKTEST'
                     """,
-                    (f'-{active_window_hours} hours', int(dry_run))
+                    (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
 
                 sample_total = int((sample_row['total'] if sample_row else 0) or 0)
@@ -699,9 +682,9 @@ class Database:
                         AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
                         AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
                     FROM trade_history
-                    WHERE created_at >= datetime('now', ?) AND dry_run = ?
+                    WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s AND reason != 'BACKTEST'
                     """,
-                    (f'-{active_window_hours} hours', int(dry_run))
+                    (f'-{active_window_hours} hours', dry_run)
                 ).fetchone()
 
                 report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
@@ -718,11 +701,11 @@ class Database:
                         SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins
                     FROM trade_analytics
                     WHERE status = 'CLOSED'
-                      AND entry_timestamp >= datetime('now', ?)
-                      AND dry_run = ?
+                      AND entry_timestamp >= NOW() + (%s)::interval
+                      AND dry_run = %s
                     GROUP BY UPPER(COALESCE(llm_verdict, 'HOLD'))
                     """,
-                                        (f'-{active_window_hours} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', dry_run)
                 ).fetchall()
 
                 for row in verdict_rows:
@@ -744,14 +727,15 @@ class Database:
                         COUNT(*) as cnt,
                         AVG(pnl_idr) as avg_loss
                     FROM trade_history
-                    WHERE created_at >= datetime('now', ?)
-                      AND dry_run = ?
+                    WHERE created_at >= NOW() + (%s)::interval
+                      AND dry_run = %s
                       AND pnl_idr < 0
+                      AND reason != 'BACKTEST'
                     GROUP BY reason
                     ORDER BY cnt DESC, avg_loss ASC
                     LIMIT 5
                     """,
-                                        (f'-{active_window_hours} hours', int(dry_run))
+                                        (f'-{active_window_hours} hours', dry_run)
                 ).fetchall()
 
                 report['dominant_loss_reasons'] = [
@@ -763,7 +747,6 @@ class Database:
                     for row in loss_rows
                 ]
 
-            return report
         except Exception as e:
             logging.error(f"[DB] get_quant_audit_report error: {e}")
             return report
@@ -773,8 +756,8 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "UPDATE trade_analytics SET llm_verdict = ?, llm_confidence = ?, llm_reason = ? "
-                    "WHERE pair = ? AND entry_timestamp = (SELECT MAX(entry_timestamp) FROM trade_analytics WHERE pair = ?)",
+                    "UPDATE trade_analytics SET llm_verdict = %s, llm_confidence = %s, llm_reason = %s "
+                    "WHERE pair = %s AND entry_timestamp = (SELECT MAX(entry_timestamp) FROM trade_analytics WHERE pair = %s)",
                     (verdict, confidence, reason, pair, pair)
                 )
         except Exception as e:
@@ -785,7 +768,7 @@ class Database:
             with self.get_connection() as conn:
                 # Update PnL untuk entri terbaru yang masih OPEN
                 conn.execute(
-                    "UPDATE trade_analytics SET pnl_idr = ?, status = 'CLOSED' WHERE pair = ? AND status = 'OPEN'",
+                    "UPDATE trade_analytics SET pnl_idr = %s, status = 'CLOSED' WHERE pair = %s AND status = 'OPEN'",
                     (pnl_idr, pair)
                 )
         except Exception as e:
@@ -795,7 +778,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cursor = conn.execute(
-                    "SELECT * FROM trade_analytics WHERE pair = ? AND status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1",
+                    "SELECT * FROM trade_analytics WHERE pair = %s AND status = 'CLOSED' ORDER BY entry_timestamp DESC LIMIT 1",
                     (pair,)
                 )
                 row = cursor.fetchone()
@@ -810,10 +793,12 @@ class Database:
                 # [Fix] Hapus JOIN ke trade_history — JOIN tersebut hanya menghasilkan 5 record
                 # karena kondisi abs(pnl_idr) < 10 tidak cocok untuk trade dengan nilai berbeda.
                 # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
+                # [Senior Fix] Ambil DNA dari data Live/Dry DAN data Backtest
                 query = """
-                    SELECT * FROM trade_analytics
-                    WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL
-                    ORDER BY entry_timestamp DESC LIMIT ?
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
+                    UNION ALL
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
+                    ORDER BY entry_timestamp DESC LIMIT %s
                 """
                 cursor = conn.execute(query, (limit,))
                 return [dict(row) for row in cursor.fetchall()]
@@ -824,7 +809,7 @@ class Database:
     def update_dynamic_weight(self, feature, value):
         with self.get_connection() as conn:
             conn.execute(
-                "UPDATE dynamic_weights SET weight_value = ?, updated_at = CURRENT_TIMESTAMP WHERE feature_name = ?",
+                "UPDATE dynamic_weights SET weight_value = %s, updated_at = CURRENT_TIMESTAMP WHERE feature_name = %s",
                 (value, feature)
             )
 
@@ -835,15 +820,12 @@ class Database:
         try:
             with self.get_connection() as conn:
                 # Hapus ticker history > 3 hari (karena kita hanya butuh 40 candle terbaru)
-                conn.execute("DELETE FROM ticker_history WHERE updated_at < datetime('now', '-3 days')")
-                # Hapus analytics > 7 hari
-                conn.execute("DELETE FROM trade_analytics WHERE entry_timestamp < datetime('now', '-7 days')")
-                # Hapus sector history > 7 hari
-                conn.execute("DELETE FROM sector_history WHERE timestamp < datetime('now', '-7 days')")
-                # Hapus order logs > 7 hari
-                conn.execute("DELETE FROM order_logs WHERE created_at < datetime('now', '-7 days')")
+                conn.execute("DELETE FROM ticker_history WHERE updated_at < NOW() - INTERVAL '3 days'")
+                conn.execute("DELETE FROM trade_analytics WHERE entry_timestamp < NOW() - INTERVAL '7 days'")
+                conn.execute("DELETE FROM sector_history WHERE timestamp < NOW() - INTERVAL '7 days'")
+                conn.execute("DELETE FROM order_logs WHERE created_at < NOW() - INTERVAL '7 days'")
                 
-                conn.execute("VACUUM") # Kompres file database
+                # conn.execute("VACUUM") # Not needed in Postgres (autovacuum handles it)
                 print(f"Database Cleanup: Old data purged (>{days} days).")
         except Exception as e:
             print(f"Cleanup Error: {e}")
@@ -853,7 +835,7 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute("""
                     INSERT INTO dynamic_weights (feature_name, weight_value, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(feature_name) DO UPDATE SET 
                         weight_value=excluded.weight_value,
                         updated_at=excluded.updated_at
@@ -873,30 +855,38 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cursor = conn.execute("""
-                    SELECT pair_id, MIN(updated_at) as first_seen 
+                    SELECT pair, MIN(updated_at) as first_seen 
                     FROM ticker_history 
-                    GROUP BY pair_id 
+                    GROUP BY pair 
                     ORDER BY first_seen DESC 
                     LIMIT 5
                 """)
-                return [{"pair": row['pair_id'], "first_seen": row['first_seen']} for row in cursor.fetchall()]
+                return [{"pair": row['pair'], "first_seen": row['first_seen']} for row in cursor.fetchall()]
         except Exception:
             return []
 
     def save_market_depth(self, pair, bids, asks):
-        """Simpan Top 10 Bids & Asks ke DB."""
+        """Simpan Top 10 Bids & Asks ke DB dengan Batch INSERT (Optimized)."""
         try:
             with self.get_connection() as conn:
-                conn.execute("DELETE FROM market_depth WHERE pair = ?", (pair,))
-                # Simpan bids (is_bid=1)
-                for b in bids:
-                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (?, ?, ?, 1)",
-                               (pair, b['price'], b['vol']))
-                # Simpan asks (is_bid=0)
-                for a in asks:
-                    conn.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES (?, ?, ?, 0)",
-                               (pair, a['price'], a['vol']))
-        except Exception: pass
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM market_depth WHERE pair = %s", (pair,))
+                
+                # Combine all rows into one batch insert
+                values = []
+                # Bids (is_bid=1)
+                for b in bids[:10]:
+                    values.append((pair, float(b['price']), float(b['vol']), 1))
+                # Asks (is_bid=0)
+                for a in asks[:10]:
+                    values.append((pair, float(a['price']), float(a['vol']), 0))
+                
+                if values:
+                    # Optimized Multi-row INSERT
+                    args_str = ",".join(cursor.mogrify("(%s, %s, %s, %s)", x).decode('utf-8') for x in values)
+                    cursor.execute("INSERT INTO market_depth (pair, price, vol, is_bid) VALUES " + args_str)
+        except Exception as e:
+            logging.debug(f"[DB] save_market_depth error: {e}")
 
     def upsert_order_book(self, order_id: str, pair: str, side: str, price: float,
                           amount: float, status: str, raw_response: dict = None):
@@ -908,7 +898,7 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO order_book (order_id, pair, side, price, amount, status, raw_response)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(order_id) DO UPDATE SET
                         status = excluded.status,
                         raw_response = excluded.raw_response,
@@ -923,8 +913,8 @@ class Database:
         """Ambil Top 10 Bids & Asks dari DB."""
         try:
             with self.get_connection() as conn:
-                bids = conn.execute("SELECT price, vol FROM market_depth WHERE pair = ? AND is_bid = 1 ORDER BY price DESC", (pair,)).fetchall()
-                asks = conn.execute("SELECT price, vol FROM market_depth WHERE pair = ? AND is_bid = 0 ORDER BY price ASC", (pair,)).fetchall()
+                bids = conn.execute("SELECT price, vol FROM market_depth WHERE pair = %s AND is_bid = 1 ORDER BY price DESC", (pair,)).fetchall()
+                asks = conn.execute("SELECT price, vol FROM market_depth WHERE pair = %s AND is_bid = 0 ORDER BY price ASC", (pair,)).fetchall()
                 return {
                     "bids": [{"price": r['price'], "vol": r['vol']} for r in bids],
                     "asks": [{"price": r['price'], "vol": r['vol']} for r in asks]
@@ -932,13 +922,74 @@ class Database:
         except Exception:
             return {"bids":[], "asks":[]}
 
+    def create_snapshot(self):
+        """Create a SQL dump of the database using pg_dump."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        db_name = self.db_url.split('/')[-1]
+        filename = f"snapshot_{db_name}_{timestamp}.sql"
+        filepath = os.path.join(DATA_PATH, "backups", filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Parse connection info from self.db_url
+        match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', self.db_url)
+        if not match:
+            logging.error(f"[DB] Could not parse DB URL for backup: {self.db_url}")
+            return None
+        
+        user, password, host, port, dbname = match.groups()
+        
+        try:
+            # 1. Try native pg_dump
+            if shutil.which("pg_dump"):
+                env = os.environ.copy()
+                env["PGPASSWORD"] = password
+                cmd = [
+                    "pg_dump",
+                    "-h", host,
+                    "-p", port,
+                    "-U", user,
+                    "-f", filepath,
+                    dbname
+                ]
+                subprocess.run(cmd, env=env, check=True, capture_output=True)
+            # 2. Fallback to docker exec if pg_dump is missing
+            elif shutil.which("docker"):
+                logging.info("[DB] Native pg_dump missing, trying docker exec fallback...")
+                cmd = [
+                    "docker", "exec", "-e", f"PGPASSWORD={password}",
+                    "algovibe-timescaledb",
+                    "pg_dump", "-U", user, dbname
+                ]
+                with open(filepath, "w") as f:
+                    subprocess.run(cmd, stdout=f, check=True)
+            else:
+                # No backup tools available in this container
+                static_warn = "[DB] Backup skipped: neither 'pg_dump' nor 'docker' found in path."
+                if not hasattr(self, "_backup_warned"):
+                    logging.warning(static_warn)
+                    self._backup_warned = True
+                return None
+            
+            # Prune old snapshots
+            backups_dir = os.path.dirname(filepath)
+            all_backups = sorted([os.path.join(backups_dir, f) for f in os.listdir(backups_dir) if f.startswith(f"snapshot_{db_name}_")])
+            if len(all_backups) > _DB_BACKUP_MAX_SNAPSHOTS:
+                for old_file in all_backups[:-_DB_BACKUP_MAX_SNAPSHOTS]:
+                    os.remove(old_file)
+                    
+            logging.info(f"[DB] Backup created: {filepath}")
+            return filepath
+        except Exception as e:
+            logging.error(f"[DB] Backup failed: {e}")
+            return None
+
     def prune_old_data(self, hours=24):
         """Hapus log sistem yang lebih lama dari X jam agar DB tidak bengkak."""
         try:
             with self.get_connection() as conn:
                 # 1. Prune system_events (logs)
                 res1 = conn.execute(
-                    "DELETE FROM system_events WHERE created_at < datetime('now', ?)",
+                    "DELETE FROM system_events WHERE created_at < NOW() + (%s)::interval",
                     (f'-{hours} hours',)
                 )
                 # 2. Prune market_depth (data orderbook lama yang tidak relevan)
@@ -960,7 +1011,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, api_key, api_secret) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO users (username, password_hash, api_key, api_secret) VALUES (%s, %s, %s, %s)",
                     (username, pw_hash, api_key, api_secret)
                 )
             return True
@@ -971,7 +1022,7 @@ class Database:
     def get_user(self, username):
         """Ambil data user berdasarkan username."""
         with self.get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+            cursor = conn.execute("SELECT * FROM users WHERE username = %s", (username,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -987,7 +1038,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "UPDATE users SET api_key = ?, api_secret = ? WHERE username = ?",
+                    "UPDATE users SET api_key = %s, api_secret = %s WHERE username = %s",
                     (api_key, api_secret, username)
                 )
             return True
@@ -1003,7 +1054,7 @@ class Database:
             with self.get_connection() as conn:
                 conn.execute(
                     """INSERT INTO user_sessions (session_id, user_id, ip_address, user_agent, is_active)
-                       VALUES (?, ?, ?, ?, 1)""",
+                       VALUES (%s, %s, %s, %s, 1)""",
                     (session_id, user_id, ip_address, user_agent),
                 )
             return True
@@ -1016,7 +1067,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 rows = conn.execute(
-                    "SELECT session_id, ip_address, user_agent, created_at FROM user_sessions WHERE user_id = ? AND is_active = 1",
+                    "SELECT session_id, ip_address, user_agent, created_at FROM user_sessions WHERE user_id = %s AND is_active = 1",
                     (user_id,),
                 ).fetchall()
             return [dict(r) for r in rows]
@@ -1029,7 +1080,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 row = conn.execute(
-                    "SELECT session_id, user_id, ip_address, user_agent, created_at, last_activity FROM user_sessions WHERE session_id = ? AND is_active = 1",
+                    "SELECT session_id, user_id, ip_address, user_agent, created_at, last_activity FROM user_sessions WHERE session_id = %s AND is_active = 1",
                     (session_id,),
                 ).fetchone()
             return dict(row) if row else None
@@ -1042,7 +1093,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "UPDATE user_sessions SET is_active = 0 WHERE session_id = ?",
+                    "UPDATE user_sessions SET is_active = 0 WHERE session_id = %s",
                     (session_id,),
                 )
             return True
@@ -1055,7 +1106,7 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "UPDATE user_sessions SET is_active = 0 WHERE user_id = ? AND is_active = 1",
+                    "UPDATE user_sessions SET is_active = 0 WHERE user_id = %s AND is_active = 1",
                     (user_id,),
                 )
             return True
@@ -1068,11 +1119,23 @@ class Database:
         try:
             with self.get_connection() as conn:
                 conn.execute(
-                    "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = ?",
+                    "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = %s",
                     (session_id,),
                 )
         except Exception as e:
             logging.warning(f"[DB] update_session_activity error: {e}")
+
+    def get_active_positions_count(self) -> int:
+        """Return the number of open positions in this DB."""
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'"
+                ).fetchone()
+                return row[0] if row else 0
+        except Exception as e:
+            logging.error(f"[DB] get_active_positions_count error: {e}")
+            return 0
 
 class DatabaseRouter:
     """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
@@ -1086,14 +1149,66 @@ class DatabaseRouter:
     _SYNC_KEYS = {"dry_run", "dry_run_loose_gates"}
 
     def __init__(self):
-        from config import DB_PATH_LIVE, DB_PATH_DRYRUN
-        self._live   = Database(DB_PATH_LIVE)
-        self._dryrun = Database(DB_PATH_DRYRUN)
+        from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN
+        self._live   = Database(DATABASE_URL_LIVE)
+        self._dryrun = Database(DATABASE_URL_DRYRUN)
         self._mode_cache: bool | None = None
         self._mode_cache_ts: float = 0.0
+        self._migrated: bool = False
         self._backup_thread: threading.Thread | None = None
         self._backup_running: bool = False
         self._start_backup_scheduler()
+
+    def run_migrations(self):
+        """Skip automatic migrations to prevent startup hangs."""
+        self._migrated = True
+        return
+
+        import os, random, time
+        is_primary = os.getenv("MIGRATION_PRIMARY", "false").lower() == "true"
+        if not is_primary:
+            time.sleep(random.uniform(2.0, 5.0))
+
+        logger.info(f"[DB] Migration check started (Primary: {is_primary})")
+
+        try:
+            with self._live.get_connection() as conn:
+                conn.autocommit = True
+                cursor = conn.cursor()
+                
+                # Use non-blocking try_advisory_lock to prevent deadlocks
+                locked = False
+                max_retries = 60 if is_primary else 30
+                for i in range(max_retries):
+                    cursor.execute("SELECT pg_try_advisory_lock(777777)")
+                    if cursor.fetchone()[0]:
+                        locked = True
+                        break
+                    if i % 10 == 0:
+                        logger.info(f"[DB] Waiting for migration lock (attempt {i}/{max_retries})...")
+                    time.sleep(1)
+                
+                if not locked:
+                    if is_primary:
+                        logger.error("[DB] PRIMARY failed to acquire migration lock! Forcing migration anyway...")
+                    else:
+                        logger.warning("[DB] Could not acquire migration lock, assuming other service is handling it.")
+                        self._migrated = True
+                        return
+
+                try:
+                    from .migrations import run_migrations as _run_mig
+                    _run_mig(self._live.db_url)
+                    _run_mig(self._dryrun.db_url)
+                    self._migrated = True
+                finally:
+                    if locked:
+                        cursor.execute("SELECT pg_advisory_unlock(777777)")
+                        logger.info("[DB] Migration lock released.")
+        except Exception as e:
+            logging.error(f"[DatabaseRouter] Migration failed or lock error: {e}")
+            if "advisory" in str(e).lower():
+                self._migrated = True
 
     # ── Scheduled 6-hour backup ────────────────────────────────────────────
 
@@ -1147,11 +1262,9 @@ class DatabaseRouter:
         if self._mode_cache is not None and (now - self._mode_cache_ts) < 2.0:
             return self._mode_cache
         try:
-            import sqlite3 as _sq
-            conn = _sq.connect(self._live.db_path, timeout=30)
-            row = conn.execute("SELECT value FROM bot_state WHERE key='dry_run'").fetchone()
-            conn.close()
-            val = (row[0].lower() in ("true", "1")) if row else True
+            with self._live.get_connection() as conn:
+                row = conn.execute("SELECT value FROM bot_state WHERE key='dry_run'").fetchone()
+                val = (row[0].lower() in ("true", "1", "t", "y")) if row else True
         except Exception:
             val = True  # safe fallback: treat as dryrun if uncertain
         self._mode_cache = val
@@ -1194,6 +1307,16 @@ class DatabaseRouter:
     @property
     def dryrun(self) -> Database:
         return self._dryrun
+
+    def get_active_positions_count(self, dry_run: int | None = None) -> int:
+        """Route to the correct DB and return open positions count."""
+        if dry_run == 1:
+            db_obj = self._dryrun
+        elif dry_run == 0:
+            db_obj = self._live
+        else:
+            db_obj = self._active()
+        return db_obj.get_active_positions_count()
 
     def __getattr__(self, name: str):
         return getattr(self._active(), name)

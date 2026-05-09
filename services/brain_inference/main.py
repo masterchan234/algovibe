@@ -94,6 +94,7 @@ class BrainInferenceService:
         # [Restoration] Exchange for backfill
         from app.infrastructure.exchange_factory import create_indodax_exchange
         self._exchange = create_indodax_exchange()
+        self._exchange.timeout = 30000 # 30s
         self._backfill_thread = None
         
         # Oracle initialization
@@ -110,8 +111,6 @@ class BrainInferenceService:
         
         # Load blacklist
         self.blacklist = set(db.get_blacklist())
-        self.daily_trades = int(db.get_state("daily_trades", 0) or 0)
-        self.start_day = int(db.get_state("start_day", datetime.now().day) or datetime.now().day)
 
     async def start(self) -> None:
         self._running = True
@@ -211,7 +210,7 @@ class BrainInferenceService:
         
         while self._running:
             try:
-                time.sleep(15)  # Run analysis every 15 seconds
+                time.sleep(1)  # Run analysis every 1 second
                 
                 if not self._tickers:
                     continue
@@ -222,7 +221,8 @@ class BrainInferenceService:
                 
                 # 2. Rank pairs
                 ranked = []
-                for symbol, data in self._tickers.items():
+                # Use list() to avoid "dictionary changed size during iteration" from concurrent tick updates
+                for symbol, data in list(self._tickers.items()):
                     res = calculate_score(((symbol, data), self._adaptive_cfg, regime))
                     if res:
                         ranked.append(res)
@@ -241,14 +241,15 @@ class BrainInferenceService:
                     if abs(change) > 3.0:
                         self.oracle.request_pump_analysis(pair, change)
                 
-                # Process LLM Insights (saves to system_events table)
-                self.oracle.process_llm_insights()
-                
                 # 3.5 [RESTORATION] Scan for trade signals (Entry Logic)
                 self._scan_for_signals(ranked)
-                
+
                 # 4. Technical Scoring and DB Update (Radar data)
                 self._update_ticker_history(ranked)
+                
+                # 5. AI Insights (DISABLED in brain-inference for stability/latency)
+                # litert-lm-decision service handles this now.
+                pass
                 
                 # Heartbeat to DB
                 db.save_state("brain_heartbeat", time.time())
@@ -325,17 +326,6 @@ class BrainInferenceService:
         if not ranked:
             return
 
-        # Monolith parity: reset daily counters on calendar day rollover.
-        current_day = datetime.now().day
-        if current_day != self.start_day:
-            self.daily_trades = 0
-            self.start_day = current_day
-            db.save_state("daily_trades", 0)
-            db.save_state("start_day", current_day)
-            db.save_state("session_mode", "NORMAL")
-            db.save_state("session_buy_enabled", "true")
-            db.save_state("session_latched", "false")
-
         regime = self.oracle.get_market_regime()
         open_positions = db.get_open_positions()
 
@@ -388,14 +378,12 @@ class BrainInferenceService:
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
             try:
-                if self.daily_trades >= config.MAX_TRADES_PER_DAY:
-                    break
-
                 # Prepare mock for enrichment/gates
                 bot_mock.price_history[pair] = self._history.get(pair, deque())
                 
                 enriched = enrich_pair(bot_mock, r, self._tickers)
                 gate = check_entry_gates(bot_mock, r, enriched, regime, adaptive_cfg, open_positions)
+                print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
                 if recovery_mode:
                     total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0
@@ -423,8 +411,6 @@ class BrainInferenceService:
                     
                     # Use "signal" topic for ZMQ multipart
                     self._signal_pub.send(sig.SerializeToString(), topic="signal")
-                    self.daily_trades += 1
-                    db.save_state("daily_trades", self.daily_trades)
                     if recovery_mode:
                         recovery_new_positions += 1
                     
@@ -477,7 +463,7 @@ class BrainInferenceService:
                     cursor.execute('''
                         INSERT INTO ticker_history (pair, history_json, prediction_prob, trend, signal,
                                                   ch_5m, ch_15m, ch_1h, volatility, score, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         ON CONFLICT(pair) DO UPDATE SET
                             history_json=excluded.history_json,
                             prediction_prob=excluded.prediction_prob,
@@ -498,6 +484,9 @@ class BrainInferenceService:
             logger.error("[brain-inference] DB Update Error: %s", e)
 
 def main() -> None:
+    # Explicitly run migrations before starting service
+    db.run_migrations()
+    
     service = BrainInferenceService()
 
     # Ensure we have an event loop

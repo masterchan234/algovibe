@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 from config import (
-    TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
+    TP_PCT, SL_PCT, AUTO_SL_ENABLED, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
     AUTO_BASKET_HARVEST_MIN, BTC_CRASH_TRIGGER_PCT,
@@ -78,6 +78,15 @@ class ExitManager:
         # Throttle for saving realised/unrealised PnL snapshots to bot_state (DB).
         self._last_pnl_snapshot_ts: float = 0.0
         self._sync_jaring_from_db()
+
+    def _parse_iso_date(self, val):
+        """Safely parse ISO date string, fallback to now() if missing or invalid."""
+        if not val or not isinstance(val, str):
+            return datetime.now()
+        try:
+            return datetime.fromisoformat(val)
+        except Exception:
+            return datetime.now()
 
     @property
     def dry_run(self):
@@ -459,7 +468,15 @@ class ExitManager:
                 btc_weakening = btc_current <= (sum(all_btc_prices) / len(all_btc_prices))
 
         # Read HARVEST_ONLY flag once — used in basket evaluation AND per-position TP tightening.
-        harvest_only = (db.get_state("session_mode") == "HARVEST_ONLY")
+        harvest_mode_raw, harvest_updated_at = db.get_state_with_time("session_mode")
+        harvest_only = (harvest_mode_raw == "HARVEST_ONLY")
+        # Parse ISO date safely for transition calculations
+        try:
+            _h_dt = self._parse_iso_date(harvest_updated_at)
+            harvest_start_ts = _h_dt.timestamp()
+        except Exception:
+            harvest_start_ts = time.time()
+
 
         try:
             open_pairs_for_basket = []
@@ -511,7 +528,7 @@ class ExitManager:
 
                 # Deteksi posisi stagnant: mandek lama & masih merugi
                 try:
-                    _pos_ts = datetime.fromisoformat(data['timestamp'])
+                    _pos_ts = self._parse_iso_date(data.get('timestamp'))
                     _pos_age = (datetime.now() - _pos_ts).total_seconds() / 60.0
                     if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_idr < 0:
                         has_stagnant = True
@@ -819,11 +836,12 @@ class ExitManager:
                 # ── HARVEST_ONLY status log (throttled) ───────────────────────────────────
                 if harvest_only:
                     if _now_ts - self._last_basket_bypass_log_ts >= 60:
+                        _strategy = "Tightening TP positions" if total_net_pnl > 0 else "Waiting for recovery to harvest"
                         log_message(
                             f"🌾 [HARVEST_ONLY] Status: HARVEST_ONLY | BUY: Blocked | "
-                            f"Strategy: Tightening TP positions | "
+                            f"Strategy: {_strategy} | "
                             f"Net Unrealized: Rp {total_net_pnl:,.0f} | "
-                            f"Target Floor: 0.85% (Net)"
+                            f"Target Floor: {SMART_BREAK_EVEN_PCT*100:.2f}% (Gross/BE)"
                         )
                         self._last_basket_bypass_log_ts = _now_ts
 
@@ -838,6 +856,12 @@ class ExitManager:
                     trigger_label  = f"BTC CRASH KILL SWITCH ({btc_drop_5min_pct*100:.2f}%)"
                     action_label   = "EMERGENCY KILL SWITCH"
 
+                # ── HARVEST_ONLY: Instant Exit if Profitable ─────────────────────────────
+                elif harvest_only and total_net_pnl >= max(300.0, MIN_NET_PROFIT_IDR * 0.5):
+                    should_execute = True
+                    trigger_label  = "MANUAL HARVEST (Profit Secured)"
+                    action_label   = "HARVEST EXIT"
+
                 # ── Net Profit Gate: disable automatic exits when portfolio is net negative ──
                 elif total_net_pnl <= 0:
                     if _now_ts - self._last_basket_bypass_log_ts >= _BYPASS_LOG_INTERVAL:
@@ -846,11 +870,6 @@ class ExitManager:
                             f"({net_pnl_pct:+.4f}%) is not yet profitable."
                         )
                         self._last_basket_bypass_log_ts = _now_ts
-
-                elif harvest_only:
-                    # HARVEST_ONLY: all basket triggers suppressed.
-                    # Individual TPs are tightened in the per-position loop below.
-                    pass
 
                 else:
                     # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
@@ -1104,7 +1123,7 @@ class ExitManager:
                     try:
                         exit_requested_at = data.get('exit_requested_at') or data.get('timestamp')
                         if isinstance(exit_requested_at, str):
-                            exit_dt = datetime.fromisoformat(exit_requested_at)
+                            exit_dt = self._parse_iso_date(exit_requested_at)
                         else:
                             exit_dt = datetime.now()
                         exiting_age_sec = (datetime.now() - exit_dt).total_seconds()
@@ -1241,7 +1260,7 @@ class ExitManager:
                     if not order_id:
                         continue
                         
-                    entry_time = datetime.fromisoformat(data['timestamp'])
+                    entry_time = self._parse_iso_date(data.get('timestamp'))
                     time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
                     
                     # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
@@ -1278,20 +1297,21 @@ class ExitManager:
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
 
-                # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%) as day-end approaches.
-                # Formula: floor + (original - floor) * time_remaining_fraction
-                # time_remaining_frac: 1.0 at midnight (full day ahead) → 0.0 at end of day.
-                # This lowers the TP trigger so the market reaches it more easily, without ever
-                # dropping below the 0.85% Net Profit Floor (covering round-trip fee + slippage).
+                # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%)
+                # over a 30-minute transition window from the moment the mode was activated.
                 if harvest_only:
-                    _now = datetime.now()
-                    _seconds_since_midnight = _now.hour * 3600 + _now.minute * 60 + _now.second
-                    # Fraction of day REMAINING (1.0 = day just started, 0.0 = end of day)
-                    _time_remaining_frac = max(0.0, 1.0 - _seconds_since_midnight / 86400)
+                    _now_ts_sec = time.time()
+                    _elapsed_sec = max(0, _now_ts_sec - harvest_start_ts)
+                    _TRANSITION_WINDOW_SEC = 30 * 60 # 30 minutes to reach minimum TP
+                    
+                    # Fraction of transition REMAINING (1.0 = just started, 0.0 = transition complete)
+                    _transition_frac = max(0.0, 1.0 - (_elapsed_sec / _TRANSITION_WINDOW_SEC))
+                    
                     dynamic_tp_pct = max(
                         SMART_BREAK_EVEN_PCT,
-                        SMART_BREAK_EVEN_PCT + (dynamic_tp_pct - SMART_BREAK_EVEN_PCT) * _time_remaining_frac,
+                        SMART_BREAK_EVEN_PCT + (dynamic_tp_pct - SMART_BREAK_EVEN_PCT) * _transition_frac,
                     )
+
 
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
 
@@ -1317,7 +1337,7 @@ class ExitManager:
                 pnl_pct = current_profit_pct * 100
                 
                 # Hitung umur posisi
-                pos_ts = datetime.fromisoformat(data['timestamp'])
+                pos_ts = self._parse_iso_date(data.get('timestamp'))
                 pos_age_min = (datetime.now() - pos_ts).total_seconds() / 60.0
                 duration_str = f"{int(pos_age_min)}m"
 
@@ -1409,6 +1429,7 @@ class ExitManager:
                 current_tier = data.get('dca_tier', 0)
                 can_dca = (
                     DCA_ENABLED and
+                    not harvest_only and
                     current_tier < DCA_MAX_TIERS and
                     current_profit_pct <= DCA_STEP_PCT and
                     current_price > active_sl_price and  # Belum kena hard SL
@@ -1432,12 +1453,20 @@ class ExitManager:
                         continue
 
                 elif current_price <= active_sl_price:
-                    # [Manual Control Mode] Automatic STOP_LOSS is DISABLED.
-                    # Posisi rugi harus ditutup manual via dashboard EXIT button.
+                    # [Senior Strategy] Execute automatic Stop Loss to protect capital.
+                    # Bypass if AUTO_SL_ENABLED is False or HARVEST_ONLY is active.
+                    if not AUTO_SL_ENABLED or harvest_only:
+                        # log_message(f"⏳ [SL SUPPRESSED] {pair} hit SL but bypassing per config/mode.")
+                        continue
+
+                    reason_sl = "STOP_LOSS"
                     log_message(
-                        f"🚫 [AUTO-SL DISABLED] {pair}: Price {current_price:,.2f} below SL {active_sl_price:,.2f} "
-                        f"({pnl_pct:+.2f}%). Holding — use dashboard EXIT button to close manually."
+                        f"💀 [AUTO-SL TRIGGERED] {pair}: Price {current_price:,.2f} hit SL {active_sl_price:,.2f} "
+                        f"({pnl_pct:+.2f}%). Protecting capital."
                     )
+                    order_id = self.execute_exit(pair, amount, current_price, reason_sl,
+                                               entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                    if order_id: mark_exit_requested(pair, order_id)
                     continue
             except Exception as e:
                 log_message(f"🚨 Error in monitor loop: {e}")
@@ -1693,8 +1722,8 @@ class ExitManager:
                 pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
                 
                 # Use provided position_data for timestamp, fallback to now
-                timestamp_str = position_data.get('timestamp') if position_data else datetime.now().isoformat()
-                entry_time = datetime.fromisoformat(timestamp_str)
+                timestamp_str = position_data.get('timestamp') if (position_data and position_data.get('timestamp')) else datetime.now().isoformat()
+                entry_time = self._parse_iso_date(timestamp_str)
                 duration_sec = (datetime.now() - entry_time).total_seconds()
                 
                 try:
@@ -2003,7 +2032,7 @@ class ExitManager:
                         ws_trade_id = str(order.get('tradeId', '') or '') or None
                         
                         timestamp_str = p_data.get('timestamp') or datetime.now().isoformat()
-                        duration_sec = (datetime.now() - datetime.fromisoformat(timestamp_str)).total_seconds()
+                        duration_sec = (datetime.now() - self._parse_iso_date(timestamp_str)).total_seconds()
                         
                         db.insert_trade_history(
                             pair=p_pair, entry_price=entry_price, exit_price=exit_price,
@@ -2351,7 +2380,7 @@ class ExitManager:
                             reason = pos.get('reason_backup', 'RECONCILE_EXIT_FILL')
                             participant = exec_type
                             try:
-                                duration_sec = int((datetime.now() - datetime.fromisoformat(str(pos.get('timestamp')))).total_seconds())
+                                duration_sec = int((datetime.now() - self._parse_iso_date(pos.get('timestamp'))).total_seconds())
                             except Exception:
                                 duration_sec = 300
                             db.insert_trade_history(
@@ -2475,7 +2504,7 @@ class ExitManager:
                             oid = str(pos.get('exit_order_id', ''))
                             if oid in all_active_order_ids:
                                 # Order still open on exchange. Check duration since position opened.
-                                pos_ts = datetime.fromisoformat(pos['timestamp'])
+                                pos_ts = self._parse_iso_date(pos.get('timestamp'))
                                 age_sec = (datetime.now() - pos_ts).total_seconds()
                                 if age_sec > 300: # 5 minutes
                                     log_message(f"⚠️ [Stuck Exit] {p} order {oid} is stuck for {age_sec:.0f}s. Cancelling and performing Emergency Exit...")

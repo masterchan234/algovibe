@@ -14,7 +14,7 @@ Setiap AUTO_TRAIN_INTERVAL_HOURS jam, trainer akan:
 import os
 import sys
 import time
-import sqlite3
+import psycopg2
 import logging
 from logging.handlers import RotatingFileHandler
 import joblib
@@ -78,7 +78,7 @@ def _load_training_data(db_path: str) -> pd.DataFrame:
     Ambil data training dari trade_analytics.
     Menggunakan sliding window 5000 trade terbaru (data paling relevan).
     """
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = psycopg2.connect(DATABASE_URL_LIVE)
     query = """
         SELECT
             ai_prob, whale_boost, sector_sentiment, imbalance,
@@ -244,7 +244,6 @@ def main():
     )
     # Gunakan path DB aktif dari router agar trainer baca data dari DB yang benar
     from app.infrastructure.database import db as _db_router
-    _active_db_path = _db_router.db_path
 
     _setup_file_logger(AUTO_TRAIN_LOG_PATH)
 
@@ -258,7 +257,7 @@ def main():
     while True:
         logger.info("=== Memulai siklus training ===")
         result = run_training_cycle(
-            db_path=_active_db_path,
+            db_path=None,
             model_path=AUTO_TRAIN_RF_MODEL_PATH,
             model_tmp=AUTO_TRAIN_RF_MODEL_TMP,
             min_samples=AUTO_TRAIN_MIN_SAMPLES,

@@ -13,13 +13,16 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from app.infrastructure.database import db
 
 TIMEFRAME       = '15m'
-SINCE_DAYS      = 60
+SINCE_DAYS      = 90
 MIN_VOL_PCT     = 0.3       # Skip koin dengan candle volatilitas < 0.3%
 MIN_VOLUME_IDR  = 10_000_000  # Min Rp 10 Juta volume 24h (filter koin zombie)
 MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin terlikuid)
 
-from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, BLACKLIST_COINS
+from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, DEFAULT_BLACKLIST_COINS as BLACKLIST_COINS
 CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
+
+import logging
+logging.getLogger('ccxt').setLevel(logging.ERROR)
 
 
 class AlgovibeBacktester:
@@ -81,23 +84,9 @@ class AlgovibeBacktester:
         pair_id = pair.replace('/', '').lower()
         print(f"  Analysing data availability for {pair}...")
         
-        # [Smart Sync] Cek apakah data sudah ada di database lokal (Shared dengan Live Bot)
-        db_history = db.get_ticker_history(pair_id, limit=1000)
-        if db_history and len(db_history) >= 200:
-            print(f"  ✅ Reusing {len(db_history)} local data points from DB (Redundancy Eliminated)")
-            # Format data dari DB ke DataFrame
-            # Urutan di DB biasanya DESC, kita butuh ASC untuk simulasi
-            prices = [h['last'] for h in reversed(db_history)]
-            # Generate placeholder timestamps (local data dari DB tidak punya timestamp akurat)
-            import datetime as dt
-            now = dt.datetime.now()
-            timestamps = [now - dt.timedelta(hours=len(prices)-i) for i in range(len(prices))]
-            df = pd.DataFrame({
-                'timestamp': timestamps,
-                'close': prices,
-                'open': prices, 'high': prices, 'low': prices, 'volume': [0]*len(prices) # Fallback
-            })
-            return df
+        # [Force Sync] Selalu fetch dari exchange untuk memastikan integritas data 90 hari
+        # (Melewati cache DB lokal agar tidak terjebak di data 1000 poin)
+        pass
 
         # Jika data di DB tidak ada atau kurang, barulah fetch dari exchange
         print(f"  ☁️ Fetching fresh data from Exchange for {pair}...")

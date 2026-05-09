@@ -11,7 +11,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-import sqlite3
+import psycopg2
 import json
 import jwt as pyjwt
 from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template, g
@@ -28,6 +28,7 @@ import config as cfg
 import utils.logger # Ensure central logging config is applied
 from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
 from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- [ZMQ COMMAND PUBLISHER] ---
 _ctx = zmq_eventlet.Context()
@@ -46,6 +47,49 @@ def broadcast_command(action, payload=None):
 exchange = ccxt.indodax()
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+# ── Pentest Fix: Custom JSON Encoder for Datetime ──
+class CustomJSONProvider(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime.date, datetime.datetime)):
+            return obj.isoformat()
+        return super().default(obj)
+
+app.json_encoder = CustomJSONProvider
+
+
+# ── Pentest Fix: Secure Date Parsing ──
+def _parse_iso_date(ts_val):
+    """Safe ISO date parser for both string and datetime objects."""
+    if ts_val is None:
+        return None
+    if isinstance(ts_val, datetime.datetime):
+        return ts_val
+    try:
+        # Handle formats: '2026-05-08 20:00:00', '2026-05-08T20:00:00', etc.
+        s = str(ts_val).replace(' ', 'T').replace('Z', '+00:00')
+        return datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+# ── Pentest Fix: Custom JSON for SocketIO ──
+class JSONUtil:
+    @staticmethod
+    def dumps(obj, **kwargs):
+        return json.dumps(obj, cls=CustomJSONProvider, **kwargs)
+    @staticmethod
+    def loads(s, **kwargs):
+        return json.loads(s, **kwargs)
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Log the full traceback
+    logging.exception(f"Unhandled Exception: {e}")
+    # Return JSON for API routes
+    if request.path.startswith('/api/'):
+        return jsonify({"error": str(e), "path": request.path}), 500
+    return "Internal Server Error", 500
 
 # ── Pentest Fix: Secure Session Configuration ──
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
@@ -62,7 +106,7 @@ app.config.update(
 # Exclude SocketIO from CSRF as it has its own mechanism
 # but keep it for normal API routes
 CORS(app, supports_credentials=True)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5, json=JSONUtil)
 
 # --- [Manual CSRF Protection] ---
 def generate_csrf():
@@ -90,7 +134,7 @@ def validate_csrf():
 
         token = request.headers.get("X-CSRFToken")
         if not token or token != session.get("_csrf_token"):
-            logging.warning(f"🚫 CSRF Validation Failed for {request.path}")
+            logging.warning(f"🚫 CSRF Validation Failed for {request.method} {request.path}")
             abort(403)
 
 # Provide CSRF token for the frontend
@@ -106,6 +150,11 @@ def generate_view_token():
 def set_csrf_cookie(response):
     response.set_cookie('csrf_token', generate_csrf(), samesite='Lax', httponly=False) # Frontend needs to read this
     return response
+
+@socketio.on('ping_latency')
+def handle_ping_latency(data):
+    # logger.debug(f"Ping latency received: {data}")
+    emit('pong_latency', data)
 
 @socketio.on('connect')
 def handle_connect(auth=None):
@@ -262,7 +311,7 @@ try:
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
-from config import DB_PATH_LIVE, DB_PATH_DRYRUN, INITIAL_CAPITAL as _IC
+from config import INITIAL_CAPITAL as _IC
 # NOTE: cfg.DRY_RUN is imported dynamically inside functions to always read current value
 
 # Default pair — akan diperbarui saat user memilih koin di dashboard
@@ -281,10 +330,10 @@ _start_time = time.time()
 from app.infrastructure.migrations import run_migrations, sync_schema_both_dbs
 
 # Ensure both live and dryrun databases have up-to-date schema on startup
-try:
-    sync_schema_both_dbs()
-except Exception as _sync_err:
-    logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
+# try:
+#     sync_schema_both_dbs()
+# except Exception as _sync_err:
+#     logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
 
 # Set untuk track DB path yang sudah dimigrasi di proses ini
 # Prevents redundant migration runs on every request
@@ -294,8 +343,7 @@ def get_db_connection():
     """Membuka koneksi SQLite ke DB aktif melalui DatabaseRouter."""
     # Ambil path dari database yang sedang aktif (live/dryrun)
     active_db = db._active()
-    conn = sqlite3.connect(active_db.db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    conn = active_db.get_raw_connection()
     return conn
 
 # [Project Predator] Sync Trade Streams for Open Positions on Startup
@@ -452,7 +500,7 @@ def _get_pair_technicals(pair):
     try:
         # 1. Price-based technicals (Diberikan sebagai JSON list di tabel ini)
         row = conn.execute(
-            "SELECT history_json FROM ticker_history WHERE pair = ?",
+            "SELECT history_json FROM ticker_history WHERE pair = %s",
             (pair,)
         ).fetchone()
         
@@ -463,7 +511,7 @@ def _get_pair_technicals(pair):
         tech = get_technical_summary(prices)
         
         # 2. Orderbook-based technicals (Imbalance & Spread)
-        depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)).fetchall()
+        depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
         bids = [r for r in depth if r['is_bid'] == 1]
         asks = [r for r in depth if r['is_bid'] == 0]
         
@@ -507,20 +555,20 @@ def _get_trade_history_summary():
                 ROUND(MIN(pnl_idr), 0) as worst_trade,
                 ROUND(SUM(pnl_idr), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
-        """, (dry_val,)).fetchone()
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+        """, (bool(dry_val),)).fetchone()
 
         exits = conn.execute("""
             SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY reason ORDER BY cnt DESC LIMIT 6
-        """, (dry_val,)).fetchall()
+        """, (bool(dry_val),)).fetchall()
 
         top_pairs = conn.execute("""
             SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
-            FROM trade_history WHERE dry_run = ? AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
-        """, (dry_val,)).fetchall()
+        """, (bool(dry_val),)).fetchall()
 
         conn.close()
 
@@ -816,178 +864,16 @@ def user_settings():
 @app.route('/api/stats')
 @login_required
 def get_stats():
-    conn = get_db_connection()
+    """
+    Endpoint utama untuk KPI dashboard. 
+    Menggunakan _build_stats_payload untuk konsistensi antara REST API dan WebSocket.
+    """
     try:
-        import config as cfg
-        dr_val = 1 if _is_dry_run() else 0
-        # PnL & Daily Trades
-        stats = conn.execute("SELECT * FROM bot_state").fetchall()
-        stats_dict = {row['key']: row['value'] for row in stats}
-
-        # Open Positions
-        positions = conn.execute("SELECT * FROM positions").fetchall()
-        mode_positions = [p for p in positions if int(p['dry_run'] or 0) == dr_val]
-
-        # 1. LIVE STATS (Real Money)
-        live_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
-        ).fetchone()
-        
-        # 2. DRY RUN STATS (Live Simulation)
-        dry_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
-        ).fetchone()
-
-        # 3. BACKTEST STATS (AI Knowledge / DNA)
-        dna_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
-        ).fetchone()
-
-        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
-        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
-        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
-
-        # Sector Sentiment
-        sectors = db.get_all_latest_sector_sentiment()
-
-        # Unrealized PnL estimasi dari ticker_history last price
-        unrealized_pnl = 0.0
-        for pos in mode_positions:
-            try:
-                pair = pos['pair']
-                entry_price = float(pos['entry_price'] or 0)
-                amount_crypto = float(pos['amount_crypto'] or 0)
-                # Ambil harga terakhir dari ticker_history
-                row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
-                ).fetchone()
-                if row and row['history_json']:
-                    history = json.loads(row['history_json'])
-                    if history and entry_price > 0:
-                        last_price = float(history[-1])
-                        unrealized_pnl += (last_price - entry_price) * amount_crypto
-            except Exception:
-                continue
-
-        tech_data = _get_pair_technicals(ANALYSIS_PAIR)
-        ai_reasoning = db.get_state(f"llm_reasoning_{ANALYSIS_PAIR}")
-        # Ambil last_price dari tech_data jika tersedia (hindari query DB ulang)
-        _last_price = tech_data.get('last_price')
-        combined_reasoning = ai_reasoning if ai_reasoning else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
-
-        import config as cfg
-        
-        # 4. Kalsulasi Saldo & Ekuitas (Predator Metrics)
-        # Saldo Tersedia = Modal Awal + Total Profit Realisasi - Modal yang sedang terpakai
-        total_used_idr = sum([float(pos['amount_idr'] or 0) for pos in mode_positions])
-        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl'] or 0)
-
-        if _is_dry_run():
-            available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
-            idr_used = total_used_idr
-            active_pnl = realized_pnl_dry
-            active_win_rate = dry_win_rate
-            # Dry Run Equity = Sisa Dana + Modal Terpakai + PnL Mengambang
-            total_equity = available_idr + total_used_idr + unrealized_pnl
-        else:
-            # LIVE MODE: Meniru 'Estimated Asset Value' Indodax
-            real_bal = _get_cached_real_balance_bundle()
-            ws_tickers_for_equity = mws.get_tickers()
-            if real_bal is not None:
-                available_idr = float(real_bal.get("free", 0) or 0)
-                idr_used = float(real_bal.get("used", 0) or 0)
-                idr_total = available_idr + idr_used
-                
-                coin_equity_idr = _get_coin_equity_idr(
-                    real_bal.get("coins", {}), ws_tickers_for_equity
-                )
-                
-                # [Senior Fix] Total Equity LIVE = (Free IDR + Used IDR) + Market Value Seluruh Koin
-                total_equity = idr_total + coin_equity_idr
-                
-                active_pnl = realized_pnl_live
-                active_win_rate = win_rate
-            else:
-                available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
-                idr_used = float(_REAL_BALANCE_CACHE.get("used") or 0)
-                idr_total = available_idr + idr_used
-                coin_equity_idr = _get_coin_equity_idr(
-                    _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
-                )
-                total_equity = idr_total + coin_equity_idr
-                active_pnl = realized_pnl_live
-                active_win_rate = win_rate
-        used_for_utilization = total_used_idr if dr_val == 1 else float(idr_used or 0)
-        utilization_pct = (used_for_utilization / (available_idr + used_for_utilization) * 100) if (available_idr + used_for_utilization) > 0 else 0
-        
-        # Performance definitions
-        perf = db.get_daily_stats()
-        import config as cfg
-        quant_audit = db.get_quant_audit_report(window_hours=24, dry_run=1 if _is_dry_run() else 0)
-        
-        top_pair_row = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST' "
-            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1"
-        ).fetchone()
-        top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
-
-        best_trade_row = conn.execute(
-            "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE created_at > date('now') AND reason != 'BACKTEST'"
-        ).fetchone()
-        best_trade = float(best_trade_row[0] or 0)
-
-        # Hitung jumlah posisi aktif sesuai mode saat ini (live/dryrun), bukan total semua mode
-        active_positions_count = len(mode_positions)
-
-        return jsonify({
-            "all_time_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "all_time_pnl_dry": realized_pnl_dry,
-            "available_idr": round(available_idr, 0),
-            "idr_used": round(idr_used, 0),
-            "total_equity": round(total_equity, 0),
-            "utilization": round(utilization_pct, 1),
-            "daily_pnl": active_pnl,
-            "win_rate": round(active_win_rate, 2),
-            "dry_win_rate": round(dry_win_rate, 2),
-            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
-            "total_trades_live": live_stats['trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
-            "live_win_rate": round(win_rate, 2),
-            "live_trades_count": live_stats['trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
-            "backtest_win_rate": round(dna_win_rate, 2),
-            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
-            "active_positions": active_positions_count,
-            "unrealized_pnl": round(unrealized_pnl, 0),
-            "regime": stats_dict.get('market_regime', 'CHOPPY'),
-            "regime_leader": stats_dict.get('regime_leader', ''),
-            "latest_whale": stats_dict.get('latest_whale', ''),
-            "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
-            "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
-            "hero_ai_insight": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'),
-            "hero_ai_insights": [{"message": r[0], "created_at": r[1]} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
-            "active_reasoning": combined_reasoning,
-            "technicals": tech_data,
-            "sectors": sectors,
-            "alpha_contributor": top_pair,
-            "best_trade": best_trade,
-            "intensity": round(perf['total_trades'] / max(1, (time.time() - _start_time) / 3600), 1),
-            "weights": db.get_all_weights(),
-            "quant_audit": quant_audit,
-            "market_sentiment_index": int(stats_dict.get('market_sentiment_index', 50)),
-            "backfill_status": stats_dict.get('backfill_status', 'N/A'),
-            "history_since": conn.execute("SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history").fetchone()[0] or '--/-- --:--',
-            "new_listings": db.get_new_listings(),
-            "dry_run": bool(_is_dry_run()),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES)
-        })
+        payload = _build_stats_payload()
+        return jsonify(payload)
     except Exception as e:
+        logging.error(f"Error in get_stats route: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route('/api/positions')
 @login_required
@@ -1013,7 +899,7 @@ def get_positions():
             pnl_pct = 0.0
             try:
                 row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
                 ).fetchone()
                 if row and row['history_json']:
                     history = json.loads(row['history_json'])
@@ -1033,7 +919,7 @@ def get_positions():
             try:
                 ts = pos['timestamp']
                 if ts:
-                    opened_at = datetime.datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+                    opened_at = _parse_iso_date(ts)
                     duration_sec = int((datetime.datetime.now(datetime.timezone.utc) - opened_at).total_seconds())
             except Exception:
                 pass
@@ -1087,13 +973,13 @@ def get_pnl_history_api(tf):
         interval = tf_map.get(tf, '-24 hours')
         
         base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST'",
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
             (interval, dr_val)
         ).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
         trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= datetime('now', ?) AND (dry_run = ? OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
             (interval, dr_val)
         ).fetchall()
         
@@ -1168,7 +1054,7 @@ def get_positions_summary():
 
             try:
                 row = conn.execute(
-                    "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
                 ).fetchone()
                 if row and row['history_json']:
                     history = json.loads(row['history_json'])
@@ -1302,8 +1188,7 @@ def sync_wallet():
 def get_orders():
     """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
     try:
-        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
-        live_conn.row_factory = sqlite3.Row
+        live_conn = active_db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT order_id, pair, side, price, amount, status, created_at, updated_at "
             "FROM order_book ORDER BY created_at DESC LIMIT 20"
@@ -1324,8 +1209,7 @@ def get_live_state():
     regardless of which mode the dashboard is currently displaying.
     """
     try:
-        live_conn = sqlite3.connect(cfg.DB_PATH_LIVE, timeout=30)
-        live_conn.row_factory = sqlite3.Row
+        live_conn = active_db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT key, value FROM bot_state WHERE key IN "
             "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
@@ -1440,7 +1324,7 @@ def get_market_context(pair):
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT price, vol, is_bid FROM market_depth WHERE pair = ? ORDER BY price DESC", 
+            "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s ORDER BY price DESC", 
             (pair,)
         ).fetchall()
         
@@ -1487,7 +1371,7 @@ def get_pair_reasoning(pair):
         # Fallback ke technical reasoning jika LLM belum ada
         conn = get_db_connection()
         try:
-            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (p,)).fetchone()
+            row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (p,)).fetchone()
             prices = json.loads(row['history_json']) if row and row['history_json'] else []
             from app.domain.technicals import get_technical_summary
             tech = get_technical_summary(prices)
@@ -1535,7 +1419,7 @@ def trade_manual_exit():
         try:
             conn = get_db_connection()
             row = conn.execute(
-                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
             ).fetchone()
             conn.close()
             if row and row['history_json']:
@@ -1652,6 +1536,41 @@ def unblock_bot():
     except Exception as e:
         logging.error(f"[Dashboard] Unblock failed: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
+@app.route('/api/bot/update-state', methods=['POST'])
+@login_required
+def update_bot_state():
+    """Manual override for bot state (Harvest Only, reset losses, etc)."""
+    data = request.json
+    key = data.get('key')
+    value = data.get('value')
+    
+    if not key or value is None:
+        return jsonify({"error": "Missing key or value"}), 400
+        
+    try:
+        if key == 'daily_target_hit' and str(value) == '0':
+            # [Smart Reset] User wants to continue trading.
+            # Move the goalpost so automation doesn't re-latch immediately.
+            try:
+                stats = _build_stats_payload()
+                current_pnl = float(stats.get('net_pnl', 0))
+                # Add a buffer (Rp 10k or 0.1% of capital, whichever is higher)
+                new_target = current_pnl + 10000 
+                db.save_state("daily_profit_target", str(new_target))
+                db.save_state("session_mode", "SCALPING")
+                db.save_state("session_latched", "false")
+                logging.info(f"🎯 [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
+            except Exception as _re:
+                logging.warning(f"Could not move goalpost during reset: {_re}")
+
+        db.save_state(key, value)
+        # Broadcast command to notify executive-core of state change
+        broadcast_command("STATE_UPDATE", {"key": key, "value": value})
+        
+        logging.info(f"🛠️ [Manual Override] Updated {key} to {value}")
+        return jsonify({"status": "ok", "key": key, "value": value})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/bot-status')
 @login_required
@@ -1671,7 +1590,7 @@ def get_bot_status():
         if last_state:
             last_heartbeat = str(last_state['updated_at'])
             try:
-                updated = datetime.datetime.fromisoformat(str(last_state['updated_at']))
+                updated = _parse_iso_date(last_state['updated_at'])
                 age_sec = (datetime.datetime.utcnow() - updated).total_seconds()
                 bot_alive = age_sec < 60
             except Exception:
@@ -1686,13 +1605,20 @@ def get_bot_status():
         # LLM Stats
         llm_stats = LLMWorker.get_instance().get_stats()
 
+        # Full Bot State from DB
+        all_states = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM bot_state").fetchall()}
+
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(cfg.DRY_RUN),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
             "last_trade_at": last_trade_at,
-            "llm": llm_stats
+            "llm": llm_stats,
+            "session_mode": all_states.get("session_mode", "N/A"),
+            "consecutive_losses": int(all_states.get("consecutive_losses", 0)),
+            "daily_target_hit": all_states.get("daily_target_hit") == "1",
+            "bot_state": all_states
         })
     except Exception as e:
         return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "uptime_sec": 0})
@@ -1704,7 +1630,7 @@ def get_bot_status():
 def get_pair_history(pair):
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
         if row and row['history_json']:
             return jsonify(json.loads(row['history_json']))
         return jsonify([])
@@ -1827,16 +1753,18 @@ def get_radar_data():
 @app.route('/api/radar-audit')
 @login_required
 def get_radar_audit():
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         rows = conn.execute(
             """
             SELECT key, value, updated_at
             FROM bot_state
-            WHERE key LIKE 'radar_reco_%'
-               OR key LIKE 'gate_skip_%'
-               OR key LIKE 'llm_veto_ts_%'
-            """
+            WHERE key LIKE %s
+               OR key LIKE %s
+               OR key LIKE %s
+            """,
+            ('radar_reco_%', 'gate_skip_%', 'llm_veto_ts_%')
         ).fetchall()
 
         now = datetime.datetime.now()
@@ -1857,11 +1785,21 @@ def get_radar_audit():
         for r in rows:
             key = str(r['key'] or '')
             val = str(r['value'] or '')
-            ts_text = str(r['updated_at'] or '')
-            try:
-                ts = datetime.datetime.fromisoformat(ts_text.replace(' ', 'T'))
-            except Exception:
+            
+            # Robust datetime extraction from updated_at column
+            ts = r['updated_at']
+            if ts and not isinstance(ts, datetime.datetime):
+                try:
+                    ts = _parse_iso_date(ts)
+                except Exception:
+                    ts = None
+            
+            if not ts:
                 continue
+                
+            # Normalise to naive for safe comparison with datetime.datetime.now()
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
 
             if key.startswith('radar_reco_'):
                 pair = key.replace('radar_reco_', '', 1)
@@ -1877,7 +1815,11 @@ def get_radar_audit():
                 pair = key.replace('llm_veto_ts_', '', 1)
                 state = _pair_state(pair)
                 try:
-                    state['veto_ts'] = datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+                    # llm_veto_ts_ value is also a timestamp string
+                    v_ts = _parse_iso_date(val)
+                    if v_ts.tzinfo is not None:
+                        v_ts = v_ts.replace(tzinfo=None)
+                    state['veto_ts'] = v_ts
                 except Exception:
                     state['veto_ts'] = ts
 
@@ -1929,9 +1871,11 @@ def get_radar_audit():
             "buy_tradable_24h": buy_tradable,
         })
     except Exception as e:
+        logging.exception("Radar Audit Error:")
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 @app.route('/api/logs')
 @login_required
@@ -2093,22 +2037,33 @@ def handle_watch_pair(data):
     except Exception as e:
         logging.warning(f"Failed to subscribe dynamic data for {pair}: {e}")
 
-def _build_stats_payload():
+def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
-    conn = get_db_connection()
+    import config as cfg
+    # Determine which mode we are building for
+    dr_val = force_dry if force_dry is not None else bool(cfg.DRY_RUN)
+    
+    # Use the appropriate DB instance
+    db_inst = db.dryrun if dr_val else db.live
+    conn = db_inst.get_raw_connection()
+
     try:
+        # Load bot_state from the TARGET database
         stats_dict = {r['key']: r['value'] for r in conn.execute("SELECT * FROM bot_state").fetchall()}
         positions  = conn.execute("SELECT * FROM positions").fetchall()
-        perf       = db.get_daily_stats()
-        # 1. LIVE STATS (Real Money)
-        live_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 0"
-        ).fetchone()
+        perf       = db_inst.get_daily_stats(dry_run=dr_val)
         
-        # 2. DRY RUN STATS (Live Simulation)
-        dry_stats = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = 1 AND reason != 'BACKTEST'"
-        ).fetchone()
+        # 1. LIVE STATS (Real Money) - always from live DB
+        with db.live.get_connection() as live_conn:
+            live_stats = live_conn.execute(
+                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
+            ).fetchone()
+        
+        # 2. DRY RUN STATS (Live Simulation) - always from dryrun DB
+        with db.dryrun.get_connection() as dry_conn:
+            dry_stats = dry_conn.execute(
+                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
+            ).fetchone()
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_stats = conn.execute(
@@ -2122,19 +2077,18 @@ def _build_stats_payload():
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
         
-        import config as cfg
-        dr_val = 1 if cfg.DRY_RUN else 0
+        # dr_val is already set correctly at the start of the function
         
         # [NEW] Predator Metrics Calculation
         total_used_idr = 0.0
         for pos in positions:
-            if int(pos['dry_run'] or 0) == dr_val:
+            if bool(pos['dry_run']) == dr_val:
                 total_used_idr += float(pos['amount_idr'] or 0)
 
         realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
         realized_pnl_live = float(live_stats['total_pnl'] or 0)
 
-        if cfg.DRY_RUN:
+        if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
             idr_used = total_used_idr
             active_pnl = realized_pnl_dry
@@ -2175,7 +2129,7 @@ def _build_stats_payload():
 
         # [Senior Audit] Calculate Unrealized PnL
         for pos in positions:
-            if int(pos['dry_run'] or 0) != dr_val:
+            if bool(pos['dry_run']) != dr_val:
                 continue
 
             pair = pos['pair']
@@ -2195,14 +2149,17 @@ def _build_stats_payload():
             if last_price <= 0:
                 # Fallback terakhir ke DB history
                 try:
-                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                    row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
                     if row and row['history_json']:
                         history = json.loads(row['history_json'])
                         if history: last_price = float(history[-1])
                 except: pass
 
             if last_price > 0:
-                unrealized_pnl += (last_price - ep) * float(pos['amount_crypto'] or 0)
+                gross = (last_price - ep) * float(pos['amount_crypto'] or 0)
+                fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
+                fee_sell = float(pos['amount_crypto'] or 0) * last_price * cfg.FEE_SELL_TAKER
+                unrealized_pnl += gross - fee_buy - fee_sell
 
         total_equity = total_equity_val
         utilization_pct = (total_used_idr / (available_idr + total_used_idr) * 100) if (available_idr + total_used_idr) > 0 else 0
@@ -2230,9 +2187,16 @@ def _build_stats_payload():
         is_stale = True
         if updated_at:
             try:
-                # SQLite CURRENT_TIMESTAMP is UTC
-                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.datetime.utcnow() - dt).total_seconds() < 180:
+                # Handle both string (SQLite legacy) and datetime object (PostgreSQL)
+                if isinstance(updated_at, datetime.datetime):
+                    dt = updated_at
+                else:
+                    dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                
+                # Normalise to naive for comparison
+                if dt.tzinfo: dt = dt.replace(tzinfo=None)
+                
+                if (datetime.datetime.now() - dt).total_seconds() < 180:
                     is_stale = False
             except: pass
                 
@@ -2240,13 +2204,13 @@ def _build_stats_payload():
         combined_reasoning = ai_reasoning if (ai_reasoning and not is_stale) else _generate_technical_reasoning(ANALYSIS_PAIR, tech_data, _last_price)
 
         history_since = conn.execute(
-            "SELECT strftime('%d/%m %H:%M', MIN(updated_at)) FROM ticker_history"
+            "SELECT TO_CHAR(MIN(updated_at), 'DD/MM HH24:MI') FROM ticker_history"
         ).fetchone()[0] or '--/-- --:--'
 
         import config as cfg
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
-        if cfg.DRY_RUN:
+        if dr_val:
             active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
@@ -2256,13 +2220,13 @@ def _build_stats_payload():
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "WHERE reason != 'BACKTEST' AND dry_run = %s "
             "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1", (dr_val,)
         ).fetchone()
         
         contribution_rows = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ? "
+            "WHERE reason != 'BACKTEST' AND dry_run = %s "
             "GROUP BY pair ORDER BY total_pnl DESC", (dr_val,)
         ).fetchall()
         
@@ -2276,7 +2240,7 @@ def _build_stats_payload():
 
         best_trade_row = conn.execute(
             "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = ?", (dr_val,)
+            "WHERE reason != 'BACKTEST' AND dry_run = %s", (bool(dr_val),)
         ).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
@@ -2284,7 +2248,7 @@ def _build_stats_payload():
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
         # Overall engagements (Closed + Open)
-        total_trades_overall = dry_stats['trades'] if cfg.DRY_RUN else live_stats['trades']
+        total_trades_overall = dry_stats['trades'] if dr_val else live_stats['trades']
         open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
         total_engagements = total_trades_overall + open_count
         
@@ -2298,8 +2262,14 @@ def _build_stats_payload():
         first_trade_ts = 0
         if first_trade_row and first_trade_row[0]:
             try:
-                dt_str = first_trade_row[0]
-                dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                dt_raw = first_trade_row[0]
+                if isinstance(dt_raw, datetime.datetime):
+                    dt = dt_raw
+                else:
+                    dt = datetime.datetime.strptime(dt_raw, "%Y-%m-%d %H:%M:%S")
+                
+                # Normalise to UTC for timestamp
+                if not dt.tzinfo: dt = dt.replace(tzinfo=datetime.timezone.utc)
                 first_trade_ts = int(dt.timestamp() * 1000)
             except: pass
 
@@ -2309,8 +2279,13 @@ def _build_stats_payload():
         is_stale_report = True
         if updated_at:
             try:
-                dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
-                if (datetime.datetime.utcnow() - dt).total_seconds() < 600:
+                if isinstance(updated_at, datetime.datetime):
+                    dt = updated_at
+                else:
+                    dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                
+                if dt.tzinfo: dt = dt.replace(tzinfo=None)
+                if (datetime.datetime.now() - dt).total_seconds() < 600:
                     is_stale_report = False
             except: pass
             
@@ -2341,9 +2316,9 @@ def _build_stats_payload():
                 SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
                        pnl_idr, pnl_pct, reason, duration_seconds, created_at
                 FROM trade_history
-                WHERE reason != 'BACKTEST' AND dry_run = ?
+                WHERE reason != 'BACKTEST' AND dry_run = %s
                 ORDER BY created_at DESC LIMIT 20
-            """, (int(dr_val),)).fetchall()
+            """, (bool(dr_val),)).fetchall()
             for r in recent_trades_rows:
                 recent_trades.append({
                     "pair":        r['pair'],
@@ -2355,7 +2330,7 @@ def _build_stats_payload():
                     "pnl_idr":     float(r['pnl_idr'] or 0),
                     "pnl_pct":     float(r['pnl_pct'] or 0),
                     "reason":      r['reason'],
-                    "created_at":  r['created_at'],
+                    "created_at":  str(r['created_at'] or ''),
                 })
         except Exception as e:
             print(f"⚠️ History Fetch Error: {e}")
@@ -2391,6 +2366,8 @@ def _build_stats_payload():
             "history_count": total_trades_overall,
             "open_count": open_count,
             "daily_pnl": active_pnl,
+            "net_pnl": active_pnl,
+            "all_time_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
@@ -2409,7 +2386,7 @@ def _build_stats_payload():
             "latest_fake_pump": stats_dict.get('latest_fake_pump', ''),
             "latest_llm_insight": stats_dict.get('latest_llm_insight', ''),
             "hero_ai_insight": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'),
-            "hero_ai_insights": [{"message": r[0], "created_at": r[1]} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.utcnow().isoformat()}],
+            "hero_ai_insights": [{"message": r[0], "created_at": str(r[1])} for r in conn.execute("SELECT message, created_at FROM system_events WHERE type='AI_INSIGHT' ORDER BY created_at DESC LIMIT 5").fetchall()] or [{"message": stats_dict.get('hero_ai_insight', 'Waiting for AI analysis...'), "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}],
             "active_reasoning": combined_reasoning,
             "equity_reasoning": final_equity_report,
             "equity_action_plan": equity_action_plan,
@@ -2422,10 +2399,23 @@ def _build_stats_payload():
             "history_since": history_since,
             "new_listings": db.get_new_listings(),
             "bot_running": True,
-            "dry_run": bool(cfg.DRY_RUN),
-            "dry_run_loose_gates": bool(cfg.DRY_RUN_LOOSE_GATES),
             "manual_exit_max_net_pct": cfg.MANUAL_EXIT_MAX_NET_PCT,
-            # BTC Condition — used by Signal Radar UX
+            
+            # --- Dynamic Session & Gate State (Source of Truth: bot_state) ---
+            "session_mode": stats_dict.get('session_mode', 'SCALPING'),
+            "session_buy_enabled": stats_dict.get('session_buy_enabled', 'true').lower() == 'true',
+            "daily_target_hit": stats_dict.get('daily_target_hit', '0') == '1',
+            "consecutive_losses": int(stats_dict.get('consecutive_losses', 0)),
+            "entry_gate_state": stats_dict.get('entry_gate_state', ''),
+            "entry_gate_pair": stats_dict.get('entry_gate_pair', ''),
+            "entry_gate_reason": stats_dict.get('entry_gate_reason', ''),
+            "entry_gate_at": stats_dict.get('entry_gate_at', ''),
+            "dry_run": bool(dr_val),
+            "dry_run_loose_gates": stats_dict.get('dry_run_loose_gates', 'false').lower() == 'true',
+            "momentum_state": db.get_state("momentum_state") or "STALLING",
+            "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
+            
+            # --- BTC Condition — used by Signal Radar UX ---
             "btc_price":      round(btc_price, 0),
             "btc_change_24h": round(btc_change_24h, 2),
             "btc_ch_5m":      round(btc_ch_5m, 2),
@@ -2435,15 +2425,6 @@ def _build_stats_payload():
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
-            # Momentum Equity Protection indicators
-            "momentum_state":    db.get_state("momentum_state") or "STALLING",
-            "net_pnl_velocity":  float(db.get_state("net_pnl_velocity") or 0),
-            "consecutive_losses": int(db.get_state("consecutive_losses", 0) or 0),
-            # Entry gate status (operator visibility for LIVE mode)
-            "entry_gate_state":  stats_dict.get("entry_gate_state", ""),
-            "entry_gate_reason": stats_dict.get("entry_gate_reason", ""),
-            "entry_gate_pair":   stats_dict.get("entry_gate_pair", ""),
-            "entry_gate_at":     stats_dict.get("entry_gate_at", ""),
         }
         return payload
     finally:
@@ -2483,7 +2464,7 @@ def _build_radar_payload():
             if not ts_str:
                 return False
             try:
-                ts = datetime.datetime.fromisoformat(str(ts_str))
+                ts = _parse_iso_date(ts_str)
                 return (datetime.datetime.now() - ts).total_seconds() <= max_age_sec
             except Exception:
                 return False # Default
@@ -2495,7 +2476,7 @@ def _build_radar_payload():
             candidates = [text, text.replace(' ', 'T')]
             for c in candidates:
                 try:
-                    return datetime.datetime.fromisoformat(c)
+                    return _parse_iso_date(c)
                 except Exception:
                     continue
             return None
@@ -2569,13 +2550,13 @@ def _build_radar_payload():
                     "radar_reco": str(radar_reco or signal).upper(),
                     "radar_reason": radar_reason,
                     "gate_status": gate_msg,
-                    "gate_updated_at": gate_updated_at,
+                    "gate_updated_at": str(gate_updated_at or ''),
                     "ai_veto": ai_veto,
                     "ai_veto_reason": veto_reason,
                     "ai_veto_confidence": veto_conf,
                     "tradable": not is_blocked,
                     "tradable_reason": tradable_reason,
-                    "updated_at": row["updated_at"] if row else None
+                    "updated_at": str(row["updated_at"] or '') if row else None
                 })
             except Exception:
                 continue
@@ -2621,7 +2602,7 @@ def _build_trades_payload():
                 
                 if last_price <= 0:
                     try:
-                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)).fetchone()
+                        row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
                         if row and row['history_json']:
                             history = json.loads(row['history_json'])
                             if history: last_price = float(history[-1])
@@ -2707,7 +2688,7 @@ def _build_logs_payload():
         events = conn.execute("""
             SELECT pair, type as side, message as price, level as status, created_at
             FROM system_events
-            ORDER BY created_at DESC LIMIT 20
+            ORDER BY created_at DESC LIMIT 100
         """).fetchall()
 
         # 2. Fetch AI Signals dari ticker_history (Legacy fallback for predictions)
@@ -2803,11 +2784,11 @@ def _build_llm_decisions_payload(limit: int = 20):
     try:
         rows = conn.execute(
             """
-            SELECT id, pair, message, level, created_at
+            SELECT id, pair, message, type as side, level, created_at
             FROM system_events
-            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL')
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT')
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
@@ -2815,6 +2796,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             {
                 "id": int(r["id"] or 0),
                 "pair": (r["pair"] or "").upper(),
+                "side": r["side"] or "LLM_EXIT_SIGNAL",
                 "message": r["message"] or "",
                 "level": r["level"] or "WARNING",
                 "created_at": str(r["created_at"]),
@@ -2965,11 +2947,26 @@ def push_data_loop():
             _slow_counter += 1
             if _slow_counter >= 5:
                 _slow_counter = 0
-                socketio.emit('stats_update',          _build_stats_payload())
-                socketio.emit('radar_update',          _build_radar_payload())
-                socketio.emit('trades_update',         _build_trades_update_packet())
-                socketio.emit('logs_update',           _build_logs_payload())
-                socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                # individual emitters wrapped in try-except to prevent one failure from killing the whole loop
+                # Emit stats for both modes so users on either dashboard see updates
+                try: 
+                    logging.info("📡 Emitting stats_update for DRY and LIVE modes...")
+                    socketio.emit('stats_update', _build_stats_payload(force_dry=True))
+                    socketio.emit('stats_update', _build_stats_payload(force_dry=False))
+                except Exception as _e: 
+                    logging.error(f"stats_update emit error: {_e}")
+
+                try: socketio.emit('radar_update',          _build_radar_payload())
+                except Exception as _e: logging.error(f"radar_update emit error: {_e}")
+
+                try: socketio.emit('trades_update',         _build_trades_update_packet())
+                except Exception as _e: logging.error(f"trades_update emit error: {_e}")
+
+                try: socketio.emit('logs_update',           _build_logs_payload())
+                except Exception as _e: logging.error(f"logs_update emit error: {_e}")
+
+                try: socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                except Exception as _e: logging.error(f"llm_decisions_update emit error: {_e}")
         except Exception as e:
             print(f"WS Error: {e}")
         socketio.sleep(1)
@@ -3318,7 +3315,7 @@ def _background_wallet_sync_loop():
     dengan database secara otomatis setiap 5 menit (hanya di mode LIVE).
     """
     import config as _cfg
-    from config import TP_PCT, SL_PCT, DB_PATH_LIVE
+    from config import TP_PCT, SL_PCT
     socketio.sleep(30)  # Tunggu 30 detik setelah startup sebelum sync pertama
     while True:
         try:
@@ -3344,7 +3341,7 @@ def _background_wallet_sync_loop():
                 current_positions = {
                     row['pair']: dict(row)
                     for row in conn.execute(
-                        "SELECT * FROM positions WHERE dry_run = 0"
+                        "SELECT * FROM positions WHERE dry_run = FALSE"
                     ).fetchall()
                 }
                 blacklist = set(r['pair'] for r in conn.execute("SELECT pair FROM blacklist").fetchall())

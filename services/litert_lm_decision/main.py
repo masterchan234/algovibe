@@ -36,7 +36,7 @@ from config import (
     SMART_BREAK_EVEN_PCT,
 )
 from shared.algovibe_pb2 import Signal, SignalAction, SignalSource, Tick  # type: ignore[attr-defined]
-from shared.transport import IPC_MARKET, IPC_SIGNAL, ZMQPublisher, ZMQSubscriber, install_uvloop
+from shared.transport import IPC_MARKET, IPC_LLM_SIGNAL, ZMQPublisher, ZMQSubscriber, install_uvloop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,13 +71,13 @@ _MIN_ENTRY_TRUE_CONDITIONS = 2
 _MIN_ENTRY_SUPPORTED_EVIDENCE = 1
 _MAX_REASON_LENGTH = 200
 # Batas waktu per-inferensi LLM (detik). Lewat batas → HOLD + log warning.
-_LLM_TIMEOUT_SEC = 15
+_LLM_TIMEOUT_SEC = 300
 
 
 class LiteRTLmDecisionService:
     def __init__(self):
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
-        self._signal_pub = ZMQPublisher(IPC_SIGNAL)
+        self._signal_pub = ZMQPublisher(IPC_LLM_SIGNAL)
         self._running = False
 
         self._tickers = {}
@@ -85,20 +85,24 @@ class LiteRTLmDecisionService:
         self._last_emitted = {}  # {pair: timestamp}
         self._stopped = False
 
-        self._interval_sec = int(os.getenv("LLM_EXIT_INTERVAL_SEC", "20"))
-        self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "45"))
+        self._interval_sec = int(os.getenv("LLM_EXIT_INTERVAL_SEC", "30"))
+        self._pair_cooldown_sec = int(os.getenv("LLM_EXIT_COOLDOWN_SEC", "60"))
         self._min_confidence = float(os.getenv("LLM_EXIT_MIN_CONFIDENCE", "80"))
-        self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "4"))
+        self._max_pairs_per_cycle = int(os.getenv("LLM_EXIT_MAX_PAIRS", "2"))
         self._timeout_sec = float(os.getenv("LLM_EXIT_TIMEOUT_SEC", str(_LLM_TIMEOUT_SEC)))
 
         # Konfigurasi scan entry realtime (300+ pair)
-        self._scan_interval_sec = int(os.getenv("LLM_SCAN_INTERVAL_SEC", "30"))
-        self._scan_max_pairs = int(os.getenv("LLM_SCAN_MAX_PAIRS", "5"))
+        self._scan_interval_sec = int(os.getenv("LLM_SCAN_INTERVAL_SEC", "60"))
+        self._scan_max_pairs = int(os.getenv("LLM_SCAN_MAX_PAIRS", "3"))
         self._scan_min_confidence = float(os.getenv("LLM_SCAN_MIN_CONFIDENCE", "75"))
         self._scan_min_vol_idr = float(os.getenv("LLM_SCAN_MIN_VOL_IDR", "1000000"))
         self._last_scanned: dict = {}  # {pair: timestamp} cooldown untuk scan entry
 
         self._engine = None
+        # LiteRT hanya support satu session sekaligus.
+        # Lock ini mencegah session conflict saat _decision_loop dan _scan_loop
+        # memanggil run_in_executor secara concurrent.
+        self._engine_lock = __import__('threading').Lock()
         self._engine_enabled = self._init_engine()
 
     def _init_engine(self) -> bool:
@@ -315,6 +319,14 @@ class LiteRTLmDecisionService:
                 logger.warning("[litert-lm-decision] Pair %s error: %s", pair, result)
                 continue
             if result["action"] != "SELL":
+                # Log HOLD decisions for visibility in "LLM Exit" dashboard section
+                if result["action"] == "HOLD" and result.get("confidence", 0) > 0:
+                    db.log_system_event(
+                        pair,
+                        "LLM_EXIT_HOLD",
+                        f"[{result.get('confidence', 0):.0f}%] {result.get('reason', 'HOLD')}",
+                        "INFO",
+                    )
                 continue
             self._publish_sell_signal(pair, result["confidence"])
             self._last_emitted[pair] = now
@@ -345,6 +357,12 @@ class LiteRTLmDecisionService:
             logger.warning(
                 "[litert-lm-decision] ⏱ Timeout %s setelah %.0f ms (limit %.0f s) — HOLD",
                 pair, elapsed_ms, self._timeout_sec,
+            )
+            db.log_system_event(
+                pair,
+                "LLM_EXIT_TIMEOUT",
+                f"LiteRT-LM analysis timed out after {elapsed_ms/1000:.1f}s. Action: HOLD",
+                "WARNING",
             )
             return {"action": "HOLD", "confidence": 0.0, "reason": "llm_timeout"}
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -483,8 +501,13 @@ class LiteRTLmDecisionService:
     def _ask_llm(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt(ctx)
-            with self._engine.create_conversation() as conv:
-                raw = conv.send_message(prompt)
+            t_lock = time.perf_counter()
+            with self._engine_lock:
+                lock_wait = (time.perf_counter() - t_lock) * 1000
+                if lock_wait > 500:
+                    logger.warning("[litert-lm-decision] ⏳ Lock wait for %s: %.0f ms", ctx.get('pair'), lock_wait)
+                with self._engine.create_conversation() as conv:
+                    raw = conv.send_message(prompt)
             text = self._extract_text(raw)
             return self._parse_json(text)
         except Exception as exc:
@@ -536,8 +559,13 @@ class LiteRTLmDecisionService:
     def _ask_llm_entry(self, ctx: dict) -> dict:
         try:
             prompt = self._prompt_entry(ctx)
-            with self._engine.create_conversation() as conv:
-                raw = conv.send_message(prompt)
+            t_lock = time.perf_counter()
+            with self._engine_lock:
+                lock_wait = (time.perf_counter() - t_lock) * 1000
+                if lock_wait > 500:
+                    logger.warning("[litert-lm-decision] ⏳ Lock wait scan %s: %.0f ms", ctx.get('pair'), lock_wait)
+                with self._engine.create_conversation() as conv:
+                    raw = conv.send_message(prompt)
             text = self._extract_text(raw)
             return self._parse_json(text)
         except Exception as exc:

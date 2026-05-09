@@ -47,6 +47,9 @@ def main() -> None:
     logger.info("  AlgoVibe Market-Pipe Service starting…")
     logger.info("=" * 60)
 
+    from app.infrastructure.database import db
+    db.run_migrations()
+
     publisher = ZMQPublisher(IPC_MARKET)
     publisher.start()
 

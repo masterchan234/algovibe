@@ -18,9 +18,8 @@ MODEL_CACHE_DIR = "models/cache"
 EXIT_LOG        = f"{DATA_PATH}/indodax_exit_log.json" # DEPRECATED
 DAILY_REPORT    = f"{DATA_PATH}/daily_performance.json" # DEPRECATED
 EXECUTION_LOG   = f"{DATA_PATH}/indodax_execution_log.json" # DEPRECATED
-DB_PATH         = f"{DATA_PATH}/algotrade.db"
-DB_PATH_LIVE    = f"{DATA_PATH}/algotrade_live.db"
-DB_PATH_DRYRUN  = f"{DATA_PATH}/algotrade_dryrun.db"
+DATABASE_URL_LIVE   = os.getenv("DATABASE_URL_LIVE", "postgresql://algovibe:secretpassword@localhost:5432/algovibe_live")
+DATABASE_URL_DRYRUN = os.getenv("DATABASE_URL_DRYRUN", "postgresql://algovibe:secretpassword@localhost:5432/algovibe_dryrun")
 
 # ==========================================
 # 2. TRADING RULES & SIZING
@@ -31,28 +30,29 @@ DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
-LIQUIDITY_MULTIPLIER   = 50        # [DYNAMIC] Volume 24h harus minimal 50x besar modal per trade
+LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan volume sedang 15x besar modal per trade
 
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih banyak posisi dari modal sama
-MAX_OPEN_POSITIONS = 25          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
+MAX_OPEN_POSITIONS = 100          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
 # --- [Scalping Targets] ---
-TP_PCT = 0.030                  # Target TP 3.0% (net profit dihitung setelah fee)
+TP_PCT = 0.012                  # Target TP 1.2% (net profit dihitung setelah fee)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
+AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as requested by user
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
-MIN_NET_PROFIT_IDR = 2000  # Filter noise: minimal 2000 IDR net profit per trade
+MIN_NET_PROFIT_IDR = 500  # Filter noise: minimal 500 IDR net profit per trade
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,
 # bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
 # Set ke 0 untuk nonaktifkan.
-BASKET_HARVEST_TARGET_IDR = 20000  # Rp 20.000 combined net profit → panen serentak
+BASKET_HARVEST_TARGET_IDR = 50000  # Rp 50.000 combined net profit → panen serentak
 
 # Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
 # Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
@@ -110,7 +110,7 @@ HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
 # NET-ZERO SURVIVAL GUARD
 # ==========================================
 # Master switch — set to False to fully disable the guard without removing code.
-NET_ZERO_SURVIVAL_ENABLED = False
+NET_ZERO_SURVIVAL_ENABLED = True
 
 # PnL velocity (IDR / second) below which the portfolio is considered to be DROPPING.
 # Net-Zero Survival only fires when the most recent velocity sample is at or below
@@ -132,7 +132,7 @@ NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (any velocity below -500 IDR/s fi
 # a single position dipping -0.3% while heading to its +3% TP.
 # Rule of thumb: set to -(3 × BASKET_HARVEST_TARGET_IDR) so the guard only fires
 # when the session is in genuine loss territory — not just temporarily underwater.
-NET_ZERO_PNL_FLOOR_IDR = -20000        # IDR  (fires only when Net PnL ≤ -Rp 20.000)
+NET_ZERO_PNL_FLOOR_IDR = -250000       # IDR  (fires only when Net PnL ≤ -Rp 250.000)
 
 # Unrealized loss as a fraction of total invested capital that must be exceeded before
 # the guard arms.  Prevents spurious exits on tiny dips (e.g., 5 positions each down
@@ -146,7 +146,7 @@ NET_ZERO_MIN_POSITIONS = 2              # need at least 2 open positions
 # Seconds after the guard fires before buys can be auto-re-enabled, provided the
 # combined Net PnL has recovered above NET_ZERO_PNL_FLOOR_IDR.
 # Set to 0 to require manual re-enable via the dashboard (old behaviour).
-NET_ZERO_AUTO_RESET_SEC = 1800          # 30-minute auto-recovery cooldown
+NET_ZERO_AUTO_RESET_SEC = 10 #1800          # 30-minute auto-recovery cooldown
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
@@ -158,7 +158,7 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- Technical Probability ---
-TECH_CONFIDENCE_THRESHOLD = 0.35 # [BALANCED] Filter noise terbawah, masih high-frequency
+TECH_CONFIDENCE_THRESHOLD = 0.30 # [AGGRESSIVE] Filter noise lebih rendah agar lebih aktif
 TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 TECH_MIN_HISTORY_POINTS   = 30   
 

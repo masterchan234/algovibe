@@ -15,6 +15,8 @@
       🛡️ NET-ZERO SURVIVAL ACTIVATED — Emergency exit executed. System Paused.
     </div>
 
+
+
     <div
       class="safety-gauge-wrap"
       :class="{ 'gauge-danger': safetyIsDanger || liveState.net_zero_survival_active }"
@@ -177,8 +179,14 @@
     </nav>
 
     <footer class="ld-footer">
-      <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
-      <span>Bot Status: <strong :class="store.connected ? 'profit' : 'loss'">{{ store.connected ? 'ONLINE' : 'OFFLINE' }}</strong></span>
+      <div class="footer-stats hide-mobile">
+        <span class="stat-item">LATENCY: <span class="v">{{ store.latency || 0 }}ms</span></span>
+        <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
+      </div>
+      <div class="footer-right">
+        <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
+        <span>Bot Status: <strong :class="store.connected ? 'profit' : 'loss'">{{ store.connected ? 'ONLINE' : 'OFFLINE' }}</strong></span>
+      </div>
     </footer>
   </div>
 </template>
@@ -197,6 +205,36 @@ import LlmDecisionPanel from '../components/LlmDecisionPanel.vue'
 const store = useTradeStore()
 const router = useRouter()
 const { getAuthHeaders } = useAuth()
+
+const now = ref(Date.now())
+const startTime = ref(Date.now())
+
+const uptimeStr = computed(() => {
+  const sec = store.stats.uptime_sec || 0
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
+})
+
+// --- [Manual Overrides] ---
+async function toggleHarvestMode() {
+  const current = store.stats.session_mode
+  const next = current === 'HARVEST_ONLY' ? 'SCALPING' : 'HARVEST_ONLY'
+  await store.updateBotState('session_mode', next)
+}
+
+async function resetDailyTarget() {
+  if (confirm('Reset daily target status? Bot will resume scalping if target was hit.')) {
+    await store.updateBotState('daily_target_hit', '0')
+    await store.updateBotState('session_mode', 'SCALPING')
+  }
+}
+
+async function resetLosses() {
+  if (confirm('Reset consecutive losses counter?')) {
+    await store.updateBotState('consecutive_losses', '0')
+  }
+}
 
 // Mobile tab: positions | chart | orders
 const mobileTab = ref('positions')
@@ -288,6 +326,8 @@ function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase(
 
 let pollInt = null
 let llmPollInt = null
+let clockInt = null
+
 onMounted(() => {
   // Live dashboard membutuhkan stream stats_update untuk mengisi pnlHistory/chart.
   // Tanpa koneksi socket ini, chart akan terus "Waiting for data".
@@ -298,10 +338,13 @@ onMounted(() => {
   pollInt = setInterval(() => { fetchLiveState(); fetchOrders() }, 5000)
   // Re-poll LLM decisions setiap 30 detik sebagai fallback jika socket putus
   llmPollInt = setInterval(fetchLlmDecisions, 30_000)
+  clockInt = setInterval(() => { now.value = Date.now() }, 1000)
 })
+
 onUnmounted(() => {
   clearInterval(pollInt)
   clearInterval(llmPollInt)
+  if (clockInt) clearInterval(clockInt)
 })
 
 // Global FORCE_LOGOUT listener — redirect to login when session is invalidated
@@ -337,12 +380,143 @@ watch(() => store.forceLogout, (triggered) => {
   color: #ff3366;
   padding: 12px;
   text-align: center;
-  font-size: 13px;
   font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 1px;
   border-bottom: 1px solid rgba(255, 51, 102, 0.2);
 }
 
+/* Command Center Styles */
+.command-center-wrap {
+  margin: 16px 24px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+}
+
+.cc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.cc-title {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #444;
+}
+
+.cc-status {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 20px;
+  letter-spacing: 1px;
+}
+
+.mode-scalping { background: rgba(0, 255, 136, 0.1); color: #00ff88; box-shadow: 0 0 10px rgba(0, 255, 136, 0.1); }
+.mode-harvest { background: rgba(245, 166, 35, 0.1); color: #f5a623; box-shadow: 0 0 10px rgba(245, 166, 35, 0.1); }
+
+.cc-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.cc-control-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cc-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #666;
+  letter-spacing: 1px;
+}
+
+.cc-toggle-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #555;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.cc-toggle-btn.active {
+  background: #f5a623;
+  color: #000;
+  box-shadow: 0 0 15px rgba(245, 166, 35, 0.4);
+  border-color: transparent;
+}
+
+.cc-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #888;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.cc-action-btn.active {
+  color: #fff;
+  border-color: rgba(0, 255, 136, 0.5);
+  background: rgba(0, 255, 136, 0.1);
+}
+
+.cc-divider {
+  width: 1px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cc-value-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cc-val {
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.cc-mini-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 51, 102, 0.3);
+  color: #ff3366;
+  font-size: 8px;
+  font-weight: 900;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.cc-mini-btn:hover {
+  background: #ff3366;
+  color: #fff;
+}
+
+@media (max-width: 768px) {
+  .command-center-wrap { margin: 12px; padding: 12px; }
+  .cc-controls { gap: 12px; overflow-x: auto; padding-bottom: 4px; }
+  .cc-control-item { flex-shrink: 0; }
+}
+
 .ld-main {
+  width: 100%;
   flex: 1;
   display: grid;
   grid-template-columns: 1.2fr 1fr;
@@ -490,16 +664,38 @@ td {
 .gauge-pct { font-size: 12px; font-weight: 800; min-width: 40px; text-align: right; }
 
 .ld-footer {
-  height: 40px;
+  height: 48px;
   background: #0a0c14;
   border-top: 1px solid #1a1c24;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 24px;
-  gap: 24px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  color: #333;
+  color: #555;
+  letter-spacing: 0.5px;
+}
+
+.footer-stats {
+  display: flex;
+  gap: 20px;
+}
+
+.stat-item {
+  font-size: 10px;
+  font-weight: 800;
+  color: #444;
+  letter-spacing: 1px;
+}
+
+.stat-item .v {
+  color: #888;
+}
+
+.footer-right {
+  display: flex;
+  gap: 24px;
 }
 
 .gold { color: #f5a623; }

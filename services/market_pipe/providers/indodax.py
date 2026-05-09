@@ -54,6 +54,7 @@ class IndodaxProvider(MarketProvider):
             on_tick=self._handle_tick_update,
             on_trade=self._handle_trade_update
         )
+        self._mws.write_to_db = True
         self._running = False
         self._ready_event = threading.Event()
 

@@ -78,7 +78,7 @@
       <div class="footer-right hide-mobile">
         <div class="system-stats">
           <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
-          <span class="stat-item">LATENCY: <span class="v">{{ store.latency }}ms</span></span>
+          <span class="stat-item">LATENCY: <span class="v">{{ store.latency || 0 }}ms</span></span>
         </div>
       </div>
     </footer>
@@ -114,7 +114,7 @@ let clockIntervalId = null
 
 async function fetchNews() {
   try {
-    const resp = await fetch('/api/news')
+    const resp = await fetch('/api/news', { headers: getAuthHeaders() })
     if (resp.ok) {
       const items = await resp.json()
       if (Array.isArray(items)) newsHeadlines.value = items
@@ -228,6 +228,7 @@ body {
 }
 
 .main-grid {
+  width: 100%;
   flex: 1;
   display: flex;
   overflow: hidden;

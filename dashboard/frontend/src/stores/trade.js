@@ -41,6 +41,7 @@ export const useTradeStore = defineStore('trade', () => {
   const socket = ref(null)
   const lastSocketStatsAt = ref(0)
   const statsSource = ref('none')
+  const latency = ref(0)
 
   // Force-logout flag: set to true when the server invalidates this session
   const forceLogout = ref(false)
@@ -68,6 +69,7 @@ export const useTradeStore = defineStore('trade', () => {
     win_rate: 0,
     active_positions: 0,
     unrealized_pnl: 0,
+    net_pnl: 0,
     regime: 'CHOPPY',
     regime_leader: '',
     market_sentiment_index: 50,
@@ -107,6 +109,8 @@ export const useTradeStore = defineStore('trade', () => {
     entry_gate_reason: '',
     entry_gate_pair: '',
     entry_gate_at: '',
+    session_mode: 'NORMAL',
+    daily_target_hit: false,
   })
 
   // Open positions (trades)
@@ -242,9 +246,23 @@ export const useTradeStore = defineStore('trade', () => {
     
     socket.value = s
 
-    s.on('connect', () => { connected.value = true })
+    let pingInterval = null
+    
+    s.on('connect', () => { 
+      connected.value = true 
+      if (pingInterval) clearInterval(pingInterval)
+      pingInterval = setInterval(() => {
+        if (s.connected) s.emit('ping_latency', Date.now())
+      }, 5000)
+    })
+    
+    s.on('pong_latency', (start) => {
+      latency.value = Date.now() - start
+    })
+    
     s.on('disconnect', () => {
       connected.value = false
+      if (pingInterval) clearInterval(pingInterval)
       if (statsSource.value === 'socket') {
         statsSource.value = 'none'
       }
@@ -322,6 +340,9 @@ export const useTradeStore = defineStore('trade', () => {
           entry_gate_reason: data.entry_gate_reason ?? '',
           entry_gate_pair: data.entry_gate_pair ?? '',
           entry_gate_at: data.entry_gate_at ?? '',
+          session_mode: data.session_mode ?? 'NORMAL',
+          daily_target_hit: data.daily_target_hit ?? false,
+          session_buy_enabled: data.session_buy_enabled ?? true,
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })
@@ -363,9 +384,9 @@ export const useTradeStore = defineStore('trade', () => {
 
     s.on('regime_update', (data) => {
       if (data && data.regime) {
-        stats.value.regime = data.regime
-        if (data.market_sentiment_index !== undefined) stats.value.market_sentiment_index = data.market_sentiment_index
-        if (data.regime_leader !== undefined) stats.value.regime_leader = data.regime_leader
+        stats.regime = data.regime
+        if (data.market_sentiment_index !== undefined) stats.market_sentiment_index = data.market_sentiment_index
+        if (data.regime_leader !== undefined) stats.regime_leader = data.regime_leader
       }
     })
 
@@ -457,6 +478,39 @@ export const useTradeStore = defineStore('trade', () => {
     }
   }
 
+  async function updateBotState(key, value) {
+    const backendUrl = import.meta.env.DEV
+      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+      : window.location.origin
+    
+    try {
+      const res = await fetch(`${backendUrl}/api/bot/update-state`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...useAuth().getAuthHeaders()
+        },
+        body: JSON.stringify({ key, value })
+      })
+      if (!res.ok) throw new Error('Failed to update bot state')
+      
+      // [Senior Fix] Optimistic Update: Update local state immediately for better UX
+      if (key === 'session_mode') {
+        stats.session_mode = value
+      } else if (key === 'session_buy_enabled') {
+        stats.session_buy_enabled = (value === 'true' || value === true)
+      } else if (stats[key] !== undefined) {
+        stats[key] = value
+      }
+
+      notify({ title: 'System Updated', message: `${key} set to ${value}`, type: 'success' })
+      return true
+    } catch (err) {
+      notify({ title: 'Update Error', message: err.message, type: 'error' })
+      return false
+    }
+  }
+
   return {
     connected,
     stats,
@@ -472,7 +526,9 @@ export const useTradeStore = defineStore('trade', () => {
     checkSessionStatus,
     statsSource,
     markApiStatsUsed,
+    updateBotState,
     socket,
     forceLogout,
+    latency,
   }
 })

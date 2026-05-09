@@ -126,7 +126,7 @@ class Oracle:
             # ── Tier 2a: Per-Pair Win/Loss History ─────────────────────────
             try:
                 recent_pair_trades = conn.execute(
-                    "SELECT pnl_idr FROM trade_history WHERE pair = ? "
+                    "SELECT pnl_idr FROM trade_history WHERE pair = %s "
                     "AND reason != 'BACKTEST' ORDER BY id DESC LIMIT 5",
                     (pair,)
                 ).fetchall()
@@ -157,7 +157,7 @@ class Oracle:
             # ── Tier 2c: Price Momentum (5m, 15m, 1h) ──────────────────────
             try:
                 ticker_row = conn.execute(
-                    "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = ?",
+                    "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = %s",
                     (pair,)
                 ).fetchone()
                 if ticker_row:
@@ -254,19 +254,17 @@ class Oracle:
         merakitnya menjadi prompt kaya untuk LLM.
         """
         from app.domain.technicals import get_technical_summary, derive_trade_signal
-        import sqlite3
         import json
 
         pair = pair.lower()
         conn = None
         try:
-            # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
-            conn = sqlite3.connect(db.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            # Gunakan connection postgres dari pool
+            conn = db.get_raw_connection()
 
             # 1. Ticker History
             row = conn.execute(
-                "SELECT history_json FROM ticker_history WHERE pair = ?", (pair,)
+                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)
             ).fetchone()
             prices = json.loads(row['history_json']) if (row and row['history_json']) else []
             
@@ -280,7 +278,7 @@ class Oracle:
 
             # 3. Order Book Microstructure
             depth_rows = conn.execute(
-                "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?", (pair,)
+                "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s", (pair,)
             ).fetchall()
             bids = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 1]
             asks = [(r['price'], r['vol']) for r in depth_rows if r['is_bid'] == 0]
@@ -320,12 +318,12 @@ class Oracle:
             last_price = float(prices[-1]) if prices else 0
             
             return self._format_rich_prompt(pair, last_price, tech, ob_ctx, ctx, task_type=task_type)
-        except sqlite3.DatabaseError as e:
+        except Exception as e:
             # Fail-safe: jika SQLite korup/malformed, jangan matikan bot.
             err = str(e).lower()
             if "malformed" in err or "database disk image is malformed" in err:
                 log_message(
-                    f"⚠️ [Oracle] SQLite malformed on {db.db_path}. Rich prompt fallback aktif untuk {pair}."
+                    f"⚠️ [Oracle] DB error detected. Rich prompt fallback aktif untuk {pair}."
                 )
             else:
                 log_message(f"⚠️ [Oracle] SQLite error in rich prompt for {pair}: {e}")
@@ -368,7 +366,6 @@ class Oracle:
         self.last_buy_signal_queue = now
 
         from app.domain.technicals import get_technical_summary, derive_trade_signal
-        import sqlite3
 
         # Ambil top 5 koin dengan verdict BUY dan confidence tertinggi
         buy_candidates = sorted(
@@ -404,21 +401,19 @@ class Oracle:
         if on_demand_pair and isinstance(on_demand_pair, str) and on_demand_pair.strip().lower() not in ('', 'none'):
             db.save_state("trigger_analysis_pair", None)
             try:
-                import sqlite3
                 from app.domain.technicals import get_technical_summary
-                # Gunakan path DB aktif dari router (live/dryrun), bukan DB_PATH legacy
-                conn = sqlite3.connect(db.db_path, timeout=30)
-                conn.row_factory = sqlite3.Row
+                # Gunakan connection postgres dari pool
+                conn = db.get_raw_connection()
                 try:
                     row = conn.execute(
-                        "SELECT history_json FROM ticker_history WHERE pair = ?",
+                        "SELECT history_json FROM ticker_history WHERE pair = %s",
                         (on_demand_pair,)
                     ).fetchone()
                     prices = json.loads(row['history_json']) if (row and row['history_json']) else []
                     tech = get_technical_summary(prices)
 
                     depth = conn.execute(
-                        "SELECT price, vol, is_bid FROM market_depth WHERE pair = ?",
+                        "SELECT price, vol, is_bid FROM market_depth WHERE pair = %s",
                         (on_demand_pair,)
                     ).fetchall()
                     bids = [(r['price'], r['vol']) for r in depth if r['is_bid'] == 1]
@@ -804,7 +799,7 @@ class Oracle:
         """
         try:
             regime = self.get_market_regime()
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
 
             total_trades = stats.get('total_trades', 0)
             win_count = stats.get('win_count', 0)
@@ -903,7 +898,7 @@ class Oracle:
             target_raw = db.get_state("daily_profit_target")
             target_idr = float(target_raw) if target_raw else 0.0
 
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
             realized_pnl = float(stats.get('total_pnl_idr', 0))
 
             # ── Unrealized PnL from open positions ───────────────────────────
@@ -1133,7 +1128,7 @@ class Oracle:
         """
         try:
             from config import ROUND_TRIP_FEE_PCT
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
             total_trades    = stats.get('total_trades', 0)
             win_count       = stats.get('win_count', 0)
             gross_profit    = float(stats.get('gross_profit', 0))
@@ -1201,7 +1196,7 @@ class Oracle:
             regime_leader = db.get_state("regime_leader") or "UNKNOWN"
 
             if not recent_stats:
-                recent_stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0)
+                recent_stats = db.get_daily_stats(dry_run=config.DRY_RUN)
 
             win_rate = 0.0
             if recent_stats.get("total_trades", 0) > 0:
@@ -1406,7 +1401,7 @@ class Oracle:
             
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
-            stats = db.get_daily_stats(dry_run=1 if config.DRY_RUN else 0) # Ambil statistik 24 jam terakhir
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN) # Ambil statistik 24 jam terakhir
             daily_pnl = stats.get('total_pnl_idr', 0)
             
             # 1. Profit-Pause (Proteksi Cuan)
@@ -1433,9 +1428,9 @@ class Oracle:
         dyn = float(base_dynamic_threshold)
 
         # Baseline gate untuk keputusan LLM
-        llm_buy_min_conf = 60.0
-        llm_hold_block_conf = 70.0
-        llm_avoid_block_conf = 60.0
+        llm_buy_min_conf = 50.0
+        llm_hold_block_conf = 60.0
+        llm_avoid_block_conf = 50.0
 
         # Regime-aware adjustments
         if regime == MarketRegime.BULLISH:
@@ -1443,24 +1438,28 @@ class Oracle:
             llm_buy_min_conf = 58.0
             llm_hold_block_conf = 74.0
         elif regime == MarketRegime.BEARISH:
-            dyn += 6.0
-            llm_buy_min_conf = 68.0
-            llm_hold_block_conf = 62.0
-            llm_avoid_block_conf = 55.0
+            dyn += 2.0
+            llm_buy_min_conf = 60.0
+            llm_hold_block_conf = 65.0
+            llm_avoid_block_conf = 50.0
         elif regime == MarketRegime.CHOPPY:
             dyn += 4.0
             llm_buy_min_conf = 65.0
             llm_hold_block_conf = 75.0  # [Loosened] was 66.0
             llm_avoid_block_conf = 65.0 # [Loosened] was 58.0
+            dyn += 2.0
+            llm_buy_min_conf = 60.0
+            llm_hold_block_conf = 70.0
+            llm_avoid_block_conf = 60.0
         elif regime == MarketRegime.RANGING:
-            dyn += 1.0
-            llm_buy_min_conf = 62.0
+            dyn += 0.0
+            llm_buy_min_conf = 55.0
 
         return {
-            "dynamic_threshold": max(50.0, min(85.0, dyn)),
-            "llm_buy_min_conf": max(50.0, min(85.0, llm_buy_min_conf)),
-            "llm_hold_block_conf": max(55.0, min(90.0, llm_hold_block_conf)),
-            "llm_avoid_block_conf": max(50.0, min(90.0, llm_avoid_block_conf)),
+            "dynamic_threshold": max(45.0, min(80.0, dyn)),
+            "llm_buy_min_conf": max(45.0, min(80.0, llm_buy_min_conf)),
+            "llm_hold_block_conf": max(50.0, min(85.0, llm_hold_block_conf)),
+            "llm_avoid_block_conf": max(45.0, min(85.0, llm_avoid_block_conf)),
         }
 
     def get_sizing_multiplier(self, pair: str, velocity_score: float = 0.5, confidence: float = 0.5) -> float:
@@ -1779,10 +1778,13 @@ class Oracle:
         Returns: { 'verdict': 'BUY'/'AVOID', 'target_tp': 0.02, 'target_sl': -0.012, 'confidence': float }
         """
         import math
-        history = db.get_all_closed_dnas(limit=1000)
-        # [Fix Bug#3] Naikkan default confidence ke 60 agar melewati dynamic_threshold (55)
-        # Sebelumnya 50% selalu gagal saat DB kosong (50 < threshold 55 = SEMUA koin di-void)
-        default_resp = {"verdict": "BUY", "target_tp": 0.04, "target_sl": -0.02, "confidence": 60.0}
+        # 1. Fetch historical DNA from both Live and Backtest tables
+        history = db.get_all_closed_dnas(limit=2000)
+        logger.info(f"[DEBUG-ORACLE] Loaded {len(history)} total DNAs for matching.")
+        
+        # [Fix Bug#3] Naikkan default confidence ke 75 agar melewati dynamic_threshold
+        # Sebelumnya 60% masih sering tertahan oleh threshold koin non-uptrend (69%)
+        default_resp = {"verdict": "BUY", "target_tp": 0.04, "target_sl": -0.02, "confidence": 75.0}
         
         if not history or len(history) < 3:
             return default_resp
@@ -1796,8 +1798,15 @@ class Oracle:
                 d_vol = (current_dna.get('volatility', 0) - h.get('volatility', 0)) / 2.0
                 d_imb = (current_dna.get('imbalance', 1) - h.get('imbalance', 1)) / 1.5
                 d_ai  = (current_dna.get('ai_prob', 0) - h.get('ai_prob', 0)) / 20.0
-                d_rsi = (current_dna.get('rsi', 50) - h.get('rsi', 50)) / 15.0
-                d_ema = (current_dna.get('ema_dist', 0) - h.get('ema_dist', 0)) / 0.1  # Scale dinaikkan
+                # Gunakan fallback default jika rsi/ema_dist NULL (DNA historis lama).
+                # Tanpa ini, record dengan NULL akan throw TypeError dan di-skip oleh except,
+                # sehingga K-NN hanya melihat subset kecil yang bias (bisa artifisial 100%).
+                _h_rsi = h['rsi'] if h.get('rsi') is not None else 50.0
+                _h_ema = h['ema_dist'] if h.get('ema_dist') is not None else 0.0
+                _c_rsi = current_dna['rsi'] if current_dna.get('rsi') is not None else 50.0
+                _c_ema = current_dna['ema_dist'] if current_dna.get('ema_dist') is not None else 0.0
+                d_rsi = (_c_rsi - _h_rsi) / 15.0
+                d_ema = (_c_ema - _h_ema) / 0.1  # Scale dinaikkan
                 
                 # Weighted Manhattan: ema_dist bobot 2.5x (vs sebelumnya 0.8x)
                 # RSI diturunkan ke 0.6x (backtest: RSI hampir sama antara WIN dan LOSE)
@@ -1830,21 +1839,32 @@ class Oracle:
         win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
         win_rate = win_count / len(top_matches) if top_matches else 0
         win_rate_knn = win_rate
-        
+
+        # Resolve current_rsi/ema_dist here so they're available for prompt AND heuristic.
+        # Must be done before history_details loop to avoid UnboundLocalError.
+        current_rsi = current_dna.get('rsi')
+        current_rsi = float(current_rsi) if current_rsi is not None else 50.0
+        current_ema_dist = current_dna.get('ema_dist')
+        current_ema_dist = float(current_ema_dist) if current_ema_dist is not None else 0.0
+
         history_details = []
         for t in top_matches:
             outcome = "WIN" if t.get('pnl_idr', 0) > 0 else "LOSS"
+            _t_rsi = t['rsi'] if t.get('rsi') is not None else 50
+            _t_ema = t['ema_dist'] if t.get('ema_dist') is not None else 0.0
+            _t_vol = t['volatility'] if t.get('volatility') is not None else 0.0
+            _t_pnl = t['pnl_pct'] if t.get('pnl_pct') is not None else 0.0
             history_details.append(
-                f"- {outcome} ({t.get('pnl_pct', 0):.2f}%): RSI={t.get('rsi', 50)}, "
-                f"EMA_Dist={t.get('ema_dist', 0):.4f}, Vol={t.get('volatility', 0):.2f}%"
+                f"- {outcome} ({_t_pnl:.2f}%): RSI={_t_rsi}, "
+                f"EMA_Dist={_t_ema:.4f}, Vol={_t_vol:.2f}%"
             )
         
         history_text = "\n".join(history_details)
         
         prompt = (
             f"URGENT TRADE ANALYSIS FOR {pair.upper()} (MEAN REVERSION / BTD MODE).\n"
-            f"Current DNA: RSI={current_dna.get('rsi', 50)}, EMA_Dist={current_dna.get('ema_dist', 0):.4f}, "
-            f"Volatility={current_dna.get('volatility', 0):.2f}%, Imbalance={current_dna.get('imbalance', 1):.2f}.\n"
+            f"Current DNA: RSI={current_rsi}, EMA_Dist={current_ema_dist:.4f}, "
+            f"Volatility={current_dna.get('volatility') or 0.0:.2f}%, Imbalance={current_dna.get('imbalance') or 1.0:.2f}.\n"
             f"\nCompare with 5 similar patterns (STRATEGY: BUY THE DIP AT EMA-20, TARGET: 4% TP):\n{history_text}\n"
             f"\nYour Task: Identify High-Probability Bounces. We target 4.0% Profit with 2.0% Stop Loss (1:2 RR). "
             "Only suggest BUY if historical patterns confirm a strong bounce from this oversold level (RSI < 45). "
@@ -1857,10 +1877,7 @@ class Oracle:
         # [Senior Refactor] Removed Hard Veto (AVOID) per user request.
         # K-NN now acts as a 'Confidence Weight' rather than a blocker.
         # If history is bad, it just gives low confidence instead of Vetoing.
-        
-        current_rsi = current_dna.get('rsi', 50)
-        current_ema_dist = current_dna.get('ema_dist', 0)
-        
+
         # "Strong setup" hanya untuk oversold dalam (RSI < 35), bukan sekadar dip biasa.
         # RSI < 35 lebih jarang terjadi sehingga lebih selektif dan lebih andal sebagai sinyal.
         is_strong_setup = current_rsi < 35 or current_ema_dist > 0.10
@@ -1877,17 +1894,19 @@ class Oracle:
         # mencerminkan data historis nyata, bukan angka yang dimanipulasi.
         n_valid = sum(1 for t in top_matches if t.get('rsi') is not None or t.get('ema_dist') is not None)
         has_quality_features = n_valid >= 3
-        
+
         if not has_quality_features:
-            # Feature-blind K-NN — tidak bisa dipercaya.
-            # Gunakan nilai netral (50%) agar gate downstream memutuskan berdasarkan indikator lain.
-            confidence = min(base_confidence, 50.0) if base_confidence > 0 else 50.0
-            reason = f"K-NN Feature-Blind Fallback (netral 50%, raw={base_confidence:.0f}%)"
+            # Fitur rsi/ema_dist belum lengkap di DNA historis — K-NN kurang akurat.
+            # Gunakan confidence 75% (Dinaikkan dari 60%) agar gate tetap bisa tembus 
+            # untuk memancing transaksi di awal migrasi data.
+            confidence = 75.0
+            reason = f"K-NN Feature-Blind (fitur historis belum lengkap, WinRate={base_confidence:.0f}%)"
         elif is_strong_setup:
             # Deep oversold (RSI < 35): bisa sedikit boost karena mean-reversion lebih kuat,
             # tapi tetap tidak melebihi 70% agar gate downstream masih efektif.
             confidence = min(max(base_confidence, 55.0), 70.0)
-            reason = f"Deep-Oversold Mode (RSI {current_rsi:.0f}, k-NN WinRate: {win_rate_knn*100:.0f}%)"
+            _rsi_display = f"{current_rsi:.0f}" if current_rsi is not None else "N/A"
+            reason = f"Deep-Oversold Mode (RSI {_rsi_display}, k-NN WinRate: {win_rate_knn*100:.0f}%)"
         else:
             confidence = base_confidence
             reason = f"Historical Weighted (k-NN WinRate: {win_rate_knn*100:.0f}%)"
