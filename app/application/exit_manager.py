@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 from config import (
-    TP_PCT, SL_PCT, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
+    TP_PCT, SL_PCT, AUTO_SL_ENABLED, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
     AUTO_BASKET_HARVEST_MIN, BTC_CRASH_TRIGGER_PCT,
@@ -1429,6 +1429,7 @@ class ExitManager:
                 current_tier = data.get('dca_tier', 0)
                 can_dca = (
                     DCA_ENABLED and
+                    not harvest_only and
                     current_tier < DCA_MAX_TIERS and
                     current_profit_pct <= DCA_STEP_PCT and
                     current_price > active_sl_price and  # Belum kena hard SL
@@ -1453,6 +1454,11 @@ class ExitManager:
 
                 elif current_price <= active_sl_price:
                     # [Senior Strategy] Execute automatic Stop Loss to protect capital.
+                    # Bypass if AUTO_SL_ENABLED is False or HARVEST_ONLY is active.
+                    if not AUTO_SL_ENABLED or harvest_only:
+                        # log_message(f"⏳ [SL SUPPRESSED] {pair} hit SL but bypassing per config/mode.")
+                        continue
+
                     reason_sl = "STOP_LOSS"
                     log_message(
                         f"💀 [AUTO-SL TRIGGERED] {pair}: Price {current_price:,.2f} hit SL {active_sl_price:,.2f} "

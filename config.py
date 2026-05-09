@@ -43,6 +43,7 @@ MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (
 # --- [Scalping Targets] ---
 TP_PCT = 0.012                  # Target TP 1.2% (net profit dihitung setelah fee)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
+AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as requested by user
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 MIN_NET_PROFIT_IDR = 500  # Filter noise: minimal 500 IDR net profit per trade
