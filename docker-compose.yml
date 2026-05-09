@@ -262,6 +262,40 @@ services:
     networks:
       - default
 
+  news-maker:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-news-maker
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      timescaledb: { condition: service_healthy }
+      model-downloader: { condition: service_completed_successfully }
+    env_file: [.env]
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - MODEL_PATH=/app/models/gemma-4-E2B-it.litertlm
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
+      - algovibe_ipc:/tmp
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    shm_size: 256mb
+    command: ["python", "-m", "services.news_maker.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
   # ─────────────────────────────────────────────────────────────────────────────
   # [Microservice 5] dashboard-api — Flask REST + SocketIO Dashboard
   # Serves the Vue.js SPA and exposes /api/* endpoints.

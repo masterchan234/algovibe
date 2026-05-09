@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 
     <!-- PWA & theme -->
-    <meta name="theme-color" content="#a371f7" />
+    <meta name="theme-color" content="#0c1119" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="AlgoVibe" />
-    <meta name="description" content="Crypto scalping bot dashboard — simulation &amp; live modes" />
+    <meta name="description" content="Algovibe Intelligence menghadirkan artikel analisis pasar kripto IDR, insight trading, dan live market signal berbasis data." />
     <meta name="format-detection" content="telephone=no" />
 
     <link rel="manifest" href="/manifest.json" />
@@ -18,28 +18,28 @@
     <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
     <link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png" />
 
-    <title>AlgoVibe — Futuristic AI-Powered Crypto Scalping Terminal</title>
-    <meta name="description" content="Algovibe is a next-generation crypto scalping terminal driven by real-time AI reasoning and predictive market telemetry. Professional-grade execution for elite operators." />
-    <meta name="keywords" content="crypto trading, ai trading bot, indodax bot, crypto scalping, market telemetry, algovibe, automated trading" />
+    <title>Algovibe Intelligence | Crypto Market Blog & Live Signals</title>
+    <meta name="keywords" content="analisis kripto, market signal, trading insight, indodax, algovibe, crypto indonesia, artikel trading" />
     <meta name="author" content="AlgoVibe Quant Team" />
+    <link rel="canonical" href="https://algovibe.yukbisayuk.id/login" />
 
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://algovibe.yukbisayuk.id/" />
-    <meta property="og:title" content="AlgoVibe — Futuristic AI-Powered Trading Terminal" />
-    <meta property="og:description" content="Real-time AI insights, high-frequency scalping, and predictive market analysis. Elevate your trading with Algovibe." />
+    <meta property="og:title" content="Algovibe Intelligence | Crypto Market Blog & Live Signals" />
+    <meta property="og:description" content="Artikel analisis market, coin radar, hype mover, loser tracker, dan live signal untuk trader kripto Indonesia." />
     <meta property="og:image" content="/icon-512.png" />
 
     <!-- Twitter -->
     <meta property="twitter:card" content="summary_large_image" />
-    <meta property="twitter:title" content="AlgoVibe — Futuristic AI-Powered Trading Terminal" />
-    <meta property="twitter:description" content="Elite crypto scalping driven by AI reasoning." />
+    <meta property="twitter:title" content="Algovibe Intelligence | Crypto Market Blog & Live Signals" />
+    <meta property="twitter:description" content="Blog analisis pasar kripto dan live signal berbasis data market realtime." />
     <meta property="twitter:image" content="/icon-512.png" />
 
     <!-- Premium Typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@300;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700;800&family=Source+Serif+4:opsz,wght@8..60,500;8..60,700&family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
 
     <!-- Mobile native base styles: prevent overscroll bounce, safe area -->
     <style>
@@ -66,7 +66,31 @@
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js', { scope: '/' })
-            .then(() => console.log('[SW] AlgoVibe service worker registered'))
+            .then((registration) => {
+              console.log('[SW] AlgoVibe service worker registered')
+              registration.update()
+
+              if (registration.waiting) {
+                registration.waiting.postMessage({ type: 'SKIP_WAITING' })
+              }
+
+              registration.addEventListener('updatefound', () => {
+                const newWorker = registration.installing
+                if (!newWorker) return
+                newWorker.addEventListener('statechange', () => {
+                  if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                    newWorker.postMessage({ type: 'SKIP_WAITING' })
+                  }
+                })
+              })
+
+              let refreshing = false
+              navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (refreshing) return
+                refreshing = true
+                window.location.reload()
+              })
+            })
             .catch((err) => console.warn('[SW] Registration failed:', err))
         })
       }

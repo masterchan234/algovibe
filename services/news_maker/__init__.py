@@ -1,0 +1,1 @@
+"""News Maker microservice package."""

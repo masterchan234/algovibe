@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import uuid
+import hashlib
 import datetime
 import logging
 import urllib.request
@@ -158,7 +159,7 @@ def handle_ping_latency(data):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Handshake: try JWT-based auth first (primary), then view-token (guest), then Flask session (legacy).
+    # Handshake: JWT/session for authenticated users, optional explicit view-token for controlled guest access.
     client_token = auth.get('token') if auth else None
 
     is_authenticated = False
@@ -202,11 +203,10 @@ def handle_connect(auth=None):
         join_room('public')
         logging.info("🔌 Guest User connected (Public/View-only mode)")
 
-    # 4. Anonymous Public Access (Landing Page)
+    # 4. Anonymous access is blocked for security.
     else:
-        is_guest = True
-        join_room('public')
-        logging.info("🔌 Anonymous visitor connected (Public/Landing mode)")
+        logging.warning("🚫 Anonymous WS connection rejected")
+        return False
 
     if not is_authenticated and not is_guest:
         logging.warning(f"🚫 Unauthorized WS connection attempt")
@@ -606,6 +606,90 @@ def _get_trade_history_summary():
 
 
 _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari push_data_loop
+_last_market_brief_llm_ts = 0.0
+_last_market_brief_payload_hash = ""
+
+
+def _extract_json_brief_text(raw_text: str) -> str | None:
+    """Parse strict JSON response from LLM and extract brief text."""
+    if not raw_text:
+        return None
+
+    text = str(raw_text).strip()
+
+    # Direct JSON
+    try:
+        obj = json.loads(text)
+        brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+        return brief or None
+    except Exception:
+        pass
+
+    # JSON in codeblock
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+            return brief or None
+        except Exception:
+            pass
+
+    # First balanced JSON object
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidate = text[start:i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+                        return brief or None
+                    except Exception:
+                        start = None
+                        continue
+    return None
+
+
+def _request_market_brief_llm(brief_vars: dict):
+    """Send full market variables to LLM and let LLM write MARKET INTELLIGENCE BRIEF."""
+    global _last_market_brief_llm_ts, _last_market_brief_payload_hash
+
+    worker = LLMWorker.get_instance()
+    if not worker.is_active:
+        return
+
+    payload_json = json.dumps(brief_vars, ensure_ascii=False, sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    now = time.time()
+
+    # Avoid spamming LLM with identical payload in short windows.
+    if (now - _last_market_brief_llm_ts) < 45 and payload_hash == _last_market_brief_payload_hash:
+        return
+
+    prompt = (
+        "Anda adalah Market Intelligence Writer.\n"
+        "Gunakan HANYA data JSON di bawah ini. Jangan menambah fakta dari luar, jangan asumsi, jangan halusinasi.\n"
+        "Balas WAJIB dalam JSON valid SATU OBJEK dengan schema tepat berikut:\n"
+        '{"brief":"..."}\n'
+        "Nilai brief: 1 paragraf ringkas Bahasa Indonesia (maks 650 karakter) dengan format konten:\n"
+        "BiasData | DriversData | PlanData | InvalidasiData\n"
+        "PlanData dan InvalidasiData HARUS diturunkan dari variabel yang tersedia di DATA_JSON.\n"
+        "Jika data kurang, tulis eksplisit 'data tidak cukup'.\n"
+        "Jangan keluarkan teks lain di luar JSON.\n\n"
+        f"DATA_JSON:\n{payload_json}"
+    )
+
+    worker.query_structured("market_intel_brief", prompt)
+    _last_market_brief_llm_ts = now
+    _last_market_brief_payload_hash = payload_hash
 
 def _generate_equity_report_llm(stats):
     """Kirim prompt ke LLM untuk membuat Executive Report berdasarkan seluruh riwayat transaksi."""
@@ -816,14 +900,32 @@ def public_landing_data():
                         "trend": str(r['value']).upper()
                     })
 
-        # 2. Latest Unique AI Insights
-        ai_rows = conn.execute(
-            "SELECT DISTINCT ON (message) message, created_at FROM system_events "
-            "WHERE type IN ('AI_INSIGHT', 'AI_ORACLE') "
-            "ORDER BY message, created_at DESC LIMIT 5"
-        ).fetchall()
-        # Re-sort by date after getting unique messages
-        insights = sorted([{"message": r['message'], "created_at": str(r['created_at'])} for r in ai_rows], key=lambda x: x['created_at'], reverse=True)
+        # 2. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
+        llm_feed = _build_llm_decisions_payload(limit=5)
+        brief_items = [
+            {
+                "message": str(item.get("message") or "").strip(),
+                "created_at": str(item.get("created_at") or "")
+            }
+            for item in llm_feed
+            if str(item.get("side") or "") == "MARKET_INTEL_BRIEF"
+               and str(item.get("message") or "").strip()
+        ]
+
+        # Fallback to existing public-safe AI insights only when brief is unavailable.
+        if brief_items:
+            insights = brief_items[:5]
+        else:
+            ai_rows = conn.execute(
+                "SELECT DISTINCT ON (message) message, created_at FROM system_events "
+                "WHERE type IN ('AI_INSIGHT', 'AI_ORACLE') "
+                "ORDER BY message, created_at DESC LIMIT 5"
+            ).fetchall()
+            insights = sorted(
+                [{"message": r['message'], "created_at": str(r['created_at'])} for r in ai_rows],
+                key=lambda x: x['created_at'],
+                reverse=True,
+            )
 
         # 3. Market Stats
         sentiment = db.get_state("market_sentiment_index") or 50
@@ -832,21 +934,41 @@ def public_landing_data():
         
         # 4. Intelligence Reports
         art_rows = conn.execute(
-            "SELECT title, excerpt, category, created_at FROM intelligence_reports "
+            "SELECT title, excerpt, content, category, created_at FROM intelligence_reports "
             "ORDER BY created_at DESC LIMIT 5"
         ).fetchall()
         articles = [{
             "title": r['title'],
             "excerpt": r['excerpt'],
+            "content": r['content'],
             "category": r['category'],
             "created_at": str(r['created_at'])
         } for r in art_rows]
+
+        # 5. Public activity logs (sanitized for landing page)
+        log_rows = conn.execute(
+            """
+            SELECT created_at, message
+            FROM system_events
+            WHERE type IN ('AI_INSIGHT', 'AI_ORACLE', 'LLM_EXIT_HOLD')
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        public_logs = [
+            {
+                "time": str(r['created_at']),
+                "message": str(r['message'] or '')[:160]
+            }
+            for r in log_rows
+        ]
 
         return jsonify({
             "success": True,
             "signals": signals[:8],
             "insights": insights,
             "articles": articles,
+            "public_logs": public_logs,
             "market": {
                 "sentiment": int(sentiment),
                 "btc_price": float(btc_price),
@@ -2598,6 +2720,13 @@ def _build_radar_payload():
                 # Gunakan titik sebelumnya agar delta harga radar benar-benar mencerminkan momentum terbaru.
                 prev = float(history[-2]) if len(history) > 1 else last
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
+
+                # Jika feed WS tidak memberi perubahan 24h (sering 0 di mode dashboard),
+                # gunakan fallback dari indikator DB agar UI tidak selalu 0.00%.
+                if abs(ch_24h) < 1e-9:
+                    ch_24h = float(row['ch_1h'] or 0) if row else 0
+                    if abs(ch_24h) < 1e-9:
+                        ch_24h = change
                 
 
                 trend = (row['trend'] if row else None) or ('UP' if change > 0 else ('DOWN' if change < 0 else 'SIDEWAYS'))
@@ -2880,6 +3009,118 @@ def _build_llm_decisions_payload(limit: int = 20):
     """Kembalikan riwayat keputusan LiteRT-LM dari system_events."""
     conn = get_db_connection()
     try:
+        # MARKET INTELLIGENCE BRIEF: all variables are real data, summary text comes from LLM.
+        regime_raw = db.get_state("current_market_regime")
+        sentiment_raw = db.get_state("market_sentiment_index")
+        btc_price_raw = db.get_state("last_price_btcidr")
+
+        regime = str(regime_raw).upper() if regime_raw else "N/A"
+        sentiment = int(float(sentiment_raw)) if sentiment_raw not in (None, "") else None
+        btc_price = float(btc_price_raw) if btc_price_raw not in (None, "") else None
+
+        stat_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN UPPER(signal) = 'BUY' THEN 1 ELSE 0 END), 0) AS buy_count,
+                COALESCE(SUM(CASE WHEN UPPER(signal) = 'SELL' THEN 1 ELSE 0 END), 0) AS sell_count,
+                AVG(score) AS avg_score,
+                MAX(updated_at) AS last_ticker_update
+            FROM ticker_history
+            """
+        ).fetchone()
+
+        mover_row = conn.execute(
+            """
+            SELECT pair, ch_1h, score, signal
+            FROM ticker_history
+            ORDER BY ABS(ch_1h) DESC NULLS LAST
+            LIMIT 1
+            """
+        ).fetchone()
+
+        detail_rows = conn.execute(
+            """
+            SELECT pair, signal, trend, score, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, updated_at
+            FROM ticker_history
+            ORDER BY ABS(ch_1h) DESC NULLS LAST
+            LIMIT 12
+            """
+        ).fetchall()
+
+        buy_count = int((stat_rows and stat_rows.get("buy_count")) or 0)
+        sell_count = int((stat_rows and stat_rows.get("sell_count")) or 0)
+        avg_score_val = (stat_rows and stat_rows.get("avg_score"))
+        avg_score = float(avg_score_val) if avg_score_val is not None else None
+        last_ticker_update = str((stat_rows and stat_rows.get("last_ticker_update")) or "N/A")
+
+        top_pair = str((mover_row and mover_row.get("pair")) or "N/A").upper()
+        top_ch_1h = float((mover_row and mover_row.get("ch_1h")) or 0)
+
+        market_vars = {
+            "generated_at": datetime.datetime.now().isoformat(),
+            "regime": regime,
+            "sentiment_pct": sentiment,
+            "btc_idr": btc_price,
+            "signal_count": {
+                "buy": buy_count,
+                "sell": sell_count,
+            },
+            "avg_ai_score": avg_score,
+            "top_mover_1h": {
+                "pair": top_pair,
+                "ch_1h": top_ch_1h,
+            },
+            "ticker_history_last_update": last_ticker_update,
+            "tickers": [
+                {
+                    "pair": str(r.get("pair") or "").upper(),
+                    "signal": str(r.get("signal") or ""),
+                    "trend": str(r.get("trend") or ""),
+                    "score": float(r.get("score") or 0),
+                    "prediction_prob": float(r.get("prediction_prob") or 0),
+                    "ch_5m": float(r.get("ch_5m") or 0),
+                    "ch_15m": float(r.get("ch_15m") or 0),
+                    "ch_1h": float(r.get("ch_1h") or 0),
+                    "volatility": float(r.get("volatility") or 0),
+                    "updated_at": str(r.get("updated_at") or ""),
+                }
+                for r in detail_rows
+            ],
+        }
+
+        _request_market_brief_llm(market_vars)
+
+        worker = LLMWorker.get_instance()
+        llm_brief = worker.get_latest_result_by_type("market_intel_brief") if worker.is_active else None
+
+        parsed_brief = _extract_json_brief_text(str(llm_brief or ""))
+        persisted_brief_row = conn.execute(
+            """
+            SELECT message, created_at
+            FROM system_events
+            WHERE type = 'MARKET_INTEL_BRIEF'
+              AND COALESCE(message, '') <> ''
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        persisted_brief = str((persisted_brief_row and persisted_brief_row.get("message")) or "").strip()
+        fallback_state_brief = str(db.get_state("hero_ai_insight") or "").strip()
+
+        if parsed_brief:
+            brief_message = parsed_brief
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+        elif persisted_brief:
+            brief_message = persisted_brief[:260]
+            brief_created_at = str((persisted_brief_row and persisted_brief_row.get("created_at")) or datetime.datetime.now().isoformat())
+        elif fallback_state_brief:
+            brief_message = fallback_state_brief[:260]
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+        else:
+            # No synthetic narrative; wait until valid LLM response is available.
+            brief_message = "LLM response pending..."
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+
         rows = conn.execute(
             """
             SELECT DISTINCT ON (message) id, pair, message, type as side, level, created_at
@@ -2890,7 +3131,18 @@ def _build_llm_decisions_payload(limit: int = 20):
             """,
             (limit,),
         ).fetchall()
-        return [
+        payload = [
+            {
+                "id": 0,
+                "pair": "MARKET",
+                "side": "MARKET_INTEL_BRIEF",
+                "message": brief_message,
+                "level": "INFO",
+                "created_at": brief_created_at,
+            }
+        ]
+
+        payload.extend([
             {
                 "id": int(r["id"] or 0),
                 "pair": (r["pair"] or "").upper(),
@@ -2900,7 +3152,9 @@ def _build_llm_decisions_payload(limit: int = 20):
                 "created_at": str(r["created_at"]),
             }
             for r in rows
-        ]
+        ])
+
+        return payload
     except Exception as exc:
         logging.warning(f"[llm-decisions] payload error: {exc}")
         return []
