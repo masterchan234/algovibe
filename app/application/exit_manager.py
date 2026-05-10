@@ -275,6 +275,16 @@ class ExitManager:
             'message': 'fee-only TP guard aktif',
         }
 
+    def _position_open_value_idr(self, position_data, amount_on_exchange=0.0):
+        """Return the stored OPEN-position IDR basis used for DUST classification."""
+        amount_on_exchange = float(amount_on_exchange or 0)
+        entry_price = float((position_data or {}).get('entry_price') or 0)
+        return float(
+            (position_data or {}).get('amount_idr')
+            or (amount_on_exchange * entry_price)
+            or 0
+        )
+
     def _format_tp_hold_log(self, label, pair, guard):
         """Build a consistent log line for TP holds and emergency exit deferrals."""
         return f"⏳ [{label}] {pair}: {guard.get('message')}."
@@ -2851,6 +2861,7 @@ class ExitManager:
             for pair, pos in open_positions.items():
                 coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(balance['total'].get(coin, 0))
+                position_idr_value = self._position_open_value_idr(pos, amount_on_exchange)
                 
                 # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
                 if pos.get('status') == "PENDING_BUY":
@@ -2865,14 +2876,28 @@ class ExitManager:
                         continue
 
                 # Dust kecil tetap tracked, tapi jangan diperlakukan sebagai posisi aktif normal.
-                if 0 < amount_on_exchange < MIN_TRADE_IDR:
+                # Basisnya adalah nilai posisi OPEN dalam IDR, bukan mark-to-market terbaru.
+                if 0 < position_idr_value < MIN_TRADE_IDR:
                     if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
                         pos['status'] = 'DUST'
                         pos['amount_crypto'] = amount_on_exchange
                         pos['amount_idr'] = amount_on_exchange * float(pos.get('entry_price') or 0)
                         db.upsert_position(pair, pos)
-                        log_message(f"🧹 Reality Sync: {pair} converted to DUST ({amount_on_exchange:.12f} {coin}).")
+                        log_message(
+                            f"🧹 Reality Sync: {pair} converted to DUST "
+                            f"({amount_on_exchange:.12f} {coin} | open value Rp {position_idr_value:,.0f} < min Rp {MIN_TRADE_IDR:,.0f})."
+                        )
                     continue
+
+                if pos.get('status') == 'DUST' and position_idr_value >= MIN_TRADE_IDR and amount_on_exchange > 0:
+                    pos['status'] = 'OPEN'
+                    pos['amount_crypto'] = amount_on_exchange
+                    pos['amount_idr'] = amount_on_exchange * float(pos.get('entry_price') or 0)
+                    db.upsert_position(pair, pos)
+                    log_message(
+                        f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "
+                        f"({amount_on_exchange:.12f} {coin} | open value Rp {position_idr_value:,.0f} >= min Rp {MIN_TRADE_IDR:,.0f})."
+                    )
 
                 # Jika status EXITING namun koin masih ada di wallet dan tidak ada open SELL order,
                 # berarti state exit nyangkut dan harus dikembalikan ke OPEN agar bisa dieksekusi ulang.

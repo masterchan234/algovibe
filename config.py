@@ -42,7 +42,7 @@ MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.12    # Modal 100k: default sizing ~12k/trade (tetap tunduk pada MIN_TRADE_IDR)
 MAX_OPEN_POSITIONS = 6          # Modal 100k: batasi eksposur agar tidak over-fragmented
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
-MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
+MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10000)) # Minimum order Indodax (10rb)
 
 # Small-account sizing clamp (configurable via env)
 # Allows runtime tuning without editing strategy code.
