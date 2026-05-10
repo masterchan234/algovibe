@@ -345,6 +345,160 @@ class ExitManager:
 
         return True, "ok", topup_idr
 
+    def _evaluate_dust_signal(self, pair, price_history, current_rsi=50.0):
+        """
+        Evaluasi sinyal khusus DUST dengan threshold lebih ketat.
+        Butuh multiple indicator confirmation sebelum give BUY signal untuk DUST top-up.
+        
+        Return: (signal, confidence)
+        - signal: 'BUY_CONFIRMED' (multi-indicator align), 'UNCERTAIN' (weak), 'HOLD' (belum)
+        - confidence: 0.0-1.0
+        """
+        if not price_history or len(price_history) < 35:
+            return 'UNCERTAIN', 0.0
+
+        hist = list(price_history)[-180:]  # Last 180 candles
+        
+        # [1] RSI check: oversold recovery (RSI naik dari 30-40 area)
+        rsi = float(current_rsi or 50.0)
+        rsi_confirm = rsi < 45  # Masih oversold area, tapi mulai recovery path
+        
+        # [2] MACD check: histogram positif atau mulai positive
+        macd_hist = 0.0
+        macd_confirm = False
+        try:
+            from app.domain.technicals import calculate_macd
+            _, _, macd_hist = calculate_macd(hist)
+            macd_confirm = macd_hist > -10.0  # Histogram belum jauh negatif, atau sudah mulai positif
+        except:
+            pass
+        
+        # [3] Stochastic RSI: oversold phase (%K < 40)
+        stoch_k = 50.0
+        stoch_confirm = False
+        try:
+            from app.domain.technicals import calculate_stochastic_rsi
+            stoch_k, stoch_d = calculate_stochastic_rsi(hist)
+            stoch_confirm = stoch_k < 40 or (stoch_k < 50 and stoch_k > stoch_d)
+        except:
+            pass
+        
+        # [4] Price trend: setidaknya 2 dari 3 recent candle naik (recovery signal)
+        price_recovery = False
+        if len(hist) >= 3:
+            recent = hist[-3:]
+            up_count = sum(1 for i in range(len(recent)-1) if recent[i+1] > recent[i])
+            price_recovery = up_count >= 2
+        
+        # Multi-indicator voting
+        confirm_count = sum([rsi_confirm, macd_confirm, stoch_confirm, price_recovery])
+        
+        if confirm_count >= 3:
+            # Strong convergence: 3+ indicators align
+            confidence = 0.85 + (confirm_count - 3) * 0.05
+            return 'BUY_CONFIRMED', min(0.95, confidence)
+        elif confirm_count == 2:
+            # Moderate convergence: 2 indicators align, still actionable
+            confidence = 0.72
+            return 'BUY_CONFIRMED', confidence
+        elif confirm_count == 1:
+            # Weak: only 1 indicator, too risky
+            return 'UNCERTAIN', 0.45
+        else:
+            # None: no indicator alignment
+            return 'HOLD', 0.20
+
+    def _evaluate_exit_signal(self, pair, price_history, entry_price, current_price, amount, amount_idr, current_rsi=50.0):
+        """
+        Evaluasi EXIT signal untuk OPEN position dengan fee protection.
+        Hanya suggest exit jika net profit after fees positif.
+        
+        Return: (signal, confidence, net_profit_idr, fee_pct_roundtrip)
+        - signal: 'SELL_CONFIRMED' (3+ indicators + profit OK), 'CONSIDER' (2 indicators + profit OK), 'HOLD'
+        - confidence: 0.0-1.0
+        - net_profit_idr: net profit AFTER round-trip fees (bisa negative!)
+        - fee_pct_roundtrip: total fee % from round-trip
+        
+        PENTING: Jika net_profit <= 0, tidak ada signal (protect dari loss)
+        """
+        from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+        
+        if not price_history or len(price_history) < 35:
+            return 'HOLD', 0.0, 0.0, 0.0
+        
+        # Calculate net profit after round-trip fees
+        entry_price = float(entry_price or 0)
+        current_price = float(current_price or 0)
+        amount = float(amount or 0)
+        amount_idr = float(amount_idr or 0)
+        
+        if entry_price <= 0 or amount <= 0:
+            return 'HOLD', 0.0, 0.0, 0.0
+        
+        sell_value_est = amount * current_price
+        fee_buy_est = amount_idr * FEE_BUY_TAKER
+        fee_sell_est = sell_value_est * FEE_SELL_TAKER
+        net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
+        
+        # Total fee round-trip %
+        total_fee_idr = fee_buy_est + fee_sell_est
+        fee_pct_roundtrip = (total_fee_idr / amount_idr * 100) if amount_idr > 0 else 0.0
+        
+        # [PROTECTION] Jika net profit negatif, jangan suggest SELL signal
+        if net_pnl_idr <= 0:
+            return 'HOLD', 0.0, net_pnl_idr, fee_pct_roundtrip
+        
+        hist = list(price_history)[-180:]
+        
+        # [1] MACD check: histogram negatif (momentum fading)
+        macd_hist = 0.0
+        macd_confirm = False
+        try:
+            from app.domain.technicals import calculate_macd
+            _, _, macd_hist = calculate_macd(hist)
+            macd_confirm = macd_hist < -5.0  # Momentum declining
+        except:
+            pass
+        
+        # [2] RSI check: overbought (RSI > 70)
+        rsi = float(current_rsi or 50.0)
+        rsi_confirm = rsi > 70
+        
+        # [3] Stochastic RSI: overbought & divergence (%K > 75)
+        stoch_k = 50.0
+        stoch_confirm = False
+        try:
+            from app.domain.technicals import calculate_stochastic_rsi
+            stoch_k, stoch_d = calculate_stochastic_rsi(hist)
+            stoch_confirm = stoch_k > 75 or (stoch_k > 70 and stoch_k > stoch_d)
+        except:
+            pass
+        
+        # [4] Price trend: recent candles decline (reversal signal)
+        price_decline = False
+        if len(hist) >= 3:
+            recent = hist[-3:]
+            down_count = sum(1 for i in range(len(recent)-1) if recent[i+1] < recent[i])
+            price_decline = down_count >= 2
+        
+        # Multi-indicator voting untuk SELL
+        confirm_count = sum([macd_confirm, rsi_confirm, stoch_confirm, price_decline])
+        
+        if confirm_count >= 3:
+            # Strong SELL convergence: 3+ indicators align
+            confidence = 0.82 + (confirm_count - 3) * 0.05
+            return 'SELL_CONFIRMED', min(0.95, confidence), net_pnl_idr, fee_pct_roundtrip
+        elif confirm_count == 2:
+            # Moderate SELL: 2 indicators, consider timing
+            confidence = 0.68
+            return 'CONSIDER', confidence, net_pnl_idr, fee_pct_roundtrip
+        elif confirm_count == 1:
+            # Weak: only 1 indicator
+            return 'HOLD', 0.40, net_pnl_idr, fee_pct_roundtrip
+        else:
+            # No alignment: market still bullish
+            return 'HOLD', 0.20, net_pnl_idr, fee_pct_roundtrip
+
     def _get_repost_limit_price_from_orderbook(self, pair, current_price):
         """Pick a passive sell price just above the live best bid."""
         current_price = float(current_price or 0)
@@ -1776,16 +1930,34 @@ class ExitManager:
 
                 active_sl_price = initial_sl_price
 
-                # [DUST RECOVERY] Dust tetap tracked, tapi hanya diaktifkan saat sinyal BUY muncul.
-                # Setelah top-up, posisi dipromosikan kembali ke OPEN supaya TP bisa menjual 100% agregat.
+                # [DUST MONITOR] Evaluasi sinyal terbaru setiap siklus untuk DUST position.
+                # Pakai sinyal khusus DUST yang lebih ketat (multiple indicator confirmation).
+                # Prioritas:
+                #   1. Profit + nilai >= MIN_TRADE_IDR → smart-promote ke OPEN → TP exit
+                #   2. DUST signal BUY_CONFIRMED + confidence OK → recovery top-up agar bisa dijual
+                #   3. Semua kondisi lain → tunggu, log saja
                 if status == 'DUST':
-                    # [DUST SMART-PROMOTE] Jika posisi DUST sedang profit dan nilai pasarnya
-                    # sudah >= MIN_TRADE_IDR, langsung promosi ke OPEN agar bisa di-TP — tanpa perlu top-up.
                     from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
                     current_dust_value_idr = float(amount or 0) * float(current_price or 0)
+
+                    # Evaluasi sinyal DUST khusus dengan multiple indicator confirmation
+                    dust_signal, dust_signal_conf = self._evaluate_dust_signal(
+                        pair, hist, current_rsi
+                    )
+
+                    # Log status DUST setiap siklus agar mudah di-monitor
+                    log_message(
+                        f"🌫️ [DUST] {pair}: "
+                        f"nilai=Rp {current_dust_value_idr:,.0f} | "
+                        f"profit={pnl_pct:.2f}% | "
+                        f"dust_sig={dust_signal} ({dust_signal_conf:.0%}) | "
+                        f"rsi={current_rsi:.0f}"
+                    )
+
+                    # [1] SMART-PROMOTE: profit dan nilai sudah cukup untuk dijual
                     if current_profit_pct > 0 and current_dust_value_idr >= _MIN_TRADE_IDR:
                         log_message(
-                            f"📈 [DUST SMART-PROMOTE] {pair}: nilai pasar Rp {current_dust_value_idr:,.0f} "
+                            f"📈 [DUST SMART-PROMOTE] {pair}: nilai Rp {current_dust_value_idr:,.0f} "
                             f">= Rp {_MIN_TRADE_IDR:,} & profit {pnl_pct:.2f}%. "
                             f"Promoting ke OPEN untuk exit TP."
                         )
@@ -1793,21 +1965,26 @@ class ExitManager:
                         data['status'] = 'OPEN'
                         status = 'OPEN'
                         modified_pairs.add(pair)
-                        # Tidak continue — fall through ke logika TP/SL di bawah
+                        # Fall through ke logika TP/SL di bawah
+
+                    # [2] RECOVERY TOP-UP: DUST signal BUY_CONFIRMED, coba tambah modal agar posisi bisa dijual
                     else:
+                        # Hanya consider top-up jika dust_signal konfirm (2+ indicators)
+                        dust_buy_confirmed = (dust_signal == 'BUY_CONFIRMED' and dust_signal_conf >= 0.70)
+                        
                         can_recover, dust_reason, topup_idr = self._evaluate_dust_recovery(
                             pair,
                             data,
                             current_tickers,
-                            momentum_signal,
-                            technical_confidence,
+                            'BUY' if dust_buy_confirmed else 'HOLD',  # Override momentum untuk dust-only logic
+                            dust_signal_conf,
                             dust_topups_this_cycle,
                             dust_budget_used_idr,
                         )
                         if can_recover:
                             log_message(
                                 f"♻️ [DUST RECOVERY BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
-                                f"conf={technical_confidence:.2f} | cycle={dust_topups_this_cycle + 1}/"
+                                f"dust_sig_conf={dust_signal_conf:.0%} | cycle={dust_topups_this_cycle + 1}/"
                                 f"{DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE}"
                             )
                             success = self.execute_averaging_down(
@@ -1822,12 +1999,15 @@ class ExitManager:
                                 dust_budget_used_idr += float(topup_idr or 0)
                                 positions[pair]['status'] = 'OPEN'
                                 modified_pairs.add(pair)
-                        elif dust_reason in ('cycle_topup_limit', 'insufficient_cycle_budget'):
+                        elif dust_reason not in ('signal_not_buy', 'low_confidence', 'cooldown_active'):
+                            # Log kondisi yang butuh perhatian (budget/limit habis), bukan sekadar tunggu sinyal
                             log_message(
                                 f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
-                                f"(conf={technical_confidence:.2f}, budget_used={dust_budget_used_idr:,.0f})"
+                                f"(dust_sig={dust_signal} {dust_signal_conf:.0%}, budget_used={dust_budget_used_idr:,.0f})"
                             )
-                        continue
+                        # [4] Jika status masih DUST setelah semua evaluasi, lanjut iterasi berikutnya
+                        if str(positions[pair].get('status') or '').upper() == 'DUST':
+                            continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -1907,26 +2087,24 @@ class ExitManager:
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
-                    # Logika Tier 2: FAST EXIT — hanya jika ada konfirmasi MULTI-INDIKATOR melemah.
-                    # Tidak lagi bergantung pada AI prob saja; butuh technical sell signal.
-                    is_momentum_sell = momentum_signal == 'SELL'
+                    # Logika Tier 2: FAST EXIT — hanya jika ada konfirmasi SELL signal (2+ indikator teknikal melemah).
+                    # Multi-indicator dengan fee protection — tidak keluar jika net profit < 0.
+                    exit_signal, exit_signal_conf, net_pnl_after_fee, fee_pct_roundtrip = self._evaluate_exit_signal(
+                        pair,
+                        hist,
+                        entry_price,
+                        current_price,
+                        amount,
+                        amount_idr_pos,
+                        current_rsi,
+                    )
 
-                    # Tambahkan konfirmasi MACD dan Stochastic RSI untuk exit
-                    is_tech_weak = False
-                    try:
-                        if len(hist) >= 35:
-                            _, _, _mh = calculate_macd(hist)
-                            _sk, _sd = calculate_stochastic_rsi(hist)
-                            # Lemah jika MACD histogram negatif DAN Stoch overbought
-                            is_tech_weak = (_mh < 0 and _sk > 65) or (_sk > 80 and current_rsi > 65)
-                    except Exception:
-                        pass
-
-                    if is_tier2_good_profit and (is_momentum_sell or is_tech_weak or current_rsi > 75):
+                    if is_tier2_good_profit and exit_signal in ('SELL_CONFIRMED', 'CONSIDER'):
                         reason_tp = "RAPID_TP_GOOD_PROFIT"
                         log_message(
                             f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
-                            f"secured on tech weakness (rsi={current_rsi:.0f}, tech_weak={is_tech_weak})."
+                            f"| exit_sig={exit_signal} ({exit_signal_conf:.0%}) "
+                            f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%) | Timing bagus untuk exit!"
                         )
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
