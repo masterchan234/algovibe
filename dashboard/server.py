@@ -1498,15 +1498,63 @@ def sync_wallet():
 @app.route('/api/orders')
 @login_required
 def get_orders():
-    """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
+    """Return recent live order activity, falling back to positions/trade history when order_book is empty."""
     try:
-        live_conn = active_db._live.get_raw_connection()
+        live_conn = db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT order_id, pair, side, price, amount, status, created_at, updated_at "
             "FROM order_book ORDER BY created_at DESC LIMIT 20"
         ).fetchall()
+
+        if rows:
+            payload = [dict(r) for r in rows]
+            live_conn.close()
+            return jsonify(payload)
+
+        position_rows = live_conn.execute(
+            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_idr, status, timestamp "
+            "FROM positions "
+            "WHERE UPPER(COALESCE(status, '')) IN ('OPEN', 'EXITING', 'PENDING_BUY') "
+            "ORDER BY timestamp DESC LIMIT 20"
+        ).fetchall()
+
+        trade_rows = live_conn.execute(
+            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_idr, reason, created_at "
+            "FROM trade_history "
+            "WHERE COALESCE(exit_order_id, '') <> '' AND COALESCE(dry_run, false) = false "
+            "ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
         live_conn.close()
-        return jsonify([dict(r) for r in rows])
+
+        fallback = []
+        for row in position_rows:
+            fallback.append({
+                "order_id": row['entry_order_id'] or f"open:{row['pair']}:{row['timestamp']}",
+                "pair": row['pair'],
+                "side": "buy",
+                "price": row['entry_price'],
+                "amount": row['amount_crypto'] or row['amount_idr'],
+                "status": row['status'] or 'OPEN',
+                "created_at": str(row['timestamp'] or ''),
+                "updated_at": str(row['timestamp'] or ''),
+                "source": "positions",
+            })
+
+        for row in trade_rows:
+            fallback.append({
+                "order_id": row['exit_order_id'] or f"exit:{row['pair']}:{row['created_at']}",
+                "pair": row['pair'],
+                "side": "sell",
+                "price": row['exit_price'],
+                "amount": row['amount_crypto'] or row['amount_idr'],
+                "status": row['reason'] or 'CLOSED',
+                "created_at": str(row['created_at'] or ''),
+                "updated_at": str(row['created_at'] or ''),
+                "source": "trade_history",
+            })
+
+        fallback.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+        return jsonify(fallback[:20])
     except Exception as e:
         logging.warning(f"[/api/orders] {e}")
         return jsonify([])
@@ -1521,7 +1569,7 @@ def get_live_state():
     regardless of which mode the dashboard is currently displaying.
     """
     try:
-        live_conn = active_db._live.get_raw_connection()
+        live_conn = db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT key, value FROM bot_state WHERE key IN "
             "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
@@ -1540,6 +1588,7 @@ def get_live_state():
                 (state.get("session_latched", "false") == "true")
                 or (state.get("session_mode", "NORMAL") == "HARVEST_ONLY")
             ),
+            "bot_offline": False,
             "net_zero_survival_active": state.get("net_zero_survival_active", "false") == "true",
             "net_pnl_velocity": float(state.get("net_pnl_velocity") or 0),
             "net_pnl_realized": float(state.get("net_pnl_realized") or 0),

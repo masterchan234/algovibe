@@ -24,6 +24,7 @@ from config import (
     NET_ZERO_IMMEDIATE_VELOCITY,
     NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
+    TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -1368,8 +1369,14 @@ class ExitManager:
                     # Tier 2: Good Profit (Fast Exit on any weakness — dikonfirmasi multi-indicator)
                     # Tier 3: High Profit (FORCE EXIT NOW - Lock it in!)
 
-                    is_tier2_good_profit = net_pnl_idr >= 7500 or current_profit_pct >= 0.015
-                    is_tier3_high_profit = net_pnl_idr >= 15000 or current_profit_pct >= 0.045
+
+                    # Dynamic thresholds for tiered profit exits
+                    # Use a percentage of MIN_NET_PROFIT_IDR or amount_idr for IDR-based triggers
+                    amount_idr_pos = float(data.get('amount_idr', 0))
+                    tier2_idr_threshold = max(MIN_NET_PROFIT_IDR, amount_idr_pos * TIER2_PROFIT_IDR_PCT)
+                    tier3_idr_threshold = max(MIN_NET_PROFIT_IDR * 2, amount_idr_pos * TIER3_PROFIT_IDR_PCT)
+                    is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
+                    is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
                     # Logika Tier 3: FORCE EXIT (Profit sangat bagus, amankan)
                     if is_tier3_high_profit:

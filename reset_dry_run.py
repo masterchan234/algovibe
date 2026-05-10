@@ -1,7 +1,5 @@
-import os
-import sys
 import psycopg2
-from config import DATABASE_URL_DRYRUN
+from config import DATABASE_URL_DRYRUN, BASKET_HARVEST_TARGET_IDR
 
 def reset_dry_run_data():
     print(f"🚀 Memulai pembersihan DRY RUN (Clean Slate) pada database PostgreSQL")
@@ -50,9 +48,19 @@ def reset_dry_run_data():
         cursor.execute("UPDATE bot_state SET value = 'false' WHERE key = 'target_protection_active'")
         cursor.execute("UPDATE bot_state SET value = '0' WHERE key = 'net_zero_fired_at'")
         cursor.execute("UPDATE bot_state SET value = '0' WHERE key = 'net_zero_floor_locked'")
-        cursor.execute("UPDATE bot_state SET value = '50000' WHERE key = 'daily_profit_target'")
+        cursor.execute("UPDATE bot_state SET value = %s WHERE key = 'daily_profit_target'", (str(int(BASKET_HARVEST_TARGET_IDR)),))
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'daily_profit_target_ts'")
         cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'strategic_break_payload'")
         cursor.execute("UPDATE bot_state SET value = '0' WHERE key = 'daily_target_hit'")
+        cursor.execute("UPDATE bot_state SET value = 'STALLING' WHERE key = 'momentum_state'")
+        cursor.execute("UPDATE bot_state SET value = '0' WHERE key = 'net_pnl_velocity'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'entry_gate_state'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'entry_gate_reason'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'entry_gate_pair'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'entry_gate_at'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'pending_approval'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'bracket_exit_confirm'")
+        cursor.execute("UPDATE bot_state SET value = '' WHERE key = 'auto_harvest_notification'")
 
         # 5. Bersihkan cooldown, shadow meta, AI cache, dan state radar/veto
         deleted_states = 0
@@ -86,6 +94,7 @@ def reset_dry_run_data():
         print(f"✅ {deleted_positions} posisi dry run dibersihkan.")
         print(f"✅ {deleted_shadows} shadow orders dibersihkan.")
         print(f"✅ {deleted_states} state & AI cache dibersihkan.")
+        print(f"✅ daily_profit_target direset ke Rp {int(BASKET_HARVEST_TARGET_IDR):,} (sesuai config aktif).")
         print("✅ Ticker history, Market depth, & System events dikosongkan.")
         print("🔓 Global Pause & Session Mode direset. Bot siap tempur!")
 

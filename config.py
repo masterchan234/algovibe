@@ -29,7 +29,7 @@ DATABASE_URL_DRYRUN = os.getenv("DATABASE_URL_DRYRUN", "postgresql://algovibe:se
 _TECHNICAL_ONLY_INTERNAL = os.getenv("TECHNICAL_ONLY_MODE", "true").lower() in ("1", "true", "yes", "on")
 
 #INITIAL_CAPITAL        = 10000000
-INITIAL_CAPITAL        = 100000000
+INITIAL_CAPITAL        = 100000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
@@ -39,29 +39,48 @@ LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan v
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih banyak posisi dari modal sama
-MAX_OPEN_POSITIONS = 100          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
+CAPITAL_PER_TRADE_PCT = 0.12    # Modal 100k: default sizing ~12k/trade (tetap tunduk pada MIN_TRADE_IDR)
+MAX_OPEN_POSITIONS = 6          # Modal 100k: batasi eksposur agar tidak over-fragmented
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
+
+# Small-account sizing clamp (configurable via env)
+# Allows runtime tuning without editing strategy code.
+SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB = float(os.getenv("SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB", 0.45))
+SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT = float(os.getenv("SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT", 1.05))
+SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX = int(os.getenv("SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX", 30000))
+SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX = int(os.getenv("SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX", 60000))
+SMALL_ACCOUNT_CLAMP_TIER1_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER1_PCT", 1.00))
+SMALL_ACCOUNT_CLAMP_TIER2_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER2_PCT", 1.02))
+SMALL_ACCOUNT_CLAMP_TIER3_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER3_PCT", 1.05))
 
 # Reserve strategy: keep a capital/slot buffer for fast high-opportunity entries.
 CAPITAL_RESERVE_FAST_TRADE_PCT = float(os.getenv("CAPITAL_RESERVE_FAST_TRADE_PCT", 0.20))
 POSITION_RESERVE_PCT = float(os.getenv("POSITION_RESERVE_PCT", 0.20))
 HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 
+
 # --- [Scalping Targets] ---
-TP_PCT = 0.012                  # Target TP 1.2% (net profit dihitung setelah fee)
+TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fee = 2.87% viable profit)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
 AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as requested by user
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
-MIN_NET_PROFIT_IDR = 500  # Filter noise: minimal 500 IDR net profit per trade
+# Dynamic tiered profit thresholds for exit_manager
+TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.015))  # 1.5% default
+TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
+TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.10))  # 10% of MIN_NET_PROFIT_IDR or amount_idr
+TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.20))  # 20% of MIN_NET_PROFIT_IDR or amount_idr
+
+# Akun kecil butuh target profit nominal yang proporsional terhadap modal.
+# 0.2% modal per trade dengan batas bawah Rp150 agar tidak terlalu agresif.
+MIN_NET_PROFIT_IDR = int(max(150, INITIAL_CAPITAL * 0.002))
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,
 # bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
 # Set ke 0 untuk nonaktifkan.
-BASKET_HARVEST_TARGET_IDR = 50000  # Rp 50.000 combined net profit → panen serentak
+BASKET_HARVEST_TARGET_IDR = int(max(3000, INITIAL_CAPITAL * 0.05))  # ~5% modal (min 3k)
 
 # Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
 # Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
@@ -80,16 +99,16 @@ BTC_CRASH_TRIGGER_PCT = 0.02    # 2.0% BTC drop in 5 minutes activates kill swit
 # ==========================================
 # Daily profit floor — the IDR target that should never be given back once reached.
 # Defaults to BASKET_HARVEST_TARGET_IDR so the same harvest level becomes the floor.
-MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # Rp 20.000 combined net profit
+MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # mengikuti target harvest aktif
 
 # Buffer above the floor that defines the "Safety Zone" range
 # [MOMENTUM_TARGET_PNL_IDR, MOMENTUM_TARGET_PNL_IDR + MOMENTUM_SAFETY_BUFFER_IDR].
 # When portfolio PnL drops into this range from above, momentum-gated logic activates.
-MOMENTUM_SAFETY_BUFFER_IDR = 2000   # Rp 2.000 cushion for faster profit lock
+MOMENTUM_SAFETY_BUFFER_IDR = int(max(500, MOMENTUM_TARGET_PNL_IDR * 0.15))  # 15% buffer (min 500)
 
 # Velocity threshold (IDR / second). Positive velocity exceeding this value means
 # the portfolio is recovering → enable Tight Trailing Stop instead of immediate exit.
-MOMENTUM_RECOVERY_THRESHOLD = 50    # Rp 50 / sec required to classify as "IMPROVING"
+MOMENTUM_RECOVERY_THRESHOLD = 15    # Modal 100k: threshold recovery lebih realistis
 
 # How often to capture a PnL snapshot for velocity measurement (seconds).
 MOMENTUM_VELOCITY_INTERVAL_SEC = 5
@@ -107,13 +126,14 @@ MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correla
 # high-quality profit profile while session remains in HARVEST_ONLY.
 HARVEST_MOMENTUM_REENTRY_ENABLED = True
 HARVEST_MOMENTUM_MAX_NEW_POSITIONS = 1
-HARVEST_MOMENTUM_MIN_CONFIDENCE = 82.0   # total gate confidence (%).
-HARVEST_MOMENTUM_MIN_TQ_PROB = 0.72      # technical probability (0..1).
-HARVEST_MOMENTUM_MIN_SCORE = 65.0        # ranked momentum score.
-HARVEST_MOMENTUM_MIN_5M_PCT = 0.25       # short momentum (%).
-HARVEST_MOMENTUM_MIN_15M_PCT = 0.60      # follow-through momentum (%).
-HARVEST_MOMENTUM_MIN_TP_PCT = 0.018      # minimum expected TP (1.8%).
-HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
+SMALL_ACCOUNT_MODE = INITIAL_CAPITAL <= 250_000
+HARVEST_MOMENTUM_MIN_CONFIDENCE = 78.0 if SMALL_ACCOUNT_MODE else 82.0   # total gate confidence (%).
+HARVEST_MOMENTUM_MIN_TQ_PROB = 0.68 if SMALL_ACCOUNT_MODE else 0.72       # technical probability (0..1).
+HARVEST_MOMENTUM_MIN_SCORE = 58.0 if SMALL_ACCOUNT_MODE else 65.0         # ranked momentum score.
+HARVEST_MOMENTUM_MIN_5M_PCT = 0.15 if SMALL_ACCOUNT_MODE else 0.25        # short momentum (%).
+HARVEST_MOMENTUM_MIN_15M_PCT = 0.35 if SMALL_ACCOUNT_MODE else 0.60       # follow-through momentum (%).
+HARVEST_MOMENTUM_MIN_TP_PCT = 0.032 if SMALL_ACCOUNT_MODE else 0.035      # minimum expected TP (aligned with TP_PCT).
+HARVEST_MOMENTUM_MIN_RR = 1.5 if SMALL_ACCOUNT_MODE else 1.8              # minimum reward-to-risk ratio.
 
 # ==========================================
 # NET-ZERO SURVIVAL GUARD
@@ -134,14 +154,14 @@ NET_ZERO_HYSTERESIS_SEC = 3.0
 # If the portfolio is collapsing faster than this value, the survival guard fires
 # immediately on the first tick — no 3-second wait.
 # Example: a -7000 IDR/s momentum spike (well below -500) triggers instant exit.
-NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (any velocity below -500 IDR/s fires instantly)
+NET_ZERO_IMMEDIATE_VELOCITY = -120.0  # IDR/s  (profil modal kecil)
 
 # Minimum combined Net PnL (realized + unrealized) the portfolio must reach before
 # the guard even considers firing.  Prevents triggering on Rp -1 rounding noise or
 # a single position dipping -0.3% while heading to its +3% TP.
 # Rule of thumb: set to -(3 × BASKET_HARVEST_TARGET_IDR) so the guard only fires
 # when the session is in genuine loss territory — not just temporarily underwater.
-NET_ZERO_PNL_FLOOR_IDR = -250000       # IDR  (fires only when Net PnL ≤ -Rp 250.000)
+NET_ZERO_PNL_FLOOR_IDR = -int(max(15000, INITIAL_CAPITAL * 0.15))  # 15% modal (min -15k)
 
 # Unrealized loss as a fraction of total invested capital that must be exceeded before
 # the guard arms.  Prevents spurious exits on tiny dips (e.g., 5 positions each down

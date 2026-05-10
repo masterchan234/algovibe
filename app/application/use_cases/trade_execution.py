@@ -18,6 +18,13 @@ from config import (
     CAPITAL_RESERVE_FAST_TRADE_PCT,
     POSITION_RESERVE_PCT,
     HIGH_OPPORTUNITY_TQ_PROB,
+    SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB,
+    SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT,
+    SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX,
+    SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX,
+    SMALL_ACCOUNT_CLAMP_TIER1_PCT,
+    SMALL_ACCOUNT_CLAMP_TIER2_PCT,
+    SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
 
 
@@ -161,9 +168,20 @@ def execute_trade(
             # we 'clamp' to the minimum trade amount to ensure the bot can actually execute.
             if is_small_account and target_amount < MIN_TRADE_IDR:
                 # Only elevate if technical probability is solid (no AI bias)
-                if tq_prob >= 0.45 and balance >= MIN_TRADE_IDR * 1.15:
-                    log_message(f"🧠 [Intelligent Sizing] Elevating {pair} to Min Trade (Rp {MIN_TRADE_IDR:,.0f}) for execution.")
-                    target_amount = MIN_TRADE_IDR * 1.05 # Add 5% buffer for market volatility
+                if tq_prob >= SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB and balance >= MIN_TRADE_IDR * SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT:
+                    # Tiered clamp avoids a single hard floor for 25k-60k balances.
+                    if balance < SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER1_PCT)
+                    elif balance < SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER2_PCT)
+                    else:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER3_PCT)
+
+                    log_message(
+                        f"🧠 [Intelligent Sizing] Tiered clamp {pair}: "
+                        f"Rp {target_amount:,.0f} -> Rp {clamp_target:,.0f}"
+                    )
+                    target_amount = clamp_target
 
             reserve_idr = balance * reserve_pct
             if is_high_opportunity_fast:

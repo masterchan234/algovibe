@@ -237,10 +237,20 @@ async function handleLogout() {
 
 async function refreshDashboardState() {
   const headers = getAuthHeaders()
+  let statsPath = '/api/live/stats'
+  let tradesPath = '/api/live/positions'
+
+  try {
+    const mode = localStorage.getItem('algovibe_mode')
+    if (mode === 'dry') {
+      statsPath = '/api/dry/stats'
+      tradesPath = '/api/dry/positions'
+    }
+  } catch {}
 
   const [statsRes, tradesRes] = await Promise.all([
-    fetch(`${backendUrl}/api/stats`, { headers, credentials: 'include' }),
-    fetch(`${backendUrl}/api/trades`, { headers, credentials: 'include' }),
+    fetch(`${backendUrl}${statsPath}`, { headers, credentials: 'include' }),
+    fetch(`${backendUrl}${tradesPath}`, { headers, credentials: 'include' }),
   ])
 
   if (statsRes.ok) {

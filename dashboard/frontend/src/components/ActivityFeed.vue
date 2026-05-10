@@ -14,19 +14,10 @@
     <nav class="feed-nav">
       <div class="segmented-control">
         <button 
-          :class="{ active: filterMode === 'all' }" 
-          @click="filterMode = 'all'"
+          :class="{ active: filterMode === 'overview' }" 
+          @click="filterMode = 'overview'"
         >
           Overview
-        </button>
-        <button 
-          :class="{ active: filterMode === 'active' }" 
-          @click="filterMode = 'active'"
-        >
-          Active
-          <span v-if="activeVisibleCount > 0" class="tab-count">
-            {{ activeVisibleCount }}
-          </span>
         </button>
         <button 
           :class="{ active: filterMode === 'history' }" 
@@ -39,9 +30,10 @@
     </nav>
 
     <!-- Contextual Panel (Positions / History) -->
-    <div class="context-panel" :class="{ 'collapsed': filterMode === 'all' && store.positions.length === 0 }">
-      <!-- Active Positions Mode -->
-      <div class="positions-section" v-if="filterMode === 'active' || (filterMode === 'all' && store.positions.length > 0)">
+    <div class="context-panel" :class="{ 'collapsed': filterMode !== 'history' && filterMode !== 'overview' }">
+
+      <!-- Active Positions Mode (Overview) -->
+      <div class="positions-section" v-if="filterMode === 'overview' || (filterMode === 'all' && store.positions.length > 0)">
         <div class="section-header">
           <div class="col-pair">PAIR</div>
           <div class="col-size">SIZE</div>
@@ -111,7 +103,7 @@
               <span v-else-if="isExitRequested(pos.pair)" class="exit-queued">QUEUED</span>
             </div>
           </div>
-          <div v-if="filterMode === 'active' && visiblePositions.length === 0" class="empty-state">
+          <div v-if="filterMode === 'overview' && visiblePositions.length === 0" class="empty-state">
             No active positions.
           </div>
         </div>
@@ -212,7 +204,7 @@ import { useAuth } from '../composables/useAuth'
 const { getAuthHeaders } = useAuth()
 
 const store = useTradeStore()
-const filterMode = ref('all')
+const filterMode = ref('overview')
 const activeStreamTab = ref('analisa') 
 
 // Threshold from server config — EXIT allowed only when Net PnL < this value

@@ -532,5 +532,6 @@ export const useTradeStore = defineStore('trade', () => {
     socket,
     forceLogout,
     latency,
+    lastSocketStatsAt,
   }
 })
