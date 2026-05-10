@@ -339,6 +339,10 @@ class ExitManager:
         if topup_idr <= 0:
             return False, "already_tradeable", 0.0
 
+        # Jika topup_idr di bawah minimum, langsung top-up MIN_TRADE_IDR (asal budget cukup)
+        if 0 < topup_idr < float(MIN_TRADE_IDR):
+            topup_idr = float(MIN_TRADE_IDR)
+
         remaining_budget = max(0.0, float(DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE) - float(cycle_budget_used or 0))
         if topup_idr > remaining_budget:
             return False, "insufficient_cycle_budget", 0.0
@@ -1416,6 +1420,10 @@ class ExitManager:
                 trigger_label  = ""
                 action_label   = ""
                 _BYPASS_LOG_INTERVAL = 60  # seconds between repeated bypass log messages
+                # [LOG] Basket Exit Trigger State
+                log_message(
+                    f"[BASKET_EXIT CHECK] NetPnL: Rp {total_net_pnl:,.0f} | GrossPnL: Rp {total_gross_pnl:,.0f} | Fees: Rp {total_fees_idr:,.0f} | Mode: {'EMERGENCY' if btc_crash_kill else 'NORMAL'} | Trigger: {trigger_label} | n={n} | has_losers={has_losers} | has_stagnant={has_stagnant} | harvest_only={harvest_only}"
+                )
 
                 # ── Exception: BTC Crash Kill Switch ─────────────────────────────────────
                 if btc_crash_kill:
