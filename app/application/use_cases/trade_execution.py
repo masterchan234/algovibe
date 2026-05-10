@@ -384,8 +384,9 @@ def execute_trade(
             params = {
                 'pair': pair.replace("idr", "_idr"),
             }
-            # [Final Fix] Use explicit create_order for market buy to avoid argument count confusion
-            order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, buy_price, params)
+            # Indodax via ccxt memerlukan price; gunakan ask agar taker-like dan cepat terisi.
+            market_buy_price = max(float(buy_price or 1), 1.0)
+            order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, market_buy_price, params)
             # Update buy_price dengan harga eksekusi asli jika tersedia
             buy_price = float(order.get('price') or price)
 

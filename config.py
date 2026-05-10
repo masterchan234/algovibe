@@ -69,8 +69,13 @@ MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat 
 # Dynamic tiered profit thresholds for exit_manager
 TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.015))  # 1.5% default
 TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
-TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.10))  # 10% of MIN_NET_PROFIT_IDR or amount_idr
-TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.20))  # 20% of MIN_NET_PROFIT_IDR or amount_idr
+TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.01))  # 1% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 10% for faster exits on profitable positions)
+TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 20%)
+
+# MICRO-PROFIT AUTO-EXIT: Exit immediately if position is small AND already profitable net
+# Allows quick harvesting of small wins without waiting for tier thresholds
+MICRO_PROFIT_MAX_SIZE_IDR = 15000  # Positions under 15k IDR
+MICRO_PROFIT_ENABLED = True        # Can disable if too aggressive
 
 # Default MIN_NET_PROFIT_IDR based on INITIAL_CAPITAL (fallback only)
 MIN_NET_PROFIT_IDR = int(max(50, INITIAL_CAPITAL * 0.0005))

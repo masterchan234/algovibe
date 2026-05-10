@@ -39,7 +39,7 @@
           <div class="col-size">SIZE</div>
           <div class="col-price">ENTRY/MARK</div>
           <div class="col-target">TARGETS</div>
-          <div class="col-pnl">PnL</div>
+          <div class="col-pnl">PnL (NET EXIT)</div>
           <div class="col-exit">ACTION</div>
         </div>
         <div class="positions-list">
@@ -73,7 +73,7 @@
                   class="progress-fill" 
                   :style="{ 
                     left: calculatePosition(pos) + '%',
-                    backgroundColor: pos.pnl_pct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
+                    backgroundColor: (pos.pnl_net_pct ?? pos.pnl_pct) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
                   }"
                 ></div>
                 <div class="target-marker sl" title="Stop Loss"></div>
@@ -87,7 +87,8 @@
 
             <div class="col-pnl">
               <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
-              <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
+              <div class="pnl-pct">{{ (pos.pnl_net_pct ?? pos.pnl_pct) > 0 ? '+' : '' }}{{ Number((pos.pnl_net_pct ?? pos.pnl_pct) || 0).toFixed(2) }}%</div>
+              <div class="pnl-kind" title="Execution-aware net estimate from orderbook depth and fees">NET EXIT EST.</div>
             </div>
 
             <div class="col-exit">
@@ -150,7 +151,7 @@
       </div>
     </div>
 
-    <!-- Live Intelligence Stream (Market / Analisa / LLM Exit) -->
+    <!-- Live Intelligence Stream (Market / Analisa / Open Coin Analysis Logs) -->
     <div class="stream-container">
       <div class="stream-tabs">
         <button 
@@ -169,7 +170,7 @@
           :class="{ active: activeStreamTab === 'llm' }"
           @click="activeStreamTab = 'llm'"
         >
-          <span class="tab-icon">🤖</span> LLM Exit
+          <span class="tab-icon">🧾</span> Open Coin Logs
           <span v-if="llmExitCount > 0" class="tab-count llm">{{ llmExitCount }}</span>
         </button>
         <div class="tab-indicator" :class="activeStreamTab"></div>
@@ -308,6 +309,10 @@ async function handleManualExit(pair) {
 
 const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
 
+const activeCoinPositions = computed(() =>
+  store.positions.filter((p) => ['TP HOLD', 'EXIT-MONITOR'].includes(String(p?.status || '').toUpperCase()))
+)
+
 watch(openPairSet, (pairs) => {
   const alive = new Set(Array.from(pairs || []))
 
@@ -324,18 +329,55 @@ watch(openPairSet, (pairs) => {
 
 const filteredStream = computed(() => {
   const items = store.activityFeed
+  const activePairs = new Set(activeCoinPositions.value.map((p) => String(p?.pair || '').toLowerCase()))
+  const activePairList = Array.from(activePairs)
+  const activeSymbols = activePairList.map((p) => p.replace(/idr$/i, '').toUpperCase())
+
   const marketItems = items.filter((item) => {
     const src = String(item?.source || '').toUpperCase()
     const side = String(item?.side || '').toUpperCase()
     return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
   })
-  const llmItems = items.filter((item) => {
-    const side = String(item?.side || '').toUpperCase()
-    return side.startsWith('LLM_')
+  const openCoinLogCandidates = items
+    .map((item) => {
+      const src = String(item?.source || '').toUpperCase()
+      if (src === 'MARKET_WS') return null
+
+      const rawPair = String(item?.pair || '').toLowerCase()
+      const msg = String(item?.message || '').toUpperCase()
+
+      if (activePairs.has(rawPair)) {
+        return { ...item, pair: rawPair }
+      }
+
+      const matchedSymbol = activeSymbols.find((sym) => sym && msg.includes(sym))
+      if (!matchedSymbol) return null
+
+      const matchedPair = activePairList.find((pair) => pair === `${matchedSymbol.toLowerCase()}idr`)
+      if (!matchedPair) return null
+
+      return { ...item, pair: matchedPair }
+    })
+    .filter(Boolean)
+
+  const openCoinLogItems = activeCoinPositions.value.map((pos) => {
+    const pair = String(pos?.pair || '').toLowerCase()
+    const latest = openCoinLogCandidates.find((item) => String(item?.pair || '').toLowerCase() === pair)
+    if (latest) return latest
+
+    const status = String(pos?.status || 'OPEN').toUpperCase()
+    return {
+      id: `synthetic-monitor-${pair}`,
+      created_at: String(pos?.created_at || pos?.timestamp || new Date().toISOString()),
+      pair,
+      side: 'MONITOR',
+      message: `Monitoring aktif ${formatPair(pair)} (${status}) — menunggu sinyal analisa/log terbaru.`,
+      source: 'SYNTHETIC',
+    }
   })
 
   if (activeStreamTab.value === 'market') return marketItems
-  if (activeStreamTab.value === 'llm') return store.llmDecisions
+  if (activeStreamTab.value === 'llm') return openCoinLogItems
   
   // Overview: show everything except dense market data
   return items.filter((item) => {
@@ -344,7 +386,7 @@ const filteredStream = computed(() => {
   })
 })
 
-const llmExitCount = computed(() => store.llmDecisions.length)
+const llmExitCount = computed(() => activeCoinPositions.value.length)
 
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
@@ -573,6 +615,7 @@ function formatIdr(val) {
 
 .pnl-val { font-weight: 900; font-size: 13px; }
 .pnl-pct { font-size: 11px; font-weight: 800; padding: 1px 4px; border-radius: 4px; display: inline-block; }
+.pnl-kind { font-size: 9px; font-weight: 700; opacity: 0.7; margin-top: 3px; letter-spacing: 0.3px; }
 
 .green .pnl-val { color: #3fb950; }
 .green .pnl-pct { background: rgba(63, 185, 80, 0.1); color: #3fb950; }

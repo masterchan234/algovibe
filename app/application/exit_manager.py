@@ -25,6 +25,7 @@ from config import (
     NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
     TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT,
+    MICRO_PROFIT_ENABLED, MICRO_PROFIT_MAX_SIZE_IDR,
     get_dynamic_min_net_profit, get_dynamic_tp_pct
 )
 from app.infrastructure.database import db
@@ -89,6 +90,251 @@ class ExitManager:
             return datetime.fromisoformat(val)
         except Exception:
             return datetime.now()
+
+    def _fetch_live_bids(self, pair, depth_limit=20):
+        """Get latest bid levels from exchange; fallback to DB snapshot when unavailable."""
+        bids = []
+        symbol = f"{pair[:-3].upper()}/IDR"
+
+        try:
+            ob = self.exchange.fetch_order_book(symbol, limit=depth_limit)
+            raw_bids = ob.get('bids') or []
+            for row in raw_bids:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    px = float(row[0] or 0)
+                    vol = float(row[1] or 0)
+                elif isinstance(row, dict):
+                    px = float(row.get('price') or row.get('px') or 0)
+                    vol = float(row.get('amount') or row.get('vol') or row.get('qty') or 0)
+                else:
+                    continue
+                if px > 0 and vol > 0:
+                    bids.append({'price': px, 'vol': vol})
+        except Exception:
+            bids = []
+
+        if not bids:
+            try:
+                depth_data = db.get_market_depth(pair)
+                bids = list(depth_data.get('bids') or [])
+            except Exception:
+                bids = []
+
+        bids = [b for b in bids if float(b.get('price') or 0) > 0 and float(b.get('vol') or 0) > 0]
+        bids.sort(key=lambda x: float(x.get('price') or 0), reverse=True)
+        return bids[:depth_limit]
+
+    def _estimate_market_sell_net_from_orderbook(self, pair, amount, entry_price, amount_idr, depth_limit=20):
+        """Estimate full-fill market sell net PnL using current bid depth."""
+        amount = float(amount or 0)
+        entry_price = float(entry_price or 0)
+        amount_idr = float(amount_idr or 0)
+        if amount <= 0 or entry_price <= 0:
+            return {
+                'ok': False,
+                'reason': 'invalid_input',
+                'filled_amount': 0.0,
+                'avg_price': 0.0,
+                'sell_value': 0.0,
+                'net_pnl_idr': 0.0,
+                'fee_buy': 0.0,
+                'fee_sell': 0.0,
+            }
+
+        bids = self._fetch_live_bids(pair, depth_limit=depth_limit)
+        if not bids:
+            return {
+                'ok': False,
+                'reason': 'no_orderbook',
+                'filled_amount': 0.0,
+                'avg_price': 0.0,
+                'sell_value': 0.0,
+                'net_pnl_idr': 0.0,
+                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'fee_sell': 0.0,
+            }
+
+        remaining = amount
+        filled = 0.0
+        sell_value = 0.0
+        for lvl in bids:
+            px = float(lvl.get('price') or 0)
+            vol = float(lvl.get('vol') or 0)
+            if px <= 0 or vol <= 0:
+                continue
+            take = min(remaining, vol)
+            sell_value += take * px
+            filled += take
+            remaining -= take
+            if remaining <= 1e-12:
+                break
+
+        if filled <= 0:
+            return {
+                'ok': False,
+                'reason': 'zero_fill',
+                'filled_amount': 0.0,
+                'avg_price': 0.0,
+                'sell_value': 0.0,
+                'net_pnl_idr': 0.0,
+                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'fee_sell': 0.0,
+            }
+
+        if remaining > 1e-8:
+            return {
+                'ok': False,
+                'reason': 'insufficient_bid_depth',
+                'filled_amount': filled,
+                'avg_price': sell_value / filled,
+                'sell_value': sell_value,
+                'net_pnl_idr': 0.0,
+                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'fee_sell': sell_value * FEE_SELL_TAKER,
+            }
+
+        avg_price = sell_value / filled
+        fee_buy = amount_idr * FEE_BUY_TAKER
+        fee_sell = sell_value * FEE_SELL_TAKER
+        gross_pnl = (avg_price - entry_price) * filled
+        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+
+        return {
+            'ok': True,
+            'reason': 'ok',
+            'filled_amount': filled,
+            'avg_price': avg_price,
+            'sell_value': sell_value,
+            'net_pnl_idr': net_pnl_idr,
+            'fee_buy': fee_buy,
+            'fee_sell': fee_sell,
+        }
+
+    def _check_tp_market_sell_guard(self, pair, amount, entry_price, amount_idr, market_price=None, depth_limit=20):
+        """Central guard for TP exits using fee-only net PnL estimation."""
+        amount = float(amount or 0)
+        entry_price = float(entry_price or 0)
+        amount_idr = float(amount_idr or 0)
+        market_price = float(market_price or 0)
+
+        if amount <= 0 or entry_price <= 0:
+            return {
+                'ok': False,
+                'reason': 'invalid_input',
+                'required_profit_idr': 0.0,
+                'estimate': {
+                    'ok': False,
+                    'reason': 'invalid_input',
+                    'avg_price': 0.0,
+                    'net_pnl_idr': 0.0,
+                    'fee_buy': 0.0,
+                    'fee_sell': 0.0,
+                },
+                'message': 'input TP guard tidak valid',
+            }
+
+        # Fee-only mode sementara: gunakan harga pasar saat ini sebagai basis estimasi.
+        # depth_limit dipertahankan di signature untuk kompatibilitas pemanggil lama.
+        ref_exit_price = market_price if market_price > 0 else entry_price
+        sell_value = amount * ref_exit_price
+        fee_buy = amount_idr * FEE_BUY_TAKER
+        fee_sell = sell_value * FEE_SELL_TAKER
+        gross_pnl = (ref_exit_price - entry_price) * amount
+        estimate = {
+            'ok': True,
+            'reason': 'fee_only',
+            'filled_amount': amount,
+            'avg_price': ref_exit_price,
+            'sell_value': sell_value,
+            'net_pnl_idr': gross_pnl - (fee_buy + fee_sell),
+            'fee_buy': fee_buy,
+            'fee_sell': fee_sell,
+        }
+
+        dynamic_min_profit = get_dynamic_min_net_profit()
+        required_profit_idr = min(dynamic_min_profit, amount_idr * SMART_BREAK_EVEN_PCT)
+
+        est_net = float(estimate.get('net_pnl_idr') or 0)
+        if est_net < required_profit_idr:
+            return {
+                'ok': False,
+                'reason': 'below_profit_floor',
+                'required_profit_idr': required_profit_idr,
+                'estimate': estimate,
+                'message': (
+                    f"est net fee-only sell Rp {est_net:,.0f} < min Rp {required_profit_idr:,.0f} "
+                    f"(harga Rp {ref_exit_price:,.0f})"
+                ),
+            }
+
+        return {
+            'ok': True,
+            'reason': 'fee_only',
+            'required_profit_idr': required_profit_idr,
+            'estimate': estimate,
+            'message': 'fee-only TP guard aktif',
+        }
+
+    def _format_tp_hold_log(self, label, pair, guard):
+        """Build a consistent log line for TP holds and emergency exit deferrals."""
+        return f"⏳ [{label}] {pair}: {guard.get('message')}."
+
+    def _get_repost_limit_price_from_orderbook(self, pair, current_price):
+        """Pick a passive sell price just above the live best bid."""
+        current_price = float(current_price or 0)
+        bids = self._fetch_live_bids(pair)
+        best_bid = float(bids[0]['price']) if bids else 0.0
+
+        if best_bid > 0:
+            return round(best_bid * 1.0005, 0)
+
+        if current_price > 0:
+            return round(current_price * (1 + SELL_MAKER_OFFSET), 0)
+
+        return 0.0
+
+    def _cancel_open_sell_orders_for_pair(self, pair, exit_order_id=None):
+        """Cancel open sell orders for a pair using the most compatible exchange params."""
+        symbol = f"{pair[:-3].upper()}/IDR"
+        pair_param = f"{pair[:-3]}_idr"
+        cancelled = False
+
+        # Try the known exit order id first.
+        if exit_order_id:
+            try:
+                self.exchange.cancel_order(
+                    exit_order_id,
+                    symbol,
+                    params={'pair': pair_param, 'type': 'sell'}
+                )
+                cancelled = True
+            except Exception as err:
+                log_message(f"⚠️ EXIT cancel by id failed {pair} ({exit_order_id}): {err}")
+
+        # Best-effort sweep: cancel any remaining open sell orders for this pair.
+        try:
+            open_orders = self.exchange.fetch_open_orders(symbol)
+            for order in open_orders or []:
+                side = str(order.get('side') or '').lower()
+                if side != 'sell':
+                    continue
+                oid = str(order.get('id') or order.get('order_id') or '')
+                if not oid:
+                    continue
+                try:
+                    self.exchange.cancel_order(
+                        oid,
+                        symbol,
+                        params={'pair': pair_param, 'type': 'sell'}
+                    )
+                    cancelled = True
+                    log_message(f"🧹 [EXIT CANCEL SWEEP] Cancelled lingering sell order {oid} for {pair}")
+                except Exception as sweep_err:
+                    log_message(f"⚠️ [EXIT CANCEL SWEEP] {pair} order {oid} cancel failed: {sweep_err}")
+        except Exception as fetch_err:
+            log_message(f"⚠️ [EXIT CANCEL SWEEP] fetch_open_orders failed for {pair}: {fetch_err}")
+
+        return cancelled
 
     @property
     def dry_run(self):
@@ -495,7 +741,84 @@ class ExitManager:
             open_position_count = 0
 
             for pair, data in positions.items():
-                if data.get('status') != "OPEN":
+                status = str(data.get('status') or '').upper()
+                if status == "EXITING":
+                    try:
+                        exit_requested_at = data.get('exit_requested_at') or data.get('timestamp')
+                        if isinstance(exit_requested_at, str):
+                            exit_dt = self._parse_iso_date(exit_requested_at)
+                        else:
+                            exit_dt = datetime.now()
+                        exiting_age_sec = (datetime.now() - exit_dt).total_seconds()
+
+                        # Biarkan order bekerja normal dulu selama 2 menit.
+                        if exiting_age_sec < 120:
+                            continue
+
+                        current_price = float(current_tickers[pair].get('last') or current_tickers[pair].get('buy') or 0)
+                        entry_price = float(data.get('entry_price') or 0)
+                        amount = float(data.get('amount_crypto') or 0)
+                        if current_price <= 0 or amount <= 0:
+                            continue
+
+                        momentum_signal = 'HOLD'
+                        technical_confidence = 0.50
+                        hist = []
+                        if price_history and pair in price_history:
+                            hist = list(price_history.get(pair, []))
+                        if not hist or hist[-1] != current_price:
+                            hist = (hist + [current_price])[-180:]
+
+                        if len(hist) >= 2:
+                            tech = get_technical_summary(hist)
+                            depth_data = db.get_market_depth(pair)
+                            if depth_data['bids'] and depth_data['asks']:
+                                total_bid = sum(b['vol'] for b in depth_data['bids'])
+                                total_ask = sum(a['vol'] for a in depth_data['asks'])
+                                total_depth = total_bid + total_ask
+                                if total_depth > 0:
+                                    tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
+                            tech_sig = derive_trade_signal(tech)
+                            momentum_signal = tech_sig.get('verdict', 'HOLD')
+                            technical_confidence = float(tech_sig.get('confidence', 50) or 50) / 100.0
+
+                        # Force fallback jika terlalu lama + momentum memburuk, atau sangat lama tanpa fill.
+                        is_momentum_bad = (momentum_signal == 'SELL') or (technical_confidence < 0.40)
+                        is_underwater = entry_price > 0 and current_price < entry_price * 0.995
+                        should_fallback = (exiting_age_sec >= 180 and (is_momentum_bad or is_underwater)) or exiting_age_sec >= 360
+
+                        if not should_fallback or self.dry_run:
+                            continue
+
+                        old_exit_order_id = data.get('exit_order_id')
+                        if old_exit_order_id:
+                            self._cancel_open_sell_orders_for_pair(pair, old_exit_order_id)
+
+                        log_message(
+                            f"⚠️ [EXIT TIMEOUT OVERRIDE] {pair}: market-only mode, "
+                            f"tetap lanjut emergency market sell."
+                        )
+
+                        new_order_id = self.execute_exit(
+                            pair,
+                            amount,
+                            current_price,
+                            "EXIT_TIMEOUT",
+                            entry_price=entry_price,
+                            amount_idr=data.get('amount_idr', 0),
+                            position_data=data
+                        )
+                        if new_order_id:
+                            mark_exit_requested(pair, new_order_id)
+                    except Exception as e:
+                        log_message(f"⚠️ EXITING timeout check error for {pair}: {e}")
+
+                    continue
+
+                if status == "DUST":
+                    continue
+
+                if status != "OPEN":
                     continue
                 open_position_count += 1
                 # Resolve current price: prefer live ticker, fall back to last known
@@ -774,7 +1097,7 @@ class ExitManager:
                                         pass
                                     self._fire_net_zero_survival(
                                         open_pairs_for_basket=open_pairs_for_basket,
-                                        realized_pnl=realized_pnl_today,
+                                        realized_pnl=realized_pnl_alltime,
                                         unrealized_pnl=total_net_pnl,
                                         net_total_pnl=net_total_pnl,
                                         latest_velocity=avg_velocity,
@@ -1138,8 +1461,20 @@ class ExitManager:
             try:
                 # Ambil harga terakhir dari ticker terbaru
                 if pair not in current_tickers:
-                    # log_message(f"Skipping {pair}: No ticker data")
-                    continue
+                    # ── FALLBACK: Fetch from REST API if WebSocket ticker is missing ──
+                    # (Happens when summary-24h broadcast hasn't included this pair yet)
+                    try:
+                        ticker = self.exchange.fetch_ticker(pair.upper() + "/IDR")
+                        current_tickers[pair] = {
+                            'last': ticker.get('last', 0),
+                            'buy': ticker.get('bid', ticker.get('last', 0)),
+                            'sell': ticker.get('ask', ticker.get('last', 0)),
+                        }
+                        # log_message(f"✅ [FALLBACK] Fetched {pair} via REST API")
+                    except Exception as _ex:
+                        # REST API also failed; skip this position for now
+                        # log_message(f"⏭️ {pair}: No ticker data (WS + REST failed)")
+                        continue
 
                 # Jika posisi sedang EXITING, cek timeout agar profit tidak balik arah.
                 if data.get('status') == "EXITING":
@@ -1193,15 +1528,20 @@ class ExitManager:
                         # Pastikan order lama benar-benar dibatalkan dulu agar tidak dobel jual.
                         old_exit_order_id = data.get('exit_order_id')
                         if old_exit_order_id:
-                            try:
-                                symbol_cancel = f"{pair[:-3].upper()}/IDR"
-                                self.exchange.cancel_order(
-                                    old_exit_order_id,
-                                    symbol_cancel,
-                                    params={'pair': pair[:-3] + "_idr", 'side': 'sell'}
-                                )
-                            except Exception as cancel_err:
-                                log_message(f"⚠️ EXITING fallback cancel skipped {pair}: {cancel_err}")
+                            self._cancel_open_sell_orders_for_pair(pair, old_exit_order_id)
+
+                        tp_guard = self._check_tp_market_sell_guard(
+                            pair,
+                            amount,
+                            entry_price,
+                            data.get('amount_idr', 0) or 0,
+                            market_price=current_price,
+                        )
+                        if not tp_guard.get('ok'):
+                            log_message(
+                                f"⚠️ [EXIT TIMEOUT OVERRIDE] {pair}: market-only mode, "
+                                f"tetap lanjut emergency market sell."
+                            )
 
                         log_message(
                             f"⚠️ [EXIT TIMEOUT FALLBACK] {pair}: {int(exiting_age_sec)}s, "
@@ -1310,6 +1650,12 @@ class ExitManager:
                         # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
                     continue
                 # --- END AUTO-CANCEL ---
+
+                status = str(data.get('status') or '').upper()
+                if status == 'DUST':
+                    # Dust tetap tracked, tapi hanya ditop-up saat sinyal BUY muncul.
+                    # Setelah posisi cukup besar, status akan dipromosikan ke OPEN oleh DCA/top-up ini.
+                    pass
     
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else get_dynamic_tp_pct()
@@ -1361,6 +1707,28 @@ class ExitManager:
                 duration_str = f"{int(pos_age_min)}m"
 
                 active_sl_price = initial_sl_price
+
+                # [DUST RECOVERY] Dust tetap tracked, tapi hanya diaktifkan saat sinyal BUY muncul.
+                # Setelah top-up, posisi dipromosikan kembali ke OPEN supaya TP bisa menjual 100% agregat.
+                if status == 'DUST':
+                    from config import MIN_TRADE_IDR
+                    if momentum_signal == 'BUY' and technical_confidence >= DCA_MIN_TECH_CONFIDENCE:
+                        current_dust_idr = float(data.get('amount_idr', 0) or 0)
+                        topup_idr = max(MIN_TRADE_IDR, MIN_TRADE_IDR - current_dust_idr)
+                        log_message(
+                            f"♻️ [DUST RECOVERY BUY] {pair}: BUY signal detected, top-up Rp {topup_idr:,.0f} "
+                            f"agar posisi kembali layak trade."
+                        )
+                        success = self.execute_averaging_down(
+                            pair,
+                            data,
+                            current_price,
+                            override_add_amount_idr=topup_idr,
+                        )
+                        if success:
+                            positions[pair]['status'] = 'OPEN'
+                            modified_pairs.add(pair)
+                    continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -1387,6 +1755,35 @@ class ExitManager:
                     is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
                     is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
+                    # [MICRO-PROFIT AUTO-EXIT] Small positions that are already profitable: exit immediately
+                    # Allows quick harvesting of small wins without waiting for tier thresholds
+                    micro_profit_guard = self._check_tp_market_sell_guard(
+                        pair,
+                        amount,
+                        entry_price,
+                        amount_idr_pos,
+                        market_price=current_price,
+                    )
+                    if MICRO_PROFIT_ENABLED and amount_idr_pos <= MICRO_PROFIT_MAX_SIZE_IDR:
+                        if not micro_profit_guard.get('ok') or net_pnl_idr <= 0:
+                            log_message(
+                                f"⏭️ [MICRO-PROFIT SKIP] {pair}: net profit belum tercapai "
+                                f"(est={net_pnl_idr:,.0f} IDR, guard={micro_profit_guard.get('reason')})."
+                            )
+                            continue
+                        reason_tp = "MICRO_PROFIT_EXIT"
+                        log_message(
+                            f"🚀 [MICRO-PROFIT EXIT] {pair}: Position size Rp {amount_idr_pos:,.0f} "
+                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_idr:,.0f} IDR ({current_profit_pct*100:.2f}%), exiting immediately!"
+                        )
+                        order_id = self.execute_exit(pair, amount, current_price, reason_tp,
+                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                        if order_id:
+                            log_message(f"✅ [MICRO-PROFIT ORDER PLACED] {pair}: Order {order_id}")
+                            mark_exit_requested(pair, order_id)
+                        else:
+                            log_message(f"⚠️ [MICRO-PROFIT ORDER FAILED] {pair}: execute_exit returned None")
+                        continue
                     # Logika Tier 3: FORCE EXIT (Profit sangat bagus, amankan)
                     if is_tier3_high_profit:
                         reason_tp = "FORCE_PROFIT_HIGH_TIER"
@@ -1426,34 +1823,56 @@ class ExitManager:
                 except Exception as e:
                     log_message(f"⚠️ Error in Global Tiered TP for {pair}: {e}")
                     continue
+
+                # [DUST RECOVERY] Jika masih dust tapi sinyal BUY kuat, lakukan top-up market buy
+                # supaya posisi bisa kembali menjadi trade yang layak dan nantinya dijual 100%.
+                if status == 'DUST':
+                    from config import MIN_TRADE_IDR
+                    if momentum_signal == 'BUY' and technical_confidence >= DCA_MIN_TECH_CONFIDENCE:
+                        current_dust_idr = float(data.get('amount_idr', 0) or 0)
+                        topup_idr = max(MIN_TRADE_IDR, MIN_TRADE_IDR - current_dust_idr)
+                        log_message(
+                            f"♻️ [DUST RECOVERY BUY] {pair}: BUY signal detected, top-up Rp {topup_idr:,.0f} "
+                            f"agar posisi kembali layak trade."
+                        )
+                        success = self.execute_averaging_down(
+                            pair,
+                            data,
+                            current_price,
+                            override_add_amount_idr=topup_idr,
+                        )
+                        if success:
+                            positions[pair]['status'] = 'OPEN'
+                            modified_pairs.add(pair)
+                        continue
+                    else:
+                        continue
     
                 # --- [AI-Free] Emergency exit signals are handled by Tier 2 technical exit
                 # (momentum SELL + tech weakness) and Tier 3 force-exit above. Any
                 # remaining position continues to hard SL / manual exit below.
 
                 # 2. Take Profit (Hard TP)
-                # DEBUG: Log TP status for first 3 positions
-                if pair in ["bioidr", "tnsridr", "chillguyidr"]:
-                    log_message(
-                        f"📊 [{pair}] TP-Status: current_price={current_price:.0f} vs tp_price={tp_price:.0f} | "
-                        f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
-                    )
+                # DEBUG: Log TP status for all open positions (helps diagnose missing exits)
+                log_message(
+                    f"📊 [{pair}] TP-Status: current_price={current_price:.0f} vs tp_price={tp_price:.0f} | "
+                    f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
+                )
                 
                 if current_price >= tp_price:
-                    msg = (
-                        f"🎯 *TAKE PROFIT* 🎯\n"
-                        f"Pair: `{pair}`\n"
-                        f"Entry: Rp {entry_price:,.2f}\n"
-                        f"Exit: Rp {current_price:,.2f}\n"
-                        f"PnL: {pnl_pct:+.2f}%\n"
-                        f"Hold: {duration_str}"
-                    )
-                    print(msg.replace('*', '').replace('\n', ' | '))
-                    send_telegram_message(msg)
-                    
                     order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
+                        msg = (
+                            f"🎯 *TAKE PROFIT* 🎯\n"
+                            f"Pair: `{pair}`\n"
+                            f"Entry: Rp {entry_price:,.2f}\n"
+                            f"Exit: Rp {current_price:,.2f}\n"
+                            f"PnL: {pnl_pct:+.2f}%\n"
+                            f"Hold: {duration_str}"
+                        )
+                        print(msg.replace('*', '').replace('\n', ' | '))
+                        send_telegram_message(msg)
                         mark_exit_requested(pair, order_id)
     
                 # 3. [Senior Strategy] Averaging Down (DCA) or Stop Loss
@@ -1578,7 +1997,7 @@ class ExitManager:
                     try:
                         symbol = f"{coin.upper()}/IDR"
                         self.exchange.create_order(
-                            symbol, 'market', 'sell', amount, price,
+                            symbol, 'market', 'sell', amount, None,
                             {'pair': pair[:-3] + '_idr'}
                         )
                         log_message(
@@ -1666,34 +2085,73 @@ class ExitManager:
         db.save_state("pending_approval", "")
         return default_approve
 
-    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None):
+    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None, limit_price=None):
         try:
             entry_price = float(entry_price or 0)
-            # Tentukan apakah ini exit darurat (harus instant taker) atau target profit (maker)
+            # Semua exit dipaksa market sell (taker) sesuai kebijakan eksekusi cepat.
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
-            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT")
+            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT", "MICRO_PROFIT_EXIT")
             symbol = f"{pair[:-3].upper()}/IDR"
 
-            if is_emergency or is_tp_exit:
-                # [Senior Scaling Fix] Gunakan Market Order untuk kecepatan maksimal
-                # TP dan SL darurat tidak boleh antre, harus hajar BID pembeli sekarang juga.
-                exit_price = price * (1 - 0.001) # Buffer tipis untuk estimasi
-                fee_sell_rate = FEE_SELL_TAKER
-            else:
-                # Maker mode (masih digunakan untuk beberapa strategi jaring/limit)
-                exit_price = price * (1 + SELL_MAKER_OFFSET)
-                fee_sell_rate = FEE_SELL_MAKER
+            if is_tp_exit and not self.dry_run:
+                amount_idr_effective = float(amount_idr or 0)
+                if amount_idr_effective <= 0 and position_data:
+                    amount_idr_effective = float(position_data.get('amount_idr', 0) or 0)
+                # MICRO_PROFIT_EXIT bypasses TP guard entirely (small profitable positions)
+                if reason != "MICRO_PROFIT_EXIT":
+                    tp_guard = self._check_tp_market_sell_guard(
+                        pair,
+                        amount,
+                        entry_price,
+                        amount_idr_effective,
+                        market_price=price,
+                    )
+                else:
+                    tp_guard = {'ok': True, 'reason': 'micro_profit_bypass'}
+                if not tp_guard.get('ok'):
+                    guard_reason = str(tp_guard.get('reason') or '')
+                    if reason in ("FORCE_PROFIT_HIGH_TIER", "MICRO_PROFIT_EXIT") and guard_reason == 'below_profit_floor':
+                        log_message(
+                            f"⚠️ [GOD-MODE OVERRIDE] {pair}: bypass TP guard ({guard_reason}) untuk eksekusi cepat."
+                        )
+                    else:
+                        log_message(
+                            f"⚠️ [TP GUARD OVERRIDE] {pair}: {guard_reason}. "
+                            f"Tetap market sell sesuai mode market-only."
+                        )
 
-            # [Senior Scaling Fix] PIGGYBACK: Ambil seluruh saldo koin yang tersedia
+            # Exit selalu market/taker.
+            exit_price = price * (1 - 0.001)  # Buffer tipis untuk estimasi awal
+            fee_sell_rate = FEE_SELL_TAKER
+
+            # [Senior Scaling Fix] PIGGYBACK + SAFETY CLAMP: jangan pernah jual melebihi saldo free.
+            # Ini mencegah error "Insufficient balance" saat amount posisi > saldo real (partial/rounding/locked).
             coin = pair[:-3].upper()
             try:
                 if not self.dry_run:
                     balance = self.exchange.fetch_balance()
-                    real_balance = float(balance['free'].get(coin, 0))
-                    if real_balance > (amount * 0.9): # Jika ada saldo koin nyata
-                        amount = real_balance
-            except Exception: pass
+                    free_map = balance.get('free', {}) if isinstance(balance, dict) else {}
+                    real_balance = float(free_map.get(coin, 0) or 0)
+
+                    # Sisakan buffer kecil untuk menghindari gagal karena presisi/fee residual.
+                    sellable_balance = max(real_balance * 0.999, 0.0)
+                    amount = min(float(amount or 0), sellable_balance)
+
+                    # Normalisasi presisi amount mengikuti aturan market exchange.
+                    try:
+                        amount = float(self.exchange.amount_to_precision(symbol, amount))
+                    except Exception:
+                        pass
+
+                    if amount <= 0:
+                        log_message(
+                            f"⚠️ [EXIT SKIP] {pair}: saldo free {coin} tidak cukup untuk jual "
+                            f"(free={real_balance:.12f})."
+                        )
+                        return None
+            except Exception:
+                pass
 
             # Use position's original mode if available, fallback to current global mode
             use_dry_run = self.dry_run
@@ -1710,15 +2168,55 @@ class ExitManager:
                 }
             else:
                 params = {'pair': pair[:-3] + "_idr"}
-                if is_emergency or is_tp_exit:
-                    # [Final Fix] Use explicit create_order for market sell
-                    order = self.exchange.create_order(symbol, 'market', 'sell', amount, price, params)
-                    # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
-                    exit_price = order.get('price') or price
-                else:
-                    params['post_only'] = True
-                    # [Final Fix] Use explicit create_order for limit sell
-                    order = self.exchange.create_order(symbol, 'limit', 'sell', amount, exit_price, params)
+                # [Final Fix] Market-only sell path
+                try:
+                    # Indodax via ccxt tetap butuh price; pakai bid agresif agar taker-like.
+                    try:
+                        tkr = self.exchange.fetch_ticker(symbol)
+                        taker_sell_price = float(tkr.get('bid') or tkr.get('last') or price or 1)
+                    except Exception:
+                        taker_sell_price = float(price or 1)
+                    if taker_sell_price < 1:
+                        taker_sell_price = 1.0
+
+                    order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
+                except Exception as place_err:
+                    err_text = str(place_err).lower()
+                    # Race-safe retry: jika saldo berubah/terkunci setelah kalkulasi awal, refresh lalu retry 1x.
+                    if (not use_dry_run) and ('insufficient balance' in err_text):
+                        try:
+                            balance_retry = self.exchange.fetch_balance()
+                            free_map_retry = balance_retry.get('free', {}) if isinstance(balance_retry, dict) else {}
+                            real_balance_retry = float(free_map_retry.get(coin, 0) or 0)
+                            retry_amount = max(real_balance_retry * 0.999, 0.0)
+                            try:
+                                retry_amount = float(self.exchange.amount_to_precision(symbol, retry_amount))
+                            except Exception:
+                                pass
+
+                            if retry_amount > 0 and retry_amount < float(amount or 0):
+                                log_message(
+                                    f"⚠️ [EXIT RETRY] {pair}: insufficient balance, retry amount {retry_amount:.12f} {coin} "
+                                    f"(prev {float(amount or 0):.12f})."
+                                )
+                                amount = retry_amount
+                                order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
+                            else:
+                                log_message(
+                                    f"⚠️ [EXIT SKIP] {pair}: insufficient balance setelah refresh "
+                                    f"(free={real_balance_retry:.12f} {coin})."
+                                )
+                                return None
+                        except Exception as retry_err:
+                            if 'insufficient balance' in str(retry_err).lower():
+                                log_message(f"⚠️ [EXIT SKIP] {pair}: insufficient balance on retry.")
+                                return None
+                            raise retry_err
+                    else:
+                        raise place_err
+
+                # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
+                exit_price = order.get('price') or taker_sell_price or price
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
@@ -1726,9 +2224,9 @@ class ExitManager:
             order_status = order.get('status', 'closed')
             order_id = order.get('id')
             
-            # Tentukan fee jual berdasarkan strategi exit
-            exec_type = "TAKER" if (is_emergency or is_tp_exit) else "MAKER"
-            fee_sell_rate = FEE_SELL_TAKER if (is_emergency or is_tp_exit) else FEE_SELL_MAKER
+            # Semua exit market-only => exec type selalu TAKER
+            exec_type = "TAKER"
+            fee_sell_rate = FEE_SELL_TAKER
             
             # Entry fee sekarang Taker (karena bot hajar kanan/market buy)
             fee_buy = amount_idr * FEE_BUY_TAKER
@@ -1810,12 +2308,12 @@ class ExitManager:
             db.log_system_event(pair, "EXIT_ERROR", err_msg, 'ERROR')
             return None
                 
-    def execute_averaging_down(self, pair, data, current_price):
+    def execute_averaging_down(self, pair, data, current_price, override_add_amount_idr=None):
         """
         [Senior Strategy] Menambah muatan (DCA) pada posisi yang sedang drawdown.
         Menghitung ulang harga rata-rata dan memperbarui state di DB.
         """
-        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, BUY_MAKER_OFFSET, MIN_TRADE_IDR
+        from config import CAPITAL_PER_TRADE_PCT, INITIAL_CAPITAL, DCA_MULTIPLIER, MIN_TRADE_IDR
         
         try:
             old_entry_price = float(data['entry_price'])
@@ -1824,7 +2322,10 @@ class ExitManager:
             
             # 1. Tentukan nominal penambahan muatan
             # Default: Tambahkan nominal yang sama dengan muatan sebelumnya
-            add_amount_idr = old_amount_idr * DCA_MULTIPLIER
+            if override_add_amount_idr is not None:
+                add_amount_idr = float(override_add_amount_idr)
+            else:
+                add_amount_idr = old_amount_idr * DCA_MULTIPLIER
             
             # [Senior Fix] Guard: Pastikan nominal DCA memenuhi minimum order exchange
             if add_amount_idr < MIN_TRADE_IDR:
@@ -1848,12 +2349,17 @@ class ExitManager:
                     f"= {add_amount_crypto:.8f} koin at Rp {current_price:,.2f}"
                 )
             else:
-                # Eksekusi Limit Buy (Maker) untuk hemat fee: 0.1% vs 0.51% taker
-                # Pasang sedikit di bawah harga pasar agar antri sebagai maker
-                limit_price = current_price * (1 - BUY_MAKER_OFFSET)
-                params = {'pair': pair[:-3] + "_idr", 'post_only': True}
+                # DCA entry dipaksa market buy agar eksekusi instan dan konsisten.
+                params = {'pair': pair[:-3] + "_idr"}
+                try:
+                    tkr = self.exchange.fetch_ticker(symbol)
+                    taker_buy_price = float(tkr.get('ask') or tkr.get('last') or current_price or 1)
+                except Exception:
+                    taker_buy_price = float(current_price or 1)
+                if taker_buy_price < 1:
+                    taker_buy_price = 1.0
                 order = self.exchange.create_order(
-                    symbol, 'limit', 'buy', add_amount_crypto, limit_price, params
+                    symbol, 'market', 'buy', add_amount_crypto, taker_buy_price, params
                 )
                 # Gunakan nilai aktual dari order response jika tersedia
                 exec_price = float(order.get('price') or current_price)
@@ -2337,6 +2843,8 @@ class ExitManager:
             log_message("Reality Check: Reconciling positions with Indodax balance...")
             if self.dry_run: return # Dry run tidak punya saldo asli untuk di-cek
             
+            from config import MIN_TRADE_IDR
+
             balance = self.exchange.fetch_balance()
             open_positions = db.get_open_positions()
             
@@ -2355,6 +2863,48 @@ class ExitManager:
                     else:
                         # Order belum tersentuh/fill, jadi wajar saldonya 0. Skip cek hallucination.
                         continue
+
+                # Dust kecil tetap tracked, tapi jangan diperlakukan sebagai posisi aktif normal.
+                if 0 < amount_on_exchange < MIN_TRADE_IDR:
+                    if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
+                        pos['status'] = 'DUST'
+                        pos['amount_crypto'] = amount_on_exchange
+                        pos['amount_idr'] = amount_on_exchange * float(pos.get('entry_price') or 0)
+                        db.upsert_position(pair, pos)
+                        log_message(f"🧹 Reality Sync: {pair} converted to DUST ({amount_on_exchange:.12f} {coin}).")
+                    continue
+
+                # Jika status EXITING namun koin masih ada di wallet dan tidak ada open SELL order,
+                # berarti state exit nyangkut dan harus dikembalikan ke OPEN agar bisa dieksekusi ulang.
+                if pos.get('status') == "EXITING":
+                    try:
+                        symbol = f"{pair[:-3].upper()}/IDR"
+                        open_orders_pair = self.exchange.fetch_open_orders() or []
+                        exit_oid = str(pos.get('exit_order_id') or '')
+                        has_active_sell = False
+                        for o in open_orders_pair:
+                            if str(o.get('side', '')).lower() != 'sell':
+                                continue
+                            o_symbol = str(o.get('symbol') or '').upper()
+                            if o_symbol and o_symbol != symbol.upper():
+                                continue
+                            o_id = o.get('id')
+                            if not exit_oid or (o_id and self._order_id_match(o_id, exit_oid)):
+                                has_active_sell = True
+                                break
+
+                        target_amount = float(pos.get('amount_crypto') or pos.get('amount') or 0)
+                        if target_amount > 0 and amount_on_exchange >= (target_amount * 0.8) and not has_active_sell:
+                            pos['status'] = 'OPEN'
+                            pos['exit_order_id'] = None
+                            db.upsert_position(pair, pos)
+                            log_message(
+                                f"↩️ Reality Sync: {pair} EXITING without active SELL order "
+                                f"(wallet {amount_on_exchange:.8f} {coin}). Reverted to OPEN."
+                            )
+                            continue
+                    except Exception as _exit_sync_err:
+                        log_message(f"⚠️ Reality Sync EXITING check failed for {pair}: {_exit_sync_err}")
 
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:
@@ -2565,6 +3115,19 @@ class ExitManager:
                                         log_message(f"↩️ Reality Sync: {p} exit order {oid} {final_status}. Position reverted to OPEN.")
                                     elif final_status == 'FILLED':
                                         log_message(f"✅ Reality Sync: {p} exit order {oid} already FILLED. Waiting trade reconcile.")
+                                else:
+                                    # Anti-stuck fallback: order tidak ditemukan di open-orders maupun recent history.
+                                    # Jika posisi sudah lama EXITING, kembalikan ke OPEN agar loop exit bisa retry.
+                                    pos_ts = self._parse_iso_date(pos.get('timestamp'))
+                                    age_sec = (datetime.now() - pos_ts).total_seconds()
+                                    if age_sec > 300:
+                                        pos['status'] = 'OPEN'
+                                        pos['exit_order_id'] = None
+                                        db.upsert_position(p, pos)
+                                        log_message(
+                                            f"↩️ Reality Sync: {p} exit order {oid} tidak ditemukan di open/history "
+                                            f"(age {age_sec:.0f}s). Position reverted to OPEN for safe retry."
+                                        )
 
                     if isinstance(orders_dict, dict):
                         for pair_key, order_list in orders_dict.items():
@@ -2681,15 +3244,22 @@ class ExitManager:
             print(f"Jaring Manager Error: {e}")
 
     def place_jaring(self, pair, amount, price):
-        """Place a deep-limit buy order."""
+        """Place a market buy order for jaring allocation."""
         try:
-            log_message(f"Jaring: Placing Liquidity Grab on {pair} at Rp {price:,.2f}")
+            log_message(f"Jaring: Placing Market Buy on {pair} (ref Rp {price:,.2f})")
             if self.dry_run:
                 order_id = f"JARING-{int(time.time())}"
                 order = {"id": order_id, "status": "open", "price": price, "amount": amount}
             else:
-                # [Final Fix] Use explicit create_order for limit buy (Jaring)
-                order = self.exchange.create_order(pair.upper().replace("IDR", "/IDR"), 'limit', 'buy', amount, price, {'post_only': True})
+                # Market-only entry mode: jaring juga pakai market buy.
+                order = self.exchange.create_order(
+                    pair.upper().replace("IDR", "/IDR"),
+                    'market',
+                    'buy',
+                    amount,
+                    max(float(price or 1), 1.0),
+                    {'pair': pair[:-3] + "_idr"}
+                )
                 order_id = order['id']
             
             self.jaring_orders[pair] = {"id": order_id, "price": price, "amount": amount}

@@ -401,10 +401,9 @@ def _fetch_all_tickers_rest():
 def _fetch_real_idr_balance_bundle():
     """
     Fetch real IDR balance bundle (free/used/total) + all non-IDR coins.
-    [Senior Logic] PRIORITASKAN DATA DATABASE (yang didorong oleh bot via WebSocket).
-    Hanya lakukan REST pull jika data DB kosong.
+    [Senior Logic] ALWAYS FETCH FRESH from DB (no cache) to keep dashboard in sync with bot.
     """
-    # 1. Coba baca dari Database (Realtime Sync dari Engine)
+    # ALWAYS fetch fresh from Database (no caching — balance changes every cycle)
     try:
         db_bal = db.get_balances()
         if db_bal and 'IDR' in db_bal:
@@ -421,12 +420,12 @@ def _fetch_real_idr_balance_bundle():
                 "used": float(idr_data.get('used', 0)),
                 "total": float(idr_data.get('total', 0)),
                 "coins": coins,
-                "source": "DATABASE_SYNC"
+                "source": "DATABASE_FRESH"
             }
     except Exception as e:
         logging.warning(f"⚠️ Failed to read balances from DB: {e}")
 
-    # 2. Fallback ke REST API (Jika DB kosong atau gagal)
+    # Fallback ke REST API (Jika DB kosong atau gagal)
     try:
         user = db.get_user('admin')
         if not user or not user['api_key'] or not user['api_secret']:
@@ -1222,9 +1221,11 @@ def get_positions():
             except Exception:
                 pass
 
+            exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, amount_idr)
             fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
             fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-            pnl_net_idr = pnl_idr - fee_buy - fee_sell
+            pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - fee_buy - fee_sell)
+            pnl_net_pct = (pnl_net_idr / amount_idr * 100) if amount_idr > 0 else 0.0
 
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
             duration_sec = 0
@@ -1245,6 +1246,7 @@ def get_positions():
                 "pnl_idr": round(pnl_idr, 0),
                 "pnl_net_idr": round(pnl_net_idr, 0),
                 "pnl_pct": round(pnl_pct, 3),
+                "pnl_net_pct": round(pnl_net_pct, 3),
                 "status": pos['status'],
                 "duration_sec": duration_sec,
                 "opened_at": str(pos['timestamp'])
@@ -1257,6 +1259,112 @@ def get_positions():
         return jsonify([])
     finally:
         conn.close()
+
+
+def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_idr, depth_limit=20):
+    """Estimate full-fill market sell PnL from live bid depth.
+
+    Mirrors the bot-side exit guard: consume the bid stack from best bid down,
+    then apply taker fees to estimate the actual net result of a market sell.
+    """
+    import config as cfg
+
+    amount = float(amount or 0)
+    entry_price = float(entry_price or 0)
+    amount_idr = float(amount_idr or 0)
+    if amount <= 0 or entry_price <= 0:
+        return {
+            "ok": False,
+            "reason": "invalid_input",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": 0.0,
+            "fee_sell": 0.0,
+        }
+
+    bids = []
+    try:
+        live_depth = mws.get_market_depth(pair) or {}
+        bids = list(live_depth.get('bids') or [])
+    except Exception:
+        bids = []
+
+    if not bids:
+        try:
+            db_depth = db.get_market_depth(pair) or {}
+            bids = list(db_depth.get('bids') or [])
+        except Exception:
+            bids = []
+
+    if not bids:
+        return {
+            "ok": False,
+            "reason": "no_orderbook",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": 0.0,
+        }
+
+    remaining = amount
+    filled = 0.0
+    sell_value = 0.0
+    for lvl in bids[:depth_limit]:
+        px = float(lvl.get('price') or 0)
+        vol = float(lvl.get('vol') or 0)
+        if px <= 0 or vol <= 0:
+            continue
+        take = min(remaining, vol)
+        sell_value += take * px
+        filled += take
+        remaining -= take
+        if remaining <= 1e-12:
+            break
+
+    if filled <= 0:
+        return {
+            "ok": False,
+            "reason": "zero_fill",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": 0.0,
+        }
+
+    if remaining > 1e-8:
+        return {
+            "ok": False,
+            "reason": "insufficient_bid_depth",
+            "filled_amount": filled,
+            "avg_price": sell_value / filled,
+            "sell_value": sell_value,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": sell_value * cfg.FEE_SELL_TAKER,
+        }
+
+    avg_price = sell_value / filled
+    fee_buy = amount_idr * cfg.FEE_BUY_TAKER
+    fee_sell = sell_value * cfg.FEE_SELL_TAKER
+    gross_pnl = (avg_price - entry_price) * filled
+    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+
+    return {
+        "ok": True,
+        "reason": "ok",
+        "filled_amount": filled,
+        "avg_price": avg_price,
+        "sell_value": sell_value,
+        "net_pnl_idr": net_pnl_idr,
+        "fee_buy": fee_buy,
+        "fee_sell": fee_sell,
+    }
 
 
 @app.route('/api/llm-decisions')
@@ -3220,9 +3328,11 @@ def _build_trades_payload():
                 current_tp_pct = stored_tp_pct
 
                 _amount_idr = float(p.get('amount_idr') or 0)
+                exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, _amount_idr)
                 _fee_buy  = _amount_idr * cfg.FEE_BUY_TAKER
                 _fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-                pnl_net_idr = pnl_idr - _fee_buy - _fee_sell
+                pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - _fee_buy - _fee_sell)
+                pnl_net_pct = (pnl_net_idr / _amount_idr * 100) if _amount_idr > 0 else 0.0
                 is_fast_opp = int(p.get('is_high_opportunity_fast') or 0)
 
                 results.append({
@@ -3232,6 +3342,7 @@ def _build_trades_payload():
                     "pnl_idr":      round(pnl_idr, 0),
                     "pnl_net_idr":  round(pnl_net_idr, 0),
                     "pnl_pct":      round(pnl_pct, 2),
+                    "pnl_net_pct":  round(pnl_net_pct, 2),
                     "entry_price":  entry_price,
                     "exit_price":   last_price,
                     "target_tp":    current_tp_pct * 100,
