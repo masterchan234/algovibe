@@ -77,6 +77,16 @@ TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of M
 MICRO_PROFIT_MAX_SIZE_IDR = 15000  # Positions under 15k IDR
 MICRO_PROFIT_ENABLED = True        # Can disable if too aggressive
 
+# DUST Recovery Policy (quantitative controls)
+# Dust positions are only topped-up when signal quality is high and
+# runtime budget/cooldown constraints are satisfied.
+DUST_RECOVERY_ENABLED = os.getenv("DUST_RECOVERY_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+DUST_RECOVERY_MIN_CONFIDENCE = float(os.getenv("DUST_RECOVERY_MIN_CONFIDENCE", 0.70))
+DUST_RECOVERY_COOLDOWN_SEC = int(os.getenv("DUST_RECOVERY_COOLDOWN_SEC", 600))
+DUST_RECOVERY_MIN_VOL_IDR = float(os.getenv("DUST_RECOVERY_MIN_VOL_IDR", 10000000))
+DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE = int(os.getenv("DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE", 2))
+DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE = float(os.getenv("DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE", 20000))
+
 # Default MIN_NET_PROFIT_IDR based on INITIAL_CAPITAL (fallback only)
 MIN_NET_PROFIT_IDR = int(max(50, INITIAL_CAPITAL * 0.0005))
 

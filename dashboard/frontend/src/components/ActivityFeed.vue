@@ -137,7 +137,7 @@
                 <div class="exit-reason" v-if="trade.reason">{{ trade.reason }}</div>
               </div>
               <div class="col-size">
-                <div class="val-idr">{{ formatIdr(trade.pnl_idr + (trade.amount_idr || 0)) }}</div>
+                <div class="val-idr">{{ formatIdr(trade.amount_idr || 0) }}</div>
               </div>
               <div class="col-price">
                 <div class="entry">{{ formatNumber(trade.entry_price) }}</div>

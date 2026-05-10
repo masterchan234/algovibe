@@ -867,94 +867,54 @@ def public_landing_data():
     conn = None
     try:
         conn = get_db_connection()
-        
-        # 1. Fetch Top 12 Signals from ticker_history (include price/change for landing cards)
-        rows = conn.execute(
-            "SELECT pair, score, trend, signal, ch_1h, ch_15m, ch_5m, history_json FROM ticker_history "
-            "WHERE score IS NOT NULL ORDER BY score DESC LIMIT 12"
-        ).fetchall()
-        
+
+        # 1. Signals — selalu dari live WebSocket/IPC (mws._tickers), bukan DB.
+        ws_tickers_snap = mws.get_tickers()
+        _live_pairs = [
+            (pair, data)
+            for pair, data in ws_tickers_snap.items()
+            if float(data.get('vol_idr') or 0) > 0
+        ]
+        # Urutkan berdasarkan volume IDR (pair paling aktif diprioritaskan).
+        _live_pairs.sort(key=lambda x: float(x[1].get('vol_idr') or 0), reverse=True)
+
         signals = []
-        for r in rows:
-            pair_raw = str(r['pair'] or '').upper()
-
-            last_price = 0.0
-            hist = []
-            try:
-                hist = json.loads(r.get('history_json') or '[]')
-                if isinstance(hist, list) and hist:
-                    last_price = float(hist[-1] or 0.0)
-            except Exception:
-                hist = []
-                last_price = 0.0
-
-            ch_5m = float(r.get('ch_5m') or 0.0)
-            ch_15m = float(r.get('ch_15m') or 0.0)
-            ch_1h = float(r.get('ch_1h') or 0.0)
-
-            # Fallback delta from local history if computed DB deltas are not available.
-            if abs(ch_1h) < 0.0001 and isinstance(hist, list) and len(hist) >= 2:
-                try:
-                    now_px = float(hist[-1] or 0.0)
-                    ref_px = 0.0
-                    if len(hist) >= 60 and float(hist[-60] or 0.0) > 0:
-                        ref_px = float(hist[-60])
-                    elif len(hist) >= 15 and float(hist[-15] or 0.0) > 0:
-                        ref_px = float(hist[-15])
-                    elif float(hist[-2] or 0.0) > 0:
-                        ref_px = float(hist[-2])
-                    if now_px > 0 and ref_px > 0:
-                        ch_1h = ((now_px - ref_px) / ref_px) * 100.0
-                except Exception:
-                    pass
-
+        for pair_key, data in _live_pairs[:12]:
+            last_price = float(data.get('last') or 0)
+            high_24h = float(data.get('high') or 0)
+            low_24h = float(data.get('low') or 0)
+            # Hitung change_24h dari posisi harga terakhir relatif terhadap midpoint range 24h.
+            # Tick proto tidak membawa field 'open', sehingga pendekatan ini digunakan.
+            if high_24h > 0 and low_24h > 0 and high_24h > low_24h and last_price > 0:
+                mid_24h = (high_24h + low_24h) / 2.0
+                ch_24h = ((last_price - mid_24h) / mid_24h) * 100.0
+            else:
+                ch_24h = 0.0
+            if ch_24h > 1.0:
+                trend = 'UP'
+            elif ch_24h < -1.0:
+                trend = 'DOWN'
+            else:
+                trend = 'SIDEWAYS'
             signals.append({
-                "pair": pair_raw.replace('IDR', ''),
-                "score": float(r['score'] or 50),
-                "confidence": 70, # Static confidence for landing teaser
-                "trend": str(r['trend'] or 'STABLE').upper(),
+                "pair": pair_key.upper().replace('IDR', ''),
+                "score": 50,
+                "confidence": 70,
+                "trend": trend,
                 "price": last_price,
-                # Keep landing UI backward-compatible with polling mapper.
-                "change_24h": ch_1h,
-                "ch_1h": ch_1h,
-                "ch_15m": ch_15m,
-                "ch_5m": ch_5m,
+                "change_24h": round(ch_24h, 2),
+                "ch_1h": round(ch_24h, 2),
+                "ch_15m": 0.0,
+                "ch_5m": 0.0,
             })
-        
-        # Fallback to bot_state if ticker_history is empty
-        if not signals:
-            signals_rows = conn.execute(
-                "SELECT key, value FROM bot_state WHERE key LIKE 'radar_reco_%%' LIMIT 12"
-            ).fetchall()
-            for r in signals_rows:
-                pair = r['key'].replace('radar_reco_', '')
-                try:
-                    val = json.loads(r['value'])
-                    signals.append({
-                        "pair": pair.upper().replace('IDR', ''),
-                        "score": val.get('score', 50),
-                        "confidence": val.get('confidence', 70),
-                        "trend": val.get('trend', 'STABLE'),
-                        "price": float(val.get('price', 0) or 0),
-                        "change_24h": float(val.get('change_24h', val.get('change', val.get('ch_1h', 0))) or 0),
-                        "ch_1h": float(val.get('ch_1h', 0) or 0),
-                        "ch_15m": float(val.get('ch_15m', 0) or 0),
-                        "ch_5m": float(val.get('ch_5m', 0) or 0),
-                    })
-                except:
-                    signals.append({
-                        "pair": pair.upper().replace('IDR', ''),
-                        "score": 50,
-                        "confidence": 60,
-                        "trend": str(r['value']).upper(),
-                        "price": 0,
-                        "change_24h": 0,
-                        "ch_1h": 0,
-                        "ch_15m": 0,
-                        "ch_5m": 0,
-                    })
 
-        # 2. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
+        # 2. Market Stats — BTC price selalu dari live WS, fallback ke bot_state DB
+        sentiment = int(db.get_state("market_sentiment_index") or 50)
+        _btc_live = ws_tickers_snap.get('btcidr', {})
+        btc_price = float(_btc_live.get('last') or 0) or float(db.get_state("last_price_btcidr") or 0)
+        regime = db.get_state("current_market_regime") or "SCANNING"
+
+        # 3. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
         llm_feed = _build_llm_decisions_payload(limit=5)
         brief_items = [
             {
@@ -966,25 +926,24 @@ def public_landing_data():
                and str(item.get("message") or "").strip()
         ]
 
-        # Fallback to existing public-safe AI insights only when brief is unavailable.
+        # Fallback: generate live insights dari WS snapshot ketika LLM brief tidak tersedia.
         if brief_items:
             insights = brief_items[:5]
         else:
-            ai_rows = conn.execute(
-                "SELECT DISTINCT ON (message) message, created_at FROM system_events "
-                "WHERE type IN ('AI_INSIGHT', 'AI_ORACLE') "
-                "ORDER BY message, created_at DESC LIMIT 5"
-            ).fetchall()
-            insights = sorted(
-                [{"message": r['message'], "created_at": str(r['created_at'])} for r in ai_rows],
-                key=lambda x: x['created_at'],
-                reverse=True,
-            )
-
-        # 3. Market Stats
-        sentiment = db.get_state("market_sentiment_index") or 50
-        btc_price = db.get_state("last_price_btcidr") or 0
-        regime = db.get_state("current_market_regime") or "SCANNING"
+            now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            top_vol_pair = _live_pairs[0][0].upper().replace('IDR', '') if _live_pairs else 'N/A'
+            btc_str = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            insights = [
+                {
+                    "message": (
+                        f"Market live: {len(_live_pairs)} pair aktif"
+                        f"{btc_str}"
+                        f" | Regime {regime} | Sentimen {sentiment}%"
+                        f" | Top vol: {top_vol_pair}"
+                    ),
+                    "created_at": now_ts
+                }
+            ]
         
         # 4. Intelligence Reports
         art_rows = conn.execute(
@@ -999,56 +958,26 @@ def public_landing_data():
             "created_at": str(r['created_at'])
         } for r in art_rows]
 
-        # 5. Public activity logs (sanitized for landing page)
-        log_rows = conn.execute(
-            """
-            SELECT created_at, message
-            FROM system_events
-            WHERE type IN ('AI_INSIGHT', 'AI_ORACLE', 'LLM_EXIT_HOLD')
-            ORDER BY created_at DESC
-            LIMIT 8
-            """
-        ).fetchall()
-        public_logs = [
-            {
-                "time": str(r['created_at']),
-                "message": str(r['message'] or '')[:160]
-            }
-            for r in log_rows
-        ]
-
-        # If the event stream is stale, synthesize lightweight live logs from
-        # current signal snapshot so landing activity panel keeps moving.
+        # 4. Public activity logs — selalu dari live signals (tidak bergantung DB events).
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        latest_log_ts = None
-        if log_rows:
-            raw_ts = log_rows[0]['created_at']
-            if isinstance(raw_ts, datetime.datetime):
-                latest_log_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=datetime.timezone.utc)
+        stream_ts = now_utc.isoformat()
+        public_logs = []
+        for pair_key, data in _live_pairs[:8]:
+            last = float(data.get('last') or 0)
+            high = float(data.get('high') or 0)
+            low = float(data.get('low') or 0)
+            if high > 0 and low > 0 and high > low and last > 0:
+                mid = (high + low) / 2.0
+                ch = round(((last - mid) / mid) * 100.0, 2)
             else:
-                parsed = _parse_iso_date(raw_ts)
-                if parsed is not None:
-                    latest_log_ts = parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
-
-        logs_are_stale = (
-            latest_log_ts is None
-            or (now_utc - latest_log_ts).total_seconds() > 180
-        )
-
-        if logs_are_stale:
-            stream_logs = []
-            stream_ts = now_utc.isoformat()
-            for sig in signals[:4]:
-                pair = str(sig.get('pair') or 'N/A')
-                score = float(sig.get('score') or 0.0)
-                trend = str(sig.get('trend') or 'STABLE').upper()
-                ch_1h = float(sig.get('ch_1h') or 0.0)
-                stream_logs.append({
-                    "time": stream_ts,
-                    "message": f"🧠 AI Rank: {score:.1f}% | Stream Snapshot {pair} ({trend}, 1H {ch_1h:+.2f}%)"
-                })
-
-            public_logs = (stream_logs + public_logs)[:8]
+                ch = 0.0
+            vol = float(data.get('vol_idr') or 0)
+            pair_label = pair_key.upper().replace('IDR', '')
+            trend_label = 'UP' if ch > 1.0 else ('DOWN' if ch < -1.0 else 'SIDEWAYS')
+            public_logs.append({
+                "time": stream_ts,
+                "message": f"📡 Live: {pair_label} {ch:+.2f}% vs midrange | Vol IDR {vol/1e6:.1f}M | {trend_label}"
+            })
 
         response = jsonify({
             "success": True,
@@ -3480,55 +3409,73 @@ def _build_llm_decisions_payload(limit: int = 20):
     """Kembalikan riwayat keputusan LiteRT-LM dari system_events."""
     conn = get_db_connection()
     try:
-        # MARKET INTELLIGENCE BRIEF: all variables are real data, summary text comes from LLM.
+        # MARKET INTELLIGENCE BRIEF: semua variabel dari live WebSocket/IPC, bukan DB.
         regime_raw = db.get_state("current_market_regime")
         sentiment_raw = db.get_state("market_sentiment_index")
-        btc_price_raw = db.get_state("last_price_btcidr")
 
-        regime = str(regime_raw).upper() if regime_raw else "N/A"
+        regime = str(regime_raw).upper() if regime_raw else "SCANNING"
         sentiment = int(float(sentiment_raw)) if sentiment_raw not in (None, "") else None
-        btc_price = float(btc_price_raw) if btc_price_raw not in (None, "") else None
 
-        stat_rows = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(CASE WHEN UPPER(signal) = 'BUY' THEN 1 ELSE 0 END), 0) AS buy_count,
-                COALESCE(SUM(CASE WHEN UPPER(signal) = 'SELL' THEN 1 ELSE 0 END), 0) AS sell_count,
-                AVG(score) AS avg_score,
-                MAX(updated_at) AS last_ticker_update
-            FROM ticker_history
-            """
-        ).fetchone()
+        # Ambil snapshot live tickers dari IPC/WS bridge
+        live_tickers = mws.get_tickers()
 
-        mover_row = conn.execute(
-            """
-            SELECT pair, ch_1h, score, signal
-            FROM ticker_history
-            ORDER BY ABS(ch_1h) DESC NULLS LAST
-            LIMIT 1
-            """
-        ).fetchone()
+        _btc_live = live_tickers.get('btcidr', {})
+        btc_price = float(_btc_live.get('last') or 0) or None
 
-        detail_rows = conn.execute(
-            """
-            SELECT pair, signal, trend, score, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, updated_at
-            FROM ticker_history
-            ORDER BY ABS(ch_1h) DESC NULLS LAST
-            LIMIT 12
-            """
-        ).fetchall()
+        _active_pairs = [
+            (k, v) for k, v in live_tickers.items()
+            if float(v.get('vol_idr') or 0) > 0
+        ]
+        # Urutkan berdasarkan volume IDR (pair paling aktif).
+        _active_pairs.sort(key=lambda x: float(x[1].get('vol_idr') or 0), reverse=True)
 
-        buy_count = int((stat_rows and stat_rows.get("buy_count")) or 0)
-        sell_count = int((stat_rows and stat_rows.get("sell_count")) or 0)
-        avg_score_val = (stat_rows and stat_rows.get("avg_score"))
-        avg_score = float(avg_score_val) if avg_score_val is not None else None
-        last_ticker_update = str((stat_rows and stat_rows.get("last_ticker_update")) or "N/A")
+        # Hitung buy/sell bias dari posisi harga vs midpoint 24h range
+        buy_count = 0
+        sell_count = 0
+        for _, v in _active_pairs:
+            last = float(v.get('last') or 0)
+            high = float(v.get('high') or 0)
+            low = float(v.get('low') or 0)
+            if high > 0 and low > 0 and high > low and last > 0:
+                mid = (high + low) / 2.0
+                if last > mid * 1.01:
+                    buy_count += 1
+                elif last < mid * 0.99:
+                    sell_count += 1
+        avg_score = None
+        now_str = datetime.datetime.now().isoformat()
+        last_ticker_update = now_str
 
-        top_pair = str((mover_row and mover_row.get("pair")) or "N/A").upper()
-        top_ch_1h = float((mover_row and mover_row.get("ch_1h")) or 0)
+        top_pair_key = _active_pairs[0][0].upper() if _active_pairs else "N/A"
+        top_ch_1h = float(_active_pairs[0][1].get('change_24h') or 0) if _active_pairs else 0
+
+        detail_tickers = []
+        for k, v in _active_pairs[:12]:
+            last = float(v.get('last') or 0)
+            high = float(v.get('high') or 0)
+            low = float(v.get('low') or 0)
+            if high > 0 and low > 0 and high > low and last > 0:
+                mid = (high + low) / 2.0
+                ch = round(((last - mid) / mid) * 100.0, 2)
+            else:
+                ch = 0.0
+            detail_tickers.append({
+                "pair": k.upper(),
+                "signal": "BUY" if ch > 1 else ("SELL" if ch < -1 else "HOLD"),
+                "trend": "UP" if ch > 1.0 else ("DOWN" if ch < -1.0 else "SIDEWAYS"),
+                "score": 50,
+                "prediction_prob": 0.5,
+                "ch_5m": 0,
+                "ch_15m": 0,
+                "ch_1h": ch,
+                "vol_idr": float(v.get('vol_idr') or 0),
+                "high_24h": high,
+                "low_24h": low,
+                "updated_at": now_str,
+            })
 
         market_vars = {
-            "generated_at": datetime.datetime.now().isoformat(),
+            "generated_at": now_str,
             "regime": regime,
             "sentiment_pct": sentiment,
             "btc_idr": btc_price,
@@ -3538,25 +3485,11 @@ def _build_llm_decisions_payload(limit: int = 20):
             },
             "avg_ai_score": avg_score,
             "top_mover_1h": {
-                "pair": top_pair,
+                "pair": top_pair_key,
                 "ch_1h": top_ch_1h,
             },
-            "ticker_history_last_update": last_ticker_update,
-            "tickers": [
-                {
-                    "pair": str(r.get("pair") or "").upper(),
-                    "signal": str(r.get("signal") or ""),
-                    "trend": str(r.get("trend") or ""),
-                    "score": float(r.get("score") or 0),
-                    "prediction_prob": float(r.get("prediction_prob") or 0),
-                    "ch_5m": float(r.get("ch_5m") or 0),
-                    "ch_15m": float(r.get("ch_15m") or 0),
-                    "ch_1h": float(r.get("ch_1h") or 0),
-                    "volatility": float(r.get("volatility") or 0),
-                    "updated_at": str(r.get("updated_at") or ""),
-                }
-                for r in detail_rows
-            ],
+            "live_pairs_count": len(_active_pairs),
+            "tickers": detail_tickers,
         }
 
         _request_market_brief_llm(market_vars)
@@ -3565,32 +3498,23 @@ def _build_llm_decisions_payload(limit: int = 20):
         llm_brief = worker.get_latest_result_by_type("market_intel_brief") if worker.is_active else None
 
         parsed_brief = _extract_json_brief_text(str(llm_brief or ""))
-        persisted_brief_row = conn.execute(
-            """
-            SELECT message, created_at
-            FROM system_events
-            WHERE type = 'MARKET_INTEL_BRIEF'
-              AND COALESCE(message, '') <> ''
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        persisted_brief = str((persisted_brief_row and persisted_brief_row.get("message")) or "").strip()
-        fallback_state_brief = str(db.get_state("hero_ai_insight") or "").strip()
 
         if parsed_brief:
             brief_message = parsed_brief
-            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
-        elif persisted_brief:
-            brief_message = persisted_brief[:260]
-            brief_created_at = str((persisted_brief_row and persisted_brief_row.get("created_at")) or datetime.datetime.now().isoformat())
-        elif fallback_state_brief:
-            brief_message = fallback_state_brief[:260]
-            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+            brief_created_at = now_str
         else:
-            # No synthetic narrative; wait until valid LLM response is available.
-            brief_message = "LLM response pending..."
-            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+            # Synthesize brief dari live market data saat LLM belum merespons.
+            # Tidak menggunakan persisted_brief dari DB agar konten selalu fresh dan valid.
+            top_label = top_pair_key.replace('IDR', '') if top_pair_key != 'N/A' else 'N/A'
+            btc_part = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            brief_message = (
+                f"Market live: {len(_active_pairs)} pair aktif"
+                f"{btc_part}"
+                f" | Regime {regime} | Sentimen {sentiment}%"
+                f" | Top vol: {top_label} {top_ch_1h:+.2f}%"
+                f" | Bullish-bias {buy_count} vs Bearish-bias {sell_count} pair"
+            )
+            brief_created_at = now_str
 
         rows = conn.execute(
             """

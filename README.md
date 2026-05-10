@@ -95,6 +95,18 @@ docker compose ps
 docker compose logs -f brain-inference
 ```
 
+### Catatan Operasional Penting (Update Terbaru)
+
+- Runtime utama adalah **Docker Compose**. Jika ada perubahan di `.env` (mis. `MIN_TRADE_IDR`), lakukan **force recreate** agar nilai env benar-benar ter-load ke container:
+
+```bash
+docker compose up -d --force-recreate executive-core dashboard-api brain-inference litert-lm-decision news-maker
+```
+
+- Threshold minimum trade/DUST saat ini menggunakan `MIN_TRADE_IDR` (default **10000**). Pastikan semua container membaca nilai yang sama untuk mencegah mismatch log (contoh `min Rp 11,000` vs `min Rp 10,000`).
+
+- Exit path terbaru menambahkan hardening untuk pair integer-only di Indodax (mencegah error `amount can't be in decimal`) dan safety cushion untuk `MICRO_PROFIT_EXIT` agar tidak mengeksekusi profit terlalu tipis yang rawan berubah negatif saat fill.
+
 ### Native (Development)
 
 Jika ingin menjalankan service secara manual untuk debugging:
@@ -122,6 +134,10 @@ Konfigurasi opsional untuk `litert-lm-decision` (via `.env`):
 - `LLM_EXIT_COOLDOWN_SEC` (default: `45`)
 - `LLM_EXIT_MIN_CONFIDENCE` (default: `80`)
 - `LLM_EXIT_MAX_PAIRS` (default: `4`)
+
+Konfigurasi trading inti terkait threshold minimum (via `.env`):
+
+- `MIN_TRADE_IDR` (default: `10000`)
 
 ---
 

@@ -2,6 +2,7 @@ import json
 import os
 import time
 import logging
+import math
 import re
 import threading
 from datetime import datetime, timedelta
@@ -26,6 +27,9 @@ from config import (
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
     TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT,
     MICRO_PROFIT_ENABLED, MICRO_PROFIT_MAX_SIZE_IDR,
+    DUST_RECOVERY_ENABLED, DUST_RECOVERY_MIN_CONFIDENCE, DUST_RECOVERY_COOLDOWN_SEC,
+    DUST_RECOVERY_MIN_VOL_IDR, DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE,
+    DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE,
     get_dynamic_min_net_profit, get_dynamic_tp_pct
 )
 from app.infrastructure.database import db
@@ -80,6 +84,8 @@ class ExitManager:
         self._net_zero_pretarget_logged: bool = False
         # Throttle for saving realised/unrealised PnL snapshots to bot_state (DB).
         self._last_pnl_snapshot_ts: float = 0.0
+        # DUST recovery anti-spam: per pair last top-up timestamp.
+        self._dust_recovery_last_ts: dict = {}
         self._sync_jaring_from_db()
 
     def _parse_iso_date(self, val):
@@ -288,6 +294,56 @@ class ExitManager:
     def _format_tp_hold_log(self, label, pair, guard):
         """Build a consistent log line for TP holds and emergency exit deferrals."""
         return f"⏳ [{label}] {pair}: {guard.get('message')}."
+
+    def _evaluate_dust_recovery(
+        self,
+        pair,
+        data,
+        current_tickers,
+        momentum_signal,
+        technical_confidence,
+        cycle_topups,
+        cycle_budget_used,
+    ):
+        """Quantitative policy gate for DUST top-up execution."""
+        from config import MIN_TRADE_IDR
+
+        if not DUST_RECOVERY_ENABLED:
+            return False, "disabled", 0.0
+
+        if str(momentum_signal or '').upper() != 'BUY':
+            return False, "signal_not_buy", 0.0
+
+        if float(technical_confidence or 0) < float(DUST_RECOVERY_MIN_CONFIDENCE):
+            return False, "low_confidence", 0.0
+
+        if int(cycle_topups) >= int(DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE):
+            return False, "cycle_topup_limit", 0.0
+
+        if float(cycle_budget_used or 0) >= float(DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE):
+            return False, "cycle_budget_exhausted", 0.0
+
+        ticker = current_tickers.get(pair) or {}
+        vol_idr = float(ticker.get('vol_idr') or 0)
+        if vol_idr < float(DUST_RECOVERY_MIN_VOL_IDR):
+            return False, "low_liquidity", 0.0
+
+        now_ts = time.time()
+        last_ts = float(self._dust_recovery_last_ts.get(pair) or 0.0)
+        if last_ts > 0 and (now_ts - last_ts) < float(DUST_RECOVERY_COOLDOWN_SEC):
+            return False, "cooldown_active", 0.0
+
+        current_dust_idr = float(data.get('amount_idr', 0) or 0)
+        target_notional_idr = max(float(MIN_TRADE_IDR) * 1.02, float(MIN_TRADE_IDR) + 100.0)
+        topup_idr = max(0.0, target_notional_idr - current_dust_idr)
+        if topup_idr <= 0:
+            return False, "already_tradeable", 0.0
+
+        remaining_budget = max(0.0, float(DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE) - float(cycle_budget_used or 0))
+        if topup_idr > remaining_budget:
+            return False, "insufficient_cycle_budget", 0.0
+
+        return True, "ok", topup_idr
 
     def _get_repost_limit_price_from_orderbook(self, pair, current_price):
         """Pick a passive sell price just above the live best bid."""
@@ -579,6 +635,8 @@ class ExitManager:
         
         
         modified_pairs = set()
+        dust_topups_this_cycle = 0
+        dust_budget_used_idr = 0.0
 
         # --- [ACTIVE DISCOVERY] ---
         # [Senior Fix] Jalankan Discovery di LUAR cek 'if not positions'
@@ -1721,24 +1779,55 @@ class ExitManager:
                 # [DUST RECOVERY] Dust tetap tracked, tapi hanya diaktifkan saat sinyal BUY muncul.
                 # Setelah top-up, posisi dipromosikan kembali ke OPEN supaya TP bisa menjual 100% agregat.
                 if status == 'DUST':
-                    from config import MIN_TRADE_IDR
-                    if momentum_signal == 'BUY' and technical_confidence >= DCA_MIN_TECH_CONFIDENCE:
-                        current_dust_idr = float(data.get('amount_idr', 0) or 0)
-                        topup_idr = max(MIN_TRADE_IDR, MIN_TRADE_IDR - current_dust_idr)
+                    # [DUST SMART-PROMOTE] Jika posisi DUST sedang profit dan nilai pasarnya
+                    # sudah >= MIN_TRADE_IDR, langsung promosi ke OPEN agar bisa di-TP — tanpa perlu top-up.
+                    from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
+                    current_dust_value_idr = float(amount or 0) * float(current_price or 0)
+                    if current_profit_pct > 0 and current_dust_value_idr >= _MIN_TRADE_IDR:
                         log_message(
-                            f"♻️ [DUST RECOVERY BUY] {pair}: BUY signal detected, top-up Rp {topup_idr:,.0f} "
-                            f"agar posisi kembali layak trade."
+                            f"📈 [DUST SMART-PROMOTE] {pair}: nilai pasar Rp {current_dust_value_idr:,.0f} "
+                            f">= Rp {_MIN_TRADE_IDR:,} & profit {pnl_pct:.2f}%. "
+                            f"Promoting ke OPEN untuk exit TP."
                         )
-                        success = self.execute_averaging_down(
+                        positions[pair]['status'] = 'OPEN'
+                        data['status'] = 'OPEN'
+                        status = 'OPEN'
+                        modified_pairs.add(pair)
+                        # Tidak continue — fall through ke logika TP/SL di bawah
+                    else:
+                        can_recover, dust_reason, topup_idr = self._evaluate_dust_recovery(
                             pair,
                             data,
-                            current_price,
-                            override_add_amount_idr=topup_idr,
+                            current_tickers,
+                            momentum_signal,
+                            technical_confidence,
+                            dust_topups_this_cycle,
+                            dust_budget_used_idr,
                         )
-                        if success:
-                            positions[pair]['status'] = 'OPEN'
-                            modified_pairs.add(pair)
-                    continue
+                        if can_recover:
+                            log_message(
+                                f"♻️ [DUST RECOVERY BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
+                                f"conf={technical_confidence:.2f} | cycle={dust_topups_this_cycle + 1}/"
+                                f"{DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE}"
+                            )
+                            success = self.execute_averaging_down(
+                                pair,
+                                data,
+                                current_price,
+                                override_add_amount_idr=topup_idr,
+                            )
+                            if success:
+                                self._dust_recovery_last_ts[pair] = time.time()
+                                dust_topups_this_cycle += 1
+                                dust_budget_used_idr += float(topup_idr or 0)
+                                positions[pair]['status'] = 'OPEN'
+                                modified_pairs.add(pair)
+                        elif dust_reason in ('cycle_topup_limit', 'insufficient_cycle_budget'):
+                            log_message(
+                                f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
+                                f"(conf={technical_confidence:.2f}, budget_used={dust_budget_used_idr:,.0f})"
+                            )
+                        continue
     
                 # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
                 # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
@@ -1775,16 +1864,31 @@ class ExitManager:
                         market_price=current_price,
                     )
                     if MICRO_PROFIT_ENABLED and amount_idr_pos <= MICRO_PROFIT_MAX_SIZE_IDR:
-                        if not micro_profit_guard.get('ok') or net_pnl_idr <= 0:
+                        # Extra safety for micro exits: cushion berbasis CURRENT sell value
+                        # (bukan amount_idr yg bisa stale di DB), minimal 2% dari nilai jual
+                        # atau 200 IDR — cukup untuk menyerap spread+slippage saat fill.
+                        sell_value_micro = float(amount or 0) * float(current_price or 0)
+                        min_cushion_micro = max(200.0, sell_value_micro * 0.02)
+                        micro_required_profit_idr = max(
+                            float(micro_profit_guard.get('required_profit_idr') or 0.0),
+                            min_cushion_micro,
+                        )
+                        if (
+                            (not micro_profit_guard.get('ok'))
+                            or net_pnl_idr <= 0
+                            or net_pnl_idr < micro_required_profit_idr
+                        ):
                             log_message(
                                 f"⏭️ [MICRO-PROFIT SKIP] {pair}: net profit belum tercapai "
-                                f"(est={net_pnl_idr:,.0f} IDR, guard={micro_profit_guard.get('reason')})."
+                                f"(est={net_pnl_idr:,.0f} IDR, min={micro_required_profit_idr:,.0f}, "
+                                f"guard={micro_profit_guard.get('reason')})."
                             )
                             continue
                         reason_tp = "MICRO_PROFIT_EXIT"
                         log_message(
                             f"🚀 [MICRO-PROFIT EXIT] {pair}: Position size Rp {amount_idr_pos:,.0f} "
-                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_idr:,.0f} IDR ({current_profit_pct*100:.2f}%), exiting immediately!"
+                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_idr:,.0f} IDR "
+                            f"(min {micro_required_profit_idr:,.0f}, {current_profit_pct*100:.2f}%), exiting immediately!"
                         )
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
@@ -1837,13 +1941,20 @@ class ExitManager:
                 # [DUST RECOVERY] Jika masih dust tapi sinyal BUY kuat, lakukan top-up market buy
                 # supaya posisi bisa kembali menjadi trade yang layak dan nantinya dijual 100%.
                 if status == 'DUST':
-                    from config import MIN_TRADE_IDR
-                    if momentum_signal == 'BUY' and technical_confidence >= DCA_MIN_TECH_CONFIDENCE:
-                        current_dust_idr = float(data.get('amount_idr', 0) or 0)
-                        topup_idr = max(MIN_TRADE_IDR, MIN_TRADE_IDR - current_dust_idr)
+                    can_recover, dust_reason, topup_idr = self._evaluate_dust_recovery(
+                        pair,
+                        data,
+                        current_tickers,
+                        momentum_signal,
+                        technical_confidence,
+                        dust_topups_this_cycle,
+                        dust_budget_used_idr,
+                    )
+                    if can_recover:
                         log_message(
-                            f"♻️ [DUST RECOVERY BUY] {pair}: BUY signal detected, top-up Rp {topup_idr:,.0f} "
-                            f"agar posisi kembali layak trade."
+                            f"♻️ [DUST RECOVERY BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
+                            f"conf={technical_confidence:.2f} | cycle={dust_topups_this_cycle + 1}/"
+                            f"{DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE}"
                         )
                         success = self.execute_averaging_down(
                             pair,
@@ -1852,8 +1963,16 @@ class ExitManager:
                             override_add_amount_idr=topup_idr,
                         )
                         if success:
+                            self._dust_recovery_last_ts[pair] = time.time()
+                            dust_topups_this_cycle += 1
+                            dust_budget_used_idr += float(topup_idr or 0)
                             positions[pair]['status'] = 'OPEN'
                             modified_pairs.add(pair)
+                    elif dust_reason in ('cycle_topup_limit', 'insufficient_cycle_budget'):
+                        log_message(
+                            f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
+                            f"(conf={technical_confidence:.2f}, budget_used={dust_budget_used_idr:,.0f})"
+                        )
                         continue
                     else:
                         continue
@@ -2144,13 +2263,25 @@ class ExitManager:
                     free_map = balance.get('free', {}) if isinstance(balance, dict) else {}
                     real_balance = float(free_map.get(coin, 0) or 0)
 
-                    # Sisakan buffer kecil untuk menghindari gagal karena presisi/fee residual.
-                    sellable_balance = max(real_balance * 0.999, 0.0)
+                    # Default: coba jual penuh saldo free agar tidak meninggalkan residu sistematis.
+                    # Fallback pengurangan qty hanya dipakai bila exchange mengembalikan
+                    # 'insufficient balance' pada saat placement/retry.
+                    sellable_balance = max(real_balance, 0.0)
                     amount = min(float(amount or 0), sellable_balance)
 
                     # Normalisasi presisi amount mengikuti aturan market exchange.
                     try:
                         amount = float(self.exchange.amount_to_precision(symbol, amount))
+                    except Exception:
+                        pass
+
+                    # Sebagian pair Indodax hanya menerima jumlah integer (tanpa desimal).
+                    # Jika metadata precision amount = 0, paksa floor agar tidak ditolak exchange.
+                    try:
+                        market_meta = self.exchange.market(symbol)
+                        amount_precision = (((market_meta or {}).get('precision') or {}).get('amount'))
+                        if amount_precision == 0:
+                            amount = int(math.floor(amount))
                     except Exception:
                         pass
 
@@ -2192,19 +2323,65 @@ class ExitManager:
                     order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
                 except Exception as place_err:
                     err_text = str(place_err).lower()
+                    handled_retry = False
+                    # Indodax reject decimal qty untuk pair tertentu (mis. RFC/IDR).
+                    # Retry 1x dengan qty integer agar exit tetap jalan dan tidak stuck.
+                    if (not use_dry_run) and ('amount' in err_text) and ('decimal' in err_text):
+                        retry_amount_int = int(math.floor(float(amount or 0)))
+                        if retry_amount_int > 0 and retry_amount_int < float(amount or 0):
+                            log_message(
+                                f"⚠️ [EXIT RETRY INTEGER] {pair}: exchange menolak decimal qty, "
+                                f"retry dengan amount integer {retry_amount_int} (prev {float(amount or 0):.12f})."
+                            )
+                            amount = retry_amount_int
+                            try:
+                                order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
+                                handled_retry = True
+                            except Exception as retry_decimal_err:
+                                place_err = retry_decimal_err
+                                err_text = str(retry_decimal_err).lower()
+                        else:
+                            log_message(
+                                f"⚠️ [EXIT SKIP] {pair}: exchange menolak decimal qty dan amount integer tidak valid "
+                                f"(amount={float(amount or 0):.12f})."
+                            )
+                            return None
+
+                    if handled_retry:
+                        pass
                     # Race-safe retry: jika saldo berubah/terkunci setelah kalkulasi awal, refresh lalu retry 1x.
-                    if (not use_dry_run) and ('insufficient balance' in err_text):
+                    elif (not use_dry_run) and ('insufficient balance' in err_text):
                         try:
                             balance_retry = self.exchange.fetch_balance()
                             free_map_retry = balance_retry.get('free', {}) if isinstance(balance_retry, dict) else {}
                             real_balance_retry = float(free_map_retry.get(coin, 0) or 0)
-                            retry_amount = max(real_balance_retry * 0.999, 0.0)
+                            # Coba tetap close semaksimal mungkin (hindari menyisakan residu sistematis).
+                            retry_amount = max(real_balance_retry, 0.0)
                             try:
                                 retry_amount = float(self.exchange.amount_to_precision(symbol, retry_amount))
                             except Exception:
                                 pass
 
-                            if retry_amount > 0 and retry_amount < float(amount or 0):
+                            # Pair integer-only: pastikan retry_amount bukan desimal.
+                            try:
+                                market_meta_retry = self.exchange.market(symbol)
+                                amt_precision_retry = (((market_meta_retry or {}).get('precision') or {}).get('amount'))
+                                if amt_precision_retry == 0:
+                                    retry_amount = int(math.floor(float(retry_amount or 0)))
+                                elif isinstance(amt_precision_retry, (int, float)) and amt_precision_retry > 0:
+                                    # Jika exchange masih menolak full free-balance karena drift,
+                                    # kurangi 1 step precision amount lalu normalize ulang.
+                                    if float(retry_amount or 0) >= float(amount or 0):
+                                        step = 10 ** (-int(amt_precision_retry))
+                                        retry_amount = max(float(retry_amount or 0) - step, 0.0)
+                                        try:
+                                            retry_amount = float(self.exchange.amount_to_precision(symbol, retry_amount))
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+
+                            if retry_amount > 0:
                                 log_message(
                                     f"⚠️ [EXIT RETRY] {pair}: insufficient balance, retry amount {retry_amount:.12f} {coin} "
                                     f"(prev {float(amount or 0):.12f})."
