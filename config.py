@@ -72,9 +72,70 @@ TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
 TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.10))  # 10% of MIN_NET_PROFIT_IDR or amount_idr
 TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.20))  # 20% of MIN_NET_PROFIT_IDR or amount_idr
 
-# Akun kecil butuh target profit nominal yang proporsional terhadap modal.
-# 0.2% modal per trade dengan batas bawah Rp150 agar tidak terlalu agresif.
-MIN_NET_PROFIT_IDR = int(max(150, INITIAL_CAPITAL * 0.002))
+# Default MIN_NET_PROFIT_IDR based on INITIAL_CAPITAL (fallback only)
+MIN_NET_PROFIT_IDR = int(max(50, INITIAL_CAPITAL * 0.0005))
+
+def get_dynamic_min_net_profit(current_balance: float = None) -> int:
+    """Calculate MIN_NET_PROFIT_IDR dynamically based on current account balance.
+    
+    Tiers adapts as capital grows — no manual reconfiguration needed:
+    - Balance ≤ 250k: 0.05% modal (minimum 50 IDR)
+    - Balance 250k-1M: 0.1% modal (minimum 200 IDR)  
+    - Balance > 1M: 0.2% modal (minimum 500 IDR)
+    
+    If current_balance is None, reads from database (live balance).
+    """
+    if current_balance is None:
+        try:
+            from app.infrastructure.database import db
+            # Get actual balance from DB — reflects current account state
+            stats = db.get_daily_stats()
+            opening_balance = float(stats.get('opening_balance', INITIAL_CAPITAL))
+            current_balance = opening_balance + float(stats.get('total_pnl_idr', 0))
+        except Exception:
+            current_balance = INITIAL_CAPITAL
+    
+    current_balance = max(current_balance, INITIAL_CAPITAL)  # Never go below initial
+    
+    if current_balance <= 100_000:
+         return int(max(5, current_balance * 0.0001))    # 0.01% modal
+    elif current_balance <= 250_000:
+        return int(max(50, current_balance * 0.0005))    # 0.05% modal
+    elif current_balance <= 1_000_000:
+        return int(max(200, current_balance * 0.001))    # 0.1% modal
+    else:
+        return int(max(500, current_balance * 0.002))    # 0.2% modal
+
+def get_dynamic_tp_pct(current_balance: float = None) -> float:
+    """Calculate TP_PCT dynamically based on current account balance.
+    
+    Small accounts need faster TP to compound gains without waiting for full scalp:
+    - Balance ≤ 100k: 1.5% TP (fast 15-min scalp)
+    - Balance 100k-250k: 2.0% TP
+    - Balance 250k-1M: 2.5% TP
+    - Balance > 1M: 3.5% TP (original aggressive scalp)
+    
+    If current_balance is None, reads from database (live balance).
+    """
+    if current_balance is None:
+        try:
+            from app.infrastructure.database import db
+            stats = db.get_daily_stats()
+            opening_balance = float(stats.get('opening_balance', INITIAL_CAPITAL))
+            current_balance = opening_balance + float(stats.get('total_pnl_idr', 0))
+        except Exception:
+            current_balance = INITIAL_CAPITAL
+    
+    current_balance = max(current_balance, INITIAL_CAPITAL)
+    
+    if current_balance <= 100_000:
+        return 0.015  # 1.5% untuk small account
+    elif current_balance <= 250_000:
+        return 0.020  # 2.0% untuk medium-small account
+    elif current_balance <= 1_000_000:
+        return 0.025  # 2.5% untuk medium account
+    else:
+        return 0.035  # 3.5% untuk large account (original)
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,

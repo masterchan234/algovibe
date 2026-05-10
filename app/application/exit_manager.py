@@ -24,7 +24,8 @@ from config import (
     NET_ZERO_IMMEDIATE_VELOCITY,
     NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
-    TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT
+    TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT,
+    get_dynamic_min_net_profit, get_dynamic_tp_pct
 )
 from app.infrastructure.database import db
 from app.domain.technicals import (
@@ -316,6 +317,10 @@ class ExitManager:
         
         # Filter: Hanya pantau posisi yang sesuai dengan mode saat ini
         positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
+        
+        if positions:
+            log_message(f"🔍 [EXIT-MONITOR] Evaluating {len(positions)} position(s): {list(positions.keys())[:5]}")
+        
         
         modified_pairs = set()
 
@@ -874,7 +879,7 @@ class ExitManager:
                     action_label   = "EMERGENCY KILL SWITCH"
 
                 # ── HARVEST_ONLY: Instant Exit if Profitable ─────────────────────────────
-                elif harvest_only and total_net_pnl >= max(300.0, MIN_NET_PROFIT_IDR * 0.5):
+                elif harvest_only and total_net_pnl >= get_dynamic_min_net_profit() * 0.5:
                     should_execute = True
                     trigger_label  = "MANUAL HARVEST (Profit Secured)"
                     action_label   = "HARVEST EXIT"
@@ -891,8 +896,9 @@ class ExitManager:
                 else:
                     # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
                     _harvest_min_pct = AUTO_BASKET_HARVEST_MIN * 100  # precomputed once
+                    dynamic_basket_min = get_dynamic_min_net_profit()
                     # (a) profit gabungan melampaui minimum DAN ada posisi rugi
-                    trigger_normal = n > 1 and total_net_pnl >= MIN_NET_PROFIT_IDR and has_losers
+                    trigger_normal = n > 1 and total_net_pnl >= dynamic_basket_min and has_losers
                     # (b) ada posisi stagnant, menutup semua setidaknya impas
                     trigger_stagnant_rescue = n > 1 and has_stagnant
                     # (c) IDR-based proactive harvest — combined PnL melebihi target IDR
@@ -1306,7 +1312,7 @@ class ExitManager:
                 # --- END AUTO-CANCEL ---
     
                 # Base TP calculation from percentage
-                dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else TP_PCT
+                dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else get_dynamic_tp_pct()
 
                 # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%)
                 # over a 30-minute transition window from the moment the mode was activated.
@@ -1334,11 +1340,13 @@ class ExitManager:
                 # [SMART_BREAK_EVEN] Minimum net profit agar trade masuk zona REAL_PROFIT (> 0.85% gross).
                 # 0.85% = 0.6322% round-trip taker fee + 0.21% slippage buffer.
                 amount_idr_pos = float(data.get('amount_idr', 0))
-                dynamic_min_net = max(300.0, min(MIN_NET_PROFIT_IDR, amount_idr_pos * SMART_BREAK_EVEN_PCT))
+                dynamic_min_profit = get_dynamic_min_net_profit()
+                dynamic_min_net = min(dynamic_min_profit, amount_idr_pos * SMART_BREAK_EVEN_PCT)
                 exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_TAKER))) / denom_tp
 
                 # Target TP minimal agar tidak rugi fee
                 tp_price = max(base_tp_price, exact_tp_price)
+                
                 
                 # Default Initial Stop Loss
                 dynamic_sl_pct = data.get('target_sl_pct') if data.get('target_sl_pct') is not None else SL_PCT
@@ -1371,10 +1379,11 @@ class ExitManager:
 
 
                     # Dynamic thresholds for tiered profit exits
-                    # Use a percentage of MIN_NET_PROFIT_IDR or amount_idr for IDR-based triggers
+                    # Use a percentage of dynamic balance-based minimum or amount_idr for IDR-based triggers
                     amount_idr_pos = float(data.get('amount_idr', 0))
-                    tier2_idr_threshold = max(MIN_NET_PROFIT_IDR, amount_idr_pos * TIER2_PROFIT_IDR_PCT)
-                    tier3_idr_threshold = max(MIN_NET_PROFIT_IDR * 2, amount_idr_pos * TIER3_PROFIT_IDR_PCT)
+                    dynamic_min_profit = get_dynamic_min_net_profit()
+                    tier2_idr_threshold = max(dynamic_min_profit, amount_idr_pos * TIER2_PROFIT_IDR_PCT)
+                    tier3_idr_threshold = max(dynamic_min_profit * 2, amount_idr_pos * TIER3_PROFIT_IDR_PCT)
                     is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
                     is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
@@ -1423,6 +1432,13 @@ class ExitManager:
                 # remaining position continues to hard SL / manual exit below.
 
                 # 2. Take Profit (Hard TP)
+                # DEBUG: Log TP status for first 3 positions
+                if pair in ["bioidr", "tnsridr", "chillguyidr"]:
+                    log_message(
+                        f"📊 [{pair}] TP-Status: current_price={current_price:.0f} vs tp_price={tp_price:.0f} | "
+                        f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
+                    )
+                
                 if current_price >= tp_price:
                     msg = (
                         f"🎯 *TAKE PROFIT* 🎯\n"

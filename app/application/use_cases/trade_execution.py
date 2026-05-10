@@ -28,6 +28,71 @@ from config import (
 )
 
 
+def check_live_liquidity(exchange_client, pair: str, order_size_idr: float, max_spread_pct: float = 0.015) -> tuple:
+    """Validate live order book liquidity from exchange before entry.
+    
+    Fetches real-time order book and checks:
+    1. Bid depth (ada cukup seller interested?)
+    2. Spread (bid-ask tidak terlalu lebar?)
+    3. Recent bid activity
+    
+    Returns:
+        (is_liquid: bool, reason: str, bid_depth_idr: float)
+        - is_liquid: True if entry is safe, False if skip
+        - reason: explanation for gate/skip decision
+        - bid_depth_idr: total IDR available at bid side for our order
+    """
+    try:
+        symbol = pair.upper().replace("IDR", "/IDR")
+        orderbook = exchange_client.fetch_order_book(symbol, limit=20)
+        
+        if not orderbook or 'bids' not in orderbook or 'asks' not in orderbook:
+            return False, "Order book unavailable", 0.0
+        
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
+        
+        if not bids or not asks or len(bids) < 2 or len(asks) < 2:
+            return False, "Order book depth insufficient", 0.0
+        
+        # Get best bid/ask
+        best_bid_price = float(bids[0][0]) if bids else 0
+        best_ask_price = float(asks[0][0]) if asks else 0
+        best_bid_vol = float(bids[0][1]) if bids else 0
+        
+        if best_bid_price <= 0 or best_ask_price <= 0:
+            return False, "Invalid bid/ask prices", 0.0
+        
+        # 1. Check spread
+        spread_pct = (best_ask_price - best_bid_price) / best_bid_price if best_bid_price > 0 else 0
+        if spread_pct > max_spread_pct:
+            return False, f"Spread terlalu lebar {spread_pct*100:.3f}% (max {max_spread_pct*100:.2f}%)", 0.0
+        
+        # 2. Calculate total bid depth (IDR available at bid side)
+        bid_depth_idr = 0.0
+        for bid_price, bid_vol in bids[:10]:  # Top 10 bids
+            bid_depth_idr += float(bid_price) * float(bid_vol)
+        
+        # We need at least 3x our order size in bid depth untuk cukup liquid
+        required_depth = order_size_idr * 3.0
+        if bid_depth_idr < required_depth:
+            return False, f"Bid depth Rp {bid_depth_idr:,.0f} < required Rp {required_depth:,.0f}", bid_depth_idr
+        
+        # 3. Check if top 2 bids have meaningful volume
+        if best_bid_vol < order_size_idr / best_bid_price * 0.5:
+            # Top bid doesn't have 50% of our order volume — check next level
+            if len(bids) > 1:
+                second_bid_vol = float(bids[1][1]) if bids[1] else 0
+                if (best_bid_vol + second_bid_vol) < order_size_idr / best_bid_price * 0.5:
+                    return False, f"Top bids volume too low for order size", bid_depth_idr
+        
+        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth Rp {bid_depth_idr:,.0f})", bid_depth_idr
+        
+    except Exception as e:
+        log_message(f"⚠️ Liquidity check error for {pair}: {e}")
+        return False, f"Liquidity check failed: {str(e)[:60]}", 0.0
+
+
 def execute_trade(
     bot,
     pair,
@@ -302,6 +367,19 @@ def execute_trade(
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
+
+            # --- [LIVE LIQUIDITY CHECK] Validate order book depth before entry ---
+            from config import MAX_ALLOWED_SPREAD_PCT
+            is_liquid, liq_reason, bid_depth = check_live_liquidity(
+                bot.exchange, pair, amount_idr, max_spread_pct=MAX_ALLOWED_SPREAD_PCT
+            )
+            
+            if not is_liquid:
+                log_message(f"🚫 [SKIP ENTRY] {pair}: Liquidity check failed — {liq_reason}")
+                _mark_gate(f"Live liquidity check failed: {liq_reason}")
+                return False
+            
+            log_message(f"✅ [LIQUIDITY OK] {pair}: {liq_reason}")
 
             params = {
                 'pair': pair.replace("idr", "_idr"),
