@@ -31,6 +31,10 @@
         <span class="bubble-label">Entry State</span>
         <span class="bubble-value" :class="gateBadgeClass" :title="gateTooltip">{{ gateBadgeText }}</span>
       </div>
+      <div class="stat-bubble" title="Decision engine mode">
+        <span class="bubble-label">Decision Engine</span>
+        <span class="bubble-value" :class="technicalOnlyMode ? 'c-bull' : 'c-neutral'">{{ technicalModeLabel }}</span>
+      </div>
     </div>
 
     <div class="header-right">
@@ -60,6 +64,16 @@
           {{ selectedMode === 'live' ? 'LIVE' : (isLiveHoldActive ? 'HOLD…' : 'LIVE') }}
         </button>
       </div>
+
+      <button
+        class="tech-toggle-btn hide-mobile"
+        :class="{ active: technicalOnlyMode }"
+        :disabled="isTogglingTech || isSwitchingMode"
+        @click="toggleTechnicalOnlyMode"
+        :title="technicalOnlyMode ? 'Technical-only mode active' : 'Hybrid mode (LLM-enabled) active'"
+      >
+        {{ isTogglingTech ? 'UPDATING…' : (technicalOnlyMode ? 'TECH ONLY' : 'HYBRID') }}
+      </button>
 
       <div class="conn-status" :class="{ 'is-live': connected }" title="WebSocket Connection Status">
         <span class="conn-dot"></span>
@@ -120,6 +134,7 @@ const { selectedMode, isLiveMode, selectMode } = useMode()
 
 const isLoggingOut = ref(false)
 const isSwitchingMode = ref(false)
+const isTogglingTech = ref(false)
 const isLiveHoldActive = ref(false)
 const liveHoldProgress = ref(0)
 const LIVE_HOLD_MS = 1200
@@ -194,6 +209,9 @@ const gateTooltip = computed(() => {
   return 'Entry gate status'
 })
 
+const technicalOnlyMode = computed(() => Boolean(props.stats.technical_only_mode))
+const technicalModeLabel = computed(() => technicalOnlyMode.value ? 'TECHNICAL ONLY' : 'HYBRID')
+
 function formatNumber(val) {
   if (val === undefined || val === null) return '0'
   return new Intl.NumberFormat('id-ID').format(Math.round(val))
@@ -248,6 +266,7 @@ async function refreshDashboardState() {
       intensity: data.intensity ?? 0,
       dry_run: data.dry_run ?? true,
       dry_run_loose_gates: data.dry_run_loose_gates ?? false,
+      technical_only_mode: data.technical_only_mode ?? true,
     })
     store.markApiStatsUsed(15000)
   }
@@ -257,6 +276,41 @@ async function refreshDashboardState() {
     if (Array.isArray(trades)) {
       store.positions = trades
     }
+  }
+}
+
+async function toggleTechnicalOnlyMode() {
+  if (isTogglingTech.value || isSwitchingMode.value) return
+
+  const nextVal = !technicalOnlyMode.value
+  const label = nextVal ? 'TECHNICAL ONLY' : 'HYBRID (LLM-enabled)'
+  if (!confirm(`Switch decision engine to ${label}?`)) return
+
+  isTogglingTech.value = true
+  try {
+    const res = await fetch(`${backendUrl}/api/bot/toggle-technical-only`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+      },
+      credentials: 'include',
+      body: JSON.stringify({ technical_only_mode: nextVal }),
+    })
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err?.message || err?.error || 'Failed to update technical mode')
+    }
+
+    const data = await res.json()
+    store.stats.technical_only_mode = Boolean(data?.technical_only_mode)
+    await refreshDashboardState()
+  } catch (err) {
+    console.error('Technical mode toggle failed:', err)
+    alert(err?.message || 'Failed to toggle technical mode')
+  } finally {
+    isTogglingTech.value = false
   }
 }
 
@@ -560,6 +614,36 @@ onUnmounted(() => {
 
 .mode-btn:disabled {
   cursor: wait;
+}
+
+.tech-toggle-btn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a4adba;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.9px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tech-toggle-btn.active {
+  border-color: rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.12);
+  color: #00ff88;
+}
+
+.tech-toggle-btn:not(.active) {
+  border-color: rgba(245, 166, 35, 0.35);
+  background: rgba(245, 166, 35, 0.1);
+  color: #f5a623;
+}
+
+.tech-toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .conn-status {

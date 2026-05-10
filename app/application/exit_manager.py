@@ -14,7 +14,7 @@ from config import (
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
     AUTO_BASKET_HARVEST_MIN, BTC_CRASH_TRIGGER_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
-    INITIAL_CAPITAL, TECH_MIN_HISTORY_POINTS,
+    INITIAL_CAPITAL,
     DCA_ENABLED, DCA_MAX_TIERS, DCA_STEP_PCT, DCA_MULTIPLIER, DCA_MIN_TECH_CONFIDENCE,
     ROUND_TRIP_FEE_PCT, SMART_BREAK_EVEN_PCT,
     MOMENTUM_TARGET_PNL_IDR, MOMENTUM_SAFETY_BUFFER_IDR, MOMENTUM_RECOVERY_THRESHOLD,
@@ -486,10 +486,12 @@ class ExitManager:
             total_amount_idr = 0.0
             has_losers  = False
             has_stagnant = False
+            open_position_count = 0
 
             for pair, data in positions.items():
                 if data.get('status') != "OPEN":
                     continue
+                open_position_count += 1
                 # Resolve current price: prefer live ticker, fall back to last known
                 # price history entry, then entry_price (conservative: no gain assumed).
                 # This ensures ALL active positions contribute to the net PnL calculation
@@ -553,8 +555,20 @@ class ExitManager:
                 self._portfolio_hwm = 0.0
                 self._was_above_safety_zone = False  # Reset when basket is empty.
 
-            # ── PnL Velocity ──────────────────────────────────────────────────────────────
-            self._update_pnl_velocity(total_net_pnl, _now_ts)
+            # ── PnL Velocity (open positions only) ──────────────────────────────────────
+            if open_position_count > 0:
+                self._update_pnl_velocity(total_net_pnl, _now_ts)
+            else:
+                # No open positions: reset momentum state/buffer to avoid stale velocity bias.
+                self._last_pnl_sample = (0.0, 0.0)
+                self._velocity_readings.clear()
+                if self._momentum_state != "STALLING":
+                    self._momentum_state = "STALLING"
+                try:
+                    db.save_state("momentum_state", self._momentum_state)
+                    db.save_state("net_pnl_velocity", "0")
+                except Exception:
+                    pass
 
             # ── Snapshot unrealised PnL to bot_state for dashboard (throttled) ─────────
             if _now_ts - self._last_pnl_snapshot_ts >= 5.0:
@@ -1141,7 +1155,7 @@ class ExitManager:
                             continue
 
                         momentum_signal = 'HOLD'
-                        live_tech_prob = -1.0
+                        technical_confidence = 0.50
                         hist = []
                         if price_history and pair in price_history:
                             hist = list(price_history.get(pair, []))
@@ -1157,13 +1171,12 @@ class ExitManager:
                                 total_depth = total_bid + total_ask
                                 if total_depth > 0:
                                     tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-                            momentum_signal = derive_trade_signal(tech).get('verdict', 'HOLD')
-
-                            if get_prediction_fn and len(hist) >= TECH_MIN_HISTORY_POINTS:
-                                live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
+                            tech_sig = derive_trade_signal(tech)
+                            momentum_signal = tech_sig.get('verdict', 'HOLD')
+                            technical_confidence = float(tech_sig.get('confidence', 50) or 50) / 100.0
 
                         # Force fallback jika terlalu lama + momentum memburuk, atau sangat lama tanpa fill.
-                        is_momentum_bad = (momentum_signal == 'SELL') or (live_tech_prob >= 0 and live_tech_prob < 0.40)
+                        is_momentum_bad = (momentum_signal == 'SELL') or (technical_confidence < 0.40)
                         is_underwater = entry_price > 0 and current_price < entry_price * 0.995
                         should_fallback = (exiting_age_sec >= 180 and (is_momentum_bad or is_underwater)) or exiting_age_sec >= 360
 
@@ -1185,7 +1198,7 @@ class ExitManager:
 
                         log_message(
                             f"⚠️ [EXIT TIMEOUT FALLBACK] {pair}: {int(exiting_age_sec)}s, "
-                            f"Sig={momentum_signal}, TQ={live_tech_prob:.2f}. Switching to emergency exit."
+                            f"Sig={momentum_signal}, TechConf={technical_confidence:.2f}. Switching to emergency exit."
                         )
 
                         new_order_id = self.execute_exit(
@@ -1213,7 +1226,7 @@ class ExitManager:
                 momentum_signal = 'HOLD'
                 momentum_conf = 50
                 current_rsi = 50.0
-                live_tech_prob = -1.0
+                technical_confidence = 0.50
 
                 hist = []
                 if price_history and pair in price_history:
@@ -1241,12 +1254,7 @@ class ExitManager:
                         current_rsi = float(tech.get('rsi', 50) or 50)
                     except Exception as e:
                         log_message(f"⚠️ Momentum eval error for {pair}: {e}")
-
-                    if get_prediction_fn and len(hist) >= TECH_MIN_HISTORY_POINTS:
-                        try:
-                            live_tech_prob = float(get_prediction_fn(hist, current_tickers.get(pair)))
-                        except Exception as e:
-                            log_message(f"⚠️ Tech live-prob eval error for {pair}: {e}")
+                    technical_confidence = max(0.0, min(1.0, momentum_conf / 100.0))
                 
                 # Diagnostic: Log status for open positions
                 # log_message(f"Monitoring {pair}: Price={current_price:,.2f}, Entry={entry_price:,.2f}, Status={data.get('status')}")
@@ -1435,14 +1443,14 @@ class ExitManager:
                     current_tier < DCA_MAX_TIERS and
                     current_profit_pct <= DCA_STEP_PCT and
                     current_price > active_sl_price and  # Belum kena hard SL
-                    live_tech_prob >= DCA_MIN_TECH_CONFIDENCE  # Probabilitas teknikal cukup kuat
+                    technical_confidence >= DCA_MIN_TECH_CONFIDENCE  # Confidence teknikal cukup kuat
                 )
 
                 if can_dca:
                     reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
                     log_msg = (
                         f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
-                        f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, TQ: {live_tech_prob:.2f})"
+                        f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, TechConf: {technical_confidence:.2f})"
                     )
                     log_message(log_msg)
                     db.log_system_event(pair, "DCA", log_msg, 'INFO')

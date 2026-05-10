@@ -360,6 +360,9 @@ class Oracle:
         antri ke LiteRT-LM untuk deep reasoning otomatis.
         ranked_signals: list of dict {pair, tech_verdict, tech_confidence, ...}
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return
+
         now = datetime.now()
         if (now - self.last_buy_signal_queue).total_seconds() < 60:
             return  # cooldown 60 detik
@@ -395,6 +398,9 @@ class Oracle:
 
     def process_llm_insights(self):
         """Called periodically to fetch async LLM insights."""
+        if config.TECHNICAL_ONLY_MODE:
+            return
+
         # 1. Check for manual analysis requests from DB (triggered by Dashboard)
         on_demand_pair = db.get_state("trigger_analysis_pair")
         # Guard: hanya proses jika pair valid (bukan None, string kosong, atau literal "None")
@@ -625,6 +631,9 @@ class Oracle:
 
         Jika tidak ada analisis LLM → TIDAK veto (bot tetap jalan berdasarkan teknikal).
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return False, "TECHNICAL_ONLY_MODE active"
+
         pair_lower = pair.lower()
         LLM_VETO_THRESHOLD   = 75   # Minimum confidence untuk veto
         LLM_VETO_TTL_MINUTES = 10   # In-memory cache TTL
@@ -673,6 +682,9 @@ class Oracle:
         Ambil verdict trading terstruktur terbaru untuk pair.
         Mengutamakan cache in-memory, fallback ke DB, dengan TTL agar tidak pakai opini usang.
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return None
+
         pair_lower = pair.lower()
 
         # 1) Fresh in-memory verdict dari insight thread
@@ -714,6 +726,9 @@ class Oracle:
         [Non-Blocking] Meminta analisis mendalam dari LLM.
         Jika hasil belum ada, bot akan mengantrekan tugas dan mengembalikan 'ANALYZING'.
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return "HOLD", 0, "TECHNICAL_ONLY_MODE active"
+
         if not self.llm_worker or not self.llm_worker.is_active:
             return "HOLD", 0, "LLM Offline"
 
@@ -1186,6 +1201,9 @@ class Oracle:
         Bangun dan kirim market context terbaru ke LLM sebagai 'kesadaran'.
         Dipanggil periodik (setiap ~30 menit) atau saat regime shift.
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return
+
         if (datetime.now() - self.last_consciousness_update).total_seconds() < 1800:
             return  # Cooldown 30 menit
         self.last_consciousness_update = datetime.now()
@@ -1524,7 +1542,7 @@ class Oracle:
         if decision == "SECTOR_BOOST":
             return "Sektor koin ini sedang 'hot'. Momentum sedang berpihak pada kita."
         
-        return "Keputusan berdasarkan analisa teknikal dan probabilitas AI yang kuat."
+        return "Keputusan berdasarkan analisa teknikal murni."
 
     def get_whale_boost(self, pair: str) -> float:
         """
@@ -1565,16 +1583,16 @@ class Oracle:
             
             if buy_wall_idr < (WHALE_THRESHOLD_IDR / 5): # Very thin buy support
                 db.save_state("latest_fake_pump", f"{pair}|{price_change_pct:.1f}")
-                
-                # Gunakan helper baru untuk konteks likuiditas yang lebih dalam
-                rich_context = self._prepare_rich_prompt(pair, task_type='fakepump')
-                prompt = (
-                    f"CRYPTO LIQUIDITY WARNING: The coin {pair.upper()} just jumped {price_change_pct:.1f}% in price, "
-                    f"but the 'buy wall' (bids) is extremely thin ({buy_wall_idr:,.0f} IDR). "
-                    "Is this a 'fake pump' designed to trap buyers? Analyze the data below and give a 2-sentence verdict.\n\n"
-                    f"{rich_context}"
-                )
-                self.llm_worker.query_async("FAKE_PUMP_ANALYSIS", prompt)
+                if not config.TECHNICAL_ONLY_MODE:
+                    # Gunakan helper baru untuk konteks likuiditas yang lebih dalam
+                    rich_context = self._prepare_rich_prompt(pair, task_type='fakepump')
+                    prompt = (
+                        f"CRYPTO LIQUIDITY WARNING: The coin {pair.upper()} just jumped {price_change_pct:.1f}% in price, "
+                        f"but the 'buy wall' (bids) is extremely thin ({buy_wall_idr:,.0f} IDR). "
+                        "Is this a 'fake pump' designed to trap buyers? Analyze the data below and give a 2-sentence verdict.\n\n"
+                        f"{rich_context}"
+                    )
+                    self.llm_worker.query_async("FAKE_PUMP_ANALYSIS", prompt)
                 
                 return True
                 
@@ -1586,6 +1604,9 @@ class Oracle:
         """
         Analyze the top mover every few minutes to keep the dashboard active.
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return
+
         # Cooldown 5 menit agar tidak membebani CPU
         if (datetime.now() - self.last_top_mover_analysis).total_seconds() < 300:
             return
@@ -1628,6 +1649,9 @@ class Oracle:
         """
         Triggered when a coin is 'exploding' or crashing rapidly.
         """
+        if config.TECHNICAL_ONLY_MODE:
+            return
+
         last_time = self.pump_cooldowns.get(pair)
         if last_time and (datetime.now() - last_time).total_seconds() < 900: # 15 min cooldown
             return
@@ -1738,16 +1762,17 @@ class Oracle:
             status = "PROFIT" if is_profit else "LOSS"
             logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_idr}).")
 
-            # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
-            prompt = (
-                f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
-                f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
-                f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
-                f"vol={dna.get('volatility',0):.2f}%. "
-                f"Sebagai quant analyst, apa satu pelajaran paling penting dari trade ini? "
-                f"Jawab dalam 1 kalimat ringkas bahasa Indonesia."
-            )
-            self.llm_worker.query_async("POST_MORTEM", prompt)
+            if not config.TECHNICAL_ONLY_MODE:
+                # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
+                prompt = (
+                    f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
+                    f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
+                    f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
+                    f"vol={dna.get('volatility',0):.2f}%. "
+                    f"Sebagai quant analyst, apa satu pelajaran paling penting dari trade ini? "
+                    f"Jawab dalam 1 kalimat ringkas bahasa Indonesia."
+                )
+                self.llm_worker.query_async("POST_MORTEM", prompt)
             
         except Exception as e:
             logger.error(f"[Oracle] Learning Error: {e}")
@@ -1883,7 +1908,8 @@ class Oracle:
             "If history shows continued dumping, return AVOID. Fees (0.51%) are already factored in. "
             "Return JSON: verdict (BUY/AVOID), confidence (0-100), TP (float, default 0.04), SL (float, default -0.02), eta_minutes (int, default 15)."
         )
-        task_id = self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
+        if not config.TECHNICAL_ONLY_MODE:
+            self.llm_worker.query_structured(f"KNN_STRATEGY:{pair}", prompt)
         
         # --- [Fix] Handle Async / Failed LLM with Statistical Fallback ---
         # [Senior Refactor] Removed Hard Veto (AVOID) per user request.

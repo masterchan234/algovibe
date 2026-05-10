@@ -131,7 +131,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
     if target_status["loss_limit_hit"]:
         # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
-        # Kondisi wajib: AI confidence ≥80%, LLM verdict BUY ≥75%, max 1 posisi baru,
+        # Kondisi wajib: confidence teknikal tinggi, max 1 posisi baru,
         # ukuran posisi diperkecil 50%.
         adaptive_cfg["tech_threshold"] = 0.80
         adaptive_cfg["recovery_mode"] = True

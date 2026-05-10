@@ -10,6 +10,8 @@ import datetime
 import logging
 import urllib.request
 import xml.etree.ElementTree as ET
+import threading
+from collections import deque
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import psycopg2
@@ -324,6 +326,12 @@ from config import INITIAL_CAPITAL as _IC
 CURRENT_WATCH_PAIR = "btcidr"
 # Pair khusus untuk kebutuhan market analysis (tetap BTC, tidak mengikuti watch pair UI)
 ANALYSIS_PAIR = "btcidr"
+
+# Realtime BTC tick buffer (source: IPC market stream from market-pipe).
+# Stores tuples: (timestamp_ms, price). Kept for max 24h window.
+_BTC_TICK_BUFFER = deque(maxlen=120000)
+_BTC_TICK_LOCK = threading.Lock()
+_BTC_WINDOW_24H_MS = 24 * 60 * 60 * 1000
 
 # Inisialisasi Market WS untuk dashboard — tidak distart di sini; data ticker
 # dibaca dari cache internal saat dibutuhkan oleh endpoint REST.
@@ -1768,6 +1776,7 @@ def get_current_mode():
     return jsonify({
         'mode': 'DRY' if is_dry else 'LIVE',
         'dry_run': is_dry,
+        'technical_only_mode': bool(cfg.TECHNICAL_ONLY_MODE),
     })
 
 @app.route('/api/bot/select-mode', methods=['POST'])
@@ -1821,6 +1830,29 @@ def toggle_loose_gates():
     cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
     logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
     return jsonify({"success": True, "loose_gates": new_val})
+
+@app.route('/api/bot/toggle-technical-only', methods=['POST'])
+@login_required
+def toggle_technical_only_mode():
+    """Toggle TECHNICAL_ONLY_MODE runtime via bot_state (no restart required)."""
+    data = request.get_json(silent=True) or {}
+    requested = data.get('technical_only_mode')
+
+    current_val = bool(cfg.TECHNICAL_ONLY_MODE)
+    if requested is None:
+        new_val = not current_val
+    else:
+        if isinstance(requested, bool):
+            new_val = requested
+        else:
+            new_val = str(requested).lower() in ('1', 'true', 'yes', 'on')
+
+    db.save_state("technical_only_mode", "true" if new_val else "false")
+    cfg.clear_dry_run_cache()
+    broadcast_command("STATE_UPDATE", {"key": "technical_only_mode", "value": "true" if new_val else "false"})
+
+    logging.info(f"🔧 [TECHNICAL_ONLY_MODE] Updated to: {new_val}")
+    return jsonify({"success": True, "technical_only_mode": new_val})
 
 @app.route('/api/bot/unblock', methods=['POST'])
 @login_required
@@ -1915,6 +1947,7 @@ def get_bot_status():
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(cfg.DRY_RUN),
+            "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
             "last_trade_at": last_trade_at,
@@ -1925,7 +1958,7 @@ def get_bot_status():
             "bot_state": all_states
         })
     except Exception as e:
-        return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "uptime_sec": 0})
+        return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE), "uptime_sec": 0})
     finally:
         conn.close()
 
@@ -2341,6 +2374,135 @@ def handle_watch_pair(data):
     except Exception as e:
         logging.warning(f"Failed to subscribe dynamic data for {pair}: {e}")
 
+
+def _pct_change_from_history(history, lookback):
+    """Compute percentage change from an in-memory price history list."""
+    try:
+        if not isinstance(history, list) or len(history) < 2:
+            return 0.0
+        curr = float(history[-1])
+        ref = float(history[-lookback]) if len(history) >= lookback else float(history[0])
+        if ref <= 0:
+            return 0.0
+        return ((curr - ref) / ref) * 100.0
+    except Exception:
+        return 0.0
+
+
+def _append_btc_tick(ts_ms, price):
+    """Append BTC tick to rolling in-memory buffer and prune entries older than 24h."""
+    try:
+        ts_ms = int(ts_ms)
+        price = float(price)
+        if ts_ms <= 0 or price <= 0:
+            return
+        cutoff = ts_ms - _BTC_WINDOW_24H_MS
+        with _BTC_TICK_LOCK:
+            _BTC_TICK_BUFFER.append((ts_ms, price))
+            while _BTC_TICK_BUFFER and _BTC_TICK_BUFFER[0][0] < cutoff:
+                _BTC_TICK_BUFFER.popleft()
+    except Exception:
+        return
+
+
+def _pct_change_from_time_window(points, window_ms):
+    """Compute percentage change using oldest point inside the requested time window."""
+    try:
+        if not points or len(points) < 2:
+            return 0.0
+        last_ts, last_px = points[-1]
+        target_ts = int(last_ts) - int(window_ms)
+        ref_px = float(points[0][1])
+        for ts, px in points:
+            if int(ts) >= target_ts:
+                ref_px = float(px)
+                break
+        if ref_px <= 0:
+            return 0.0
+        return ((float(last_px) - ref_px) / ref_px) * 100.0
+    except Exception:
+        return 0.0
+
+
+def _get_btc_realtime_metrics():
+    """Build BTC momentum metrics from IPC tick buffer (5m/15m/1h/24h + trend)."""
+    try:
+        with _BTC_TICK_LOCK:
+            points = list(_BTC_TICK_BUFFER)
+        if len(points) < 2:
+            return {
+                "has_data": False,
+                "price": 0.0,
+                "ch_5m": 0.0,
+                "ch_15m": 0.0,
+                "ch_1h": 0.0,
+                "ch_24h": 0.0,
+                "trend": "N/A",
+                "age_sec": None,
+            }
+
+        _, last_px = points[-1]
+        last_ts = int(points[-1][0])
+        prices = [float(p[1]) for p in points]
+
+        ch_5m = _pct_change_from_time_window(points, 5 * 60 * 1000)
+        ch_15m = _pct_change_from_time_window(points, 15 * 60 * 1000)
+        ch_1h = _pct_change_from_time_window(points, 60 * 60 * 1000)
+        ch_24h = _pct_change_from_time_window(points, _BTC_WINDOW_24H_MS)
+
+        trend = _derive_trend_from_history(prices)
+        if trend == "N/A":
+            if ch_1h > 0.2:
+                trend = "UP"
+            elif ch_1h < -0.2:
+                trend = "DOWN"
+            else:
+                trend = "SIDEWAYS"
+
+        age_sec = int(max(0, (int(time.time() * 1000) - last_ts) / 1000))
+
+        return {
+            "has_data": True,
+            "price": float(last_px),
+            "ch_5m": float(ch_5m),
+            "ch_15m": float(ch_15m),
+            "ch_1h": float(ch_1h),
+            "ch_24h": float(ch_24h),
+            "trend": str(trend),
+            "age_sec": age_sec,
+        }
+    except Exception:
+        return {
+            "has_data": False,
+            "price": 0.0,
+            "ch_5m": 0.0,
+            "ch_15m": 0.0,
+            "ch_1h": 0.0,
+            "ch_24h": 0.0,
+            "trend": "N/A",
+            "age_sec": None,
+        }
+
+
+def _derive_trend_from_history(history):
+    """Lightweight trend derivation from EMA-like moving averages."""
+    try:
+        if not isinstance(history, list) or len(history) < 20:
+            return "N/A"
+        avg_20 = sum(float(x) for x in history[-20:]) / 20.0
+        avg_50 = (
+            sum(float(x) for x in history[-50:]) / 50.0
+            if len(history) >= 50
+            else avg_20
+        )
+        if avg_20 > (avg_50 * 1.001):
+            return "UP"
+        if avg_20 < (avg_50 * 0.999):
+            return "DOWN"
+        return "SIDEWAYS"
+    except Exception:
+        return "N/A"
+
 def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
     import config as cfg
@@ -2521,6 +2683,9 @@ def _build_stats_payload(force_dry=None):
             active_pnl = float(live_stats['total_pnl_idr'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
+        # Net PnL for dashboard headline should include open-position unrealized PnL.
+        net_total_pnl = float(active_pnl) + float(unrealized_pnl)
+
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
             "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
@@ -2641,20 +2806,77 @@ def _build_stats_payload(force_dry=None):
 
 
         # ── BTC Condition (for Signal Radar UX) ─────────────────────────────
+        # Realtime-first: price/24h from WS summary. If interval metrics are
+        # empty or stale in DB, recompute from the latest BTC history snapshot.
         _btc_ticker = ws_tickers.get('btcidr', {}) or {}
         btc_price = float(_btc_ticker.get('last', 0))
         btc_change_24h = float(_btc_ticker.get('change_24h', 0))
         try:
             _btc_row = conn.execute(
-                "SELECT ch_5m, ch_15m, ch_1h, trend, score FROM ticker_history WHERE pair = 'btcidr'"
+                "SELECT ch_5m, ch_15m, ch_1h, trend, score, history_json, updated_at "
+                "FROM ticker_history WHERE pair = 'btcidr'"
             ).fetchone()
         except Exception:
             _btc_row = None
+
+        btc_history = []
+        btc_history_updated_at = None
+        if _btc_row:
+            btc_history_updated_at = _btc_row['updated_at']
+            try:
+                raw_hist = _btc_row['history_json']
+                if raw_hist:
+                    parsed_hist = json.loads(raw_hist)
+                    if isinstance(parsed_hist, list):
+                        btc_history = [float(x) for x in parsed_hist if x is not None]
+            except Exception:
+                btc_history = []
+
+        if btc_price <= 0 and btc_history:
+            btc_price = float(btc_history[-1])
+
         btc_ch_5m  = float(_btc_row['ch_5m']  or 0) if _btc_row else 0.0
         btc_ch_15m = float(_btc_row['ch_15m'] or 0) if _btc_row else 0.0
         btc_ch_1h  = float(_btc_row['ch_1h']  or 0) if _btc_row else 0.0
         btc_trend  = str(_btc_row['trend'] or 'N/A') if _btc_row else 'N/A'
-        btc_score  = float(_btc_row['score']  or 50) if _btc_row else 50.0
+        btc_score  = float(_btc_row['score'] or 50) if _btc_row else 50.0
+
+        btc_rt = _get_btc_realtime_metrics()
+        if btc_rt['has_data']:
+            btc_price = btc_rt['price'] if btc_rt['price'] > 0 else btc_price
+            btc_change_24h = btc_rt['ch_24h']
+            btc_ch_5m = btc_rt['ch_5m']
+            btc_ch_15m = btc_rt['ch_15m']
+            btc_ch_1h = btc_rt['ch_1h']
+            btc_trend = btc_rt['trend']
+
+        if btc_history:
+            if abs(btc_ch_5m) < 1e-9:
+                btc_ch_5m = _pct_change_from_history(btc_history, 5)
+            if abs(btc_ch_15m) < 1e-9:
+                btc_ch_15m = _pct_change_from_history(btc_history, 15)
+            if abs(btc_ch_1h) < 1e-9:
+                btc_ch_1h = _pct_change_from_history(btc_history, 60)
+
+            if str(btc_trend).upper() in ('N/A', 'UNKNOWN', ''):
+                btc_trend = _derive_trend_from_history(btc_history)
+            elif str(btc_trend).upper() == 'SIDEWAYS' and abs(btc_ch_1h) >= 0.25:
+                # If momentum is materially moving, avoid a stale SIDEWAYS label.
+                btc_trend = _derive_trend_from_history(btc_history)
+
+        # Optional diagnostics to inspect freshness in frontend/devtools.
+        btc_data_source = 'ipc_tick_buffer' if btc_rt['has_data'] else ('ws_summary' if _btc_ticker else 'ticker_history')
+        btc_updated_age_sec = btc_rt['age_sec']
+        if btc_updated_age_sec is None:
+            try:
+                dt_upd = _parse_iso_date(btc_history_updated_at)
+                if dt_upd is not None:
+                    if dt_upd.tzinfo is None:
+                        dt_upd = dt_upd.replace(tzinfo=datetime.timezone.utc)
+                    btc_updated_age_sec = int((datetime.datetime.now(datetime.timezone.utc) - dt_upd).total_seconds())
+            except Exception:
+                btc_updated_age_sec = None
+
         btc_weakening_flag = btc_ch_5m < 0  # proxy: 5-min change negative = weakening
         btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
 
@@ -2670,7 +2892,7 @@ def _build_stats_payload(force_dry=None):
             "history_count": total_trades_overall,
             "open_count": open_count,
             "daily_pnl": active_pnl,
-            "net_pnl": active_pnl,
+            "net_pnl": net_total_pnl,
             "all_time_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
@@ -2716,6 +2938,7 @@ def _build_stats_payload(force_dry=None):
             "entry_gate_at": stats_dict.get('entry_gate_at', ''),
             "dry_run": bool(dr_val),
             "dry_run_loose_gates": stats_dict.get('dry_run_loose_gates', 'false').lower() == 'true',
+            "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "momentum_state": db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
             
@@ -2729,6 +2952,8 @@ def _build_stats_payload(force_dry=None):
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
+            "btc_data_source": btc_data_source,
+            "btc_updated_age_sec": btc_updated_age_sec,
         }
         return payload
     finally:
@@ -2949,6 +3174,7 @@ def _build_trades_payload():
                 _fee_buy  = _amount_idr * cfg.FEE_BUY_TAKER
                 _fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
                 pnl_net_idr = pnl_idr - _fee_buy - _fee_sell
+                is_fast_opp = int(p.get('is_high_opportunity_fast') or 0)
 
                 results.append({
                     "id":           f"pos_{pair}",
@@ -2968,7 +3194,8 @@ def _build_trades_payload():
                     "created_at":   str(p.get('timestamp') or ''),
                     "status":       pos_status,
                     "pos_status":   pos_status,
-                    "is_manual":    0
+                    "is_manual":    0,
+                    "is_fast_opportunity": bool(is_fast_opp)
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
@@ -3702,7 +3929,7 @@ def _zmq_market_bridge():
                     # logging.debug(f"[ZMQ] Received tick")
                     tick = Tick()
                     tick.ParseFromString(raw)
-                    pair = tick.symbol
+                    pair = str(tick.symbol or '').lower()
                     with mws._lock:
                         if pair not in mws._tickers:
                             mws._tickers[pair] = {
@@ -3720,6 +3947,9 @@ def _zmq_market_bridge():
                             if tick.high_24h > 0: t["high"] = tick.high_24h
                             if tick.low_24h > 0: t["low"] = tick.low_24h
                             if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
+
+                    if pair == 'btcidr':
+                        _append_btc_tick(tick.timestamp, tick.price)
                 
                 elif topic == "trade":
                     logging.info(f"[ZMQ] Received trade for {pair if 'pair' in locals() else 'unknown'}")

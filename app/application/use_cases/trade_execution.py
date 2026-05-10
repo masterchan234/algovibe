@@ -15,6 +15,9 @@ from config import (
     MAX_OPEN_POSITIONS,
     MIN_VOLUME_FILTER,
     LIQUIDITY_MULTIPLIER,
+    CAPITAL_RESERVE_FAST_TRADE_PCT,
+    POSITION_RESERVE_PCT,
+    HIGH_OPPORTUNITY_TQ_PROB,
 )
 
 
@@ -52,23 +55,38 @@ def execute_trade(
             except Exception:
                 pass
 
-        # --- [Risk Check: Max Positions] ---
+        # --- [Risk Check: Max Positions + Reserved Slots] ---
         active_count = db.get_active_positions_count(dry_run=1 if config.DRY_RUN else 0)
-        
+
+        # High-opportunity path: fast entries with strong technical probability can use reserved capacity.
+        is_high_opportunity_fast = bool(taker or (tq_prob >= HIGH_OPPORTUNITY_TQ_PROB))
+
         # [Senior Audit] Adaptive Position Limits based on Equity
         effective_max_pos = MAX_OPEN_POSITIONS
         is_small_account = False
-        
+
         if not config.DRY_RUN:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < 500000: # < 500rb IDR
                 is_small_account = True
                 effective_max_pos = min(5, MAX_OPEN_POSITIONS)
-                
-        if active_count >= effective_max_pos:
-            log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached for account size.")
-            _mark_gate(f"Max active positions reached ({effective_max_pos})")
-            return False
+
+        reserve_slots = max(1, int(round(effective_max_pos * max(0.0, min(0.5, POSITION_RESERVE_PCT)))))
+        standard_slot_limit = max(1, effective_max_pos - reserve_slots)
+
+        if is_high_opportunity_fast:
+            if active_count >= effective_max_pos:
+                log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached.")
+                _mark_gate(f"Max active positions reached ({effective_max_pos})")
+                return False
+        else:
+            if active_count >= standard_slot_limit:
+                log_message(
+                    f"⚠️ SKIP {pair}: Standard slot limit reached ({standard_slot_limit}/{effective_max_pos}). "
+                    f"{reserve_slots} slot reserved for fast high-opportunity setups."
+                )
+                _mark_gate(f"Standard slot limit reached ({standard_slot_limit}); reserve slots active")
+                return False
 
         # --- [Risk Check: Dynamic Liquidity Guard] ---
         tickers = bot.market_ws.get_tickers()
@@ -93,6 +111,8 @@ def execute_trade(
             _mark_gate("Oracle blocked trade for current regime")
             return False
 
+        reserve_pct = max(0.0, min(0.5, CAPITAL_RESERVE_FAST_TRADE_PCT))
+
         if config.DRY_RUN:
             # Derive simulated balance from INITIAL_CAPITAL adjusted by today's realised
             # PnL and currently open DRY positions so sizing decays correctly with losses
@@ -114,8 +134,19 @@ def execute_trade(
                 log_message(f"STOP DRY: Simulated balance {dry_balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                 _mark_gate(f"Dry balance below threshold ({dry_balance:.0f})")
                 return False
+
+            reserve_idr = dry_balance * reserve_pct
+            if is_high_opportunity_fast:
+                usable_capital = dry_balance - MIN_BALANCE_THRESHOLD
+            else:
+                usable_capital = dry_balance - reserve_idr - MIN_BALANCE_THRESHOLD
+
+            if usable_capital <= 0:
+                _mark_gate("Dry usable capital exhausted after reserve buffer")
+                return False
+
             target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
-            amount_idr = min(target_amount, dry_balance - MIN_BALANCE_THRESHOLD)
+            amount_idr = min(target_amount, usable_capital)
         else:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < MIN_BALANCE_THRESHOLD:
@@ -124,7 +155,7 @@ def execute_trade(
                 return False
             # Use real balance as the basis for sizing in LIVE mode
             target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
-            
+
             # [Small Account Optimization]
             # If the calculated size is too small for the exchange but the account can afford it,
             # we 'clamp' to the minimum trade amount to ensure the bot can actually execute.
@@ -133,8 +164,18 @@ def execute_trade(
                 if tq_prob >= 0.45 and balance >= MIN_TRADE_IDR * 1.15:
                     log_message(f"🧠 [Intelligent Sizing] Elevating {pair} to Min Trade (Rp {MIN_TRADE_IDR:,.0f}) for execution.")
                     target_amount = MIN_TRADE_IDR * 1.05 # Add 5% buffer for market volatility
-                    
-            amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
+
+            reserve_idr = balance * reserve_pct
+            if is_high_opportunity_fast:
+                usable_capital = balance - MIN_BALANCE_THRESHOLD
+            else:
+                usable_capital = balance - reserve_idr - MIN_BALANCE_THRESHOLD
+
+            if usable_capital <= 0:
+                _mark_gate("Live usable capital exhausted after reserve buffer")
+                return False
+
+            amount_idr = min(target_amount, usable_capital)
 
         # [Recovery Mode] Kurangi ukuran posisi 50% saat bot dalam mode pemulihan setelah loss limit
         recovery_factor = getattr(bot, '_recovery_size_factor', 1.0)
@@ -315,6 +356,7 @@ def execute_trade(
             "target_sl_pct": final_sl,
             "reason_backup": trend,
             "ai_confidence": tq_prob * 100,
+            "is_high_opportunity_fast": 1 if is_high_opportunity_fast else 0,
         }
 
         db.upsert_position(pair, data)

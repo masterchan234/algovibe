@@ -24,6 +24,10 @@ DATABASE_URL_DRYRUN = os.getenv("DATABASE_URL_DRYRUN", "postgresql://algovibe:se
 # ==========================================
 # 2. TRADING RULES & SIZING
 # ==========================================
+# Master switch: enforce pure technical decision path.
+# When enabled, any LLM-based analysis/veto/insight pipeline is bypassed.
+_TECHNICAL_ONLY_INTERNAL = os.getenv("TECHNICAL_ONLY_MODE", "true").lower() in ("1", "true", "yes", "on")
+
 #INITIAL_CAPITAL        = 10000000
 INITIAL_CAPITAL        = 100000000
 DAILY_LOSS_LIMIT_PCT   = 0.03
@@ -39,6 +43,11 @@ CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih ban
 MAX_OPEN_POSITIONS = 100          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
+
+# Reserve strategy: keep a capital/slot buffer for fast high-opportunity entries.
+CAPITAL_RESERVE_FAST_TRADE_PCT = float(os.getenv("CAPITAL_RESERVE_FAST_TRADE_PCT", 0.20))
+POSITION_RESERVE_PCT = float(os.getenv("POSITION_RESERVE_PCT", 0.20))
+HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 
 # --- [Scalping Targets] ---
 TP_PCT = 0.012                  # Target TP 1.2% (net profit dihitung setelah fee)
@@ -221,6 +230,7 @@ SECTOR_MAP = {
 # Bot akan selalu mulai di mode simulasi kecuali diubah lewat dashboard ter-otentikasi.
 _DRY_RUN_INTERNAL = True 
 _DRY_RUN_CACHE = {"value": None, "last_check": 0}
+_TECH_MODE_CACHE = {"value": None, "last_check": 0}
 
 def get_dynamic_dry_run():
     import time
@@ -252,15 +262,41 @@ def get_dynamic_loose_gates():
         pass
     return False # Default
 
+def get_dynamic_technical_only_mode():
+    import time
+    now = time.time()
+    # Cache for 2 seconds to avoid slamming DB on high-frequency loops
+    if _TECH_MODE_CACHE["value"] is not None and (now - _TECH_MODE_CACHE["last_check"]) < 2:
+        return _TECH_MODE_CACHE["value"]
+
+    try:
+        from app.infrastructure.database import db
+        db_val = db.get_state("technical_only_mode")
+        if db_val is not None:
+            val = str(db_val).lower() in ("true", "1")
+            _TECH_MODE_CACHE["value"] = val
+            _TECH_MODE_CACHE["last_check"] = now
+            return val
+    except Exception:
+        pass
+
+    _TECH_MODE_CACHE["value"] = _TECHNICAL_ONLY_INTERNAL
+    _TECH_MODE_CACHE["last_check"] = now
+    return _TECHNICAL_ONLY_INTERNAL
+
 def clear_dry_run_cache():
     _DRY_RUN_CACHE["value"] = None
     _DRY_RUN_CACHE["last_check"] = 0
+    _TECH_MODE_CACHE["value"] = None
+    _TECH_MODE_CACHE["last_check"] = 0
 
 def __getattr__(name):
     if name == "DRY_RUN":
         return get_dynamic_dry_run()
     if name == "DRY_RUN_LOOSE_GATES":
         return get_dynamic_loose_gates()
+    if name == "TECHNICAL_ONLY_MODE":
+        return get_dynamic_technical_only_mode()
     raise AttributeError(f"module {__name__} has no attribute {name}")
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins (Managed via Database) ---

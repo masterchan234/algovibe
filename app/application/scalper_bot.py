@@ -419,6 +419,12 @@ class ScalperBot:
     def _insight_loop(self):
         while True:
             try:
+                if config.TECHNICAL_ONLY_MODE:
+                    if not getattr(self, "_technical_only_logged", False):
+                        log_message("🧩 [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
+                        self._technical_only_logged = True
+                    time.sleep(5)
+                    continue
                 self.oracle.process_llm_insights()
             except Exception as e:
                 log_message(f"Error in _insight_loop: {e}")

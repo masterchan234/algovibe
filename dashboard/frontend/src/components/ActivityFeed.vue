@@ -59,7 +59,10 @@
           >
             <div class="col-pair">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
-              <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
+              <div style="display: flex; gap: 6px; margin-top: 4px;">
+                <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
+                <div v-if="pos.is_fast_opportunity" class="status-pill fast-opportunity" title="High-opportunity fast trade using reserved capacity">⚡ FAST</div>
+              </div>
             </div>
             
             <div class="col-size">
@@ -520,6 +523,12 @@ function formatIdr(val) {
 .status-pill.exiting { color: #f85149; border: 1px solid rgba(248, 81, 73, 0.2); }
 .status-pill.pending_buy { color: #d29922; border: 1px solid rgba(210, 153, 34, 0.2); }
 .status-pill.open { color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.2); }
+.status-pill.fast-opportunity { 
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 9px;
+}
 
 .val-idr { font-weight: 800; font-size: 12px; color: #c9d1d9; }
 .val-coin, .time { font-size: 10px; color: #484f58; font-family: monospace; }

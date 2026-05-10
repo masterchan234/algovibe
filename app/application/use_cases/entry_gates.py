@@ -92,7 +92,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     Runs all pre-entry gate checks in sequence.
 
     Returns:
-        dict   — all gates passed; contains scoring & LLM data for downstream use
+        dict   — all gates passed; contains scoring data for downstream use
         None   — pair should be skipped (continue)
         "BREAK"— consecutive-loss halt; caller should break the pair loop
     """
