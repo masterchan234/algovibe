@@ -306,7 +306,7 @@ class ScalperBot:
                 self.cached_balance = float(bal['IDR'].get('free', 0))
                 # Cache saldo IDR ke bot_state agar Oracle bisa membacanya untuk target harian
                 db.save_state("cached_idr_balance", str(self.cached_balance))
-            # log_message("🔄 Balances synced to DB for Dashboard.")
+                log_message(f"💰 [BALANCE SYNC] IDR Free: {self.cached_balance:,.0f} → DB Updated")
         except Exception as e:
             log_message(f"⚠️ Balance Sync Failed: {e}")
 
@@ -419,6 +419,12 @@ class ScalperBot:
     def _insight_loop(self):
         while True:
             try:
+                if config.TECHNICAL_ONLY_MODE:
+                    if not getattr(self, "_technical_only_logged", False):
+                        log_message("🧩 [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
+                        self._technical_only_logged = True
+                    time.sleep(5)
+                    continue
                 self.oracle.process_llm_insights()
             except Exception as e:
                 log_message(f"Error in _insight_loop: {e}")
@@ -571,6 +577,10 @@ class ScalperBot:
 
         if not self.market_ws.wait_ready(timeout=30):
             log_message("WARNING: Market WS not ready after 30s, will retry in loop.")
+        
+        # ── Subscribe to orderbook for all open positions ──
+        # Ensures exit monitor gets fresh tickers immediately (doesn't wait for summary-24h broadcast)
+        self.market_ws.subscribe_open_positions()
 
         log_message("Starting Private WebSocket…")
         self.private_ws.start()
@@ -586,8 +596,8 @@ class ScalperBot:
 
         while True:
             run_market_cycle(self)
-            # Sync balance ke DB setiap siklus (atau tiap 60 detik)
-            if not config.DRY_RUN and (time.time() - getattr(self, '_last_bal_sync_ts', 0) > 60):
+            # Sync balance ke DB setiap 20 detik untuk dashboard accuracy
+            if not config.DRY_RUN and (time.time() - getattr(self, '_last_bal_sync_ts', 0) > 20):
                 self._sync_balances_to_db()
                 self._last_bal_sync_ts = time.time()
 

@@ -15,7 +15,82 @@ from config import (
     MAX_OPEN_POSITIONS,
     MIN_VOLUME_FILTER,
     LIQUIDITY_MULTIPLIER,
+    CAPITAL_RESERVE_FAST_TRADE_PCT,
+    POSITION_RESERVE_PCT,
+    HIGH_OPPORTUNITY_TQ_PROB,
+    SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB,
+    SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT,
+    SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX,
+    SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX,
+    SMALL_ACCOUNT_CLAMP_TIER1_PCT,
+    SMALL_ACCOUNT_CLAMP_TIER2_PCT,
+    SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
+
+
+def check_live_liquidity(exchange_client, pair: str, order_size_idr: float, max_spread_pct: float = 0.015) -> tuple:
+    """Validate live order book liquidity from exchange before entry.
+    
+    Fetches real-time order book and checks:
+    1. Bid depth (ada cukup seller interested?)
+    2. Spread (bid-ask tidak terlalu lebar?)
+    3. Recent bid activity
+    
+    Returns:
+        (is_liquid: bool, reason: str, bid_depth_idr: float)
+        - is_liquid: True if entry is safe, False if skip
+        - reason: explanation for gate/skip decision
+        - bid_depth_idr: total IDR available at bid side for our order
+    """
+    try:
+        symbol = pair.upper().replace("IDR", "/IDR")
+        orderbook = exchange_client.fetch_order_book(symbol, limit=20)
+        
+        if not orderbook or 'bids' not in orderbook or 'asks' not in orderbook:
+            return False, "Order book unavailable", 0.0
+        
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
+        
+        if not bids or not asks or len(bids) < 2 or len(asks) < 2:
+            return False, "Order book depth insufficient", 0.0
+        
+        # Get best bid/ask
+        best_bid_price = float(bids[0][0]) if bids else 0
+        best_ask_price = float(asks[0][0]) if asks else 0
+        best_bid_vol = float(bids[0][1]) if bids else 0
+        
+        if best_bid_price <= 0 or best_ask_price <= 0:
+            return False, "Invalid bid/ask prices", 0.0
+        
+        # 1. Check spread
+        spread_pct = (best_ask_price - best_bid_price) / best_bid_price if best_bid_price > 0 else 0
+        if spread_pct > max_spread_pct:
+            return False, f"Spread terlalu lebar {spread_pct*100:.3f}% (max {max_spread_pct*100:.2f}%)", 0.0
+        
+        # 2. Calculate total bid depth (IDR available at bid side)
+        bid_depth_idr = 0.0
+        for bid_price, bid_vol in bids[:10]:  # Top 10 bids
+            bid_depth_idr += float(bid_price) * float(bid_vol)
+        
+        # We need at least 3x our order size in bid depth untuk cukup liquid
+        required_depth = order_size_idr * 3.0
+        if bid_depth_idr < required_depth:
+            return False, f"Bid depth Rp {bid_depth_idr:,.0f} < required Rp {required_depth:,.0f}", bid_depth_idr
+        
+        # 3. Check if top 2 bids have meaningful volume
+        if best_bid_vol < order_size_idr / best_bid_price * 0.5:
+            # Top bid doesn't have 50% of our order volume — check next level
+            if len(bids) > 1:
+                second_bid_vol = float(bids[1][1]) if bids[1] else 0
+                if (best_bid_vol + second_bid_vol) < order_size_idr / best_bid_price * 0.5:
+                    return False, f"Top bids volume too low for order size", bid_depth_idr
+        
+        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth Rp {bid_depth_idr:,.0f})", bid_depth_idr
+        
+    except Exception as e:
+        log_message(f"⚠️ Liquidity check error for {pair}: {e}")
+        return False, f"Liquidity check failed: {str(e)[:60]}", 0.0
 
 
 def execute_trade(
@@ -52,23 +127,38 @@ def execute_trade(
             except Exception:
                 pass
 
-        # --- [Risk Check: Max Positions] ---
+        # --- [Risk Check: Max Positions + Reserved Slots] ---
         active_count = db.get_active_positions_count(dry_run=1 if config.DRY_RUN else 0)
-        
+
+        # High-opportunity path: fast entries with strong technical probability can use reserved capacity.
+        is_high_opportunity_fast = bool(taker or (tq_prob >= HIGH_OPPORTUNITY_TQ_PROB))
+
         # [Senior Audit] Adaptive Position Limits based on Equity
         effective_max_pos = MAX_OPEN_POSITIONS
         is_small_account = False
-        
+
         if not config.DRY_RUN:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < 500000: # < 500rb IDR
                 is_small_account = True
                 effective_max_pos = min(5, MAX_OPEN_POSITIONS)
-                
-        if active_count >= effective_max_pos:
-            log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached for account size.")
-            _mark_gate(f"Max active positions reached ({effective_max_pos})")
-            return False
+
+        reserve_slots = max(1, int(round(effective_max_pos * max(0.0, min(0.5, POSITION_RESERVE_PCT)))))
+        standard_slot_limit = max(1, effective_max_pos - reserve_slots)
+
+        if is_high_opportunity_fast:
+            if active_count >= effective_max_pos:
+                log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached.")
+                _mark_gate(f"Max active positions reached ({effective_max_pos})")
+                return False
+        else:
+            if active_count >= standard_slot_limit:
+                log_message(
+                    f"⚠️ SKIP {pair}: Standard slot limit reached ({standard_slot_limit}/{effective_max_pos}). "
+                    f"{reserve_slots} slot reserved for fast high-opportunity setups."
+                )
+                _mark_gate(f"Standard slot limit reached ({standard_slot_limit}); reserve slots active")
+                return False
 
         # --- [Risk Check: Dynamic Liquidity Guard] ---
         tickers = bot.market_ws.get_tickers()
@@ -93,6 +183,8 @@ def execute_trade(
             _mark_gate("Oracle blocked trade for current regime")
             return False
 
+        reserve_pct = max(0.0, min(0.5, CAPITAL_RESERVE_FAST_TRADE_PCT))
+
         if config.DRY_RUN:
             # Derive simulated balance from INITIAL_CAPITAL adjusted by today's realised
             # PnL and currently open DRY positions so sizing decays correctly with losses
@@ -114,8 +206,19 @@ def execute_trade(
                 log_message(f"STOP DRY: Simulated balance {dry_balance:.0f} IDR below {MIN_BALANCE_THRESHOLD}")
                 _mark_gate(f"Dry balance below threshold ({dry_balance:.0f})")
                 return False
+
+            reserve_idr = dry_balance * reserve_pct
+            if is_high_opportunity_fast:
+                usable_capital = dry_balance - MIN_BALANCE_THRESHOLD
+            else:
+                usable_capital = dry_balance - reserve_idr - MIN_BALANCE_THRESHOLD
+
+            if usable_capital <= 0:
+                _mark_gate("Dry usable capital exhausted after reserve buffer")
+                return False
+
             target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
-            amount_idr = min(target_amount, dry_balance - MIN_BALANCE_THRESHOLD)
+            amount_idr = min(target_amount, usable_capital)
         else:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < MIN_BALANCE_THRESHOLD:
@@ -124,17 +227,38 @@ def execute_trade(
                 return False
             # Use real balance as the basis for sizing in LIVE mode
             target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
-            
+
             # [Small Account Optimization]
             # If the calculated size is too small for the exchange but the account can afford it,
             # we 'clamp' to the minimum trade amount to ensure the bot can actually execute.
             if is_small_account and target_amount < MIN_TRADE_IDR:
                 # Only elevate if technical probability is solid (no AI bias)
-                if tq_prob >= 0.45 and balance >= MIN_TRADE_IDR * 1.15:
-                    log_message(f"🧠 [Intelligent Sizing] Elevating {pair} to Min Trade (Rp {MIN_TRADE_IDR:,.0f}) for execution.")
-                    target_amount = MIN_TRADE_IDR * 1.05 # Add 5% buffer for market volatility
-                    
-            amount_idr = min(target_amount, balance - MIN_BALANCE_THRESHOLD)
+                if tq_prob >= SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB and balance >= MIN_TRADE_IDR * SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT:
+                    # Tiered clamp avoids a single hard floor for 25k-60k balances.
+                    if balance < SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER1_PCT)
+                    elif balance < SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER2_PCT)
+                    else:
+                        clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER3_PCT)
+
+                    log_message(
+                        f"🧠 [Intelligent Sizing] Tiered clamp {pair}: "
+                        f"Rp {target_amount:,.0f} -> Rp {clamp_target:,.0f}"
+                    )
+                    target_amount = clamp_target
+
+            reserve_idr = balance * reserve_pct
+            if is_high_opportunity_fast:
+                usable_capital = balance - MIN_BALANCE_THRESHOLD
+            else:
+                usable_capital = balance - reserve_idr - MIN_BALANCE_THRESHOLD
+
+            if usable_capital <= 0:
+                _mark_gate("Live usable capital exhausted after reserve buffer")
+                return False
+
+            amount_idr = min(target_amount, usable_capital)
 
         # [Recovery Mode] Kurangi ukuran posisi 50% saat bot dalam mode pemulihan setelah loss limit
         recovery_factor = getattr(bot, '_recovery_size_factor', 1.0)
@@ -244,11 +368,25 @@ def execute_trade(
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
 
+            # --- [LIVE LIQUIDITY CHECK] Validate order book depth before entry ---
+            from config import MAX_ALLOWED_SPREAD_PCT
+            is_liquid, liq_reason, bid_depth = check_live_liquidity(
+                bot.exchange, pair, amount_idr, max_spread_pct=MAX_ALLOWED_SPREAD_PCT
+            )
+            
+            if not is_liquid:
+                log_message(f"🚫 [SKIP ENTRY] {pair}: Liquidity check failed — {liq_reason}")
+                _mark_gate(f"Live liquidity check failed: {liq_reason}")
+                return False
+            
+            log_message(f"✅ [LIQUIDITY OK] {pair}: {liq_reason}")
+
             params = {
                 'pair': pair.replace("idr", "_idr"),
             }
-            # [Final Fix] Use explicit create_order for market buy to avoid argument count confusion
-            order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, buy_price, params)
+            # Indodax via ccxt memerlukan price; gunakan ask agar taker-like dan cepat terisi.
+            market_buy_price = max(float(buy_price or 1), 1.0)
+            order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, market_buy_price, params)
             # Update buy_price dengan harga eksekusi asli jika tersedia
             buy_price = float(order.get('price') or price)
 
@@ -315,6 +453,7 @@ def execute_trade(
             "target_sl_pct": final_sl,
             "reason_backup": trend,
             "ai_confidence": tq_prob * 100,
+            "is_high_opportunity_fast": 1 if is_high_opportunity_fast else 0,
         }
 
         db.upsert_position(pair, data)

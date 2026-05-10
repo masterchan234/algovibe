@@ -90,6 +90,7 @@ export const useTradeStore = defineStore('trade', () => {
     open_count: 0,
     dry_run: true,
     dry_run_loose_gates: false,
+    technical_only_mode: true,
     manual_exit_max_net_pct: 0.001,
     // BTC Condition
     btc_price: 0,
@@ -323,6 +324,7 @@ export const useTradeStore = defineStore('trade', () => {
           open_count: data.open_count ?? 0,
           dry_run: data.dry_run ?? true,
           dry_run_loose_gates: data.dry_run_loose_gates ?? false,
+          technical_only_mode: data.technical_only_mode ?? true,
           manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
           btc_price: data.btc_price ?? 0,
           btc_change_24h: data.btc_change_24h ?? 0,
@@ -530,5 +532,6 @@ export const useTradeStore = defineStore('trade', () => {
     socket,
     forceLogout,
     latency,
+    lastSocketStatsAt,
   }
 })

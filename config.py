@@ -24,8 +24,12 @@ DATABASE_URL_DRYRUN = os.getenv("DATABASE_URL_DRYRUN", "postgresql://algovibe:se
 # ==========================================
 # 2. TRADING RULES & SIZING
 # ==========================================
+# Master switch: enforce pure technical decision path.
+# When enabled, any LLM-based analysis/veto/insight pipeline is bypassed.
+_TECHNICAL_ONLY_INTERNAL = os.getenv("TECHNICAL_ONLY_MODE", "true").lower() in ("1", "true", "yes", "on")
+
 #INITIAL_CAPITAL        = 10000000
-INITIAL_CAPITAL        = 100000000
+INITIAL_CAPITAL        = 100000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
@@ -35,24 +39,114 @@ LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan v
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.04    # [DYNAMIC BASE] Dasar 4% per koin → lebih banyak posisi dari modal sama
-MAX_OPEN_POSITIONS = 100          # [WIDE NET] Maksimal 25 posisi terbuka (dari 15 → 25)
+CAPITAL_PER_TRADE_PCT = 0.12    # Modal 100k: default sizing ~12k/trade (tetap tunduk pada MIN_TRADE_IDR)
+MAX_OPEN_POSITIONS = 6          # Modal 100k: batasi eksposur agar tidak over-fragmented
 MIN_BALANCE_THRESHOLD = 10000   # Jangan trading jika saldo < 10rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 10500)) # Minimum order Indodax (10k + buffer)
 
+# Small-account sizing clamp (configurable via env)
+# Allows runtime tuning without editing strategy code.
+SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB = float(os.getenv("SMALL_ACCOUNT_CLAMP_MIN_TQ_PROB", 0.45))
+SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT = float(os.getenv("SMALL_ACCOUNT_CLAMP_MIN_BAL_MULT", 1.05))
+SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX = int(os.getenv("SMALL_ACCOUNT_CLAMP_TIER1_BALANCE_MAX", 30000))
+SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX = int(os.getenv("SMALL_ACCOUNT_CLAMP_TIER2_BALANCE_MAX", 60000))
+SMALL_ACCOUNT_CLAMP_TIER1_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER1_PCT", 1.00))
+SMALL_ACCOUNT_CLAMP_TIER2_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER2_PCT", 1.02))
+SMALL_ACCOUNT_CLAMP_TIER3_PCT = float(os.getenv("SMALL_ACCOUNT_CLAMP_TIER3_PCT", 1.05))
+
+# Reserve strategy: keep a capital/slot buffer for fast high-opportunity entries.
+CAPITAL_RESERVE_FAST_TRADE_PCT = float(os.getenv("CAPITAL_RESERVE_FAST_TRADE_PCT", 0.20))
+POSITION_RESERVE_PCT = float(os.getenv("POSITION_RESERVE_PCT", 0.20))
+HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
+
+
 # --- [Scalping Targets] ---
-TP_PCT = 0.012                  # Target TP 1.2% (net profit dihitung setelah fee)
+TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fee = 2.87% viable profit)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
 AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as requested by user
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
-MIN_NET_PROFIT_IDR = 500  # Filter noise: minimal 500 IDR net profit per trade
+# Dynamic tiered profit thresholds for exit_manager
+TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.015))  # 1.5% default
+TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
+TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.01))  # 1% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 10% for faster exits on profitable positions)
+TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 20%)
+
+# MICRO-PROFIT AUTO-EXIT: Exit immediately if position is small AND already profitable net
+# Allows quick harvesting of small wins without waiting for tier thresholds
+MICRO_PROFIT_MAX_SIZE_IDR = 15000  # Positions under 15k IDR
+MICRO_PROFIT_ENABLED = True        # Can disable if too aggressive
+
+# Default MIN_NET_PROFIT_IDR based on INITIAL_CAPITAL (fallback only)
+MIN_NET_PROFIT_IDR = int(max(50, INITIAL_CAPITAL * 0.0005))
+
+def get_dynamic_min_net_profit(current_balance: float = None) -> int:
+    """Calculate MIN_NET_PROFIT_IDR dynamically based on current account balance.
+    
+    Tiers adapts as capital grows — no manual reconfiguration needed:
+    - Balance ≤ 250k: 0.05% modal (minimum 50 IDR)
+    - Balance 250k-1M: 0.1% modal (minimum 200 IDR)  
+    - Balance > 1M: 0.2% modal (minimum 500 IDR)
+    
+    If current_balance is None, reads from database (live balance).
+    """
+    if current_balance is None:
+        try:
+            from app.infrastructure.database import db
+            # Get actual balance from DB — reflects current account state
+            stats = db.get_daily_stats()
+            opening_balance = float(stats.get('opening_balance', INITIAL_CAPITAL))
+            current_balance = opening_balance + float(stats.get('total_pnl_idr', 0))
+        except Exception:
+            current_balance = INITIAL_CAPITAL
+    
+    current_balance = max(current_balance, INITIAL_CAPITAL)  # Never go below initial
+    
+    if current_balance <= 100_000:
+         return int(max(5, current_balance * 0.0001))    # 0.01% modal
+    elif current_balance <= 250_000:
+        return int(max(50, current_balance * 0.0005))    # 0.05% modal
+    elif current_balance <= 1_000_000:
+        return int(max(200, current_balance * 0.001))    # 0.1% modal
+    else:
+        return int(max(500, current_balance * 0.002))    # 0.2% modal
+
+def get_dynamic_tp_pct(current_balance: float = None) -> float:
+    """Calculate TP_PCT dynamically based on current account balance.
+    
+    Small accounts need faster TP to compound gains without waiting for full scalp:
+    - Balance ≤ 100k: 1.5% TP (fast 15-min scalp)
+    - Balance 100k-250k: 2.0% TP
+    - Balance 250k-1M: 2.5% TP
+    - Balance > 1M: 3.5% TP (original aggressive scalp)
+    
+    If current_balance is None, reads from database (live balance).
+    """
+    if current_balance is None:
+        try:
+            from app.infrastructure.database import db
+            stats = db.get_daily_stats()
+            opening_balance = float(stats.get('opening_balance', INITIAL_CAPITAL))
+            current_balance = opening_balance + float(stats.get('total_pnl_idr', 0))
+        except Exception:
+            current_balance = INITIAL_CAPITAL
+    
+    current_balance = max(current_balance, INITIAL_CAPITAL)
+    
+    if current_balance <= 100_000:
+        return 0.015  # 1.5% untuk small account
+    elif current_balance <= 250_000:
+        return 0.020  # 2.0% untuk medium-small account
+    elif current_balance <= 1_000_000:
+        return 0.025  # 2.5% untuk medium account
+    else:
+        return 0.035  # 3.5% untuk large account (original)
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,
 # bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
 # Set ke 0 untuk nonaktifkan.
-BASKET_HARVEST_TARGET_IDR = 50000  # Rp 50.000 combined net profit → panen serentak
+BASKET_HARVEST_TARGET_IDR = int(max(3000, INITIAL_CAPITAL * 0.05))  # ~5% modal (min 3k)
 
 # Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
 # Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
@@ -71,16 +165,16 @@ BTC_CRASH_TRIGGER_PCT = 0.02    # 2.0% BTC drop in 5 minutes activates kill swit
 # ==========================================
 # Daily profit floor — the IDR target that should never be given back once reached.
 # Defaults to BASKET_HARVEST_TARGET_IDR so the same harvest level becomes the floor.
-MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # Rp 20.000 combined net profit
+MOMENTUM_TARGET_PNL_IDR = BASKET_HARVEST_TARGET_IDR  # mengikuti target harvest aktif
 
 # Buffer above the floor that defines the "Safety Zone" range
 # [MOMENTUM_TARGET_PNL_IDR, MOMENTUM_TARGET_PNL_IDR + MOMENTUM_SAFETY_BUFFER_IDR].
 # When portfolio PnL drops into this range from above, momentum-gated logic activates.
-MOMENTUM_SAFETY_BUFFER_IDR = 2000   # Rp 2.000 cushion for faster profit lock
+MOMENTUM_SAFETY_BUFFER_IDR = int(max(500, MOMENTUM_TARGET_PNL_IDR * 0.15))  # 15% buffer (min 500)
 
 # Velocity threshold (IDR / second). Positive velocity exceeding this value means
 # the portfolio is recovering → enable Tight Trailing Stop instead of immediate exit.
-MOMENTUM_RECOVERY_THRESHOLD = 50    # Rp 50 / sec required to classify as "IMPROVING"
+MOMENTUM_RECOVERY_THRESHOLD = 15    # Modal 100k: threshold recovery lebih realistis
 
 # How often to capture a PnL snapshot for velocity measurement (seconds).
 MOMENTUM_VELOCITY_INTERVAL_SEC = 5
@@ -98,13 +192,14 @@ MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correla
 # high-quality profit profile while session remains in HARVEST_ONLY.
 HARVEST_MOMENTUM_REENTRY_ENABLED = True
 HARVEST_MOMENTUM_MAX_NEW_POSITIONS = 1
-HARVEST_MOMENTUM_MIN_CONFIDENCE = 82.0   # total gate confidence (%).
-HARVEST_MOMENTUM_MIN_TQ_PROB = 0.72      # technical probability (0..1).
-HARVEST_MOMENTUM_MIN_SCORE = 65.0        # ranked momentum score.
-HARVEST_MOMENTUM_MIN_5M_PCT = 0.25       # short momentum (%).
-HARVEST_MOMENTUM_MIN_15M_PCT = 0.60      # follow-through momentum (%).
-HARVEST_MOMENTUM_MIN_TP_PCT = 0.018      # minimum expected TP (1.8%).
-HARVEST_MOMENTUM_MIN_RR = 1.8            # minimum reward-to-risk ratio.
+SMALL_ACCOUNT_MODE = INITIAL_CAPITAL <= 250_000
+HARVEST_MOMENTUM_MIN_CONFIDENCE = 78.0 if SMALL_ACCOUNT_MODE else 82.0   # total gate confidence (%).
+HARVEST_MOMENTUM_MIN_TQ_PROB = 0.68 if SMALL_ACCOUNT_MODE else 0.72       # technical probability (0..1).
+HARVEST_MOMENTUM_MIN_SCORE = 58.0 if SMALL_ACCOUNT_MODE else 65.0         # ranked momentum score.
+HARVEST_MOMENTUM_MIN_5M_PCT = 0.15 if SMALL_ACCOUNT_MODE else 0.25        # short momentum (%).
+HARVEST_MOMENTUM_MIN_15M_PCT = 0.35 if SMALL_ACCOUNT_MODE else 0.60       # follow-through momentum (%).
+HARVEST_MOMENTUM_MIN_TP_PCT = 0.032 if SMALL_ACCOUNT_MODE else 0.035      # minimum expected TP (aligned with TP_PCT).
+HARVEST_MOMENTUM_MIN_RR = 1.5 if SMALL_ACCOUNT_MODE else 1.8              # minimum reward-to-risk ratio.
 
 # ==========================================
 # NET-ZERO SURVIVAL GUARD
@@ -125,14 +220,14 @@ NET_ZERO_HYSTERESIS_SEC = 3.0
 # If the portfolio is collapsing faster than this value, the survival guard fires
 # immediately on the first tick — no 3-second wait.
 # Example: a -7000 IDR/s momentum spike (well below -500) triggers instant exit.
-NET_ZERO_IMMEDIATE_VELOCITY = -500.0  # IDR/s  (any velocity below -500 IDR/s fires instantly)
+NET_ZERO_IMMEDIATE_VELOCITY = -120.0  # IDR/s  (profil modal kecil)
 
 # Minimum combined Net PnL (realized + unrealized) the portfolio must reach before
 # the guard even considers firing.  Prevents triggering on Rp -1 rounding noise or
 # a single position dipping -0.3% while heading to its +3% TP.
 # Rule of thumb: set to -(3 × BASKET_HARVEST_TARGET_IDR) so the guard only fires
 # when the session is in genuine loss territory — not just temporarily underwater.
-NET_ZERO_PNL_FLOOR_IDR = -250000       # IDR  (fires only when Net PnL ≤ -Rp 250.000)
+NET_ZERO_PNL_FLOOR_IDR = -int(max(15000, INITIAL_CAPITAL * 0.15))  # 15% modal (min -15k)
 
 # Unrealized loss as a fraction of total invested capital that must be exceeded before
 # the guard arms.  Prevents spurious exits on tiny dips (e.g., 5 positions each down
@@ -158,7 +253,8 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- Technical Probability ---
-TECH_CONFIDENCE_THRESHOLD = 0.30 # [AGGRESSIVE] Filter noise lebih rendah agar lebih aktif
+# Default ideal profile (Loose Gates OFF): lebih ketat untuk kualitas entry.
+TECH_CONFIDENCE_THRESHOLD = 0.45
 TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 TECH_MIN_HISTORY_POINTS   = 30   
 
@@ -220,6 +316,7 @@ SECTOR_MAP = {
 # Bot akan selalu mulai di mode simulasi kecuali diubah lewat dashboard ter-otentikasi.
 _DRY_RUN_INTERNAL = True 
 _DRY_RUN_CACHE = {"value": None, "last_check": 0}
+_TECH_MODE_CACHE = {"value": None, "last_check": 0}
 
 def get_dynamic_dry_run():
     import time
@@ -251,15 +348,41 @@ def get_dynamic_loose_gates():
         pass
     return False # Default
 
+def get_dynamic_technical_only_mode():
+    import time
+    now = time.time()
+    # Cache for 2 seconds to avoid slamming DB on high-frequency loops
+    if _TECH_MODE_CACHE["value"] is not None and (now - _TECH_MODE_CACHE["last_check"]) < 2:
+        return _TECH_MODE_CACHE["value"]
+
+    try:
+        from app.infrastructure.database import db
+        db_val = db.get_state("technical_only_mode")
+        if db_val is not None:
+            val = str(db_val).lower() in ("true", "1")
+            _TECH_MODE_CACHE["value"] = val
+            _TECH_MODE_CACHE["last_check"] = now
+            return val
+    except Exception:
+        pass
+
+    _TECH_MODE_CACHE["value"] = _TECHNICAL_ONLY_INTERNAL
+    _TECH_MODE_CACHE["last_check"] = now
+    return _TECHNICAL_ONLY_INTERNAL
+
 def clear_dry_run_cache():
     _DRY_RUN_CACHE["value"] = None
     _DRY_RUN_CACHE["last_check"] = 0
+    _TECH_MODE_CACHE["value"] = None
+    _TECH_MODE_CACHE["last_check"] = 0
 
 def __getattr__(name):
     if name == "DRY_RUN":
         return get_dynamic_dry_run()
     if name == "DRY_RUN_LOOSE_GATES":
         return get_dynamic_loose_gates()
+    if name == "TECHNICAL_ONLY_MODE":
+        return get_dynamic_technical_only_mode()
     raise AttributeError(f"module {__name__} has no attribute {name}")
 
 # --- [Senior Audit] Blacklist Koin "Busuk" & Stablecoins (Managed via Database) ---

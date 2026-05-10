@@ -82,13 +82,14 @@ def run_market_cycle(bot):
     ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime) for item in tickers.items()]) if r]
     ranked.sort(key=lambda x: x['score'], reverse=True)
 
-    bot.oracle.request_periodic_analysis(ranked)
+    if not config.TECHNICAL_ONLY_MODE:
+        bot.oracle.request_periodic_analysis(ranked)
 
     for r in ranked[:5]:
         pair = r['pair']
         change = r['change']
         bot.oracle.detect_fake_pump(pair, change)
-        if abs(change) > 3.0:
+        if abs(change) > 3.0 and not config.TECHNICAL_ONLY_MODE:
             bot.oracle.request_pump_analysis(pair, change)
 
     ranked_with_signals = []
@@ -103,7 +104,8 @@ def run_market_cycle(bot):
             ranked_with_signals.append(r_copy)
         except Exception:
             pass
-    bot.oracle.auto_queue_buy_candidates(ranked_with_signals)
+    if not config.TECHNICAL_ONLY_MODE:
+        bot.oracle.auto_queue_buy_candidates(ranked_with_signals)
 
     if not config.DRY_RUN:
         try:

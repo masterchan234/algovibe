@@ -383,6 +383,19 @@ class BrainInferenceService:
                 
                 enriched = enrich_pair(bot_mock, r, self._tickers)
                 gate = check_entry_gates(bot_mock, r, enriched, regime, adaptive_cfg, open_positions)
+
+                if gate == "BREAK":
+                    logger.warning(
+                        "[DEBUG-BRAIN] %s Gate requested BREAK (consecutive-loss halt). Stopping candidate scan.",
+                        pair,
+                    )
+                    break
+
+                if gate is None:
+                    gate_reason = db.get_state(f"gate_skip_{pair}", "Gate rejected")
+                    print(f"[DEBUG-BRAIN] {pair} Gate Rejected: {gate_reason}", flush=True)
+                    continue
+
                 print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
                 if recovery_mode:

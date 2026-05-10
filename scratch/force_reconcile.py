@@ -10,7 +10,7 @@ from app.infrastructure.database import db
 from app.application.exit_manager import ExitManager
 
 def force_reconcile():
-    load_dotenv()
+    load_dotenv(dotenv_path='.env')
     exchange = ccxt.indodax({
         'apiKey': os.getenv('INDODAX_API_KEY'),
         'secret': os.getenv('INDODAX_API_SECRET'),
@@ -18,7 +18,7 @@ def force_reconcile():
     })
     
     print("Running force reconciliation...")
-    manager = ExitManager(exchange, dry_run=False)
+    manager = ExitManager(exchange)
     manager.reconcile_with_exchange()
     print("Force reconciliation complete.")
 

@@ -14,19 +14,10 @@
     <nav class="feed-nav">
       <div class="segmented-control">
         <button 
-          :class="{ active: filterMode === 'all' }" 
-          @click="filterMode = 'all'"
+          :class="{ active: filterMode === 'overview' }" 
+          @click="filterMode = 'overview'"
         >
           Overview
-        </button>
-        <button 
-          :class="{ active: filterMode === 'active' }" 
-          @click="filterMode = 'active'"
-        >
-          Active
-          <span v-if="activeVisibleCount > 0" class="tab-count">
-            {{ activeVisibleCount }}
-          </span>
         </button>
         <button 
           :class="{ active: filterMode === 'history' }" 
@@ -39,15 +30,16 @@
     </nav>
 
     <!-- Contextual Panel (Positions / History) -->
-    <div class="context-panel" :class="{ 'collapsed': filterMode === 'all' && store.positions.length === 0 }">
-      <!-- Active Positions Mode -->
-      <div class="positions-section" v-if="filterMode === 'active' || (filterMode === 'all' && store.positions.length > 0)">
+    <div class="context-panel" :class="{ 'collapsed': filterMode !== 'history' && filterMode !== 'overview' }">
+
+      <!-- Active Positions Mode (Overview) -->
+      <div class="positions-section" v-if="filterMode === 'overview' || (filterMode === 'all' && store.positions.length > 0)">
         <div class="section-header">
           <div class="col-pair">PAIR</div>
           <div class="col-size">SIZE</div>
           <div class="col-price">ENTRY/MARK</div>
           <div class="col-target">TARGETS</div>
-          <div class="col-pnl">PnL</div>
+          <div class="col-pnl">PnL (NET EXIT)</div>
           <div class="col-exit">ACTION</div>
         </div>
         <div class="positions-list">
@@ -55,11 +47,14 @@
             v-for="pos in visiblePositions"
             :key="pos.pair"
             class="position-item"
-            :class="[pos.pnl_net_idr >= 0 ? 'green' : 'red', { 'exit-pending': isExitRequested(pos.pair) }]"
+            :class="[isDustPosition(pos) ? 'dust' : (pos.pnl_net_idr >= 0 ? 'green' : 'red'), { 'exit-pending': isExitRequested(pos.pair) }]"
           >
             <div class="col-pair">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
-              <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
+              <div style="display: flex; gap: 6px; margin-top: 4px;">
+                <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
+                <div v-if="pos.is_fast_opportunity" class="status-pill fast-opportunity" title="High-opportunity fast trade using reserved capacity">⚡ FAST</div>
+              </div>
             </div>
             
             <div class="col-size">
@@ -72,19 +67,22 @@
                 <span class="entry-label">ENT: {{ formatNumber(pos.entry_price) }}</span>
                 <span class="current-label">MARK: {{ formatNumber(pos.exit_price) }}</span>
               </div>
-              <div class="progress-container">
+              <div v-if="!isDustPosition(pos)" class="progress-container">
                 <div class="progress-bg"></div>
                 <div 
                   class="progress-fill" 
                   :style="{ 
                     left: calculatePosition(pos) + '%',
-                    backgroundColor: pos.pnl_pct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
+                    backgroundColor: (pos.pnl_net_pct ?? pos.pnl_pct) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
                   }"
                 ></div>
                 <div class="target-marker sl" title="Stop Loss"></div>
                 <div class="target-marker tp" title="Take Profit"></div>
               </div>
-              <div class="target-labels">
+              <div v-else class="dust-note">
+                DUST tracked - menunggu BUY signal untuk top-up dan promosi kembali ke OPEN.
+              </div>
+              <div v-if="!isDustPosition(pos)" class="target-labels">
                 <span class="sl-val">SL -{{ Math.abs(pos.target_sl || 0).toFixed(1) }}%</span>
                 <span class="tp-val">TP +{{ Math.abs(pos.target_tp || 0).toFixed(1) }}%</span>
               </div>
@@ -92,7 +90,10 @@
 
             <div class="col-pnl">
               <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
-              <div class="pnl-pct">{{ pos.pnl_pct > 0 ? '+' : '' }}{{ (pos.pnl_pct || 0).toFixed(2) }}%</div>
+              <div class="pnl-pct">{{ (pos.pnl_net_pct ?? pos.pnl_pct) > 0 ? '+' : '' }}{{ Number((pos.pnl_net_pct ?? pos.pnl_pct) || 0).toFixed(2) }}%</div>
+              <div class="pnl-kind" :title="isDustPosition(pos) ? 'Tracked dust estimate only' : 'Execution-aware net estimate from orderbook depth and fees'">
+                {{ isDustPosition(pos) ? 'DUST TRACKED' : 'NET EXIT EST.' }}
+              </div>
             </div>
 
             <div class="col-exit">
@@ -108,7 +109,7 @@
               <span v-else-if="isExitRequested(pos.pair)" class="exit-queued">QUEUED</span>
             </div>
           </div>
-          <div v-if="filterMode === 'active' && visiblePositions.length === 0" class="empty-state">
+          <div v-if="filterMode === 'overview' && visiblePositions.length === 0" class="empty-state">
             No active positions.
           </div>
         </div>
@@ -155,7 +156,7 @@
       </div>
     </div>
 
-    <!-- Live Intelligence Stream (Market / Analisa / LLM Exit) -->
+    <!-- Live Intelligence Stream (Market / Analisa / Open Coin Analysis Logs) -->
     <div class="stream-container">
       <div class="stream-tabs">
         <button 
@@ -174,7 +175,7 @@
           :class="{ active: activeStreamTab === 'llm' }"
           @click="activeStreamTab = 'llm'"
         >
-          <span class="tab-icon">🤖</span> LLM Exit
+          <span class="tab-icon">🧾</span> Open Coin Logs
           <span v-if="llmExitCount > 0" class="tab-count llm">{{ llmExitCount }}</span>
         </button>
         <div class="tab-indicator" :class="activeStreamTab"></div>
@@ -209,7 +210,7 @@ import { useAuth } from '../composables/useAuth'
 const { getAuthHeaders } = useAuth()
 
 const store = useTradeStore()
-const filterMode = ref('all')
+const filterMode = ref('overview')
 const activeStreamTab = ref('analisa') 
 
 // Threshold from server config — EXIT allowed only when Net PnL < this value
@@ -236,9 +237,16 @@ function isExitRequested(pair) {
   return exitRequestedPairs.value.has(normalizePair(pair))
 }
 
+function isDustPosition(pos) {
+  return String(pos?.status || '').toUpperCase() === 'DUST'
+}
+
 function displayStatus(pos) {
   if (isExitRequested(pos.pair) && String(pos.status || '').toUpperCase() === 'EXITING') {
     return 'EXIT REQUESTED'
+  }
+  if (isDustPosition(pos)) {
+    return 'DUST'
   }
   return pos.status
 }
@@ -313,6 +321,10 @@ async function handleManualExit(pair) {
 
 const openPairSet = computed(() => new Set(store.positions.map(p => (p.pair || '').toLowerCase())))
 
+const activeCoinPositions = computed(() =>
+  store.positions.filter((p) => ['TP HOLD', 'EXIT-MONITOR'].includes(String(p?.status || '').toUpperCase()))
+)
+
 watch(openPairSet, (pairs) => {
   const alive = new Set(Array.from(pairs || []))
 
@@ -329,18 +341,55 @@ watch(openPairSet, (pairs) => {
 
 const filteredStream = computed(() => {
   const items = store.activityFeed
+  const activePairs = new Set(activeCoinPositions.value.map((p) => String(p?.pair || '').toLowerCase()))
+  const activePairList = Array.from(activePairs)
+  const activeSymbols = activePairList.map((p) => p.replace(/idr$/i, '').toUpperCase())
+
   const marketItems = items.filter((item) => {
     const src = String(item?.source || '').toUpperCase()
     const side = String(item?.side || '').toUpperCase()
     return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
   })
-  const llmItems = items.filter((item) => {
-    const side = String(item?.side || '').toUpperCase()
-    return side.startsWith('LLM_')
+  const openCoinLogCandidates = items
+    .map((item) => {
+      const src = String(item?.source || '').toUpperCase()
+      if (src === 'MARKET_WS') return null
+
+      const rawPair = String(item?.pair || '').toLowerCase()
+      const msg = String(item?.message || '').toUpperCase()
+
+      if (activePairs.has(rawPair)) {
+        return { ...item, pair: rawPair }
+      }
+
+      const matchedSymbol = activeSymbols.find((sym) => sym && msg.includes(sym))
+      if (!matchedSymbol) return null
+
+      const matchedPair = activePairList.find((pair) => pair === `${matchedSymbol.toLowerCase()}idr`)
+      if (!matchedPair) return null
+
+      return { ...item, pair: matchedPair }
+    })
+    .filter(Boolean)
+
+  const openCoinLogItems = activeCoinPositions.value.map((pos) => {
+    const pair = String(pos?.pair || '').toLowerCase()
+    const latest = openCoinLogCandidates.find((item) => String(item?.pair || '').toLowerCase() === pair)
+    if (latest) return latest
+
+    const status = String(pos?.status || 'OPEN').toUpperCase()
+    return {
+      id: `synthetic-monitor-${pair}`,
+      created_at: String(pos?.created_at || pos?.timestamp || new Date().toISOString()),
+      pair,
+      side: 'MONITOR',
+      message: `Monitoring aktif ${formatPair(pair)} (${status}) — menunggu sinyal analisa/log terbaru.`,
+      source: 'SYNTHETIC',
+    }
   })
 
   if (activeStreamTab.value === 'market') return marketItems
-  if (activeStreamTab.value === 'llm') return store.llmDecisions
+  if (activeStreamTab.value === 'llm') return openCoinLogItems
   
   // Overview: show everything except dense market data
   return items.filter((item) => {
@@ -349,7 +398,7 @@ const filteredStream = computed(() => {
   })
 })
 
-const llmExitCount = computed(() => store.llmDecisions.length)
+const llmExitCount = computed(() => activeCoinPositions.value.length)
 
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
@@ -502,6 +551,11 @@ function formatIdr(val) {
   background: rgba(210, 153, 34, 0.06);
 }
 
+.position-item.dust {
+  border-left: 3px solid rgba(139, 148, 158, 0.45);
+  background: rgba(139, 148, 158, 0.05);
+}
+
 .pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
 .exit-reason {
   font-size: 8px; font-weight: 700; text-transform: uppercase;
@@ -520,6 +574,12 @@ function formatIdr(val) {
 .status-pill.exiting { color: #f85149; border: 1px solid rgba(248, 81, 73, 0.2); }
 .status-pill.pending_buy { color: #d29922; border: 1px solid rgba(210, 153, 34, 0.2); }
 .status-pill.open { color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.2); }
+.status-pill.fast-opportunity { 
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 9px;
+}
 
 .val-idr { font-weight: 800; font-size: 12px; color: #c9d1d9; }
 .val-coin, .time { font-size: 10px; color: #484f58; font-family: monospace; }
@@ -572,6 +632,14 @@ function formatIdr(val) {
 
 .pnl-val { font-weight: 900; font-size: 13px; }
 .pnl-pct { font-size: 11px; font-weight: 800; padding: 1px 4px; border-radius: 4px; display: inline-block; }
+.pnl-kind { font-size: 9px; font-weight: 700; opacity: 0.7; margin-top: 3px; letter-spacing: 0.3px; }
+.dust-note {
+  font-size: 9px;
+  font-weight: 700;
+  color: #8b949e;
+  margin-top: 4px;
+  letter-spacing: 0.2px;
+}
 
 .green .pnl-val { color: #3fb950; }
 .green .pnl-pct { background: rgba(63, 185, 80, 0.1); color: #3fb950; }

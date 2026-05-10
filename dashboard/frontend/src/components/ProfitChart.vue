@@ -332,8 +332,14 @@ async function fetchPnlHistory() {
     ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
     : window.location.origin
 
+  let modePrefix = '/api/live'
   try {
-    const res = await fetch(`${backendUrl}/api/pnl-history/${tf}`, { headers: getAuthHeaders() })
+    const mode = localStorage.getItem('algovibe_mode')
+    if (mode === 'dry') modePrefix = '/api/dry'
+  } catch {}
+
+  try {
+    const res = await fetch(`${backendUrl}${modePrefix}/pnl-history/${tf}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       // Data format: [{time, pnl}, ...]
@@ -870,6 +876,15 @@ function scheduleUpdate() {
 }
 
 watch(() => store.pnlHistory.length, scheduleUpdate)
+watch(
+  () => {
+    const last = store.pnlHistory[store.pnlHistory.length - 1]
+    return last ? `${last.time}:${last.pnl}` : 'empty'
+  },
+  scheduleUpdate
+)
+watch(() => `${stats.value.net_pnl}|${stats.value.daily_pnl}|${stats.value.unrealized_pnl}|${stats.value.momentum_state}|${stats.value.net_pnl_velocity}|${stats.value.active_positions}`, scheduleUpdate)
+watch(() => timeframe.value, scheduleUpdate)
 watch(() => store.connected, (conn) => {
   if (conn) {
     setTimeout(scheduleUpdate, 500)

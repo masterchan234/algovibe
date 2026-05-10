@@ -7,7 +7,7 @@
  *  - Socket.IO (/socket.io/*): Always network — never cache WS handshakes.
  */
 
-const CACHE_VERSION = 'av-v4'
+const CACHE_VERSION = 'av-v6'
 const STATIC_CACHE  = `${CACHE_VERSION}-static`
 const API_CACHE     = `${CACHE_VERSION}-api`
 
@@ -34,6 +34,13 @@ self.addEventListener('activate', (event) => {
       )
     ).then(() => self.clients.claim())
   )
+})
+
+// Allow the page to force immediate activation for new SW versions.
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting()
+  }
 })
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────

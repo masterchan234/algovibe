@@ -263,9 +263,14 @@ class ExecutiveCoreService:
         except Exception as exc:
             logger.warning(f"[executive-core] predictor unavailable for exit monitor: {exc}")
 
+        loop_cycle = 0
         while self._running:
             try:
                 tickers = self._build_current_tickers_snapshot()
+                loop_cycle += 1
+                if loop_cycle % 30 == 0:  # Log every 60 seconds (30 cycles × 2s)
+                    logger.info(f"[exit-monitor] Cycle #{loop_cycle}: {len(tickers)} tickers in snapshot")
+                
                 if tickers:
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(

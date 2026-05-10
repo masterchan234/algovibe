@@ -41,6 +41,8 @@ OB_MIN_VOL_IDR   = 50_000_000  # 50 Juta IDR (diturunkan agar lebih banyak pair 
 # Pair yang SELALU di-subscribe order book terlepas dari volume threshold.
 # btcidr wajib ada agar Oracle regime filter tidak mengalami error
 # "Data BTC tidak tersedia di WS/DB. Melewati filter regime."
+# PLUS all currently OPEN positions (so exit monitor gets fresh tickers immediately).
+# Will be built dynamically after WS connects.
 OB_HIGH_PRIORITY_PAIRS: frozenset = frozenset({"btcidr"})
 
 # Indeks kolom pada payload market:summary-24h
@@ -114,6 +116,34 @@ class MarketDataWS:
     def wait_ready(self, timeout: float = 30.0) -> bool:
         """Blok hingga data pertama diterima (atau timeout detik)."""
         return self._connected.wait(timeout=timeout)
+
+    def subscribe_open_positions(self):
+        """Subscribe to orderbook for all open live positions.
+        
+        Called after database is ready to ensure exit monitor gets fresh tickers
+        for all open positions (not just pairs that have appeared in summary-24h yet).
+        """
+        try:
+            from app.infrastructure.database import db
+            live_pos = db.get_open_positions()
+            if not live_pos:
+                return
+            
+            # Ensure each open position has an orderbook subscription
+            for pair in live_pos.keys():
+                if pair not in self._ob_subscribed and self._ws_ref:
+                    try:
+                        req_id = self._next_id()
+                        channel = f"{CHANNEL_OB_PFX}{pair}"
+                        sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+                        self._ws_ref.send(json.dumps(sub_msg))
+                        self._ob_subscribed.add(pair)
+                        logger.info(f"[MarketWS] Subscribed OB for open position: {pair}")
+                        time.sleep(0.05)  # Small delay between subscriptions
+                    except Exception as e:
+                        logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
+        except Exception as e:
+            logger.warning(f"[MarketWS] Failed to subscribe_open_positions: {e}")
 
     def get_tickers(self) -> dict:
         """

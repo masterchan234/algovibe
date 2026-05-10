@@ -5,10 +5,13 @@ import os
 import sys
 import time
 import uuid
+import hashlib
 import datetime
 import logging
 import urllib.request
 import xml.etree.ElementTree as ET
+import threading
+from collections import deque
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import psycopg2
@@ -158,7 +161,7 @@ def handle_ping_latency(data):
 
 @socketio.on('connect')
 def handle_connect(auth=None):
-    # Handshake: try JWT-based auth first (primary), then view-token (guest), then Flask session (legacy).
+    # Handshake: JWT/session for authenticated users, optional explicit view-token for controlled guest access.
     client_token = auth.get('token') if auth else None
 
     is_authenticated = False
@@ -201,6 +204,11 @@ def handle_connect(auth=None):
         is_guest = True
         join_room('public')
         logging.info("🔌 Guest User connected (Public/View-only mode)")
+
+    # 4. Anonymous access is blocked for security.
+    else:
+        logging.warning("🚫 Anonymous WS connection rejected")
+        return False
 
     if not is_authenticated and not is_guest:
         logging.warning(f"🚫 Unauthorized WS connection attempt")
@@ -319,6 +327,12 @@ CURRENT_WATCH_PAIR = "btcidr"
 # Pair khusus untuk kebutuhan market analysis (tetap BTC, tidak mengikuti watch pair UI)
 ANALYSIS_PAIR = "btcidr"
 
+# Realtime BTC tick buffer (source: IPC market stream from market-pipe).
+# Stores tuples: (timestamp_ms, price). Kept for max 24h window.
+_BTC_TICK_BUFFER = deque(maxlen=120000)
+_BTC_TICK_LOCK = threading.Lock()
+_BTC_WINDOW_24H_MS = 24 * 60 * 60 * 1000
+
 # Inisialisasi Market WS untuk dashboard — tidak distart di sini; data ticker
 # dibaca dari cache internal saat dibutuhkan oleh endpoint REST.
 # Double ingress ke exchange dilarang keras di arsitektur microservice ini.
@@ -387,10 +401,9 @@ def _fetch_all_tickers_rest():
 def _fetch_real_idr_balance_bundle():
     """
     Fetch real IDR balance bundle (free/used/total) + all non-IDR coins.
-    [Senior Logic] PRIORITASKAN DATA DATABASE (yang didorong oleh bot via WebSocket).
-    Hanya lakukan REST pull jika data DB kosong.
+    [Senior Logic] ALWAYS FETCH FRESH from DB (no cache) to keep dashboard in sync with bot.
     """
-    # 1. Coba baca dari Database (Realtime Sync dari Engine)
+    # ALWAYS fetch fresh from Database (no caching — balance changes every cycle)
     try:
         db_bal = db.get_balances()
         if db_bal and 'IDR' in db_bal:
@@ -407,12 +420,12 @@ def _fetch_real_idr_balance_bundle():
                 "used": float(idr_data.get('used', 0)),
                 "total": float(idr_data.get('total', 0)),
                 "coins": coins,
-                "source": "DATABASE_SYNC"
+                "source": "DATABASE_FRESH"
             }
     except Exception as e:
         logging.warning(f"⚠️ Failed to read balances from DB: {e}")
 
-    # 2. Fallback ke REST API (Jika DB kosong atau gagal)
+    # Fallback ke REST API (Jika DB kosong atau gagal)
     try:
         user = db.get_user('admin')
         if not user or not user['api_key'] or not user['api_secret']:
@@ -600,6 +613,90 @@ def _get_trade_history_summary():
 
 
 _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari push_data_loop
+_last_market_brief_llm_ts = 0.0
+_last_market_brief_payload_hash = ""
+
+
+def _extract_json_brief_text(raw_text: str) -> str | None:
+    """Parse strict JSON response from LLM and extract brief text."""
+    if not raw_text:
+        return None
+
+    text = str(raw_text).strip()
+
+    # Direct JSON
+    try:
+        obj = json.loads(text)
+        brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+        return brief or None
+    except Exception:
+        pass
+
+    # JSON in codeblock
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+            return brief or None
+        except Exception:
+            pass
+
+    # First balanced JSON object
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidate = text[start:i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        brief = str(obj.get("brief") or "").strip() if isinstance(obj, dict) else ""
+                        return brief or None
+                    except Exception:
+                        start = None
+                        continue
+    return None
+
+
+def _request_market_brief_llm(brief_vars: dict):
+    """Send full market variables to LLM and let LLM write MARKET INTELLIGENCE BRIEF."""
+    global _last_market_brief_llm_ts, _last_market_brief_payload_hash
+
+    worker = LLMWorker.get_instance()
+    if not worker.is_active:
+        return
+
+    payload_json = json.dumps(brief_vars, ensure_ascii=False, sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    now = time.time()
+
+    # Avoid spamming LLM with identical payload in short windows.
+    if (now - _last_market_brief_llm_ts) < 45 and payload_hash == _last_market_brief_payload_hash:
+        return
+
+    prompt = (
+        "Anda adalah Market Intelligence Writer.\n"
+        "Gunakan HANYA data JSON di bawah ini. Jangan menambah fakta dari luar, jangan asumsi, jangan halusinasi.\n"
+        "Balas WAJIB dalam JSON valid SATU OBJEK dengan schema tepat berikut:\n"
+        '{"brief":"..."}\n'
+        "Nilai brief: 1 paragraf ringkas Bahasa Indonesia (maks 650 karakter) dengan format konten:\n"
+        "BiasData | DriversData | PlanData | InvalidasiData\n"
+        "PlanData dan InvalidasiData HARUS diturunkan dari variabel yang tersedia di DATA_JSON.\n"
+        "Jika data kurang, tulis eksplisit 'data tidak cukup'.\n"
+        "Jangan keluarkan teks lain di luar JSON.\n\n"
+        f"DATA_JSON:\n{payload_json}"
+    )
+
+    worker.query_structured("market_intel_brief", prompt)
+    _last_market_brief_llm_ts = now
+    _last_market_brief_payload_hash = payload_hash
 
 def _generate_equity_report_llm(stats):
     """Kirim prompt ke LLM untuk membuat Executive Report berdasarkan seluruh riwayat transaksi."""
@@ -764,6 +861,220 @@ def favicon():
     return send_from_directory("static", "favicon.ico", mimetype="image/x-icon")
 
 
+@app.route('/api/public/landing-data', methods=['GET'])
+def public_landing_data():
+    """Provides a public 'teaser' of market signals and AI insights for the landing page."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        
+        # 1. Fetch Top 12 Signals from ticker_history (include price/change for landing cards)
+        rows = conn.execute(
+            "SELECT pair, score, trend, signal, ch_1h, ch_15m, ch_5m, history_json FROM ticker_history "
+            "WHERE score IS NOT NULL ORDER BY score DESC LIMIT 12"
+        ).fetchall()
+        
+        signals = []
+        for r in rows:
+            pair_raw = str(r['pair'] or '').upper()
+
+            last_price = 0.0
+            hist = []
+            try:
+                hist = json.loads(r.get('history_json') or '[]')
+                if isinstance(hist, list) and hist:
+                    last_price = float(hist[-1] or 0.0)
+            except Exception:
+                hist = []
+                last_price = 0.0
+
+            ch_5m = float(r.get('ch_5m') or 0.0)
+            ch_15m = float(r.get('ch_15m') or 0.0)
+            ch_1h = float(r.get('ch_1h') or 0.0)
+
+            # Fallback delta from local history if computed DB deltas are not available.
+            if abs(ch_1h) < 0.0001 and isinstance(hist, list) and len(hist) >= 2:
+                try:
+                    now_px = float(hist[-1] or 0.0)
+                    ref_px = 0.0
+                    if len(hist) >= 60 and float(hist[-60] or 0.0) > 0:
+                        ref_px = float(hist[-60])
+                    elif len(hist) >= 15 and float(hist[-15] or 0.0) > 0:
+                        ref_px = float(hist[-15])
+                    elif float(hist[-2] or 0.0) > 0:
+                        ref_px = float(hist[-2])
+                    if now_px > 0 and ref_px > 0:
+                        ch_1h = ((now_px - ref_px) / ref_px) * 100.0
+                except Exception:
+                    pass
+
+            signals.append({
+                "pair": pair_raw.replace('IDR', ''),
+                "score": float(r['score'] or 50),
+                "confidence": 70, # Static confidence for landing teaser
+                "trend": str(r['trend'] or 'STABLE').upper(),
+                "price": last_price,
+                # Keep landing UI backward-compatible with polling mapper.
+                "change_24h": ch_1h,
+                "ch_1h": ch_1h,
+                "ch_15m": ch_15m,
+                "ch_5m": ch_5m,
+            })
+        
+        # Fallback to bot_state if ticker_history is empty
+        if not signals:
+            signals_rows = conn.execute(
+                "SELECT key, value FROM bot_state WHERE key LIKE 'radar_reco_%%' LIMIT 12"
+            ).fetchall()
+            for r in signals_rows:
+                pair = r['key'].replace('radar_reco_', '')
+                try:
+                    val = json.loads(r['value'])
+                    signals.append({
+                        "pair": pair.upper().replace('IDR', ''),
+                        "score": val.get('score', 50),
+                        "confidence": val.get('confidence', 70),
+                        "trend": val.get('trend', 'STABLE'),
+                        "price": float(val.get('price', 0) or 0),
+                        "change_24h": float(val.get('change_24h', val.get('change', val.get('ch_1h', 0))) or 0),
+                        "ch_1h": float(val.get('ch_1h', 0) or 0),
+                        "ch_15m": float(val.get('ch_15m', 0) or 0),
+                        "ch_5m": float(val.get('ch_5m', 0) or 0),
+                    })
+                except:
+                    signals.append({
+                        "pair": pair.upper().replace('IDR', ''),
+                        "score": 50,
+                        "confidence": 60,
+                        "trend": str(r['value']).upper(),
+                        "price": 0,
+                        "change_24h": 0,
+                        "ch_1h": 0,
+                        "ch_15m": 0,
+                        "ch_5m": 0,
+                    })
+
+        # 2. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
+        llm_feed = _build_llm_decisions_payload(limit=5)
+        brief_items = [
+            {
+                "message": str(item.get("message") or "").strip(),
+                "created_at": str(item.get("created_at") or "")
+            }
+            for item in llm_feed
+            if str(item.get("side") or "") == "MARKET_INTEL_BRIEF"
+               and str(item.get("message") or "").strip()
+        ]
+
+        # Fallback to existing public-safe AI insights only when brief is unavailable.
+        if brief_items:
+            insights = brief_items[:5]
+        else:
+            ai_rows = conn.execute(
+                "SELECT DISTINCT ON (message) message, created_at FROM system_events "
+                "WHERE type IN ('AI_INSIGHT', 'AI_ORACLE') "
+                "ORDER BY message, created_at DESC LIMIT 5"
+            ).fetchall()
+            insights = sorted(
+                [{"message": r['message'], "created_at": str(r['created_at'])} for r in ai_rows],
+                key=lambda x: x['created_at'],
+                reverse=True,
+            )
+
+        # 3. Market Stats
+        sentiment = db.get_state("market_sentiment_index") or 50
+        btc_price = db.get_state("last_price_btcidr") or 0
+        regime = db.get_state("current_market_regime") or "SCANNING"
+        
+        # 4. Intelligence Reports
+        art_rows = conn.execute(
+            "SELECT title, excerpt, content, category, created_at FROM intelligence_reports "
+            "ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        articles = [{
+            "title": r['title'],
+            "excerpt": r['excerpt'],
+            "content": r['content'],
+            "category": r['category'],
+            "created_at": str(r['created_at'])
+        } for r in art_rows]
+
+        # 5. Public activity logs (sanitized for landing page)
+        log_rows = conn.execute(
+            """
+            SELECT created_at, message
+            FROM system_events
+            WHERE type IN ('AI_INSIGHT', 'AI_ORACLE', 'LLM_EXIT_HOLD')
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        public_logs = [
+            {
+                "time": str(r['created_at']),
+                "message": str(r['message'] or '')[:160]
+            }
+            for r in log_rows
+        ]
+
+        # If the event stream is stale, synthesize lightweight live logs from
+        # current signal snapshot so landing activity panel keeps moving.
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        latest_log_ts = None
+        if log_rows:
+            raw_ts = log_rows[0]['created_at']
+            if isinstance(raw_ts, datetime.datetime):
+                latest_log_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=datetime.timezone.utc)
+            else:
+                parsed = _parse_iso_date(raw_ts)
+                if parsed is not None:
+                    latest_log_ts = parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
+
+        logs_are_stale = (
+            latest_log_ts is None
+            or (now_utc - latest_log_ts).total_seconds() > 180
+        )
+
+        if logs_are_stale:
+            stream_logs = []
+            stream_ts = now_utc.isoformat()
+            for sig in signals[:4]:
+                pair = str(sig.get('pair') or 'N/A')
+                score = float(sig.get('score') or 0.0)
+                trend = str(sig.get('trend') or 'STABLE').upper()
+                ch_1h = float(sig.get('ch_1h') or 0.0)
+                stream_logs.append({
+                    "time": stream_ts,
+                    "message": f"🧠 AI Rank: {score:.1f}% | Stream Snapshot {pair} ({trend}, 1H {ch_1h:+.2f}%)"
+                })
+
+            public_logs = (stream_logs + public_logs)[:8]
+
+        response = jsonify({
+            "success": True,
+            "signals": signals[:8],
+            "insights": insights,
+            "articles": articles,
+            "public_logs": public_logs,
+            "market": {
+                "sentiment": int(sentiment),
+                "btc_price": float(btc_price),
+                "regime": regime
+            }
+        })
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+    except Exception as e:
+        import traceback
+        logging.error(f"[LandingData] Global Error: {e}")
+        logging.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if conn: conn.close()
+
+
 @app.route('/api/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'GET':
@@ -910,9 +1221,11 @@ def get_positions():
             except Exception:
                 pass
 
+            exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, amount_idr)
             fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
             fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-            pnl_net_idr = pnl_idr - fee_buy - fee_sell
+            pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - fee_buy - fee_sell)
+            pnl_net_pct = (pnl_net_idr / amount_idr * 100) if amount_idr > 0 else 0.0
 
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
             duration_sec = 0
@@ -933,6 +1246,7 @@ def get_positions():
                 "pnl_idr": round(pnl_idr, 0),
                 "pnl_net_idr": round(pnl_net_idr, 0),
                 "pnl_pct": round(pnl_pct, 3),
+                "pnl_net_pct": round(pnl_net_pct, 3),
                 "status": pos['status'],
                 "duration_sec": duration_sec,
                 "opened_at": str(pos['timestamp'])
@@ -945,6 +1259,112 @@ def get_positions():
         return jsonify([])
     finally:
         conn.close()
+
+
+def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_idr, depth_limit=20):
+    """Estimate full-fill market sell PnL from live bid depth.
+
+    Mirrors the bot-side exit guard: consume the bid stack from best bid down,
+    then apply taker fees to estimate the actual net result of a market sell.
+    """
+    import config as cfg
+
+    amount = float(amount or 0)
+    entry_price = float(entry_price or 0)
+    amount_idr = float(amount_idr or 0)
+    if amount <= 0 or entry_price <= 0:
+        return {
+            "ok": False,
+            "reason": "invalid_input",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": 0.0,
+            "fee_sell": 0.0,
+        }
+
+    bids = []
+    try:
+        live_depth = mws.get_market_depth(pair) or {}
+        bids = list(live_depth.get('bids') or [])
+    except Exception:
+        bids = []
+
+    if not bids:
+        try:
+            db_depth = db.get_market_depth(pair) or {}
+            bids = list(db_depth.get('bids') or [])
+        except Exception:
+            bids = []
+
+    if not bids:
+        return {
+            "ok": False,
+            "reason": "no_orderbook",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": 0.0,
+        }
+
+    remaining = amount
+    filled = 0.0
+    sell_value = 0.0
+    for lvl in bids[:depth_limit]:
+        px = float(lvl.get('price') or 0)
+        vol = float(lvl.get('vol') or 0)
+        if px <= 0 or vol <= 0:
+            continue
+        take = min(remaining, vol)
+        sell_value += take * px
+        filled += take
+        remaining -= take
+        if remaining <= 1e-12:
+            break
+
+    if filled <= 0:
+        return {
+            "ok": False,
+            "reason": "zero_fill",
+            "filled_amount": 0.0,
+            "avg_price": 0.0,
+            "sell_value": 0.0,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": 0.0,
+        }
+
+    if remaining > 1e-8:
+        return {
+            "ok": False,
+            "reason": "insufficient_bid_depth",
+            "filled_amount": filled,
+            "avg_price": sell_value / filled,
+            "sell_value": sell_value,
+            "net_pnl_idr": 0.0,
+            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "fee_sell": sell_value * cfg.FEE_SELL_TAKER,
+        }
+
+    avg_price = sell_value / filled
+    fee_buy = amount_idr * cfg.FEE_BUY_TAKER
+    fee_sell = sell_value * cfg.FEE_SELL_TAKER
+    gross_pnl = (avg_price - entry_price) * filled
+    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+
+    return {
+        "ok": True,
+        "reason": "ok",
+        "filled_amount": filled,
+        "avg_price": avg_price,
+        "sell_value": sell_value,
+        "net_pnl_idr": net_pnl_idr,
+        "fee_buy": fee_buy,
+        "fee_sell": fee_sell,
+    }
 
 
 @app.route('/api/llm-decisions')
@@ -1186,15 +1606,63 @@ def sync_wallet():
 @app.route('/api/orders')
 @login_required
 def get_orders():
-    """Return the 20 most-recent entries from the order_book table for the Live Dashboard."""
+    """Return recent live order activity, falling back to positions/trade history when order_book is empty."""
     try:
-        live_conn = active_db._live.get_raw_connection()
+        live_conn = db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT order_id, pair, side, price, amount, status, created_at, updated_at "
             "FROM order_book ORDER BY created_at DESC LIMIT 20"
         ).fetchall()
+
+        if rows:
+            payload = [dict(r) for r in rows]
+            live_conn.close()
+            return jsonify(payload)
+
+        position_rows = live_conn.execute(
+            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_idr, status, timestamp "
+            "FROM positions "
+            "WHERE UPPER(COALESCE(status, '')) IN ('OPEN', 'EXITING', 'PENDING_BUY') "
+            "ORDER BY timestamp DESC LIMIT 20"
+        ).fetchall()
+
+        trade_rows = live_conn.execute(
+            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_idr, reason, created_at "
+            "FROM trade_history "
+            "WHERE COALESCE(exit_order_id, '') <> '' AND COALESCE(dry_run, false) = false "
+            "ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
         live_conn.close()
-        return jsonify([dict(r) for r in rows])
+
+        fallback = []
+        for row in position_rows:
+            fallback.append({
+                "order_id": row['entry_order_id'] or f"open:{row['pair']}:{row['timestamp']}",
+                "pair": row['pair'],
+                "side": "buy",
+                "price": row['entry_price'],
+                "amount": row['amount_crypto'] or row['amount_idr'],
+                "status": row['status'] or 'OPEN',
+                "created_at": str(row['timestamp'] or ''),
+                "updated_at": str(row['timestamp'] or ''),
+                "source": "positions",
+            })
+
+        for row in trade_rows:
+            fallback.append({
+                "order_id": row['exit_order_id'] or f"exit:{row['pair']}:{row['created_at']}",
+                "pair": row['pair'],
+                "side": "sell",
+                "price": row['exit_price'],
+                "amount": row['amount_crypto'] or row['amount_idr'],
+                "status": row['reason'] or 'CLOSED',
+                "created_at": str(row['created_at'] or ''),
+                "updated_at": str(row['created_at'] or ''),
+                "source": "trade_history",
+            })
+
+        fallback.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+        return jsonify(fallback[:20])
     except Exception as e:
         logging.warning(f"[/api/orders] {e}")
         return jsonify([])
@@ -1209,7 +1677,7 @@ def get_live_state():
     regardless of which mode the dashboard is currently displaying.
     """
     try:
-        live_conn = active_db._live.get_raw_connection()
+        live_conn = db._live.get_raw_connection()
         rows = live_conn.execute(
             "SELECT key, value FROM bot_state WHERE key IN "
             "('target_protection_active', 'peak_net_pnl_session', 'momentum_state', "
@@ -1228,6 +1696,7 @@ def get_live_state():
                 (state.get("session_latched", "false") == "true")
                 or (state.get("session_mode", "NORMAL") == "HARVEST_ONLY")
             ),
+            "bot_offline": False,
             "net_zero_survival_active": state.get("net_zero_survival_active", "false") == "true",
             "net_pnl_velocity": float(state.get("net_pnl_velocity") or 0),
             "net_pnl_realized": float(state.get("net_pnl_realized") or 0),
@@ -1464,6 +1933,7 @@ def get_current_mode():
     return jsonify({
         'mode': 'DRY' if is_dry else 'LIVE',
         'dry_run': is_dry,
+        'technical_only_mode': bool(cfg.TECHNICAL_ONLY_MODE),
     })
 
 @app.route('/api/bot/select-mode', methods=['POST'])
@@ -1517,6 +1987,29 @@ def toggle_loose_gates():
     cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
     logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
     return jsonify({"success": True, "loose_gates": new_val})
+
+@app.route('/api/bot/toggle-technical-only', methods=['POST'])
+@login_required
+def toggle_technical_only_mode():
+    """Toggle TECHNICAL_ONLY_MODE runtime via bot_state (no restart required)."""
+    data = request.get_json(silent=True) or {}
+    requested = data.get('technical_only_mode')
+
+    current_val = bool(cfg.TECHNICAL_ONLY_MODE)
+    if requested is None:
+        new_val = not current_val
+    else:
+        if isinstance(requested, bool):
+            new_val = requested
+        else:
+            new_val = str(requested).lower() in ('1', 'true', 'yes', 'on')
+
+    db.save_state("technical_only_mode", "true" if new_val else "false")
+    cfg.clear_dry_run_cache()
+    broadcast_command("STATE_UPDATE", {"key": "technical_only_mode", "value": "true" if new_val else "false"})
+
+    logging.info(f"🔧 [TECHNICAL_ONLY_MODE] Updated to: {new_val}")
+    return jsonify({"success": True, "technical_only_mode": new_val})
 
 @app.route('/api/bot/unblock', methods=['POST'])
 @login_required
@@ -1611,6 +2104,7 @@ def get_bot_status():
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(cfg.DRY_RUN),
+            "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "uptime_sec": uptime_sec,
             "last_heartbeat": last_heartbeat,
             "last_trade_at": last_trade_at,
@@ -1621,7 +2115,7 @@ def get_bot_status():
             "bot_state": all_states
         })
     except Exception as e:
-        return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "uptime_sec": 0})
+        return jsonify({"is_running": False, "dry_run": bool(cfg.DRY_RUN), "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE), "uptime_sec": 0})
     finally:
         conn.close()
 
@@ -2037,6 +2531,135 @@ def handle_watch_pair(data):
     except Exception as e:
         logging.warning(f"Failed to subscribe dynamic data for {pair}: {e}")
 
+
+def _pct_change_from_history(history, lookback):
+    """Compute percentage change from an in-memory price history list."""
+    try:
+        if not isinstance(history, list) or len(history) < 2:
+            return 0.0
+        curr = float(history[-1])
+        ref = float(history[-lookback]) if len(history) >= lookback else float(history[0])
+        if ref <= 0:
+            return 0.0
+        return ((curr - ref) / ref) * 100.0
+    except Exception:
+        return 0.0
+
+
+def _append_btc_tick(ts_ms, price):
+    """Append BTC tick to rolling in-memory buffer and prune entries older than 24h."""
+    try:
+        ts_ms = int(ts_ms)
+        price = float(price)
+        if ts_ms <= 0 or price <= 0:
+            return
+        cutoff = ts_ms - _BTC_WINDOW_24H_MS
+        with _BTC_TICK_LOCK:
+            _BTC_TICK_BUFFER.append((ts_ms, price))
+            while _BTC_TICK_BUFFER and _BTC_TICK_BUFFER[0][0] < cutoff:
+                _BTC_TICK_BUFFER.popleft()
+    except Exception:
+        return
+
+
+def _pct_change_from_time_window(points, window_ms):
+    """Compute percentage change using oldest point inside the requested time window."""
+    try:
+        if not points or len(points) < 2:
+            return 0.0
+        last_ts, last_px = points[-1]
+        target_ts = int(last_ts) - int(window_ms)
+        ref_px = float(points[0][1])
+        for ts, px in points:
+            if int(ts) >= target_ts:
+                ref_px = float(px)
+                break
+        if ref_px <= 0:
+            return 0.0
+        return ((float(last_px) - ref_px) / ref_px) * 100.0
+    except Exception:
+        return 0.0
+
+
+def _get_btc_realtime_metrics():
+    """Build BTC momentum metrics from IPC tick buffer (5m/15m/1h/24h + trend)."""
+    try:
+        with _BTC_TICK_LOCK:
+            points = list(_BTC_TICK_BUFFER)
+        if len(points) < 2:
+            return {
+                "has_data": False,
+                "price": 0.0,
+                "ch_5m": 0.0,
+                "ch_15m": 0.0,
+                "ch_1h": 0.0,
+                "ch_24h": 0.0,
+                "trend": "N/A",
+                "age_sec": None,
+            }
+
+        _, last_px = points[-1]
+        last_ts = int(points[-1][0])
+        prices = [float(p[1]) for p in points]
+
+        ch_5m = _pct_change_from_time_window(points, 5 * 60 * 1000)
+        ch_15m = _pct_change_from_time_window(points, 15 * 60 * 1000)
+        ch_1h = _pct_change_from_time_window(points, 60 * 60 * 1000)
+        ch_24h = _pct_change_from_time_window(points, _BTC_WINDOW_24H_MS)
+
+        trend = _derive_trend_from_history(prices)
+        if trend == "N/A":
+            if ch_1h > 0.2:
+                trend = "UP"
+            elif ch_1h < -0.2:
+                trend = "DOWN"
+            else:
+                trend = "SIDEWAYS"
+
+        age_sec = int(max(0, (int(time.time() * 1000) - last_ts) / 1000))
+
+        return {
+            "has_data": True,
+            "price": float(last_px),
+            "ch_5m": float(ch_5m),
+            "ch_15m": float(ch_15m),
+            "ch_1h": float(ch_1h),
+            "ch_24h": float(ch_24h),
+            "trend": str(trend),
+            "age_sec": age_sec,
+        }
+    except Exception:
+        return {
+            "has_data": False,
+            "price": 0.0,
+            "ch_5m": 0.0,
+            "ch_15m": 0.0,
+            "ch_1h": 0.0,
+            "ch_24h": 0.0,
+            "trend": "N/A",
+            "age_sec": None,
+        }
+
+
+def _derive_trend_from_history(history):
+    """Lightweight trend derivation from EMA-like moving averages."""
+    try:
+        if not isinstance(history, list) or len(history) < 20:
+            return "N/A"
+        avg_20 = sum(float(x) for x in history[-20:]) / 20.0
+        avg_50 = (
+            sum(float(x) for x in history[-50:]) / 50.0
+            if len(history) >= 50
+            else avg_20
+        )
+        if avg_20 > (avg_50 * 1.001):
+            return "UP"
+        if avg_20 < (avg_50 * 0.999):
+            return "DOWN"
+        return "SIDEWAYS"
+    except Exception:
+        return "N/A"
+
 def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
     import config as cfg
@@ -2053,26 +2676,26 @@ def _build_stats_payload(force_dry=None):
         positions  = conn.execute("SELECT * FROM positions").fetchall()
         perf       = db_inst.get_daily_stats(dry_run=dr_val)
         
-        # 1. LIVE STATS (Real Money) - always from live DB
-        with db.live.get_connection() as live_conn:
-            live_stats = live_conn.execute(
-                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
-            ).fetchone()
+        # 1. LIVE STATS (Real Money) - use proper DB method for all-time stats
+        live_stats = db.live.get_all_time_stats(dry_run=False)
         
-        # 2. DRY RUN STATS (Live Simulation) - always from dryrun DB
-        with db.dryrun.get_connection() as dry_conn:
-            dry_stats = dry_conn.execute(
-                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
-            ).fetchone()
+        # 2. DRY RUN STATS (Live Simulation) - use proper DB method for all-time stats
+        dry_stats = db.dryrun.get_all_time_stats(dry_run=True)
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
-        dna_stats = conn.execute(
+        dna_row = conn.execute(
             "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
+        # Convert row to standard dict format for consistency
+        dna_stats = {
+            'total_trades': dna_row['trades'] if dna_row else 0,
+            'win_count': dna_row['wins'] if dna_row else 0,
+            'total_pnl_idr': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
+        } if dna_row else {}
 
-        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
-        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
-        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
+        win_rate = (live_stats['win_count'] / live_stats['total_trades'] * 100) if (live_stats and live_stats['total_trades'] > 0) else 0
+        dry_win_rate = (dry_stats['win_count'] / dry_stats['total_trades'] * 100) if (dry_stats and dry_stats['total_trades'] > 0) else 0
+        dna_win_rate = (dna_stats.get('win_count', 0) / dna_stats.get('total_trades', 1) * 100) if (dna_stats and dna_stats.get('total_trades', 0) > 0) else 0
 
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
@@ -2085,8 +2708,8 @@ def _build_stats_payload(force_dry=None):
             if bool(pos['dry_run']) == dr_val:
                 total_used_idr += float(pos['amount_idr'] or 0)
 
-        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        realized_pnl_dry = float(dry_stats['total_pnl_idr'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl_idr'] or 0)
 
         if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
@@ -2211,11 +2834,14 @@ def _build_stats_payload(force_dry=None):
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if dr_val:
-            active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
+            active_pnl = float(dry_stats['total_pnl_idr'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
-            active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
+            active_pnl = float(live_stats['total_pnl_idr'] or 0) if live_stats else 0
             active_win_rate = win_rate
+
+        # Net PnL for dashboard headline should include open-position unrealized PnL.
+        net_total_pnl = float(active_pnl) + float(unrealized_pnl)
 
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
         top_pair_row = conn.execute(
@@ -2248,7 +2874,7 @@ def _build_stats_payload(force_dry=None):
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
         # Overall engagements (Closed + Open)
-        total_trades_overall = dry_stats['trades'] if dr_val else live_stats['trades']
+        total_trades_overall = dry_stats['total_trades'] if dr_val else live_stats['total_trades']
         open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
         total_engagements = total_trades_overall + open_count
         
@@ -2337,20 +2963,77 @@ def _build_stats_payload(force_dry=None):
 
 
         # ── BTC Condition (for Signal Radar UX) ─────────────────────────────
+        # Realtime-first: price/24h from WS summary. If interval metrics are
+        # empty or stale in DB, recompute from the latest BTC history snapshot.
         _btc_ticker = ws_tickers.get('btcidr', {}) or {}
         btc_price = float(_btc_ticker.get('last', 0))
         btc_change_24h = float(_btc_ticker.get('change_24h', 0))
         try:
             _btc_row = conn.execute(
-                "SELECT ch_5m, ch_15m, ch_1h, trend, score FROM ticker_history WHERE pair = 'btcidr'"
+                "SELECT ch_5m, ch_15m, ch_1h, trend, score, history_json, updated_at "
+                "FROM ticker_history WHERE pair = 'btcidr'"
             ).fetchone()
         except Exception:
             _btc_row = None
+
+        btc_history = []
+        btc_history_updated_at = None
+        if _btc_row:
+            btc_history_updated_at = _btc_row['updated_at']
+            try:
+                raw_hist = _btc_row['history_json']
+                if raw_hist:
+                    parsed_hist = json.loads(raw_hist)
+                    if isinstance(parsed_hist, list):
+                        btc_history = [float(x) for x in parsed_hist if x is not None]
+            except Exception:
+                btc_history = []
+
+        if btc_price <= 0 and btc_history:
+            btc_price = float(btc_history[-1])
+
         btc_ch_5m  = float(_btc_row['ch_5m']  or 0) if _btc_row else 0.0
         btc_ch_15m = float(_btc_row['ch_15m'] or 0) if _btc_row else 0.0
         btc_ch_1h  = float(_btc_row['ch_1h']  or 0) if _btc_row else 0.0
         btc_trend  = str(_btc_row['trend'] or 'N/A') if _btc_row else 'N/A'
-        btc_score  = float(_btc_row['score']  or 50) if _btc_row else 50.0
+        btc_score  = float(_btc_row['score'] or 50) if _btc_row else 50.0
+
+        btc_rt = _get_btc_realtime_metrics()
+        if btc_rt['has_data']:
+            btc_price = btc_rt['price'] if btc_rt['price'] > 0 else btc_price
+            btc_change_24h = btc_rt['ch_24h']
+            btc_ch_5m = btc_rt['ch_5m']
+            btc_ch_15m = btc_rt['ch_15m']
+            btc_ch_1h = btc_rt['ch_1h']
+            btc_trend = btc_rt['trend']
+
+        if btc_history:
+            if abs(btc_ch_5m) < 1e-9:
+                btc_ch_5m = _pct_change_from_history(btc_history, 5)
+            if abs(btc_ch_15m) < 1e-9:
+                btc_ch_15m = _pct_change_from_history(btc_history, 15)
+            if abs(btc_ch_1h) < 1e-9:
+                btc_ch_1h = _pct_change_from_history(btc_history, 60)
+
+            if str(btc_trend).upper() in ('N/A', 'UNKNOWN', ''):
+                btc_trend = _derive_trend_from_history(btc_history)
+            elif str(btc_trend).upper() == 'SIDEWAYS' and abs(btc_ch_1h) >= 0.25:
+                # If momentum is materially moving, avoid a stale SIDEWAYS label.
+                btc_trend = _derive_trend_from_history(btc_history)
+
+        # Optional diagnostics to inspect freshness in frontend/devtools.
+        btc_data_source = 'ipc_tick_buffer' if btc_rt['has_data'] else ('ws_summary' if _btc_ticker else 'ticker_history')
+        btc_updated_age_sec = btc_rt['age_sec']
+        if btc_updated_age_sec is None:
+            try:
+                dt_upd = _parse_iso_date(btc_history_updated_at)
+                if dt_upd is not None:
+                    if dt_upd.tzinfo is None:
+                        dt_upd = dt_upd.replace(tzinfo=datetime.timezone.utc)
+                    btc_updated_age_sec = int((datetime.datetime.now(datetime.timezone.utc) - dt_upd).total_seconds())
+            except Exception:
+                btc_updated_age_sec = None
+
         btc_weakening_flag = btc_ch_5m < 0  # proxy: 5-min change negative = weakening
         btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
 
@@ -2366,18 +3049,18 @@ def _build_stats_payload(force_dry=None):
             "history_count": total_trades_overall,
             "open_count": open_count,
             "daily_pnl": active_pnl,
-            "net_pnl": active_pnl,
+            "net_pnl": net_total_pnl,
             "all_time_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
-            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
-            "total_trades_live": live_stats['trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "dry_trades_count": dry_stats['total_trades'] if dry_stats else 0,
+            "total_trades_live": live_stats['total_trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl_idr'] or 0) if live_stats else 0,
             "live_win_rate": round(win_rate, 2),
-            "live_trades_count": live_stats['trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "live_trades_count": live_stats['total_trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats.get('total_pnl_idr') or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
-            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
+            "backtest_trades_count": dna_stats.get('total_trades', 0) if dna_stats else 0,
             "active_positions": open_count,
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
@@ -2412,6 +3095,7 @@ def _build_stats_payload(force_dry=None):
             "entry_gate_at": stats_dict.get('entry_gate_at', ''),
             "dry_run": bool(dr_val),
             "dry_run_loose_gates": stats_dict.get('dry_run_loose_gates', 'false').lower() == 'true',
+            "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "momentum_state": db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
             
@@ -2425,6 +3109,8 @@ def _build_stats_payload(force_dry=None):
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
+            "btc_data_source": btc_data_source,
+            "btc_updated_age_sec": btc_updated_age_sec,
         }
         return payload
     finally:
@@ -2500,6 +3186,13 @@ def _build_radar_payload():
                 # Gunakan titik sebelumnya agar delta harga radar benar-benar mencerminkan momentum terbaru.
                 prev = float(history[-2]) if len(history) > 1 else last
                 change = ((last - prev) / prev * 100) if prev > 0 else 0
+
+                # Jika feed WS tidak memberi perubahan 24h (sering 0 di mode dashboard),
+                # gunakan fallback dari indikator DB agar UI tidak selalu 0.00%.
+                if abs(ch_24h) < 1e-9:
+                    ch_24h = float(row['ch_1h'] or 0) if row else 0
+                    if abs(ch_24h) < 1e-9:
+                        ch_24h = change
                 
 
                 trend = (row['trend'] if row else None) or ('UP' if change > 0 else ('DOWN' if change < 0 else 'SIDEWAYS'))
@@ -2635,9 +3328,12 @@ def _build_trades_payload():
                 current_tp_pct = stored_tp_pct
 
                 _amount_idr = float(p.get('amount_idr') or 0)
+                exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, _amount_idr)
                 _fee_buy  = _amount_idr * cfg.FEE_BUY_TAKER
                 _fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-                pnl_net_idr = pnl_idr - _fee_buy - _fee_sell
+                pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - _fee_buy - _fee_sell)
+                pnl_net_pct = (pnl_net_idr / _amount_idr * 100) if _amount_idr > 0 else 0.0
+                is_fast_opp = int(p.get('is_high_opportunity_fast') or 0)
 
                 results.append({
                     "id":           f"pos_{pair}",
@@ -2646,6 +3342,7 @@ def _build_trades_payload():
                     "pnl_idr":      round(pnl_idr, 0),
                     "pnl_net_idr":  round(pnl_net_idr, 0),
                     "pnl_pct":      round(pnl_pct, 2),
+                    "pnl_net_pct":  round(pnl_net_pct, 2),
                     "entry_price":  entry_price,
                     "exit_price":   last_price,
                     "target_tp":    current_tp_pct * 100,
@@ -2657,7 +3354,8 @@ def _build_trades_payload():
                     "created_at":   str(p.get('timestamp') or ''),
                     "status":       pos_status,
                     "pos_status":   pos_status,
-                    "is_manual":    0
+                    "is_manual":    0,
+                    "is_fast_opportunity": bool(is_fast_opp)
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
@@ -2782,17 +3480,140 @@ def _build_llm_decisions_payload(limit: int = 20):
     """Kembalikan riwayat keputusan LiteRT-LM dari system_events."""
     conn = get_db_connection()
     try:
+        # MARKET INTELLIGENCE BRIEF: all variables are real data, summary text comes from LLM.
+        regime_raw = db.get_state("current_market_regime")
+        sentiment_raw = db.get_state("market_sentiment_index")
+        btc_price_raw = db.get_state("last_price_btcidr")
+
+        regime = str(regime_raw).upper() if regime_raw else "N/A"
+        sentiment = int(float(sentiment_raw)) if sentiment_raw not in (None, "") else None
+        btc_price = float(btc_price_raw) if btc_price_raw not in (None, "") else None
+
+        stat_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN UPPER(signal) = 'BUY' THEN 1 ELSE 0 END), 0) AS buy_count,
+                COALESCE(SUM(CASE WHEN UPPER(signal) = 'SELL' THEN 1 ELSE 0 END), 0) AS sell_count,
+                AVG(score) AS avg_score,
+                MAX(updated_at) AS last_ticker_update
+            FROM ticker_history
+            """
+        ).fetchone()
+
+        mover_row = conn.execute(
+            """
+            SELECT pair, ch_1h, score, signal
+            FROM ticker_history
+            ORDER BY ABS(ch_1h) DESC NULLS LAST
+            LIMIT 1
+            """
+        ).fetchone()
+
+        detail_rows = conn.execute(
+            """
+            SELECT pair, signal, trend, score, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, updated_at
+            FROM ticker_history
+            ORDER BY ABS(ch_1h) DESC NULLS LAST
+            LIMIT 12
+            """
+        ).fetchall()
+
+        buy_count = int((stat_rows and stat_rows.get("buy_count")) or 0)
+        sell_count = int((stat_rows and stat_rows.get("sell_count")) or 0)
+        avg_score_val = (stat_rows and stat_rows.get("avg_score"))
+        avg_score = float(avg_score_val) if avg_score_val is not None else None
+        last_ticker_update = str((stat_rows and stat_rows.get("last_ticker_update")) or "N/A")
+
+        top_pair = str((mover_row and mover_row.get("pair")) or "N/A").upper()
+        top_ch_1h = float((mover_row and mover_row.get("ch_1h")) or 0)
+
+        market_vars = {
+            "generated_at": datetime.datetime.now().isoformat(),
+            "regime": regime,
+            "sentiment_pct": sentiment,
+            "btc_idr": btc_price,
+            "signal_count": {
+                "buy": buy_count,
+                "sell": sell_count,
+            },
+            "avg_ai_score": avg_score,
+            "top_mover_1h": {
+                "pair": top_pair,
+                "ch_1h": top_ch_1h,
+            },
+            "ticker_history_last_update": last_ticker_update,
+            "tickers": [
+                {
+                    "pair": str(r.get("pair") or "").upper(),
+                    "signal": str(r.get("signal") or ""),
+                    "trend": str(r.get("trend") or ""),
+                    "score": float(r.get("score") or 0),
+                    "prediction_prob": float(r.get("prediction_prob") or 0),
+                    "ch_5m": float(r.get("ch_5m") or 0),
+                    "ch_15m": float(r.get("ch_15m") or 0),
+                    "ch_1h": float(r.get("ch_1h") or 0),
+                    "volatility": float(r.get("volatility") or 0),
+                    "updated_at": str(r.get("updated_at") or ""),
+                }
+                for r in detail_rows
+            ],
+        }
+
+        _request_market_brief_llm(market_vars)
+
+        worker = LLMWorker.get_instance()
+        llm_brief = worker.get_latest_result_by_type("market_intel_brief") if worker.is_active else None
+
+        parsed_brief = _extract_json_brief_text(str(llm_brief or ""))
+        persisted_brief_row = conn.execute(
+            """
+            SELECT message, created_at
+            FROM system_events
+            WHERE type = 'MARKET_INTEL_BRIEF'
+              AND COALESCE(message, '') <> ''
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        persisted_brief = str((persisted_brief_row and persisted_brief_row.get("message")) or "").strip()
+        fallback_state_brief = str(db.get_state("hero_ai_insight") or "").strip()
+
+        if parsed_brief:
+            brief_message = parsed_brief
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+        elif persisted_brief:
+            brief_message = persisted_brief[:260]
+            brief_created_at = str((persisted_brief_row and persisted_brief_row.get("created_at")) or datetime.datetime.now().isoformat())
+        elif fallback_state_brief:
+            brief_message = fallback_state_brief[:260]
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+        else:
+            # No synthetic narrative; wait until valid LLM response is available.
+            brief_message = "LLM response pending..."
+            brief_created_at = last_ticker_update if last_ticker_update != "N/A" else datetime.datetime.now().isoformat()
+
         rows = conn.execute(
             """
-            SELECT id, pair, message, type as side, level, created_at
+            SELECT DISTINCT ON (message) id, pair, message, type as side, level, created_at
             FROM system_events
-            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT')
-            ORDER BY created_at DESC
+            WHERE type IN ('LLM_EXIT_SIGNAL', 'LLM_ENTRY_SIGNAL', 'LLM_EXIT_HOLD', 'LLM_EXIT_TIMEOUT', 'AI_INSIGHT', 'AI_ORACLE')
+            ORDER BY message, created_at DESC
             LIMIT %s
             """,
             (limit,),
         ).fetchall()
-        return [
+        payload = [
+            {
+                "id": 0,
+                "pair": "MARKET",
+                "side": "MARKET_INTEL_BRIEF",
+                "message": brief_message,
+                "level": "INFO",
+                "created_at": brief_created_at,
+            }
+        ]
+
+        payload.extend([
             {
                 "id": int(r["id"] or 0),
                 "pair": (r["pair"] or "").upper(),
@@ -2802,7 +3623,9 @@ def _build_llm_decisions_payload(limit: int = 20):
                 "created_at": str(r["created_at"]),
             }
             for r in rows
-        ]
+        ])
+
+        return payload
     except Exception as exc:
         logging.warning(f"[llm-decisions] payload error: {exc}")
         return []
@@ -2939,7 +3762,13 @@ def push_data_loop():
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
-                })
+                }, room='public')
+                # Also emit to authenticated room for dashboard users
+                socketio.emit('regime_update', {
+                    "regime": _regime_now,
+                    "market_sentiment_index": _sentiment_now,
+                    "regime_leader": _regime_leader_now,
+                }, room='authenticated')
             except Exception as _re:
                 logging.warning(f"[push_data_loop] regime_update error: {_re}")
 
@@ -2956,16 +3785,26 @@ def push_data_loop():
                 except Exception as _e: 
                     logging.error(f"stats_update emit error: {_e}")
 
-                try: socketio.emit('radar_update',          _build_radar_payload())
+                try: 
+                    _radar_payload = _build_radar_payload()
+                    socketio.emit('radar_update', _radar_payload, room='public')
+                    socketio.emit('radar_update', _radar_payload, room='authenticated')
                 except Exception as _e: logging.error(f"radar_update emit error: {_e}")
 
                 try: socketio.emit('trades_update',         _build_trades_update_packet())
                 except Exception as _e: logging.error(f"trades_update emit error: {_e}")
 
-                try: socketio.emit('logs_update',           _build_logs_payload())
+                try: 
+                    _logs_payload = _build_logs_payload()
+                    socketio.emit('logs_update', _logs_payload, room='authenticated')
+                    # Emit a sanitized version to public
+                    socketio.emit('public_activity', _logs_payload[:10], room='public')
                 except Exception as _e: logging.error(f"logs_update emit error: {_e}")
 
-                try: socketio.emit('llm_decisions_update',  _build_llm_decisions_payload())
+                try: 
+                    _llm_payload = _build_llm_decisions_payload()
+                    socketio.emit('llm_decisions_update', _llm_payload, room='public')
+                    socketio.emit('llm_decisions_update', _llm_payload, room='authenticated')
                 except Exception as _e: logging.error(f"llm_decisions_update emit error: {_e}")
         except Exception as e:
             print(f"WS Error: {e}")
@@ -3250,7 +4089,7 @@ def _zmq_market_bridge():
                     # logging.debug(f"[ZMQ] Received tick")
                     tick = Tick()
                     tick.ParseFromString(raw)
-                    pair = tick.symbol
+                    pair = str(tick.symbol or '').lower()
                     with mws._lock:
                         if pair not in mws._tickers:
                             mws._tickers[pair] = {
@@ -3268,6 +4107,9 @@ def _zmq_market_bridge():
                             if tick.high_24h > 0: t["high"] = tick.high_24h
                             if tick.low_24h > 0: t["low"] = tick.low_24h
                             if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
+
+                    if pair == 'btcidr':
+                        _append_btc_tick(tick.timestamp, tick.price)
                 
                 elif topic == "trade":
                     logging.info(f"[ZMQ] Received trade for {pair if 'pair' in locals() else 'unknown'}")
