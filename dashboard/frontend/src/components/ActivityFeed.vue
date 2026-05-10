@@ -47,7 +47,7 @@
             v-for="pos in visiblePositions"
             :key="pos.pair"
             class="position-item"
-            :class="[pos.pnl_net_idr >= 0 ? 'green' : 'red', { 'exit-pending': isExitRequested(pos.pair) }]"
+            :class="[isDustPosition(pos) ? 'dust' : (pos.pnl_net_idr >= 0 ? 'green' : 'red'), { 'exit-pending': isExitRequested(pos.pair) }]"
           >
             <div class="col-pair">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
@@ -67,7 +67,7 @@
                 <span class="entry-label">ENT: {{ formatNumber(pos.entry_price) }}</span>
                 <span class="current-label">MARK: {{ formatNumber(pos.exit_price) }}</span>
               </div>
-              <div class="progress-container">
+              <div v-if="!isDustPosition(pos)" class="progress-container">
                 <div class="progress-bg"></div>
                 <div 
                   class="progress-fill" 
@@ -79,7 +79,10 @@
                 <div class="target-marker sl" title="Stop Loss"></div>
                 <div class="target-marker tp" title="Take Profit"></div>
               </div>
-              <div class="target-labels">
+              <div v-else class="dust-note">
+                DUST tracked - menunggu BUY signal untuk top-up dan promosi kembali ke OPEN.
+              </div>
+              <div v-if="!isDustPosition(pos)" class="target-labels">
                 <span class="sl-val">SL -{{ Math.abs(pos.target_sl || 0).toFixed(1) }}%</span>
                 <span class="tp-val">TP +{{ Math.abs(pos.target_tp || 0).toFixed(1) }}%</span>
               </div>
@@ -88,7 +91,9 @@
             <div class="col-pnl">
               <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
               <div class="pnl-pct">{{ (pos.pnl_net_pct ?? pos.pnl_pct) > 0 ? '+' : '' }}{{ Number((pos.pnl_net_pct ?? pos.pnl_pct) || 0).toFixed(2) }}%</div>
-              <div class="pnl-kind" title="Execution-aware net estimate from orderbook depth and fees">NET EXIT EST.</div>
+              <div class="pnl-kind" :title="isDustPosition(pos) ? 'Tracked dust estimate only' : 'Execution-aware net estimate from orderbook depth and fees'">
+                {{ isDustPosition(pos) ? 'DUST TRACKED' : 'NET EXIT EST.' }}
+              </div>
             </div>
 
             <div class="col-exit">
@@ -232,9 +237,16 @@ function isExitRequested(pair) {
   return exitRequestedPairs.value.has(normalizePair(pair))
 }
 
+function isDustPosition(pos) {
+  return String(pos?.status || '').toUpperCase() === 'DUST'
+}
+
 function displayStatus(pos) {
   if (isExitRequested(pos.pair) && String(pos.status || '').toUpperCase() === 'EXITING') {
     return 'EXIT REQUESTED'
+  }
+  if (isDustPosition(pos)) {
+    return 'DUST'
   }
   return pos.status
 }
@@ -539,6 +551,11 @@ function formatIdr(val) {
   background: rgba(210, 153, 34, 0.06);
 }
 
+.position-item.dust {
+  border-left: 3px solid rgba(139, 148, 158, 0.45);
+  background: rgba(139, 148, 158, 0.05);
+}
+
 .pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
 .exit-reason {
   font-size: 8px; font-weight: 700; text-transform: uppercase;
@@ -616,6 +633,13 @@ function formatIdr(val) {
 .pnl-val { font-weight: 900; font-size: 13px; }
 .pnl-pct { font-size: 11px; font-weight: 800; padding: 1px 4px; border-radius: 4px; display: inline-block; }
 .pnl-kind { font-size: 9px; font-weight: 700; opacity: 0.7; margin-top: 3px; letter-spacing: 0.3px; }
+.dust-note {
+  font-size: 9px;
+  font-weight: 700;
+  color: #8b949e;
+  margin-top: 4px;
+  letter-spacing: 0.2px;
+}
 
 .green .pnl-val { color: #3fb950; }
 .green .pnl-pct { background: rgba(63, 185, 80, 0.1); color: #3fb950; }
