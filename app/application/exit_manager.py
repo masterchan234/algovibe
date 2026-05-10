@@ -581,11 +581,13 @@ class ExitManager:
                 #   • Avg velocity + hysteresis remain to filter noise.
                 if NET_ZERO_SURVIVAL_ENABLED:
                     try:
-                        realized_pnl_today = db.get_daily_stats()['total_pnl_idr']
-                        net_total_pnl = realized_pnl_today + total_net_pnl
-                        # Save realized PnL snapshot for the dashboard gauge.
+                        # Get all-time realized PnL for accurate KPI display
+                        realized_pnl_alltime = db.get_all_time_stats()['total_pnl_idr']
+                        # For net_total_pnl calculation, use all-time not daily
+                        net_total_pnl = realized_pnl_alltime + total_net_pnl
+                        # Save all-time realized PnL snapshot for the dashboard gauge (not just 24h)
                         try:
-                            db.save_state("net_pnl_realized", str(round(realized_pnl_today, 2)))
+                            db.save_state("net_pnl_realized", str(round(realized_pnl_alltime, 2)))
                         except Exception:
                             pass
 

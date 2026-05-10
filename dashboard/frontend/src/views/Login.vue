@@ -31,8 +31,11 @@
           <h2 class="reader-title">{{ selectedArticle.title }}</h2>
           <div class="art-meta">{{ formatDate(selectedArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
         </div>
-        <div class="reader-body">
-          <div class="reader-content">{{ selectedArticle.content }}</div>
+        <div ref="articleBodyRef" class="reader-body">
+          <div class="reader-content">
+            <div v-if="renderedArticleHtml" v-html="renderedArticleHtml"></div>
+            <div v-else class="reader-content-fallback">{{ selectedArticle.content }}</div>
+          </div>
           <div v-if="relatedArticles.length" class="related-section">
             <h3>Related Articles</h3>
             <div class="related-list">
@@ -184,15 +187,23 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, onUnmounted, watch } from 'vue'
+import { ref, reactive, onMounted, computed, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
+import MarkdownIt from 'markdown-it'
 
 const router = useRouter()
 const route = useRoute()
 const { login } = useAuth()
 const { syncModeFromBackend } = useMode()
+
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  typographer: true,
+  breaks: true,
+})
 
 const username = ref('')
 const password = ref('')
@@ -204,6 +215,7 @@ const dbState = ref('SYNCING')
 const currentTime = ref('')
 const publicLogs = ref([])
 const selectedArticle = ref(null)
+const articleBodyRef = ref(null)
 
 const landingData = reactive({
   insights: [],
@@ -232,6 +244,16 @@ const relatedArticles = computed(() => {
   return landingData.articles
     .filter((art) => art.slug !== selectedArticle.value.slug)
     .slice(0, 3)
+})
+
+const renderedArticleHtml = computed(() => {
+  if (!selectedArticle.value?.content) return ''
+  try {
+    return md.render(selectedArticle.value.content)
+  } catch (err) {
+    console.error('[Markdown Render Error]', err)
+    return escapeHtml(selectedArticle.value.content)
+  }
 })
 
 const backendUrl = import.meta.env.DEV
@@ -298,7 +320,13 @@ function startTime() {
 
 async function fetchLandingData() {
   try {
-    const res = await fetch(`${backendUrl}/api/public/landing-data`)
+    const res = await fetch(`${backendUrl}/api/public/landing-data?ts=${Date.now()}`, {
+      cache: 'no-store',
+      headers: {
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+      },
+    })
     const data = await res.json()
     if (data.success) {
       landingData.insights = data.insights
@@ -311,7 +339,7 @@ async function fetchLandingData() {
       }))
       landingData.market = data.market
       publicLogs.value = (data.public_logs || []).map((log) => ({
-        time: String(log.time || '').split(' ')[1] || String(log.time || '-'),
+        time: formatLogTime(log.time),
         message: String(log.message || '')
       })).slice(0, 8)
       const slugCounter = new Map()
@@ -401,6 +429,11 @@ function openArticle(article) {
   selectedArticle.value = article
   applySeoMeta(article)
   const slug = article.slug || slugify(article.title)
+  nextTick(() => {
+    if (articleBodyRef.value) {
+      articleBodyRef.value.scrollTop = 0
+    }
+  })
   if (route.name !== 'article' || route.params.slug !== slug) {
     router.push({ name: 'article', params: { slug } })
   }
@@ -443,7 +476,21 @@ function syncArticleFromRoute() {
   if (matched) {
     selectedArticle.value = matched
     applySeoMeta(matched)
+    nextTick(() => {
+      if (articleBodyRef.value) {
+        articleBodyRef.value.scrollTop = 0
+      }
+    })
   }
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 function setMetaTag(attr, key, value) {
@@ -619,6 +666,28 @@ function getDbStateClass(value) {
   if (s === 'OPTIMAL') return 'green'
   if (s === 'DEGRADED') return 'red'
   return 'amber'
+}
+
+function formatLogTime(value) {
+  if (!value) return '--:--:--'
+  const raw = String(value)
+
+  // Handle ISO and common datetime formats directly.
+  const parsed = new Date(raw)
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleTimeString('id-ID', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  }
+
+  // Fallback for raw strings that include hh:mm:ss with microseconds.
+  const m = raw.match(/(\d{2}:\d{2}:\d{2})/)
+  if (m && m[1]) return m[1]
+
+  return raw.slice(0, 8)
 }
 
 function formatDate(v) {
@@ -969,6 +1038,7 @@ function formatDate(v) {
 
 .log-item {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
   font-size: 11px;
   line-height: 1.45;
@@ -978,8 +1048,18 @@ function formatDate(v) {
   background: rgba(8, 19, 27, 0.56);
 }
 
-.log-item .time { color: #7bcbe8; font-weight: 800; }
-.log-item .msg { color: #96adbc; }
+.log-item .time {
+  color: #7bcbe8;
+  font-weight: 800;
+  min-width: 72px;
+  flex: 0 0 72px;
+  white-space: nowrap;
+}
+
+.log-item .msg {
+  color: #96adbc;
+  flex: 1;
+}
 
 .auth-modal {
   position: fixed;
@@ -1051,6 +1131,7 @@ function formatDate(v) {
 }
 
 .article-modal {
+  display: flex;
   width: min(900px, 100%);
   max-height: 85vh;
   overflow: hidden;
@@ -1099,16 +1180,89 @@ function formatDate(v) {
 }
 
 .reader-body {
+  flex: 1;
+  min-height: 0;
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid rgba(119, 161, 184, 0.22);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .reader-content {
   color: #b5c6d2;
-  white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   line-height: 1.7;
+}
+
+.reader-content-fallback {
+  color: #b5c6d2;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.7;
+  font-size: 15px;
+}
+
+.reader-section-title {
+  margin: 8px 0 0;
+  color: #eef7ff;
+  font-size: 17px;
+  line-height: 1.35;
+  font-family: 'Source Serif 4', 'Georgia', serif;
+}
+
+.reader-paragraph {
+  margin: 0;
+  color: #b5c6d2;
+}
+
+.reader-list {
+  margin: 0;
+  padding-left: 20px;
+  color: #d6e5ef;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reader-list-ordered {
+  padding-left: 24px;
+}
+
+.reader-table-wrap {
+  overflow-x: auto;
+  border: 1px solid rgba(119, 161, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(7, 16, 25, 0.65);
+}
+
+.reader-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 520px;
+}
+
+.reader-table th,
+.reader-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(119, 161, 184, 0.14);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.reader-table th {
+  color: #eef7ff;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(16, 31, 43, 0.92);
+}
+
+.reader-table tr:last-child td {
+  border-bottom: none;
 }
 
 .related-section {
@@ -1199,6 +1353,15 @@ function formatDate(v) {
   .hero,
   .article-modal {
     padding: 18px;
+  }
+
+  .article-overlay {
+    padding: 12px;
+    align-items: stretch;
+  }
+
+  .article-modal {
+    max-height: calc(100vh - 24px);
   }
 
   .hero-copy p,

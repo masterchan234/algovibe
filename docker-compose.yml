@@ -275,10 +275,17 @@ services:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
       - MODEL_PATH=/app/models/gemma-4-E2B-it.litertlm
+      - NEWS_LLM_PROVIDER=${NEWS_LLM_PROVIDER:-local}
+      - NEWS_REMOTE_TIMEOUT_SEC=${NEWS_REMOTE_TIMEOUT_SEC:-60}
+      - NEWS_HF_API_URL=${NEWS_HF_API_URL:-}
+      - NEWS_HF_API_TOKEN=${NEWS_HF_API_TOKEN:-}
+      - NEWS_CF_API_URL=${NEWS_CF_API_URL:-}
+      - NEWS_CF_API_TOKEN=${NEWS_CF_API_TOKEN:-}
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
       - algovibe_ipc:/tmp
+      - ./generate_news.sh:/app/generate_news.sh
       - ./services:/app/services
       - ./app:/app/app
       - ./shared:/app/shared

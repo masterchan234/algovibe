@@ -158,7 +158,8 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 STRONG_IMBALANCE_RATIO  = 1.4  
 
 # --- Technical Probability ---
-TECH_CONFIDENCE_THRESHOLD = 0.30 # [AGGRESSIVE] Filter noise lebih rendah agar lebih aktif
+# Default ideal profile (Loose Gates OFF): lebih ketat untuk kualitas entry.
+TECH_CONFIDENCE_THRESHOLD = 0.45
 TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 TECH_MIN_HISTORY_POINTS   = 30   
 

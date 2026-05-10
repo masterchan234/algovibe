@@ -5,162 +5,189 @@
         <div class="brand">
           <p class="kicker">ALGOVIBE SYSTEM DOCS</p>
           <h1>About Us</h1>
-          <p class="subtitle">Penjelasan implementasi runtime Algovibe yang berjalan saat ini.</p>
+          <p class="subtitle">Penjelasan faktual tentang alur pengambilan keputusan trading yang berjalan di runtime saat ini.</p>
         </div>
         <nav class="top-nav" aria-label="About navigation">
-          <a href="/login">Landing</a>
-          <a href="#flow">Flow</a>
-          <a href="#components">Components</a>
-          <a href="#safety">Safety</a>
-          <a href="#public">Public Data</a>
+          <a href="/login" class="nav-home">Back to Landing</a>
+          <div class="nav-pills">
+            <button
+              v-for="section in sections"
+              :key="section.id"
+              type="button"
+              class="nav-pill"
+              :class="{ active: activeSection === section.id }"
+              @click="goToSection(section.id)"
+            >
+              {{ section.label }}
+            </button>
+          </div>
         </nav>
       </div>
     </header>
 
     <main class="container about-main">
       <section class="hero">
-        <p class="hero-kicker">WHAT ALGOVIBE IS</p>
+        <p class="hero-kicker">ABOUT ALGOVIBE</p>
         <h2>
-          Algovibe adalah sistem trading crypto berbasis event, dengan pipeline market data real-time,
-          analisis teknikal + AI, eksekusi order, monitoring exit, dan dashboard publik/member.
+          Coding boleh dimulai dari vibe, tapi eksekusi tetap harus tunduk pada data.
+          Algovibe lahir dari eksperimen itu: ide kreatif dibantu Agentic AI, lalu dipaksa disiplin oleh market reality.
         </h2>
+        <p class="hero-tagline">AI = <strong>Aku dan Intelligence</strong></p>
         <div class="chips">
-          <span>Main Entrypoint: <b>main.py -> app/interfaces/cli.py -> app/bootstrap.py</b></span>
-          <span>Bot Runtime: <b>app/application/scalper_bot.py</b></span>
-          <span>Web/API Runtime: <b>dashboard/server.py</b></span>
+          <span>Eksperimen: <b>Vibe Coding x Real-Time Trading</b></span>
+          <span>Fokus: <b>Crypto Scalping (Indodax)</b></span>
+          <span>Prinsip: <b>Creativity in Build, Discipline in Execution</b></span>
         </div>
       </section>
 
-      <section id="flow" class="block">
-        <h3>End-to-End Flow</h3>
-        <ol class="steps">
-          <li>
-            <strong>Bootstrap runtime</strong>
-            <p>
-              Saat startup, sistem memasang event loop policy (uvloop jika tersedia), preload model prediktor,
-              dan mengaktifkan PID lock untuk mencegah dua instance bot aktif bersamaan.
-            </p>
-          </li>
-          <li>
-            <strong>Initialize trading core</strong>
-            <p>
-              <code>ScalperBot</code> membangun koneksi exchange Indodax, menyalakan market websocket,
-              private websocket, oracle engine, exit manager, deadman switch, dan recovery state dari database.
-            </p>
-          </li>
-          <li>
-            <strong>Warm-up historical context</strong>
-            <p>
-              Bot melakukan backfill OHLCV per market IDR untuk membentuk context harga (1m), lalu menyimpan
-              ringkasan perubahan (5m/15m/1h) ke storage agar scoring tidak mulai dari nol.
-            </p>
-          </li>
-          <li>
-            <strong>Market cycle and decisioning</strong>
-            <p>
-              Siklus utama memproses ticker/trade stream, menghitung sinyal teknikal dan scoring, lalu mengeksekusi
-              trade sesuai mode (dry/live), gate risiko, dan rule strategy yang aktif di konfigurasi.
-            </p>
-          </li>
-          <li>
-            <strong>Position and order lifecycle</strong>
-            <p>
-              Exit manager memonitor posisi terbuka, update order private feed, rekonsiliasi order live saat restart,
-              dan menjaga state posisi tetap sinkron dengan exchange.
-            </p>
-          </li>
-          <li>
-            <strong>API, dashboard, and intelligence delivery</strong>
-            <p>
-              Service dashboard menyiapkan endpoint publik/member. Landing publik melakukan polling API,
-              sedangkan member dashboard memakai autentikasi session/JWT dengan websocket terkontrol.
-            </p>
-          </li>
-        </ol>
+      <section id="what-is" class="block">
+        <h3>Apa Itu Algovibe</h3>
+        <p>
+          Algovibe adalah sistem trading bot untuk market IDR yang dibangun dari kolaborasi manusia + AI.
+          Awalnya berangkat dari bot sederhana, tapi berkembang menjadi arsitektur yang memadukan indikator teknikal,
+          pembacaan konteks market, veto AI, dan loop pembelajaran agar keputusan tidak berhenti di pola statis.
+        </p>
+        <p class="note">
+          Tujuan utamanya bukan sekadar "asal buy/sell", tetapi membangun sistem yang bisa menilai konteks,
+          mengendalikan risiko, dan belajar dari hasil eksekusinya sendiri.
+        </p>
       </section>
 
-      <section id="components" class="block">
-        <h3>Komponen Utama yang Terimplementasi</h3>
+      <section id="who-we-are" class="block">
+        <h3>Siapa Kita</h3>
         <div class="grid">
           <article class="card">
-            <h4>Trading Orchestrator</h4>
+            <h4>Dia</h4>
             <p>
-              Runtime inti ada di <code>ScalperBot</code> dan use case aplikasi. Komponen ini mengatur lifecycle bot,
-              loop market cycle, sinkronisasi balance, dan trigger eksekusi.
+              Dia adalah seorang pengembang yang berpengalaman lebih dari 20 tahun dalam pengembangan software,
+              disini dia merancang ide, mendefinisikan risiko, dan memutuskan apa yang layak dijalankan di lingkungan real.
             </p>
           </article>
           <article class="card">
-            <h4>Market & Private Streams</h4>
+            <h4>Saya (GitHub Copilot)</h4>
             <p>
-              Market stream menangani data ticker/trade publik. Private stream menangani update order/akun untuk
-              memastikan status order dan posisi real-time saat mode live.
+              Saya berperan sebagai partner engineering: membantu menerjemahkan ide jadi implementasi,
+              mempercepat iterasi, dan menjaga kualitas teknis sepanjang pengembangan.
             </p>
           </article>
           <article class="card">
-            <h4>Oracle + Predictor Layer</h4>
+            <h4>Konsep AI di Algovibe</h4>
             <p>
-              Layer analisis menggabungkan teknikal, scoring, dan komponen AI/ML (termasuk worker LLM) untuk
-              menghasilkan insight dan dukungan keputusan trading.
+              Di proyek ini, AI bukan hanya <em>Artificial Intelligence</em>. AI juga dimaknai sebagai
+              <strong>Aku dan Intelligence</strong>: kolaborasi antara intuisi pembuat sistem dengan mesin analitik
+              yang disiplin terhadap data.
             </p>
           </article>
           <article class="card">
-            <h4>Persistence Layer</h4>
+            <h4>Partner AI Lain Dalam Riset</h4>
             <p>
-              State bot, histori ticker, posisi, order book, event log, laporan, dan telemetry disimpan melalui
-              abstraction database di <code>app/infrastructure/database.py</code>.
+              Dalam eksplorasi awal, kamu juga menandemkan Agentic AI Gemini sebagai sparring teknis.
+              Kombinasi ini membuat proses riset cepat, tapi tetap diarahkan ke arsitektur yang bisa diuji dengan data.
             </p>
           </article>
           <article class="card">
-            <h4>Dashboard/API Layer</h4>
+            <h4>Siapa Ambil Keputusan Akhir</h4>
             <p>
-              <code>dashboard/server.py</code> menyajikan API publik dan member, static frontend build,
-              autentikasi JWT/session, serta emit event dashboard untuk pengguna yang terautentikasi.
-            </p>
-          </article>
-          <article class="card">
-            <h4>News & Intelligence</h4>
-            <p>
-              Service <code>news_maker</code> menjadi jalur tunggal pembuatan konten intelijen market,
-              dengan trigger manual/otomatis dan integrasi LLM sesuai pipeline yang aktif.
+              Keputusan akhir tetap di tangan kamu. AI mempercepat analisis dan coding,
+              tetapi kebijakan strategi, risk appetite, dan kontrol produksi tetap manusia yang menentukan.
             </p>
           </article>
         </div>
+      </section>
+
+      <section id="how-we-work" class="block">
+        <h3>Tiga Fondasi yang Membentuk Algovibe</h3>
+        <ul class="plain-list">
+          <li><strong>Algoritma dengan "Hati Nurani"</strong>: layer AI lokal digunakan sebagai filter terakhir (veto power) saat market terlihat anomali walau sinyal teknikal tampak menarik.</li>
+          <li><strong>The Oracle</strong>: otak sentral yang membaca market regime (bullish, bearish, atau choppy) dan menyesuaikan sikap bot agar tidak one-size-fits-all.</li>
+          <li><strong>Belajar dari Kesalahan</strong>: sistem melakukan evaluasi berkala dari hasil trade, lalu insight yang relevan dipakai untuk penyesuaian konteks jangka pendek.</li>
+        </ul>
       </section>
 
       <section id="safety" class="block">
-        <h3>Risk & Safety Controls</h3>
+        <h3>Prinsip Keamanan Sistem</h3>
         <ul class="plain-list">
-          <li>PID lock untuk mencegah multi-instance menulis ke state yang sama.</li>
-          <li>Pemisahan mode dry run vs live agar validasi strategi aman sebelum eksekusi real.</li>
-          <li>Recovery startup: resume open positions dan reconcile open orders ke database.</li>
-          <li>Deadman switch dan heartbeat untuk mitigasi kondisi koneksi/exchange abnormal.</li>
-          <li>Session enforcement: satu login aktif per user, sesi lama dapat diputus paksa.</li>
-          <li>Websocket anonymous diblokir; akses event sensitif memerlukan autentikasi valid.</li>
+          <li>Mode dry run dan live dipisah agar eksperimen tidak langsung menyentuh dana real.</li>
+          <li>Perhitungan hasil memperhitungkan komponen biaya trading (maker/taker) dan komponen pajak sesuai konfigurasi sistem.</li>
+          <li>Monitoring posisi tetap berjalan saat restart melalui recovery dan reconcile state.</li>
+          <li>Layer exit management menjaga disiplin TP/SL pada posisi yang sudah terbuka.</li>
         </ul>
       </section>
 
       <section id="public" class="block">
-        <h3>Data Publik yang Ditampilkan di Landing</h3>
+        <h3>Peran Halaman Landing</h3>
         <p>
-          Landing page publik menggunakan endpoint <code>/api/public/landing-data</code> dengan polling periodik.
-          Data yang ditampilkan mencakup ringkasan signal market, artikel intelijen, market stats, dan activity log
-          publik yang sudah disanitasi. Konten hero "Market Intelligence Brief" diprioritaskan dari output
-          <code>MARKET_INTEL_BRIEF</code> pipeline LLM ketika tersedia.
+          Landing adalah jendela publik Algovibe: menampilkan ringkasan market, artikel, dan brief dalam format yang mudah dibaca.
+          Halaman ini dirancang untuk menunjukkan progres riset secara terbuka, tanpa membuka detail sensitif dari engine internal.
         </p>
         <p class="note">
-          Catatan: halaman publik hanya menampilkan data yang aman untuk konsumsi publik, bukan detail internal order
-          execution atau payload sensitif akun.
+          Intinya: ini proyek riset yang serius. AI dipakai bukan hanya untuk menjawab pertanyaan,
+          tapi sebagai komponen decision-making di sistem real-time yang kompleks.
         </p>
       </section>
+
+      <div class="page-actions">
+        <button type="button" class="page-action-btn" @click="goToSection('what-is')">Kembali ke Apa Itu Algovibe</button>
+        <button type="button" class="page-action-btn secondary" @click="goToTop">Kembali ke Atas</button>
+      </div>
     </main>
   </div>
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
+
+const sections = [
+  { id: 'what-is', label: 'Apa Itu' },
+  { id: 'who-we-are', label: 'Siapa Kita' },
+  { id: 'how-we-work', label: 'Cara Kerja' },
+  { id: 'safety', label: 'Safety' },
+  { id: 'public', label: 'Landing' },
+]
+
+const activeSection = ref('what-is')
+
+function goToSection(sectionId) {
+  const el = document.getElementById(sectionId)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  history.replaceState(null, '', `#${sectionId}`)
+  activeSection.value = sectionId
+}
+
+function goToTop() {
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  history.replaceState(null, '', window.location.pathname)
+}
+
+function syncActiveSection() {
+  const offset = 140
+  let current = sections[0].id
+
+  for (const section of sections) {
+    const el = document.getElementById(section.id)
+    if (!el) continue
+    const top = el.getBoundingClientRect().top
+    if (top - offset <= 0) {
+      current = section.id
+    }
+  }
+
+  activeSection.value = current
+}
 
 onMounted(() => {
   document.title = 'About Us | Algovibe Intelligence'
+  const hash = window.location.hash.replace('#', '')
+  if (hash && sections.some((section) => section.id === hash)) {
+    requestAnimationFrame(() => goToSection(hash))
+  }
+  window.addEventListener('scroll', syncActiveSection, { passive: true })
+  syncActiveSection()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('scroll', syncActiveSection)
 })
 </script>
 
@@ -221,20 +248,51 @@ onMounted(() => {
 
 .top-nav {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  align-items: flex-start;
+  gap: 14px;
 }
 
-.top-nav a {
+.nav-home {
   color: #b7ccdb;
   text-decoration: none;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.6px;
+  border: 1px solid rgba(126, 171, 195, 0.22);
+  background: rgba(10, 25, 37, 0.68);
+  border-radius: 999px;
+  padding: 10px 14px;
+  white-space: nowrap;
 }
 
-.top-nav a:hover {
+.nav-home:hover {
   color: #d7edf9;
+}
+
+.nav-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nav-pill {
+  border: 1px solid rgba(126, 171, 195, 0.18);
+  background: rgba(8, 20, 29, 0.52);
+  color: #a9c0cf;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: 999px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.nav-pill:hover,
+.nav-pill.active {
+  color: #e8f4fb;
+  border-color: rgba(138, 195, 226, 0.42);
+  background: rgba(15, 38, 54, 0.82);
 }
 
 .about-main {
@@ -265,6 +323,17 @@ onMounted(() => {
   font-family: 'Source Serif 4', 'Georgia', serif;
 }
 
+.hero-tagline {
+  margin: 14px 0 0;
+  color: #9fd6ee;
+  font-size: 15px;
+  letter-spacing: 0.4px;
+}
+
+.hero-tagline strong {
+  color: #e7f6ff;
+}
+
 .chips {
   margin-top: 18px;
   display: flex;
@@ -287,6 +356,7 @@ onMounted(() => {
   border-radius: 14px;
   background: rgba(9, 20, 30, 0.56);
   padding: 22px;
+  scroll-margin-top: 128px;
 }
 
 .block h3 {
@@ -367,6 +437,28 @@ onMounted(() => {
   font-size: 13px;
 }
 
+.page-actions {
+  margin-top: 28px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.page-action-btn {
+  border: 1px solid rgba(125, 171, 196, 0.24);
+  background: rgba(10, 24, 35, 0.78);
+  color: #d3e6f1;
+  padding: 10px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.page-action-btn.secondary {
+  color: #9ec0d3;
+}
+
 code {
   color: #9dd8f2;
   background: rgba(16, 39, 54, 0.6);
@@ -386,7 +478,12 @@ code {
   }
 
   .top-nav {
-    flex-wrap: wrap;
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .nav-pills {
+    width: 100%;
   }
 }
 

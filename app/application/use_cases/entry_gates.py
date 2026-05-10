@@ -52,7 +52,8 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
 
     # ── 2. BUY Filter (Sync with check_entry_gates) ──
     # Radar hanya boleh bilang BUY jika kriteria trend dan probabilitas terpenuhi
-    is_trend_ok = config.DRY_RUN_LOOSE_GATES or breakout or trend == "UP"
+    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
+    is_trend_ok = breakout or trend == "UP" or (is_loose and trend == "SIDEWAYS")
     
     # Mirroring Step 9: Dynamic threshold based on volatility
     current_vol = float(p.get('volatility', 0) or 0)
@@ -63,6 +64,9 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
         base_thresh = 50.0
     if trend != "UP":
         base_thresh += 4.0
+    if is_loose:
+        base_thresh -= 8.0
+    base_thresh = max(35.0, min(75.0, base_thresh))
     
     # tq_prob is 0.0-1.0, threshold is 0-100
     is_prob_ok = (tq_prob * 100) >= base_thresh
@@ -187,25 +191,40 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    tech_ready = tq_prob >= adaptive_cfg['tech_threshold']
-    has_strong_imb = imbalance_ratio >= STRONG_IMBALANCE_RATIO
-    if not config.DRY_RUN_LOOSE_GATES and not tech_ready and not has_strong_imb:
+    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
+    tech_gate_threshold = float(adaptive_cfg['tech_threshold'])
+    imb_gate_threshold = float(STRONG_IMBALANCE_RATIO)
+    if is_loose:
+        tech_gate_threshold = max(0.25, tech_gate_threshold - 0.10)
+        imb_gate_threshold = max(1.10, imb_gate_threshold - 0.25)
+
+    tech_ready = tq_prob >= tech_gate_threshold
+    has_strong_imb = imbalance_ratio >= imb_gate_threshold
+    if not tech_ready and not has_strong_imb:
         msg = (
             f"SKIP: Tech prob {tq_prob * 100:.0f}% < threshold "
-            f"{adaptive_cfg['tech_threshold'] * 100:.0f}% "
-            f"& imbalance {imbalance_ratio:.2f}x < {STRONG_IMBALANCE_RATIO}x"
+            f"{tech_gate_threshold * 100:.0f}% "
+            f"& imbalance {imbalance_ratio:.2f}x < {imb_gate_threshold:.2f}x"
         )
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
 
     # ── 6. Trend / breakout requirement ───────────────────────────────────
-    if not config.DRY_RUN_LOOSE_GATES and not breakout and trend != "UP":
-        msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
-        print(f"[DEBUG-GATE] {pair} REJECTED: Trend {trend} (no breakout)", flush=True)
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+    if not breakout and trend != "UP":
+        # Loose mode: boleh SIDEWAYS jika probabilitas + orderbook masih kuat.
+        sideway_relaxed_ok = (
+            is_loose
+            and trend == "SIDEWAYS"
+            and tq_prob >= max(tech_gate_threshold, 0.45)
+            and imbalance_ratio >= 1.05
+        )
+        if not sideway_relaxed_ok:
+            msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
+            print(f"[DEBUG-GATE] {pair} REJECTED: Trend {trend} (no breakout)", flush=True)
+            log_message(f"{msg} [{pair}]")
+            save_gate_state(msg)
+            return None
 
     # ── 7. Radar recommendation guard (sinkron dashboard <-> eksekusi bot) ──
     if radar_rec == "SELL":
@@ -217,14 +236,18 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 9. Dynamic threshold based on volatility + trend ──────────────────
     current_vol = p['volatility']
-    # Threshold diturunkan (55→50, 65→60) agar bot lebih agresif bertransaksi.
-    dynamic_threshold = 50.0 
+    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
+
+    # OFF: ideal (lebih ketat), ON: lebih longgar tapi tetap terkontrol.
+    dynamic_threshold = 55.0
     if current_vol > 2.0:
-        dynamic_threshold = 60.0 
+        dynamic_threshold = 65.0
     elif current_vol < 0.6:
-        dynamic_threshold = 45.0 
+        dynamic_threshold = 50.0
     if trend != "UP":
         dynamic_threshold += 3.0
+    if is_loose:
+        dynamic_threshold -= 8.0
 
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
@@ -275,11 +298,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         return None
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    # Floor dinaikkan: 35%/40% → 50%/55%.
-    # Break-even memerlukan win rate ≥ 65%; floor 50% adalah batas minimum aman.
+    # OFF: ideal floor; ON: diturunkan tapi tidak nol agar kualitas tetap terjaga.
     min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
     if config.DRY_RUN_LOOSE_GATES:
-        min_base_conf = 0.0  
+        min_base_conf = 35.0 if current_vol <= 2.0 else 40.0
 
     if base_confidence < min_base_conf:
         msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"

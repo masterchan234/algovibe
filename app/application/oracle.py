@@ -1417,6 +1417,18 @@ class Oracle:
                 overrides["tech_threshold"] -= 0.05 # Lebih agresif
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
+
+        # ── Dynamic profile from UI toggle (dry_run_loose_gates) ─────────────────
+        if config.DRY_RUN_LOOSE_GATES:
+            # Loose profile: turunkan gate untuk eksplorasi sinyal lebih luas.
+            overrides["tech_threshold"] -= 0.10
+            overrides["min_vol"] *= 0.60
+            overrides["max_spread"] *= 1.40
+        else:
+            # Ideal profile: jaga kualitas entry saat toggle OFF.
+            overrides["tech_threshold"] = max(0.45, float(overrides["tech_threshold"]))
+
+        overrides["tech_threshold"] = max(0.25, min(0.95, float(overrides["tech_threshold"])))
         
         return overrides
 

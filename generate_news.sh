@@ -48,7 +48,9 @@ if [[ "$MODE" == "landing" ]]; then
 fi
 
 # Prefer running inside the news-maker container so runtime/env matches service.
-if docker compose ps --services --status=running | grep -qx "news-maker"; then
+# If docker CLI is unavailable (e.g. script already running inside container),
+# run the Python module directly.
+if command -v docker >/dev/null 2>&1 && docker compose ps --services --status=running | grep -qx "news-maker"; then
   docker compose exec -T news-maker "${CMD[@]}"
 else
   "${CMD[@]}"

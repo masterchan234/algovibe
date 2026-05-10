@@ -861,20 +861,57 @@ def public_landing_data():
     try:
         conn = get_db_connection()
         
-        # 1. Fetch Top 12 Signals from ticker_history (has scores and trends)
+        # 1. Fetch Top 12 Signals from ticker_history (include price/change for landing cards)
         rows = conn.execute(
-            "SELECT pair, score, trend, signal FROM ticker_history "
+            "SELECT pair, score, trend, signal, ch_1h, ch_15m, ch_5m, history_json FROM ticker_history "
             "WHERE score IS NOT NULL ORDER BY score DESC LIMIT 12"
         ).fetchall()
         
         signals = []
         for r in rows:
             pair_raw = str(r['pair'] or '').upper()
+
+            last_price = 0.0
+            hist = []
+            try:
+                hist = json.loads(r.get('history_json') or '[]')
+                if isinstance(hist, list) and hist:
+                    last_price = float(hist[-1] or 0.0)
+            except Exception:
+                hist = []
+                last_price = 0.0
+
+            ch_5m = float(r.get('ch_5m') or 0.0)
+            ch_15m = float(r.get('ch_15m') or 0.0)
+            ch_1h = float(r.get('ch_1h') or 0.0)
+
+            # Fallback delta from local history if computed DB deltas are not available.
+            if abs(ch_1h) < 0.0001 and isinstance(hist, list) and len(hist) >= 2:
+                try:
+                    now_px = float(hist[-1] or 0.0)
+                    ref_px = 0.0
+                    if len(hist) >= 60 and float(hist[-60] or 0.0) > 0:
+                        ref_px = float(hist[-60])
+                    elif len(hist) >= 15 and float(hist[-15] or 0.0) > 0:
+                        ref_px = float(hist[-15])
+                    elif float(hist[-2] or 0.0) > 0:
+                        ref_px = float(hist[-2])
+                    if now_px > 0 and ref_px > 0:
+                        ch_1h = ((now_px - ref_px) / ref_px) * 100.0
+                except Exception:
+                    pass
+
             signals.append({
                 "pair": pair_raw.replace('IDR', ''),
                 "score": float(r['score'] or 50),
                 "confidence": 70, # Static confidence for landing teaser
-                "trend": str(r['trend'] or 'STABLE').upper()
+                "trend": str(r['trend'] or 'STABLE').upper(),
+                "price": last_price,
+                # Keep landing UI backward-compatible with polling mapper.
+                "change_24h": ch_1h,
+                "ch_1h": ch_1h,
+                "ch_15m": ch_15m,
+                "ch_5m": ch_5m,
             })
         
         # Fallback to bot_state if ticker_history is empty
@@ -890,14 +927,24 @@ def public_landing_data():
                         "pair": pair.upper().replace('IDR', ''),
                         "score": val.get('score', 50),
                         "confidence": val.get('confidence', 70),
-                        "trend": val.get('trend', 'STABLE')
+                        "trend": val.get('trend', 'STABLE'),
+                        "price": float(val.get('price', 0) or 0),
+                        "change_24h": float(val.get('change_24h', val.get('change', val.get('ch_1h', 0))) or 0),
+                        "ch_1h": float(val.get('ch_1h', 0) or 0),
+                        "ch_15m": float(val.get('ch_15m', 0) or 0),
+                        "ch_5m": float(val.get('ch_5m', 0) or 0),
                     })
                 except:
                     signals.append({
                         "pair": pair.upper().replace('IDR', ''),
                         "score": 50,
                         "confidence": 60,
-                        "trend": str(r['value']).upper()
+                        "trend": str(r['value']).upper(),
+                        "price": 0,
+                        "change_24h": 0,
+                        "ch_1h": 0,
+                        "ch_15m": 0,
+                        "ch_5m": 0,
                     })
 
         # 2. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
@@ -963,7 +1010,40 @@ def public_landing_data():
             for r in log_rows
         ]
 
-        return jsonify({
+        # If the event stream is stale, synthesize lightweight live logs from
+        # current signal snapshot so landing activity panel keeps moving.
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        latest_log_ts = None
+        if log_rows:
+            raw_ts = log_rows[0]['created_at']
+            if isinstance(raw_ts, datetime.datetime):
+                latest_log_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=datetime.timezone.utc)
+            else:
+                parsed = _parse_iso_date(raw_ts)
+                if parsed is not None:
+                    latest_log_ts = parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
+
+        logs_are_stale = (
+            latest_log_ts is None
+            or (now_utc - latest_log_ts).total_seconds() > 180
+        )
+
+        if logs_are_stale:
+            stream_logs = []
+            stream_ts = now_utc.isoformat()
+            for sig in signals[:4]:
+                pair = str(sig.get('pair') or 'N/A')
+                score = float(sig.get('score') or 0.0)
+                trend = str(sig.get('trend') or 'STABLE').upper()
+                ch_1h = float(sig.get('ch_1h') or 0.0)
+                stream_logs.append({
+                    "time": stream_ts,
+                    "message": f"🧠 AI Rank: {score:.1f}% | Stream Snapshot {pair} ({trend}, 1H {ch_1h:+.2f}%)"
+                })
+
+            public_logs = (stream_logs + public_logs)[:8]
+
+        response = jsonify({
             "success": True,
             "signals": signals[:8],
             "insights": insights,
@@ -975,6 +1055,10 @@ def public_landing_data():
                 "regime": regime
             }
         })
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     except Exception as e:
         import traceback
         logging.error(f"[LandingData] Global Error: {e}")
@@ -2273,26 +2357,26 @@ def _build_stats_payload(force_dry=None):
         positions  = conn.execute("SELECT * FROM positions").fetchall()
         perf       = db_inst.get_daily_stats(dry_run=dr_val)
         
-        # 1. LIVE STATS (Real Money) - always from live DB
-        with db.live.get_connection() as live_conn:
-            live_stats = live_conn.execute(
-                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = FALSE"
-            ).fetchone()
+        # 1. LIVE STATS (Real Money) - use proper DB method for all-time stats
+        live_stats = db.live.get_all_time_stats(dry_run=False)
         
-        # 2. DRY RUN STATS (Live Simulation) - always from dryrun DB
-        with db.dryrun.get_connection() as dry_conn:
-            dry_stats = dry_conn.execute(
-                "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE dry_run = TRUE AND reason != 'BACKTEST'"
-            ).fetchone()
+        # 2. DRY RUN STATS (Live Simulation) - use proper DB method for all-time stats
+        dry_stats = db.dryrun.get_all_time_stats(dry_run=True)
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
-        dna_stats = conn.execute(
+        dna_row = conn.execute(
             "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
+        # Convert row to standard dict format for consistency
+        dna_stats = {
+            'total_trades': dna_row['trades'] if dna_row else 0,
+            'win_count': dna_row['wins'] if dna_row else 0,
+            'total_pnl_idr': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
+        } if dna_row else {}
 
-        win_rate = (live_stats['wins'] / live_stats['trades'] * 100) if (live_stats and live_stats['trades'] > 0) else 0
-        dry_win_rate = (dry_stats['wins'] / dry_stats['trades'] * 100) if (dry_stats and dry_stats['trades'] > 0) else 0
-        dna_win_rate = (dna_stats['wins'] / dna_stats['trades'] * 100) if (dna_stats and dna_stats['trades'] > 0) else 0
+        win_rate = (live_stats['win_count'] / live_stats['total_trades'] * 100) if (live_stats and live_stats['total_trades'] > 0) else 0
+        dry_win_rate = (dry_stats['win_count'] / dry_stats['total_trades'] * 100) if (dry_stats and dry_stats['total_trades'] > 0) else 0
+        dna_win_rate = (dna_stats.get('win_count', 0) / dna_stats.get('total_trades', 1) * 100) if (dna_stats and dna_stats.get('total_trades', 0) > 0) else 0
 
         unrealized_pnl = 0.0
         ws_tickers = mws.get_tickers() # Pre-fetch untuk efisiensi
@@ -2305,8 +2389,8 @@ def _build_stats_payload(force_dry=None):
             if bool(pos['dry_run']) == dr_val:
                 total_used_idr += float(pos['amount_idr'] or 0)
 
-        realized_pnl_dry = float(dry_stats['total_pnl'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl'] or 0)
+        realized_pnl_dry = float(dry_stats['total_pnl_idr'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl_idr'] or 0)
 
         if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
@@ -2431,10 +2515,10 @@ def _build_stats_payload(force_dry=None):
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if dr_val:
-            active_pnl = float(dry_stats['total_pnl'] or 0) if dry_stats else 0
+            active_pnl = float(dry_stats['total_pnl_idr'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
-            active_pnl = float(live_stats['total_pnl'] or 0) if live_stats else 0
+            active_pnl = float(live_stats['total_pnl_idr'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
@@ -2468,7 +2552,7 @@ def _build_stats_payload(force_dry=None):
         regime = stats_dict.get('market_regime', 'CHOPPY')
 
         # Overall engagements (Closed + Open)
-        total_trades_overall = dry_stats['trades'] if dr_val else live_stats['trades']
+        total_trades_overall = dry_stats['total_trades'] if dr_val else live_stats['total_trades']
         open_count = len([p for p in positions if int(p['dry_run'] or 0) == dr_val and (p['status'] or '').upper() in ['OPEN', 'EXITING']])
         total_engagements = total_trades_overall + open_count
         
@@ -2590,14 +2674,14 @@ def _build_stats_payload(force_dry=None):
             "all_time_pnl": active_pnl,
             "win_rate": round(active_win_rate, 2),
             "dry_win_rate": round(dry_win_rate, 2),
-            "dry_trades_count": dry_stats['trades'] if dry_stats else 0,
-            "total_trades_live": live_stats['trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl'] or 0) if live_stats else 0,
+            "dry_trades_count": dry_stats['total_trades'] if dry_stats else 0,
+            "total_trades_live": live_stats['total_trades'] if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl_idr'] or 0) if live_stats else 0,
             "live_win_rate": round(win_rate, 2),
-            "live_trades_count": live_stats['trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats['total_pnl'] or 0) if dna_stats else 0,
+            "live_trades_count": live_stats['total_trades'] if live_stats else 0,
+            "backtest_pnl": float(dna_stats.get('total_pnl_idr') or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
-            "backtest_trades_count": dna_stats['trades'] if dna_stats else 0,
+            "backtest_trades_count": dna_stats.get('total_trades', 0) if dna_stats else 0,
             "active_positions": open_count,
             "unrealized_pnl": round(unrealized_pnl, 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
