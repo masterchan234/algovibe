@@ -86,6 +86,8 @@ class ExitManager:
         self._last_pnl_snapshot_ts: float = 0.0
         # DUST recovery anti-spam: per pair last top-up timestamp.
         self._dust_recovery_last_ts: dict = {}
+        # Menghindari race condition readoption saat koin baru saja dijual manual atau otomatis
+        self._recently_exited_pairs: dict = {}  # {pair: timestamp}
         self._sync_jaring_from_db()
 
     def _parse_iso_date(self, val):
@@ -812,8 +814,19 @@ class ExitManager:
                     
                     pair = f"{coin.lower()}idr"
                     if pair not in all_positions:
+                        # Jangan adopsi jika koin baru saja dijual dalam 60 detik terakhir (menghindari balapan data exchange)
+                        recent_exit_ts = self._recently_exited_pairs.get(pair, 0)
+                        if time.time() - recent_exit_ts < 60:
+                            continue
+                            
                         price = float(tickers.get(pair, {}).get('last', 0))
-                        log_message(f"🔍 [DISCOVERY] Adopting asset: {coin} ({amount})")
+                        value_idr = amount * price if price > 0 else 0
+                        
+                        # Jangan adopsi aset debu (di bawah Rp 10.000 / minimum trade)
+                        if price > 0 and value_idr < 10000:
+                            continue
+                            
+                        log_message(f"🔍 [DISCOVERY] Adopting asset: {coin} ({amount}) - Value IDR: Rp {value_idr:,.0f}")
                         recovery_data = {
                             "pair": pair,
                             "entry_price": price if price > 0 else 0,
@@ -851,9 +864,14 @@ class ExitManager:
                     coin = pair[:-3].upper() # Ambil simbol koin (e.g., 'AXL' dari 'axlidr')
                     amount_on_exchange = float(total_balances.get(coin, 0) or 0)
                     
-                    # Jika saldo di exchange sangat kecil (dust) atau nol, anggap sudah terjual
-                    if amount_on_exchange < 1e-8:
-                        log_message(f"👻 [AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange})")
+                    # Ambil ticker untuk estimasi nilai IDR sisa saldo
+                    ticker_data = current_tickers.get(pair) or {}
+                    price = float(ticker_data.get('last') or ticker_data.get('buy') or 0)
+                    value_idr = amount_on_exchange * price if price > 0 else 0
+                    
+                    # Jika saldo di exchange sangat kecil/nol, atau nilainya di bawah Rp 5.000, anggap sudah terjual
+                    if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000):
+                        log_message(f"👻 [AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value IDR: Rp {value_idr:,.0f})")
                         db.delete_position(pair)
                         positions.pop(pair, None)
                         ghosts_removed.append(pair)
@@ -2426,6 +2444,8 @@ class ExitManager:
 
     def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None, limit_price=None):
         try:
+            # Catat waktu exit koin untuk menghindari balapan data di Active Discovery
+            self._recently_exited_pairs[pair] = time.time()
             entry_price = float(entry_price or 0)
             # Semua exit dipaksa market sell (taker) sesuai kebijakan eksekusi cepat.
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
@@ -2703,6 +2723,17 @@ class ExitManager:
             err_msg = f"Critical error in execute_exit for {pair}: {e}"
             print(err_msg)
             db.log_system_event(pair, "EXIT_ERROR", err_msg, 'ERROR')
+            
+            # Jika ditolak exchange karena di bawah minimum order (debu) atau saldo tidak ada,
+            # hapus dari database agar tidak stuck sebagai zombie position di dashboard.
+            err_lower = str(e).lower()
+            is_dust_or_invalid = ("minimum order" in err_lower or 
+                                  "minimum amount" in err_lower or 
+                                  "insufficient balance" in err_lower)
+            if is_dust_or_invalid or reason == "MANUAL_DASHBOARD_EXIT":
+                log_message(f"🧹 [EXIT CLEANUP] {pair}: Menghapus posisi zombie dari database karena ditolak exchange / di bawah batas minimum: {e}")
+                db.delete_position(pair)
+                
             return None
                 
     def execute_averaging_down(self, pair, data, current_price, override_add_amount_idr=None):

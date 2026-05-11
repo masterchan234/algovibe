@@ -780,7 +780,18 @@ function formatPrice(p) {
 
 function formatSignalPrice(price) {
   if (!price || price <= 0) return '-'
-  return `${Math.round(price).toLocaleString('id-ID')} IDR`
+  const p = Number(price)
+  let formatted = ''
+  if (p >= 1000) {
+    formatted = Math.round(p).toLocaleString('id-ID')
+  } else if (p >= 10) {
+    formatted = p.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  } else if (p >= 1) {
+    formatted = p.toLocaleString('id-ID', { minimumFractionDigits: 4, maximumFractionDigits: 4 })
+  } else {
+    formatted = p.toLocaleString('id-ID', { minimumFractionDigits: 6, maximumFractionDigits: 6 })
+  }
+  return `${formatted} IDR`
 }
 
 function pickBestChange(source) {
@@ -1132,7 +1143,7 @@ function stripMarkdown(text) {
 
 .signals-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 16px;
   margin-top: 6px;
 }
@@ -1735,6 +1746,9 @@ function stripMarkdown(text) {
   .articles-list {
     grid-template-columns: 1fr;
   }
+  .signals-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
   .reader-title { font-size: 22px; }
 }
 
@@ -1762,6 +1776,11 @@ function stripMarkdown(text) {
   .hero-copy p,
   .feature-excerpt {
     font-size: 14px;
+  }
+
+  .articles-list,
+  .signals-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

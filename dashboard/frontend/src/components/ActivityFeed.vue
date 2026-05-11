@@ -125,7 +125,7 @@
         </div>
         <div class="history-list">
           <div
-            v-for="trade in store.stats.recent_trades"
+            v-for="trade in sortedRecentTrades"
             :key="trade.created_at"
             class="history-item"
             :class="trade.pnl_idr >= 0 ? 'green' : 'red'"
@@ -224,6 +224,15 @@ const temporarilyHiddenExitRows = ref(new Set())
 const visiblePositions = computed(() =>
   store.positions.filter(p => !temporarilyHiddenExitRows.value.has(String(p.pair || '').toLowerCase()))
 )
+
+const sortedRecentTrades = computed(() => {
+  const trades = store.stats.recent_trades || []
+  return [...trades].sort((a, b) => {
+    const timeA = a.created_at ? new Date(a.created_at).getTime() : 0
+    const timeB = b.created_at ? new Date(b.created_at).getTime() : 0
+    return timeB - timeA
+  })
+})
 
 const activeVisibleCount = computed(() =>
   visiblePositions.value.filter(p => ['OPEN', 'EXITING'].includes(String(p.status || '').toUpperCase())).length

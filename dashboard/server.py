@@ -870,25 +870,41 @@ def public_landing_data():
 
         # 1. Signals — selalu dari live WebSocket/IPC (mws._tickers), bukan DB.
         ws_tickers_snap = mws.get_tickers()
-        _live_pairs = [
-            (pair, data)
-            for pair, data in ws_tickers_snap.items()
-            if float(data.get('vol_idr') or 0) > 0
-        ]
-        # Urutkan berdasarkan volume IDR (pair paling aktif diprioritaskan).
-        _live_pairs.sort(key=lambda x: float(x[1].get('vol_idr') or 0), reverse=True)
-
-        signals = []
-        for pair_key, data in _live_pairs[:8]:
+        
+        # Filter koin aktif (bukan stablecoin) dan memiliki volume transaksi minimum Rp 20 juta
+        _STABLECOINS = {'usdt', 'usdc', 'busd', 'bidr', 'dai', 'tusd', 'idrt'}
+        
+        candidates = []
+        for pair_key, data in ws_tickers_snap.items():
+            vol_idr = float(data.get('vol_idr') or 0)
+            if vol_idr < 20_000_000:  # Filter likuiditas min Rp 20 juta IDR
+                continue
+                
+            base_coin = pair_key.lower().replace('idr', '').strip()
+            if base_coin in _STABLECOINS:
+                continue
+                
+            # Hitung change_24h dari posisi harga terakhir relatif terhadap midpoint range 24h.
             last_price = float(data.get('last') or 0)
             high_24h = float(data.get('high') or 0)
             low_24h = float(data.get('low') or 0)
-            # Hitung change_24h dari posisi harga terakhir relatif terhadap midpoint range 24h.
             if high_24h > 0 and low_24h > 0 and high_24h > low_24h and last_price > 0:
                 mid_24h = (high_24h + low_24h) / 2.0
                 ch_24h = ((last_price - mid_24h) / mid_24h) * 100.0
             else:
                 ch_24h = 0.0
+                
+            candidates.append((pair_key, data, ch_24h))
+            
+        # Urutkan berdasarkan pergerakan/volatilitas absolut (Top Movers) terbesar
+        candidates.sort(key=lambda x: abs(x[2]), reverse=True)
+        
+        # Untuk kompatibilitas fallback dan log aktivitas publik di bawah
+        _live_pairs = [(pair_key, data) for pair_key, data, ch_24h in candidates]
+        
+        signals = []
+        for pair_key, data, ch_24h in candidates[:8]:
+            last_price = float(data.get('last') or 0.0)
             if ch_24h > 1.0:
                 trend = 'UP'
             elif ch_24h < -1.0:
