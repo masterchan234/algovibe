@@ -107,6 +107,18 @@ class BaseExchangeAdapter(ABC):
             {symbol, last, bid, ask, high, low, volume, timestamp}
         """
 
+    def fetch_summaries(self) -> dict:
+        """Fetch bulk public market/ticker summaries from the exchange.
+        
+        Optional method; returns empty dict if not supported by the exchange.
+
+        Returns
+        -------
+        dict
+            {"tickers": dict, "prices_24h": dict}
+        """
+        return {}
+
     # ── Order management ─────────────────────────────────────────────────────
 
     @abstractmethod

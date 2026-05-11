@@ -244,8 +244,9 @@ class NewsMaker:
             try:
                 tick = Tick()
                 tick.ParseFromString(raw)
-                pair = str(tick.symbol or "").lower()
-                if pair:
+                pair = str(tick.symbol or "").lower().strip()
+                # Enforce strict IDR-only constraint
+                if pair and pair.endswith("idr"):
                     self._apply_tick_update(pair, float(tick.price or 0), float(tick.change_24h or 0), float(tick.vol_idr or 0))
             except: pass
 
@@ -257,8 +258,9 @@ class NewsMaker:
             try:
                 sig = Signal()
                 sig.ParseFromString(raw)
-                pair = str(sig.symbol or "").lower()
-                if not pair:
+                pair = str(sig.symbol or "").lower().strip()
+                # Enforce strict IDR-only constraint
+                if not pair or not pair.endswith("idr"):
                     continue
                 action = _action_map.get(int(sig.action), "HOLD")
                 entry = {
@@ -278,6 +280,11 @@ class NewsMaker:
                 pass
 
     def _apply_tick_update(self, pair, price, ch_24h, vol_idr):
+        pair = str(pair).lower().strip()
+        # Enforce strict IDR-only constraint
+        if not pair.endswith("idr"):
+            return
+
         self._tickers[pair] = {
             "price": float(price or 0),
             "ch_24h": float(ch_24h or 0),
@@ -340,12 +347,8 @@ class NewsMaker:
         if p + "idr" in self._tickers:
             return p + "idr"
             
-        # Try appending 'usdt'
-        if p + "usdt" in self._tickers:
-            return p + "usdt"
-            
         # Fallback to appending 'idr' if it's just a 3-4 letter coin symbol
-        if not p.endswith("idr") and not p.endswith("usdt"):
+        if not p.endswith("idr"):
             return p + "idr"
             
         return p
@@ -474,15 +477,19 @@ class NewsMaker:
         Sangat berguna saat startup atau saat koin tertentu belum mendapatkan WS tick.
         """
         try:
-            import requests
-            r = requests.get('https://indodax.com/api/summaries', timeout=8)
-            if r.status_code != 200:
+            from app.infrastructure.exchange_factory import create_exchange_provider
+            adapter = create_exchange_provider()
+            data = adapter.fetch_summaries()
+            if not data:
                 return
-            data = r.json()
             tickers = data.get("tickers", {})
             prices_24h = data.get("prices_24h", {})
             
             for key, val in tickers.items():
+                # Strict: Only load IDR pairs (pair only with idr)
+                if not key.endswith("_idr"):
+                    continue
+
                 pair = key.replace("_", "").lower() # e.g. "btc_idr" -> "btcidr"
                 price = float(val.get("last") or 0.0)
                 if price <= 0:
@@ -494,7 +501,10 @@ class NewsMaker:
                 ch_24h = 0.0
                 px_24h = float(prices_24h.get(pair) or 0.0)
                 if px_24h > 0:
-                    ch_24h = ((price - px_24h) / px_24h) * 100.0
+                    ratio = price / px_24h
+                    # Safeguard: If the change is more than 100x or less than 1/100th, it is an API scale mismatch
+                    if 0.01 <= ratio <= 100.0:
+                        ch_24h = ((price - px_24h) / px_24h) * 100.0
                 
                 # Only update/set if we don't have a fresher WS tick or if we need to bootstrap
                 existing = self._tickers.get(pair)
@@ -507,7 +517,7 @@ class NewsMaker:
                         "updated_at": time.time(),
                         "source": "exchange_rest", # marker: real-time exchange public summaries API
                     }
-            logger.info("[news-maker] Successfully bootstrapped %d pairs from Indodax REST summaries.", len(self._tickers))
+            logger.info("[news-maker] Successfully bootstrapped %d IDR pairs from Indodax REST summaries.", len(self._tickers))
         except Exception as exc:
             logger.warning("[news-maker] Exchange summaries bootstrap failed: %s", exc)
 

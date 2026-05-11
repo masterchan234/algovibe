@@ -89,6 +89,22 @@ class IndodaxAdapter(BaseExchangeAdapter):
             "slippage_buffer":  0.0021,     # 0.21% market-impact buffer
         }
 
+    def fetch_summaries(self) -> dict:
+        """Fetch bulk ticker summaries directly from Indodax public REST API.
+        
+        Returns
+        -------
+        dict
+            Dictionay containing 'tickers' and 'prices_24h' or empty dict on failure.
+        """
+        try:
+            r = requests.get("https://indodax.com/api/summaries", timeout=8)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.error(f"[IndodaxAdapter] Failed to fetch summaries: {e}")
+        return {}
+
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _next_nonce(self) -> str:
