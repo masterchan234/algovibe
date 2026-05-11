@@ -29,6 +29,7 @@ from app.infrastructure.database import db
 from app.domain.technicals import (
     calculate_rsi, derive_trade_signal, get_technical_summary,
     calculate_macd, calculate_bollinger_bands, calculate_stochastic_rsi, calculate_ema,
+    calculate_atr,
     _MACD_NORM_FACTOR,
 )
 from utils.logger import log_message
@@ -183,6 +184,51 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             f"⚠️  SELL-WARN [{pair}]: sell_score={tech_sig.get('sell_score',0):.1f} "
             f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
         )
+
+    # ── 4b. ATR Volatility Filter ─────────────────────────────────────────
+    # Skip entry jika ATR > 3% harga — volatilitas terlalu tinggi, spread lebar,
+    # slippage besar, TP/SL sering kena sebelum waktunya.
+    # Loose gates: batas dinaikkan ke 4.5% agar tetap bisa trading di kondisi moderat.
+    if len(history) >= 15:
+        try:
+            _prices_arr = history[-15:]
+            _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
+            _last = float(p.get('last', 1.0)) or 1.0
+            _atr_pct = (_atr / _last) * 100.0
+            _atr_limit = 4.5 if config.DRY_RUN_LOOSE_GATES else 3.0
+            if _atr_pct > _atr_limit:
+                msg = (
+                    f"⛔ ATR-FILTER: ATR {_atr_pct:.2f}% > batas {_atr_limit:.1f}% "
+                    f"— volatilitas terlalu tinggi, risiko slippage."
+                )
+                print(f"[DEBUG-GATE] {pair} REJECTED: ATR {_atr_pct:.2f}% > {_atr_limit:.1f}%", flush=True)
+                log_message(f"{msg} [{pair}]")
+                save_gate_state(msg)
+                return None
+        except Exception:
+            pass  # Jika ATR gagal dihitung, biarkan lewat
+
+    # ── 4c. EMA-50 Trend Filter ───────────────────────────────────────────
+    # Hanya masuk jika harga penutupan terakhir > EMA-50 (trend makro naik).
+    # Ini mencegah entry di pertengahan downtrend besar hanya karena EMA-9 > EMA-21 sesaat.
+    # Jika data < 50 candle: filter dilewati (tidak cukup histori untuk konfirmasi).
+    # Loose gates: filter dilewati agar lebih banyak opportunity.
+    if not config.DRY_RUN_LOOSE_GATES and len(history) >= 50:
+        try:
+            _ema50 = calculate_ema(history, 50)
+            _last_price = float(p.get('last', 0.0))
+            if _last_price > 0 and _last_price < _ema50:
+                _gap_pct = (_ema50 - _last_price) / _ema50 * 100.0
+                msg = (
+                    f"⛔ EMA50-FILTER: harga {_last_price:.4f} < EMA50 {_ema50:.4f} "
+                    f"(gap -{_gap_pct:.2f}%) — trend makro masih turun."
+                )
+                print(f"[DEBUG-GATE] {pair} REJECTED: EMA50 filter (price {_last_price:.4f} < EMA50 {_ema50:.4f})", flush=True)
+                log_message(f"{msg} [{pair}]")
+                save_gate_state(msg)
+                return None
+        except Exception:
+            pass  # Jika EMA50 gagal dihitung, biarkan lewat
 
     # ── 5. Technical probability + imbalance threshold ────────────────────────
     if tq_prob < 0:

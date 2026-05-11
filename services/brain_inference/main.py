@@ -223,7 +223,7 @@ class BrainInferenceService:
                 ranked = []
                 # Use list() to avoid "dictionary changed size during iteration" from concurrent tick updates
                 for symbol, data in list(self._tickers.items()):
-                    res = calculate_score(((symbol, data), self._adaptive_cfg, regime))
+                    res = calculate_score(((symbol, data), self._adaptive_cfg, regime, self._history))
                     if res:
                         ranked.append(res)
                 
@@ -433,37 +433,42 @@ class BrainInferenceService:
     def _update_ticker_history(self, ranked):
         """Calculate technicals for ALL ranked pairs and update the ticker_history table."""
         updates = []
-        # Process all ranked pairs so no coin stays stuck with stale/N/A trend
         for r in ranked:
             pair = r['pair'].lower()
             hist = list(self._history.get(pair, []))
             if len(hist) < 5:
                 continue
-            
+
             try:
                 tech = get_technical_summary(hist)
                 signal_info = derive_trade_signal(tech)
-                
-                # Prepare update tuple for database.save_ticker_history_batch
-                # Expected: (pair, history_list, ch_5m, ch_15m, ch_1h)
-                # Wait, our database method is limited. Let's see if we should enhance it.
-                # Actually, I'll use a direct query to save everything.
-                
+
+                # Hitung trend dari history (avg_20 vs avg_50)
+                avg_20 = sum(hist[-20:]) / 20 if len(hist) >= 20 else hist[-1]
+                avg_50 = sum(hist[-50:]) / 50 if len(hist) >= 50 else avg_20
+                trend = "UP" if avg_20 > avg_50 * 1.001 else "SIDEWAYS"
+
+                # Hitung perubahan harga berdasarkan history in-memory (LIVE)
+                last = float(hist[-1])
+                ch_5m = ((last - hist[-5]) / hist[-5] * 100) if len(hist) >= 5 and hist[-5] > 0 else 0.0
+                ch_15m = ((last - hist[-15]) / hist[-15] * 100) if len(hist) >= 15 and hist[-15] > 0 else 0.0
+                ch_1h = ((last - hist[-60]) / hist[-60] * 100) if len(hist) >= 60 and hist[-60] > 0 else 0.0
+
                 updates.append({
                     'pair': pair,
                     'history_json': json.dumps(hist),
-                    'prediction_prob': 0.0, # Will be updated by LLM if needed
-                    'trend': tech['trend'],
+                    'prediction_prob': 0.0,
+                    'trend': trend,
                     'signal': signal_info['verdict'],
-                    'ch_5m': tech['ch_5m'],
-                    'ch_15m': tech['ch_15m'],
-                    'ch_1h': tech['ch_1h'],
+                    'ch_5m': ch_5m,
+                    'ch_15m': ch_15m,
+                    'ch_1h': ch_1h,
                     'volatility': r['volatility'],
-                    'score': r['score']
+                    'score': r['score'],
                 })
             except Exception as e:
                 logger.debug("Failed tech summary for %s: %s", pair, e)
-        
+
         if updates:
             self._save_to_db(updates)
 

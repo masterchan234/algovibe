@@ -300,18 +300,85 @@ def calculate_roc(prices, period=10):
     return float((float(prices[-1]) - prev) / prev * 100.0)
 
 
+def calculate_volume_ratio(volumes, ma_period=20):
+    """
+    Rasio volume sekarang terhadap volume MA-20.
+    Mengukur apakah aktivitas trading saat ini di atas atau di bawah rata-rata.
+
+    Returns: rasio float, 1.0 = rata-rata, >1.5 = spike signifikan, <0.5 = sepi.
+
+    Berguna untuk:
+      - Konfirmasi breakout: breakout valid harus disertai volume spike (ratio > 1.5).
+      - Filter entry di pasar sepi (ratio < 0.5) → sinyal kurang reliabel.
+    """
+    if not volumes or len(volumes) < 2:
+        return 1.0
+    v_arr = np.array(volumes, dtype=float)
+    window = v_arr[-ma_period:] if len(v_arr) >= ma_period else v_arr
+    ma_vol = float(np.mean(window[:-1])) if len(window) > 1 else float(window[0])
+    if ma_vol <= 0:
+        return 1.0
+    return float(v_arr[-1] / ma_vol)
+
+
+def calculate_obv(prices, volumes):
+    """
+    On-Balance Volume (OBV) — mengakumulasi volume berdasarkan arah harga.
+    Jika harga naik → tambah volume; jika turun → kurangi volume.
+
+    Returns: (obv_now, obv_slope_pct)
+      obv_now       : nilai OBV terakhir (relative, bisa negatif)
+      obv_slope_pct : slope OBV 5 periode terakhir dalam % (positif = OBV naik).
+
+    Divergence bullish  : harga turun tapi OBV naik  → akumulasi diam-diam.
+    Divergence bearish  : harga naik tapi OBV turun  → distribusi diam-diam.
+    """
+    if len(prices) < 2 or len(volumes) < 2 or len(prices) != len(volumes):
+        return 0.0, 0.0
+
+    p_arr = np.array(prices, dtype=float)
+    v_arr = np.array(volumes, dtype=float)
+
+    obv = [0.0]
+    for i in range(1, len(p_arr)):
+        if p_arr[i] > p_arr[i - 1]:
+            obv.append(obv[-1] + v_arr[i])
+        elif p_arr[i] < p_arr[i - 1]:
+            obv.append(obv[-1] - v_arr[i])
+        else:
+            obv.append(obv[-1])
+
+    obv_arr = np.array(obv)
+    obv_now = float(obv_arr[-1])
+
+    # Slope OBV 5 periode terakhir
+    lookback = min(5, len(obv_arr) - 1)
+    obv_prev = float(obv_arr[-lookback - 1])
+    if obv_prev == 0:
+        obv_slope_pct = 0.0
+    else:
+        obv_slope_pct = float((obv_now - obv_prev) / abs(obv_prev) * 100.0)
+
+    return obv_now, obv_slope_pct
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MULTI-INDICATOR CONFLUENCE ENGINE
 # ──────────────────────────────────────────────────────────────────────────────
 
-def get_technical_summary(prices):
+def get_technical_summary(prices, volumes=None):
     """
     Kembalikan rangkuman teknikal lengkap dari semua indikator.
     Data ini dipakai oleh derive_trade_signal() untuk keputusan akhir.
 
     Indikator:
       RSI, MACD, Bollinger Bands, Stochastic RSI, EMA Crossover,
-      EMA Slope, Williams %R, Rate of Change (ROC).
+      EMA Slope, Williams %R, Rate of Change (ROC),
+      Volume Ratio (vol sekarang / MA-20), OBV slope.
+
+    Args:
+      prices  : list harga penutupan
+      volumes : list volume per candle (opsional) — aktifkan volume indicators
     """
     if not prices or len(prices) < 2:
         return {
@@ -319,6 +386,7 @@ def get_technical_summary(prices):
             "macd_hist": 0, "bb_pct": 0.5, "stoch_k": 50, "stoch_d": 50,
             "ema9": 0, "ema21": 0, "ema_cross": "NEUTRAL",
             "last_price": 0, "williams_r": -50, "roc": 0,
+            "volume_ratio": 1.0, "obv_slope": 0.0,
         }
 
     prices_list = list(prices)
@@ -371,23 +439,34 @@ def get_technical_summary(prices):
     # Rate of Change (10-period)
     roc = calculate_roc(prices_list) if len(prices_list) >= 11 else 0.0
 
+    # Volume Ratio dan OBV (opsional — butuh data volume)
+    vols_list = list(volumes) if volumes and len(volumes) == len(prices_list) else None
+    if vols_list and len(vols_list) >= 2:
+        volume_ratio = calculate_volume_ratio(vols_list)
+        _, obv_slope = calculate_obv(prices_list, vols_list)
+    else:
+        volume_ratio = 1.0
+        obv_slope = 0.0
+
     return {
-        "rsi":        round(rsi, 1),
-        "volatility": round(vol, 2),
-        "slope":      round(slope, 4),
-        "signal":     signal,
-        "macd_line":  round(macd_line, 6),
-        "macd_sig":   round(macd_sig, 6),
-        "macd_hist":  round(macd_hist, 6),
-        "bb_pct":     round(bb_pct, 4),
-        "stoch_k":    round(stoch_k, 1),
-        "stoch_d":    round(stoch_d, 1),
-        "ema9":       round(ema9, 6),
-        "ema21":      round(ema21, 6),
-        "ema_cross":  ema_cross,
-        "last_price": round(float(prices_list[-1]), 6),
-        "williams_r": round(williams_r, 1),
-        "roc":        round(roc, 4),
+        "rsi":          round(rsi, 1),
+        "volatility":   round(vol, 2),
+        "slope":        round(slope, 4),
+        "signal":       signal,
+        "macd_line":    round(macd_line, 6),
+        "macd_sig":     round(macd_sig, 6),
+        "macd_hist":    round(macd_hist, 6),
+        "bb_pct":       round(bb_pct, 4),
+        "stoch_k":      round(stoch_k, 1),
+        "stoch_d":      round(stoch_d, 1),
+        "ema9":         round(ema9, 6),
+        "ema21":        round(ema21, 6),
+        "ema_cross":    ema_cross,
+        "last_price":   round(float(prices_list[-1]), 6),
+        "williams_r":   round(williams_r, 1),
+        "roc":          round(roc, 4),
+        "volume_ratio": round(volume_ratio, 3),
+        "obv_slope":    round(obv_slope, 4),
     }
 
 
@@ -413,9 +492,11 @@ def derive_trade_signal(tech):
     7. Slope/Momentum (w=1.0) — percepatan harga
     8. ROC-10 (w=1.0)         — momentum harga langsung (mean-reversion)
     9. Order Book Pressure (w=2.0) — permintaan nyata dari pasar
+   10. Volume Ratio (w=1.5)   — konfirmasi volume; spike = breakout valid
+   11. OBV Slope (w=1.5)      — akumulasi/distribusi diam-diam
 
-    Total max buy score  ≈ 16.5
-    Total max sell score ≈ 16.5
+    Total max buy score  ≈ 19.5
+    Total max sell score ≈ 19.5
 
     Syarat BUY : buy_score >= 6.0 DAN sell_score < 4.0
     Syarat SELL: sell_score >= 6.0 DAN buy_score < 4.0
@@ -431,6 +512,8 @@ def derive_trade_signal(tech):
     ema_cr  = str(tech.get('ema_cross', 'NEUTRAL'))
     wr      = float(tech.get('williams_r', -50))   # Williams %R
     roc     = float(tech.get('roc', 0))             # Rate of Change (10-period)
+    vr      = float(tech.get('volume_ratio', 1.0))  # Volume Ratio (vol / MA-20)
+    obv_sl  = float(tech.get('obv_slope', 0.0))     # OBV Slope (% per 5 candle)
     last_price = max(1.0, float(tech.get('last_price', 1.0)))  # harga terakhir untuk normalisasi MACD
 
     buy_score  = 0.0
@@ -561,7 +644,8 @@ def derive_trade_signal(tech):
         signals.append(f"ROC mild-up({roc:.2f}%)")
 
     # ── 9. Order Book Buy Pressure (Bobot 2.0) ────────────────────────────────
-    # Hanya berlaku jika data OB tersedia (bp != 50.0 default)
+    # Jika data OB tersedia (bp != 50.0 default), gunakan langsung.
+    # Jika OB tidak ada, fallback: volume spike → proxy demand, volume kering → proxy supply.
     if bp != 50.0:
         if bp >= 65:
             buy_score += 2.0
@@ -575,6 +659,51 @@ def derive_trade_signal(tech):
         elif bp <= 45:
             sell_score += 1.0
             signals.append(f"OB ask-dom({100 - bp:.0f}%)")
+    elif vr != 1.0:
+        # Fallback: volume ratio sebagai proxy demand jika OB tidak tersedia
+        # Spike volume saat harga naik = demand nyata (partial credit 1.0 maks)
+        if vr >= 2.0:
+            buy_score += 1.0
+            signals.append(f"OB-fallback: Vol spike({vr:.1f}x) demand proxy")
+        elif vr <= 0.4:
+            sell_score += 1.0
+            signals.append(f"OB-fallback: Vol dry({vr:.1f}x) supply proxy")
+
+    # ── 10. Volume Ratio (Bobot 1.5) ─────────────────────────────────────────
+    # Hanya aktif jika data volume tersedia (vr != 1.0 default berarti ada data nyata).
+    # Spike volume (>1.5x) mengkonfirmasi breakout valid.
+    # Volume sepi (<0.5x) memperlemah sinyal arah apapun.
+    if vr != 1.0:
+        if vr >= 2.0:
+            buy_score += 1.5
+            signals.append(f"Vol spike({vr:.1f}x) BUY confirm")
+        elif vr >= 1.5:
+            buy_score += 0.8
+            signals.append(f"Vol high({vr:.1f}x)")
+        elif vr <= 0.4:
+            sell_score += 1.5
+            signals.append(f"Vol dry({vr:.1f}x) SELL confirm")
+        elif vr <= 0.6:
+            sell_score += 0.5
+            signals.append(f"Vol low({vr:.1f}x)")
+
+    # ── 11. OBV Slope (Bobot 1.5) ────────────────────────────────────────────
+    # OBV naik = akumulasi (smart money beli diam-diam) → BUY bias.
+    # OBV turun = distribusi (smart money jual diam-diam) → SELL bias.
+    # Divergence: harga naik tapi OBV turun adalah sinyal jual kuat.
+    if obv_sl != 0.0:
+        if obv_sl >= 5.0:
+            buy_score += 1.5
+            signals.append(f"OBV accumulate({obv_sl:+.1f}%)")
+        elif obv_sl >= 2.0:
+            buy_score += 0.8
+            signals.append(f"OBV rising({obv_sl:+.1f}%)")
+        elif obv_sl <= -5.0:
+            sell_score += 1.5
+            signals.append(f"OBV distribute({obv_sl:+.1f}%)")
+        elif obv_sl <= -2.0:
+            sell_score += 0.8
+            signals.append(f"OBV falling({obv_sl:+.1f}%)")
 
     # ── KEPUTUSAN AKHIR (Multi-Confluence Gate) ───────────────────────────────
     BUY_THRESHOLD  = 6.0   # Minimal skor BUY untuk trigger entry

@@ -27,6 +27,7 @@ if _REPO_ROOT not in sys.path:
 
 from app.domain.technicals import derive_trade_signal, get_technical_summary
 from app.infrastructure.database import db
+import config as cfg
 from config import (
     FEE_BUY_TAKER,
     FEE_SELL_TAKER,
@@ -197,10 +198,17 @@ class LiteRTLmDecisionService:
         """
         Pre-filter 300+ pair via technical indicators (tanpa LLM), ambil top N
         kandidat terkuat, lalu kirim ke LLM untuk konfirmasi entry secara concurrent.
+
+        Ketika TECHNICAL_ONLY_MODE aktif, cycle ini tidak publish signal BUY.
+        LLM tetap bisa digunakan untuk analisa/artikel tanpa mempengaruhi keputusan trading.
         """
         if not self._engine_enabled:
             return
         if not self._tickers:
+            return
+
+        # [TECHNICAL_ONLY_MODE] Jangan publish signal trading — keputusan entry murni teknikal.
+        if cfg.TECHNICAL_ONLY_MODE:
             return
 
         now = time.time()
@@ -282,6 +290,9 @@ class LiteRTLmDecisionService:
             )
 
     async def _evaluate_cycle(self):
+        # [TECHNICAL_ONLY_MODE] Jangan publish signal trading — keputusan exit murni teknikal.
+        if cfg.TECHNICAL_ONLY_MODE:
+            return
         if not self._engine_enabled:
             return
 

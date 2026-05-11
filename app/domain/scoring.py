@@ -10,14 +10,23 @@ _BOOSTED_SECTORS = {"AI", "MEME", "L1"}
 def calculate_score(args):
     """Fungsi pembantu untuk multiprocessing ranking.
 
-    args dapat berupa (item, config_override) atau
-    (item, config_override, market_regime) untuk bobot dinamis berbasis regime.
+    args dapat berupa:
+      (item, config_override)
+      (item, config_override, market_regime)
+      (item, config_override, market_regime, price_history)
+
+    price_history: dict {pair: deque/list} dari in-memory WS cache — diutamakan
+    dibanding DB agar RSI/MACD berbasis data LIVE, bukan stale DB.
     """
-    if len(args) == 3:
+    if len(args) == 4:
+        item, config_override, market_regime, price_history = args
+    elif len(args) == 3:
         item, config_override, market_regime = args
+        price_history = None
     else:
         item, config_override = args
         market_regime = "UNKNOWN"
+        price_history = None
 
     market_regime = (market_regime or "UNKNOWN").upper()
     pair, d = item
@@ -82,41 +91,48 @@ def calculate_score(args):
             # Final Score (Normalized roughly to 0-100+)
             score = (score_vol * w_vol) + (rel_momentum * w_momentum) - (penalty_spread * (w_spread / 12)) + bid_depth_bonus
 
-            # [Technical Confirmation] Tambahkan RSI + MACD sebagai penyesuaian skor
-            # Ini memastikan koin dengan teknikal kuat mendapat skor lebih tinggi,
-            # dan koin yang sudah overbought tidak salah masuk.
+            # [Technical Confirmation] RSI + MACD sebagai penyesuaian skor.
+            # Prioritaskan in-memory live history (dikirim dari caller).
+            # DB fallback hanya jika caller tidak menyediakan history.
             tech_adj = 0.0
             try:
-                from app.infrastructure.database import db as _db
-                import json
-                row_h = None
-                try:
-                    import psycopg2
-                    with _db.get_connection() as _conn:
-                        row_h = _conn.execute(
-                            "SELECT history_json FROM ticker_history WHERE pair = %s", (pair.lower(),)
-                        ).fetchone()
-                except Exception:
-                    pass
-                if row_h and row_h['history_json']:
-                    _prices = json.loads(row_h['history_json'])
+                _prices = None
+                if price_history is not None:
+                    # In-memory WS cache — LIVE, tidak stale
+                    _ph = price_history.get(pair.lower())
+                    if _ph:
+                        _prices = list(_ph)
+                else:
+                    # DB fallback — hanya digunakan jika caller adalah monolith lama
+                    # yang belum meneruskan price_history
+                    try:
+                        from app.infrastructure.database import db as _db
+                        import json
+                        with _db.get_connection() as _conn:
+                            row_h = _conn.execute(
+                                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair.lower(),)
+                            ).fetchone()
+                        if row_h and row_h['history_json']:
+                            _prices = json.loads(row_h['history_json'])
+                    except Exception:
+                        pass
+                if _prices:
                     if len(_prices) >= 14:
                         _rsi = calculate_rsi(_prices)
-                        # RSI oversold = bonus, RSI overbought = penalti
                         if _rsi < 30:
-                            tech_adj += 8.0   # Bonus besar: peluang mean reversion
+                            tech_adj += 8.0
                         elif _rsi < 45:
                             tech_adj += 4.0
                         elif _rsi > 70:
-                            tech_adj -= 6.0   # Penalti: sudah mahal
+                            tech_adj -= 6.0
                         elif _rsi > 60:
                             tech_adj -= 2.0
                     if len(_prices) >= 35:
                         _, _, _mh = calculate_macd(_prices)
                         if _mh > 0:
-                            tech_adj += 3.0   # MACD bullish momentum
+                            tech_adj += 3.0
                         elif _mh < 0:
-                            tech_adj -= 3.0   # MACD bearish momentum
+                            tech_adj -= 3.0
             except Exception:
                 pass
 

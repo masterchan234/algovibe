@@ -50,6 +50,7 @@ from app.infrastructure.exchange_factory import create_indodax_exchange
 from app.infrastructure.ws_private import PrivateWS
 from utils.logger import log_message, send_telegram_message
 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
+import config as cfg
 
 logging.basicConfig(
     level=logging.INFO,
@@ -420,13 +421,27 @@ class ExecutiveCoreService:
                 logger.error(f"[executive-core] Failed to parse signal: {exc}")
 
     async def _consume_llm_signals(self) -> None:
-        """Consume Signal messages from litert-lm-decision (LLM signals)."""
+        """Consume Signal messages from litert-lm-decision (LLM signals).
+
+        Ketika TECHNICAL_ONLY_MODE aktif, semua signal dari LLM diabaikan —
+        keputusan BUY/SELL murni dari jalur teknikal (brain-inference).
+        Service litert-lm-decision tetap berjalan untuk keperluan lain (artikel, insight).
+        """
         async for raw in self._llm_signal_sub.aiter_messages():
             if not self._running:
                 break
             try:
                 sig = Signal()
                 sig.ParseFromString(raw)
+
+                # [TECHNICAL_ONLY_MODE] Abaikan semua signal LLM jika mode teknikal aktif.
+                if cfg.TECHNICAL_ONLY_MODE:
+                    logger.debug(
+                        f"[executive-core] 🚫 LLM signal untuk {sig.symbol} diabaikan "
+                        f"(TECHNICAL_ONLY_MODE aktif)"
+                    )
+                    continue
+
                 if sig.action == 1:  # BUY
                     logger.info(f"[executive-core] 🤖 Received LLM BUY signal for {sig.symbol} (conf: {sig.confidence:.1f}%)")
                     from app.application.use_cases.trade_execution import execute_trade
