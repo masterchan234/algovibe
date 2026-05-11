@@ -6,7 +6,7 @@
 
 ## 🎯 Fitur Utama
 
-- **Microservice Architecture:** Terbagi menjadi 5 layanan independen (Market-Pipe, Brain-Inference, LiteRT-LM-Decision, Executive-Core, Dashboard-API) untuk skalabilitas dan stabilitas tinggi.
+- **Microservice Architecture:** Terbagi menjadi 6 layanan independen (Market-Pipe, Brain-Inference, LiteRT-LM-Decision, Executive-Core, Dashboard-API, News-Maker) untuk skalabilitas dan stabilitas tinggi.
 - **TECHNICAL_ONLY_MODE:** Semua keputusan trading 100% berbasis indikator teknikal (11 indikator, max score ~19.5). LLM hanya aktif untuk article writing.
 - **Live Market Data:** Semua scoring dan sinyal menggunakan in-memory price history dari WebSocket stream — bukan data DB yang bisa stale.
 - **Market Regime Detection:** Oracle sentral mendeteksi fase market (Bullish, Bearish, Choppy, Ranging, Crash) dan menyesuaikan strategi secara dinamis.
@@ -14,6 +14,7 @@
 - **Indodax Tax Compliant:** Kalkulasi PnL akurat termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
 - **Interactive Dashboard:** Monitoring realtime via Vue.js & SocketIO dengan visualisasi radar market dan eksekusi manual.
 - **RF Auto-Trainer:** Background service yang secara otomatis melatih ulang model RandomForest (Scalper V2) berdasarkan data trade terbaru.
+- **Automated News Engine:** News Maker menghasilkan artikel pasar otomatis (Morning Briefing, Trending Review, Evening Review, Breaking Headlines) berdasarkan sinyal teknikal live.
 
 ---
 
@@ -23,14 +24,19 @@
 graph TD
     ID[Indodax WebSocket] -- WebSocket --> MP[Market Pipe]
     MP -- ZMQ PUB ipc:market_stream.ipc --> BI[Brain Inference]
+    MP -- ZMQ PUB ipc:market_stream.ipc --> NM[News Maker]
     MP -- ZMQ PUB --> EC[Executive Core]
 
     BI -- in-memory price history --> BI
     BI -- 11-indikator scoring live --> BI
     BI -- ZMQ PUB ipc:signal_stream.ipc --> EC
+    BI -- ZMQ PUB ipc:signal_stream.ipc --> NM
 
     EC -- Risk Check & Order Execution --> ID
     EC -- PnL & Order Status --> DB[(PostgreSQL/TimescaleDB)]
+
+    NM -- Articles & Briefings --> DB
+    NM -- hero_ai_insight --> DB
 
     DB -- Shared State --> DA[Dashboard API]
     DA -- Web UI --> User((Trader))
@@ -86,6 +92,7 @@ services/
 ├── brain_inference/    # Scoring & Oracle: live in-memory history, 11 indikator
 ├── litert_lm_decision/ # LLM: TECHNICAL_ONLY_MODE=true (article writing only)
 ├── executive_core/     # Execution: Risk Checks, P&L, Order Placement
+├── news_maker/         # Automated Editorial Engine: briefings, headlines, trending review
 └── dashboard_api/      # UI: Flask Server + SocketIO
 
 app/
@@ -147,12 +154,69 @@ docker compose up -d --force-recreate brain-inference executive-core litert-lm-d
 ### Native (Development / Debugging)
 
 ```bash
-python3 -m services.market_pipe.main     # Terminal 1
-python3 -m services.brain_inference.main # Terminal 2
-python3 -m services.executive_core.main  # Terminal 3
+python3 -m services.market_pipe.main        # Terminal 1
+python3 -m services.brain_inference.main    # Terminal 2
+python3 -m services.executive_core.main     # Terminal 3
 python3 -m services.litert_lm_decision.main # Terminal 4 (article writing only)
-python3 -m dashboard.server              # Terminal 5
+python3 -m services.news_maker.main         # Terminal 5 (news engine)
+python3 -m dashboard.server                 # Terminal 6
 ```
+
+---
+
+## 📰 News Maker (Automated Editorial Engine)
+
+`services/news_maker/` adalah layanan AI editorial yang menghasilkan artikel pasar kripto secara otomatis dalam Bahasa Indonesia, berdasarkan data live dari WebSocket stream dan sinyal teknikal dari Brain Inference.
+
+### Jadwal Otomatis
+
+| Trigger | Waktu / Kondisi | Tipe Artikel | Kategori DB |
+| :--- | :--- | :--- | :--- |
+| Scheduler | **08:00 WIB** setiap hari | Morning Briefing | `MORNING_BRIEF` |
+| Scheduler | **14:00 WIB** setiap hari | Daily Trending Review (top 7 coins) | `TRENDING_REVIEW` |
+| Scheduler | **20:00 WIB** setiap hari | Evening Market Review | `EVENING_REVIEW` |
+| Realtime monitor (setiap 30s) | Coin bergerak >3% in 1h atau >10% in 24h | Breaking Headline | `REALTIME_HEADLINE` |
+| Realtime monitor (setiap ~3 menit) | Top gainer >2% + volume >30M IDR | Headline | `REALTIME_HEADLINE` |
+| **Signal-triggered** | Brain Inference kirim BUY/SELL dengan confidence ≥ 75% | Headline | `REALTIME_HEADLINE` |
+
+### Generate Manual
+
+```bash
+# Dari host — semua mode tersedia:
+./generate_news.sh morning
+./generate_news.sh evening
+./generate_news.sh headline BTC
+./generate_news.sh brief
+./generate_news.sh landing [COIN] [COUNT]
+```
+
+Script otomatis mendeteksi apakah container `news-maker` sedang berjalan dan mengeksekusi di dalamnya; jika tidak, berjalan native. Dilengkapi progress bar + elapsed time.
+
+### Konfigurasi News Maker (`.env`)
+
+```env
+NEWS_LLM_PROVIDER=local          # local | hf | cf | auto
+NEWS_LLM_TIMEOUT_SEC=45           # timeout LLM local (default 45s)
+NEWS_TRENDING_REVIEW_HOUR=14      # jam trending review WIB (default 14)
+NEWS_SIGNAL_CONFIDENCE_MIN=0.75   # min confidence sinyal untuk trigger headline
+NEWS_MIN_CONTENT_CHARS=2000       # minimum panjang konten artikel
+
+# Remote provider (opsional — fallback jika local model timeout)
+NEWS_HF_API_URL=https://...
+NEWS_HF_API_TOKEN=hf_...
+NEWS_CF_API_URL=https://...
+NEWS_CF_API_TOKEN=...
+```
+
+### LLM Fallback Strategy
+
+```
+Local Engine (timeout 45s)
+  └─ timeout → Remote Provider (CF atau HF, timeout 60s)
+        └─ gagal → artikel tidak dibuat (skip, tidak crash)
+```
+
+Artikel disimpan ke tabel `intelligence_reports`. Deduplication: headline untuk pair yang sama tidak dibuat ulang dalam 20 menit.
 
 ---
 

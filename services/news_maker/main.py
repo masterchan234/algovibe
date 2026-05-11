@@ -43,8 +43,8 @@ install_uvloop()
 
 WIB_TZ = ZoneInfo("Asia/Jakarta")
 MIN_NEWS_CONTENT_CHARS = int(os.getenv("NEWS_MIN_CONTENT_CHARS", "2000"))
-LLM_TIMEOUT_SEC = int(os.getenv("NEWS_LLM_TIMEOUT_SEC", "90"))
-LLM_TIMEOUT_RETRY_SEC = int(os.getenv("NEWS_LLM_TIMEOUT_RETRY_SEC", "140"))
+LLM_TIMEOUT_SEC = int(os.getenv("NEWS_LLM_TIMEOUT_SEC", "45"))
+LLM_TIMEOUT_RETRY_SEC = int(os.getenv("NEWS_LLM_TIMEOUT_RETRY_SEC", "75"))  # fallback jika local diretry eksplisit via env
 REMOTE_TIMEOUT_SEC = int(os.getenv("NEWS_REMOTE_TIMEOUT_SEC", "60"))
 NEWS_LLM_PROVIDER = str(os.getenv("NEWS_LLM_PROVIDER", "local") or "local").strip().lower()
 NEWS_HF_API_URL = str(os.getenv("NEWS_HF_API_URL", "") or "").strip()
@@ -54,6 +54,10 @@ NEWS_CF_API_TOKEN = str(os.getenv("NEWS_CF_API_TOKEN", "") or "").strip()
 NEWS_WS_PRIME_SEC = int(os.getenv("NEWS_WS_PRIME_SEC", "8"))
 NEWS_WS_MIN_TICKS = int(os.getenv("NEWS_WS_MIN_TICKS", "5"))
 NEWS_WS_SAMPLE_SEC = float(os.getenv("NEWS_WS_SAMPLE_SEC", "5"))
+# Jam trending review harian (WIB). Override via NEWS_TRENDING_REVIEW_HOUR.
+TRENDING_REVIEW_HOUR = int(os.getenv("NEWS_TRENDING_REVIEW_HOUR", "14"))
+# Confidence minimum dari brain-inference agar sinyal trigger pembuatan headline.
+NEWS_SIGNAL_CONFIDENCE_MIN = float(os.getenv("NEWS_SIGNAL_CONFIDENCE_MIN", "0.75"))
 
 class NewsMaker:
     def __init__(self):
@@ -73,6 +77,8 @@ class NewsMaker:
         self._market_sub = ZMQSubscriber(IPC_MARKET)
         self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
         self._ipc_signals: dict = {}  # pair -> {signal, confidence, ts}
+        self._pending_signal_pairs: set = set()  # pairs queued untuk signal-triggered headline
+        self._last_trending_review_date = None
 
     def _remote_provider_configured(self):
         provider = self._llm_provider
@@ -260,6 +266,9 @@ class NewsMaker:
                 if pair in self._tickers:
                     self._tickers[pair]["signal"] = action
                     self._tickers[pair]["confidence"] = float(sig.confidence or 0.0)
+                # Queue signal-triggered headline jika confidence tinggi (non-HOLD).
+                if action != "HOLD" and float(sig.confidence or 0.0) >= NEWS_SIGNAL_CONFIDENCE_MIN:
+                    self._pending_signal_pairs.add(pair)
             except Exception:
                 pass
 
@@ -545,6 +554,11 @@ class NewsMaker:
                 await self._generate_periodic_report("EVENING_REVIEW")
                 self._last_report_date["evening"] = today
 
+            # Daily Trending Review: jam dikonfigurasi via NEWS_TRENDING_REVIEW_HOUR (default 14:00)
+            if now.hour == TRENDING_REVIEW_HOUR and self._last_trending_review_date != today:
+                await self._generate_trending_review()
+                self._last_trending_review_date = today
+
             await asyncio.sleep(60)
 
     async def _realtime_monitor_loop(self):
@@ -557,15 +571,43 @@ class NewsMaker:
                 if movers:
                     coin_symbol = movers[0]  # Pick most significant
                     move_data = movers[1]
-                    
+
                     cache_key = f"{coin_symbol}_{move_data['pct_change']:.1f}"
                     if cache_key not in self._headline_cache:
                         self._headline_cache.add(cache_key)
                         if len(self._headline_cache) > 20:  # Limit cache
                             self._headline_cache.pop()
-                        
+
                         await self._generate_market_headline(coin_symbol, move_data)
-                
+
+                # Signal-triggered headlines: pairs dengan confidence tinggi dari brain-inference.
+                # Cap 2 per cycle agar tidak flood LLM.
+                _signal_batch = []
+                while self._pending_signal_pairs and len(_signal_batch) < 2:
+                    _signal_batch.append(self._pending_signal_pairs.pop())
+                for _sig_pair in _signal_batch:
+                    _data = self._tickers.get(_sig_pair, {})
+                    if not _data:
+                        continue
+                    _rt = self._resolve_realtime_move(_sig_pair)
+                    _ipc = self._ipc_signals.get(_sig_pair, {})
+                    _move = {
+                        "pct_change": float(_rt.get("pct_change") or 0.0),
+                        "pct_source": str(_rt.get("pct_source") or "signal"),
+                        "price": float(_data.get("price") or 0.0),
+                        "change_1h": float(_rt.get("ch_1h") or 0.0),
+                        "vol_idr": float(_data.get("vol_idr") or _data.get("vol") or 0.0),
+                        "score": float(_ipc.get("confidence") or 0.0) * 10,
+                    }
+                    if _move["price"] > 0:
+                        logger.info(
+                            "[news-maker] Signal-triggered headline: %s %s (conf=%.0f%%)",
+                            _sig_pair.upper(),
+                            _ipc.get("signal", "?"),
+                            float(_ipc.get("confidence") or 0.0) * 100,
+                        )
+                        await self._generate_market_headline(_sig_pair, _move)
+
                 # Every 6 intervals (~3 min), also generate headline for top gainer
                 interval_count += 1
                 if interval_count >= 6 and len(self._tickers) > 0:
@@ -734,6 +776,84 @@ class NewsMaker:
             self._save_market_brief(brief)
         except Exception as e:
             logger.error("[news-maker] Failed to generate MARKET_INTEL_BRIEF: %s", e)
+
+    async def _generate_trending_review(self):
+        """Generate daily trending coins review — sekali sehari untuk top performing coins."""
+        if not self._engine_enabled:
+            return
+        logger.info("[news-maker] Generating TRENDING_REVIEW...")
+        self._refresh_db_context(force=True)
+        context = self._build_trending_review_context()
+        prompt = self._build_trending_review_prompt(context)
+
+        try:
+            article = await self._ask_llm(prompt)
+            if article:
+                article = self._ensure_min_content(article, context)
+                self._save_article(article, "TRENDING_REVIEW")
+            else:
+                logger.warning("[news-maker] Empty/invalid TRENDING_REVIEW payload")
+        except Exception as e:
+            logger.error("[news-maker] Failed to generate TRENDING_REVIEW: %s", e)
+
+    def _build_trending_review_context(self):
+        """Build composite context untuk daily trending review — top coins by composite score."""
+        valid_items = self._get_valid_market_items(require_fresh=False)  # tidak perlu fresh untuk daily
+        if not valid_items:
+            return "- No market data available\n"
+
+        scored = []
+        for pair, data in valid_items:
+            rt = self._resolve_realtime_move(pair)
+            sig = self._db_signals.get(pair, {})
+            ipc = self._ipc_signals.get(pair, {})
+            vol_idr = float(data.get("vol_idr") or data.get("vol") or 0.0)
+            ch_24h_abs = abs(float(rt.get("pct_change") or 0.0))
+            ch_1h_abs = abs(float(rt.get("ch_1h") or 0.0))
+            score_db = abs(float(sig.get("score") or 0.0))
+            conf = float(ipc.get("confidence") or 0.0)
+            signal = str(ipc.get("signal") or sig.get("signal") or "HOLD")
+            composite = ch_24h_abs + ch_1h_abs * 1.5 + score_db * 0.5 + conf * 10 + min(vol_idr / 1_000_000_000, 5)
+            scored.append((pair, data, rt, sig, signal, conf, composite))
+
+        scored.sort(key=lambda x: x[6], reverse=True)
+        top = scored[:7]
+
+        context = f"Daily Trending Coins ({datetime.now(WIB_TZ).strftime('%d %b %Y')}):\n"
+        for pair, data, rt, sig, signal, conf, _ in top:
+            price = float(data.get("price") or 0.0)
+            vol_idr = float(data.get("vol_idr") or data.get("vol") or 0.0)
+            ch_24h = float(rt.get("pct_change") or 0.0)
+            ch_1h = float(rt.get("ch_1h") or 0.0)
+            trend = sig.get("trend") or "N/A"
+            context += (
+                f"- {pair.upper()}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
+                f"ch_1h={ch_1h:+.2f}%  vol={vol_idr/1e6:.0f}M  "
+                f"signal={signal}({conf:.0%})  trend={trend}\n"
+            )
+
+        regime = db.get_state("current_market_regime") or "NEUTRAL"
+        sentiment = db.get_state("market_sentiment_index") or 50
+        context += f"\nMarket Regime: {regime} | Sentiment: {sentiment}%\n"
+        return context
+
+    def _build_trending_review_prompt(self, context):
+        """Prompt untuk daily trending review — multi-coin analysis."""
+        _prompt_min_chars = max(700, MIN_NEWS_CONTENT_CHARS // 3)
+        return (
+            f"Anda adalah Senior Market Analyst Algovibe. Tulis Daily Trending Review dalam Bahasa Indonesia.\n"
+            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y')}\n"
+            f"\nKonteks Data:\n{context}\n"
+            f"Persyaratan Artikel:\n"
+            f"- Judul: sebutkan 2-3 coin terpilih, 50-80 karakter.\n"
+            f"- Excerpt: ringkasan 100-150 karakter.\n"
+            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
+            f"- Content: PADAT (250-400 kata). Bahas tiap coin: harga, arah, sinyal, level penting.\n"
+            f"- Format MARKDOWN. Struktur: ## Ringkasan → ## Analisis Per Coin → ## Kesimpulan\n"
+            f"- Fokus ke data konkret di atas, hindari narasi generik.\n"
+            "Balas HANYA 1 JSON object:\n"
+            '{"title":"...","excerpt":"...","content":"..."}'
+        )
 
     async def _generate_landing_pack(self, coin_symbol=None, headline_count=3):
         """Generate a complete landing content pack: brief + periodic reports + headlines."""
@@ -927,12 +1047,14 @@ class NewsMaker:
     def _build_market_headline_prompt(self, coin_symbol, move_data, context):
         """Generate prompt for market headline analysis."""
         direction = "naik/hype" if move_data['pct_change'] >= 0 else "turun/rugi"
+        # Target lebih rendah agar LLM generate lebih cepat; _ensure_min_content akan pad jika kurang.
+        _prompt_min_chars = max(700, MIN_NEWS_CONTENT_CHARS // 3)
         contract = self._markdown_article_output_contract(
             variant="headline",
             title_rule="Title: Breaking news impactful, 50-80 karakter. Include: coin + action + pct.",
             excerpt_rule="Excerpt: Summary 120-180 karakter. Jelaskan: apa geraknya, kenapa significant, dampaknya.",
-            min_chars=MIN_NEWS_CONTENT_CHARS,
-            content_hint="DETAIL LENGKAP (300+ kata) dalam FORMAT MARKDOWN yang ringkas dan enak dibaca di news feed.",
+            min_chars=_prompt_min_chars,
+            content_hint=f"RINGKAS & PADAT (150-250 kata) dalam FORMAT MARKDOWN. Fokus ke data utama dan analisis singkat.",
         )
         return (
             f"Anda adalah Market Analyst Algovibe. Tulis Breaking News pasar kripto dalam Bahasa Indonesia.\n"
@@ -945,12 +1067,14 @@ class NewsMaker:
 
     def _build_report_prompt(self, rtype, context):
         title = "Morning Briefing" if rtype == "MORNING_BRIEF" else "Market Review Malam"
+        # Target lebih rendah agar LLM generate lebih cepat; _ensure_min_content akan pad jika kurang.
+        _prompt_min_chars = max(700, MIN_NEWS_CONTENT_CHARS // 3)
         contract = self._markdown_article_output_contract(
             variant="report",
             title_rule="Judul: catchy, informatif, 50-80 karakter.",
             excerpt_rule="Excerpt: ringkasan 100-150 karakter yang mengecup poin utama.",
-            min_chars=MIN_NEWS_CONTENT_CHARS,
-            content_hint="DETAIL & LENGKAP (500+ kata) dalam FORMAT MARKDOWN PROPER yang nyaman dibaca di news feed.",
+            min_chars=_prompt_min_chars,
+            content_hint="PADAT (250-400 kata) dalam FORMAT MARKDOWN PROPER yang nyaman dibaca di news feed.",
         )
         return (
             f"Anda adalah Chief Editor Algovibe Intelligence. Tulis artikel blog profesional dalam Bahasa Indonesia.\n"
@@ -1133,27 +1257,21 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
                 with self._engine.create_conversation() as conv:
                     return conv.send_message(prompt)
 
-            try:
-                raw = await asyncio.wait_for(
-                    loop.run_in_executor(None, _infer),
-                    timeout=LLM_TIMEOUT_SEC,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[news-maker] LLM timeout first attempt >%ss, retry once with %ss",
-                    LLM_TIMEOUT_SEC,
-                    LLM_TIMEOUT_RETRY_SEC,
-                )
-                raw = await asyncio.wait_for(
-                    loop.run_in_executor(None, _infer),
-                    timeout=LLM_TIMEOUT_RETRY_SEC,
-                )
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(None, _infer),
+                timeout=LLM_TIMEOUT_SEC,
+            )
 
             text = self._extract_text(raw)
             logger.debug("[news-maker] Local LLM response len: %d", len(str(text) or ""))
             return text
         except asyncio.TimeoutError:
-            logger.error("[news-maker] LLM timeout after retry (%ss/%ss)", LLM_TIMEOUT_SEC, LLM_TIMEOUT_RETRY_SEC)
+            # Jangan retry local — langsung return "" agar _ask_llm_raw fallback ke remote.
+            # Retry lokal hanya spawn thread kedua yang jalan bersamaan dan makin lambat.
+            logger.warning(
+                "[news-maker] Local LLM timeout >%ss. Falling back to remote provider.",
+                LLM_TIMEOUT_SEC,
+            )
             return ""
         except Exception as e:
             logger.error("[news-maker] Local LLM Error: %s", e)
