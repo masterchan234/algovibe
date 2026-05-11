@@ -3268,7 +3268,10 @@ class ExitManager:
                     if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
                         pos['status'] = 'DUST'
                         pos['amount_crypto'] = amount_on_exchange
-                        pos['amount_idr'] = amount_on_exchange * float(pos.get('entry_price') or 0)
+                        # amount_idr adalah cost basis asli pembelian — JANGAN dioverwrite.
+                        # Overwrite dengan mark-to-market (amount_on_exchange × entry_price)
+                        # menyebabkan posisi terperangkap DUST selamanya karena fee exchange
+                        # memotong sisi coin sehingga nilainya selalu < MIN_TRADE_IDR.
                         db.upsert_position(pair, pos)
                         log_message(
                             f"🧹 Reality Sync: {pair} converted to DUST "
@@ -3279,7 +3282,7 @@ class ExitManager:
                 if pos.get('status') == 'DUST' and position_idr_value >= MIN_TRADE_IDR and amount_on_exchange > 0:
                     pos['status'] = 'OPEN'
                     pos['amount_crypto'] = amount_on_exchange
-                    pos['amount_idr'] = amount_on_exchange * float(pos.get('entry_price') or 0)
+                    # amount_idr: jaga cost basis asli, jangan overwrite.
                     db.upsert_position(pair, pos)
                     log_message(
                         f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "
