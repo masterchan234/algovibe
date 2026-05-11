@@ -124,19 +124,79 @@
           </div>
           <div class="signals-grid">
             <div v-for="sig in landingData.signals" :key="sig.pair" class="sig-brief">
+              <!-- Header: pair + verdict badge -->
               <div class="sig-header">
-                <span class="pair">{{ sig.pair }}</span>
-                <span class="score-wrap">
-                  <span class="score-label">AI SCORE</span>
-                  <span class="score" :style="{ color: getScoreColor(sig.score) }">{{ sig.score.toFixed(0) }}</span>
-                </span>
+                <div class="sig-pair-wrap">
+                  <span class="pair">{{ sig.pair }}<span class="pair-base">/IDR</span></span>
+                  <span class="sig-verdict" :class="sig.verdict?.toLowerCase()">{{ sig.verdict || 'HOLD' }}</span>
+                </div>
+                <div class="sig-scores">
+                  <span class="score-pill buy" title="Buy Score">B {{ sig.score?.toFixed(1) }}</span>
+                  <span class="score-pill sell" title="Sell Score">S {{ sig.sell_score?.toFixed(1) }}</span>
+                </div>
               </div>
+              <!-- Price row -->
               <div class="sig-market">
                 <span class="price">{{ formatSignalPrice(sig.price) }}</span>
                 <span class="change" :class="getChangeClass(sig.change_display)">{{ formatChange(sig.change_display) }}</span>
               </div>
-              <div class="sig-footer">
-                <span class="trend" :class="sig.trend.toLowerCase()">{{ sig.trend }}</span>
+              <!-- Technical indicators grid -->
+              <div class="ind-grid">
+                <div class="ind-row" :class="rsiClass(sig.rsi)">
+                  <span class="ind-name">RSI-14</span>
+                  <span class="ind-val">{{ sig.rsi?.toFixed(1) ?? '—' }}</span>
+                  <span class="ind-tag">{{ rsiTag(sig.rsi) }}</span>
+                </div>
+                <div class="ind-row" :class="macdClass(sig.macd_hist)">
+                  <span class="ind-name">MACD</span>
+                  <span class="ind-val">{{ formatIndFloat(sig.macd_hist) }}</span>
+                  <span class="ind-tag">{{ sig.macd_hist > 0 ? 'POS' : sig.macd_hist < 0 ? 'NEG' : '—' }}</span>
+                </div>
+                <div class="ind-row" :class="bbClass(sig.bb_pct)">
+                  <span class="ind-name">BB %B</span>
+                  <span class="ind-val">{{ sig.bb_pct?.toFixed(2) ?? '—' }}</span>
+                  <span class="ind-tag">{{ bbTag(sig.bb_pct) }}</span>
+                </div>
+                <div class="ind-row" :class="stochClass(sig.stoch_k)">
+                  <span class="ind-name">Stoch K/D</span>
+                  <span class="ind-val">{{ sig.stoch_k?.toFixed(0) }}/{{ sig.stoch_d?.toFixed(0) }}</span>
+                  <span class="ind-tag">{{ stochTag(sig.stoch_k) }}</span>
+                </div>
+                <div class="ind-row" :class="emaCrossClass(sig.ema_cross)">
+                  <span class="ind-name">EMA 9/21</span>
+                  <span class="ind-val">{{ sig.ema_cross ?? '—' }}</span>
+                  <span class="ind-tag">{{ sig.ema_cross === 'BULLISH' ? '↑' : sig.ema_cross === 'BEARISH' ? '↓' : '→' }}</span>
+                </div>
+                <div class="ind-row" :class="wrClass(sig.williams_r)">
+                  <span class="ind-name">Williams %R</span>
+                  <span class="ind-val">{{ sig.williams_r?.toFixed(1) ?? '—' }}</span>
+                  <span class="ind-tag">{{ wrTag(sig.williams_r) }}</span>
+                </div>
+                <div class="ind-row" :class="slopeClass(sig.slope)">
+                  <span class="ind-name">Slope</span>
+                  <span class="ind-val">{{ formatIndFloat(sig.slope) }}%</span>
+                  <span class="ind-tag">{{ sig.slope > 0.01 ? 'UP' : sig.slope < -0.01 ? 'DN' : 'FLAT' }}</span>
+                </div>
+                <div class="ind-row" :class="rocClass(sig.roc)">
+                  <span class="ind-name">ROC-10</span>
+                  <span class="ind-val">{{ formatIndFloat(sig.roc) }}%</span>
+                  <span class="ind-tag">{{ sig.roc > 0 ? 'POS' : sig.roc < 0 ? 'NEG' : '—' }}</span>
+                </div>
+                <div class="ind-row" :class="volClass(sig.volume_ratio)">
+                  <span class="ind-name">Vol Ratio</span>
+                  <span class="ind-val">{{ sig.volume_ratio?.toFixed(2) ?? '—' }}x</span>
+                  <span class="ind-tag">{{ volTag(sig.volume_ratio) }}</span>
+                </div>
+                <div class="ind-row" :class="obvClass(sig.obv_slope)">
+                  <span class="ind-name">OBV Slope</span>
+                  <span class="ind-val">{{ formatIndFloat(sig.obv_slope) }}</span>
+                  <span class="ind-tag">{{ sig.obv_slope > 0 ? 'ACC' : sig.obv_slope < 0 ? 'DIST' : '—' }}</span>
+                </div>
+                <div class="ind-row" :class="bpClass(sig.buy_pressure)">
+                  <span class="ind-name">Buy Press</span>
+                  <span class="ind-val">{{ sig.buy_pressure?.toFixed(1) ?? '—' }}%</span>
+                  <span class="ind-tag">{{ sig.buy_pressure > 55 ? 'BID' : sig.buy_pressure < 45 ? 'ASK' : 'BAL' }}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -332,10 +392,27 @@ async function fetchLandingData() {
       landingData.insights = data.insights
       landingData.signals = (data.signals || []).map((s) => ({
         pair: String(s.pair || '').toUpperCase().replace('IDR', ''),
-        score: Number(s.score || 50),
+        score: Number(s.score ?? 0),
+        sell_score: Number(s.sell_score ?? 0),
+        confidence: Number(s.confidence ?? 50),
+        verdict: s.verdict || 'HOLD',
         trend: s.trend || 'STABLE',
         price: Number(s.price || 0),
-        change_display: pickBestChange(s)
+        change_display: pickBestChange(s),
+        // Indikator teknikal
+        rsi: Number(s.rsi ?? 50),
+        macd_hist: Number(s.macd_hist ?? 0),
+        bb_pct: Number(s.bb_pct ?? 0.5),
+        stoch_k: Number(s.stoch_k ?? 50),
+        stoch_d: Number(s.stoch_d ?? 50),
+        ema_cross: s.ema_cross || 'NEUTRAL',
+        williams_r: Number(s.williams_r ?? -50),
+        slope: Number(s.slope ?? 0),
+        roc: Number(s.roc ?? 0),
+        volume_ratio: Number(s.volume_ratio ?? 1),
+        obv_slope: Number(s.obv_slope ?? 0),
+        buy_pressure: Number(s.buy_pressure ?? 50),
+        signal: s.signal || 'NEUTRAL',
       }))
       landingData.market = data.market
       publicLogs.value = (data.public_logs || []).map((log) => ({
@@ -591,6 +668,110 @@ function getScoreColor(s) {
   if (s > 50) return '#00f2ff'
   return '#ff3366'
 }
+
+// ── Indicator status helpers ──────────────────────────────────────────────────
+function rsiClass(v) {
+  const n = Number(v ?? 50)
+  if (n > 70) return 'ind-ob'
+  if (n < 30) return 'ind-os'
+  if (n > 55) return 'ind-up'
+  if (n < 45) return 'ind-dn'
+  return 'ind-nt'
+}
+function rsiTag(v) {
+  const n = Number(v ?? 50)
+  if (n > 80) return 'EXOB'
+  if (n > 70) return 'OB'
+  if (n < 20) return 'EXOS'
+  if (n < 30) return 'OS'
+  if (n > 55) return 'HIGH'
+  if (n < 45) return 'LOW'
+  return 'NEUT'
+}
+function macdClass(v) { return Number(v ?? 0) > 0 ? 'ind-up' : Number(v ?? 0) < 0 ? 'ind-dn' : 'ind-nt' }
+function bbClass(v) {
+  const n = Number(v ?? 0.5)
+  if (n > 0.85) return 'ind-ob'
+  if (n < 0.15) return 'ind-os'
+  if (n > 0.65) return 'ind-up'
+  if (n < 0.35) return 'ind-dn'
+  return 'ind-nt'
+}
+function bbTag(v) {
+  const n = Number(v ?? 0.5)
+  if (n > 0.85) return 'UPPER'
+  if (n < 0.15) return 'LOWER'
+  if (n > 0.65) return 'HIGH'
+  if (n < 0.35) return 'LOW'
+  return 'MID'
+}
+function stochClass(v) {
+  const n = Number(v ?? 50)
+  if (n > 80) return 'ind-ob'
+  if (n < 20) return 'ind-os'
+  if (n > 60) return 'ind-up'
+  if (n < 40) return 'ind-dn'
+  return 'ind-nt'
+}
+function stochTag(v) {
+  const n = Number(v ?? 50)
+  if (n > 80) return 'OB'
+  if (n < 20) return 'OS'
+  if (n > 60) return 'HIGH'
+  if (n < 40) return 'LOW'
+  return 'NEUT'
+}
+function emaCrossClass(v) {
+  if (v === 'BULLISH') return 'ind-up'
+  if (v === 'BEARISH') return 'ind-dn'
+  return 'ind-nt'
+}
+function wrClass(v) {
+  // Williams %R: 0 to -100. Above -20 = overbought, below -80 = oversold
+  const n = Number(v ?? -50)
+  if (n > -20) return 'ind-ob'
+  if (n < -80) return 'ind-os'
+  if (n > -50) return 'ind-up'
+  return 'ind-dn'
+}
+function wrTag(v) {
+  const n = Number(v ?? -50)
+  if (n > -20) return 'OB'
+  if (n < -80) return 'OS'
+  if (n > -50) return 'HIGH'
+  return 'LOW'
+}
+function slopeClass(v) { return Number(v ?? 0) > 0.01 ? 'ind-up' : Number(v ?? 0) < -0.01 ? 'ind-dn' : 'ind-nt' }
+function rocClass(v) { return Number(v ?? 0) > 0 ? 'ind-up' : Number(v ?? 0) < 0 ? 'ind-dn' : 'ind-nt' }
+function volClass(v) {
+  const n = Number(v ?? 1)
+  if (n >= 2.0) return 'ind-up'
+  if (n <= 0.5) return 'ind-dn'
+  return 'ind-nt'
+}
+function volTag(v) {
+  const n = Number(v ?? 1)
+  if (n >= 2.0) return 'SPIKE'
+  if (n >= 1.5) return 'HIGH'
+  if (n <= 0.5) return 'DRY'
+  if (n <= 0.8) return 'LOW'
+  return 'NORM'
+}
+function obvClass(v) { return Number(v ?? 0) > 0 ? 'ind-up' : Number(v ?? 0) < 0 ? 'ind-dn' : 'ind-nt' }
+function bpClass(v) {
+  const n = Number(v ?? 50)
+  if (n > 60) return 'ind-up'
+  if (n < 40) return 'ind-dn'
+  return 'ind-nt'
+}
+function formatIndFloat(v) {
+  const n = Number(v ?? 0)
+  if (Math.abs(n) >= 100) return n.toFixed(1)
+  if (Math.abs(n) >= 1) return n.toFixed(2)
+  if (Math.abs(n) >= 0.001) return n.toFixed(4)
+  return n.toFixed(6)
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatPrice(p) {
   if (!p) return '0'
@@ -951,49 +1132,83 @@ function stripMarkdown(text) {
 
 .signals-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 16px;
   margin-top: 6px;
 }
 
 .sig-brief {
-  background: rgba(8, 23, 33, 0.62);
+  background: rgba(8, 23, 33, 0.68);
   padding: 16px;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid rgba(125, 173, 198, 0.22);
 }
 
+/* Header: pair + verdict */
 .sig-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
-.sig-header .pair { font-weight: 900; font-size: 16px; color: #edf5fb; }
-
-.score-wrap {
+.sig-pair-wrap {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+.sig-pair-wrap .pair {
+  font-weight: 900;
+  font-size: 18px;
+  color: #edf5fb;
+  line-height: 1;
+}
+
+.pair-base {
+  font-size: 10px;
+  font-weight: 600;
+  color: #6e8fa2;
+  margin-left: 2px;
+}
+
+.sig-verdict {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  width: fit-content;
+  background: rgba(100, 140, 160, 0.18);
+  color: #8aabbc;
+}
+.sig-verdict.buy { background: rgba(0, 200, 100, 0.18); color: #00d87a; }
+.sig-verdict.sell { background: rgba(220, 60, 80, 0.18); color: #ff4466; }
+.sig-verdict.hold { background: rgba(100, 150, 190, 0.15); color: #7aabcc; }
+
+.sig-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-items: flex-end;
-  line-height: 1.05;
 }
 
-.score-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  color: #8ca8bb;
-  margin-bottom: 4px;
+.score-pill {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
 }
+.score-pill.buy { background: rgba(0, 180, 90, 0.15); color: #00d87a; border: 1px solid rgba(0, 200, 100, 0.25); }
+.score-pill.sell { background: rgba(220, 60, 80, 0.12); color: #ff6680; border: 1px solid rgba(220, 60, 80, 0.25); }
 
-.sig-header .score { font-weight: 800; font-size: 14px; }
-
+/* Price row */
 .sig-market {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   gap: 8px;
 }
 
@@ -1003,18 +1218,64 @@ function stripMarkdown(text) {
   font-weight: 700;
 }
 
-.sig-market .change {
-  font-size: 11px;
-  font-weight: 800;
-}
-
+.sig-market .change { font-size: 11px; font-weight: 800; }
 .sig-market .change.up { color: #00ff88; }
 .sig-market .change.down { color: #ff5577; }
 .sig-market .change.flat { color: #91aabd; }
 
-.sig-footer { font-size: 10px; font-weight: 700; color: #7896aa; }
-.sig-footer .trend.up { color: #00ff88; }
-.sig-footer .trend.down { color: #ff3366; }
+/* Technical indicator grid */
+.ind-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ind-row {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: rgba(10, 28, 40, 0.45);
+  border-left: 2px solid rgba(100, 140, 170, 0.25);
+  font-size: 11px;
+}
+
+/* Indicator state colors */
+.ind-row.ind-up  { border-left-color: #00cc66; }
+.ind-row.ind-dn  { border-left-color: #ff3355; }
+.ind-row.ind-ob  { border-left-color: #ffaa00; }
+.ind-row.ind-os  { border-left-color: #00d4ff; }
+.ind-row.ind-nt  { border-left-color: rgba(100, 140, 170, 0.25); }
+
+.ind-name {
+  color: #7a9db2;
+  font-weight: 600;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+}
+
+.ind-val {
+  color: #c8dce8;
+  font-weight: 700;
+  font-size: 11px;
+  text-align: right;
+}
+
+.ind-tag {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  text-align: right;
+  min-width: 32px;
+  color: #6e8fa2;
+}
+.ind-row.ind-up  .ind-tag { color: #00cc66; }
+.ind-row.ind-dn  .ind-tag { color: #ff3355; }
+.ind-row.ind-ob  .ind-tag { color: #ffaa00; }
+.ind-row.ind-os  .ind-tag { color: #00d4ff; }
 
 .activity-list {
   margin-top: 20px;

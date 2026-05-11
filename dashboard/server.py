@@ -879,12 +879,11 @@ def public_landing_data():
         _live_pairs.sort(key=lambda x: float(x[1].get('vol_idr') or 0), reverse=True)
 
         signals = []
-        for pair_key, data in _live_pairs[:12]:
+        for pair_key, data in _live_pairs[:8]:
             last_price = float(data.get('last') or 0)
             high_24h = float(data.get('high') or 0)
             low_24h = float(data.get('low') or 0)
             # Hitung change_24h dari posisi harga terakhir relatif terhadap midpoint range 24h.
-            # Tick proto tidak membawa field 'open', sehingga pendekatan ini digunakan.
             if high_24h > 0 and low_24h > 0 and high_24h > low_24h and last_price > 0:
                 mid_24h = (high_24h + low_24h) / 2.0
                 ch_24h = ((last_price - mid_24h) / mid_24h) * 100.0
@@ -896,16 +895,58 @@ def public_landing_data():
                 trend = 'DOWN'
             else:
                 trend = 'SIDEWAYS'
+
+            # Hitung technical indicators dari price history DB
+            tech = {}
+            try:
+                _th_row = conn.execute(
+                    "SELECT history_json FROM ticker_history WHERE pair = %s", (pair_key,)
+                ).fetchone()
+                _prices = json.loads(_th_row['history_json']) if _th_row and _th_row['history_json'] else []
+                if len(_prices) >= 2:
+                    tech = get_technical_summary(_prices)
+                    tech['last_price'] = float(_prices[-1])
+            except Exception:
+                pass
+
+            # Order book buy pressure
+            try:
+                _depth = conn.execute(
+                    "SELECT vol, is_bid FROM market_depth WHERE pair = %s", (pair_key,)
+                ).fetchall()
+                _bid_vol = sum(r['vol'] for r in _depth if r['is_bid'] == 1)
+                _ask_vol = sum(r['vol'] for r in _depth if r['is_bid'] == 0)
+                _total_ob = _bid_vol + _ask_vol
+                tech['buy_pressure'] = round(_bid_vol / _total_ob * 100, 1) if _total_ob > 0 else 50.0
+            except Exception:
+                tech['buy_pressure'] = 50.0
+
+            # Derive multi-confluence trade signal untuk score & verdict
+            trade_sig = derive_trade_signal(tech) if tech else {}
+
             signals.append({
                 "pair": pair_key.upper().replace('IDR', ''),
-                "score": 50,
-                "confidence": 70,
+                "score": trade_sig.get('buy_score', 0),
+                "sell_score": trade_sig.get('sell_score', 0),
+                "confidence": trade_sig.get('confidence', 50),
+                "verdict": trade_sig.get('verdict', 'HOLD'),
                 "trend": trend,
                 "price": last_price,
                 "change_24h": round(ch_24h, 2),
-                "ch_1h": round(ch_24h, 2),
-                "ch_15m": 0.0,
-                "ch_5m": 0.0,
+                # Indikator teknikal (11 indikator aktif)
+                "rsi": tech.get('rsi', 50),
+                "macd_hist": tech.get('macd_hist', 0),
+                "bb_pct": tech.get('bb_pct', 0.5),
+                "stoch_k": tech.get('stoch_k', 50),
+                "stoch_d": tech.get('stoch_d', 50),
+                "ema_cross": tech.get('ema_cross', 'NEUTRAL'),
+                "williams_r": tech.get('williams_r', -50),
+                "slope": tech.get('slope', 0),
+                "roc": tech.get('roc', 0),
+                "volume_ratio": tech.get('volume_ratio', 1.0),
+                "obv_slope": tech.get('obv_slope', 0.0),
+                "buy_pressure": tech.get('buy_pressure', 50.0),
+                "signal": tech.get('signal', 'NEUTRAL'),
             })
 
         # 2. Market Stats — BTC price selalu dari live WS, fallback ke bot_state DB

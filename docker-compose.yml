@@ -4,8 +4,8 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: algovibe-timescaledb
     restart: always
-    #ports:
-    #  - "5432:5432"
+    ports:
+      - "5432:5432"
     environment:
       - POSTGRES_USER=algovibe
       - POSTGRES_PASSWORD=secretpassword
@@ -91,6 +91,11 @@ services:
     network_mode: host             # Bypass Docker NAT for minimum WS latency
     env_file:
       - .env
+    environment:
+      # network_mode:host tidak bisa pakai Docker internal DNS (timescaledb),
+      # gunakan localhost karena port 5432 di-publish ke host.
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@localhost:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@localhost:5432/algovibe_dryrun
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Shared IPC volume for ZMQ sockets
