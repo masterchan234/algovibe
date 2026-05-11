@@ -288,10 +288,13 @@ def execute_trade(
         final_sl = dynamic_sl if dynamic_sl is not None else SL_PCT
 
         # [Fee-Viability Guard] Gunakan ROUND_TRIP_FEE_PCT (0.6322%) sebagai baseline.
-        # Contoh: TP 1.0% → net profit 1.0% - 0.63% = +0.37% → VALID.
+        # Guard memastikan TP > round-trip fee sehingga ada net profit nyata.
+        # _min_viable_net = 0.5% dari trade size (pure persentase, tanpa hard floor),
+        # sehingga guard proporsional di semua ukuran akun dan tidak memblokir trade
+        # kecil yang secara matematis sudah menghasilkan profit bersih setelah fee.
         _fee_rt = ROUND_TRIP_FEE_PCT
         _max_net_profit = amount_idr * (final_tp - _fee_rt)
-        _min_viable_net = max(300.0, amount_idr * 0.005)  # Minimal Rp 300 atau 0.5% dari trade
+        _min_viable_net = amount_idr * 0.005  # 0.5% dari trade size, proporsional
         if _max_net_profit < _min_viable_net:
             log_message(
                 f"⚠️ SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
