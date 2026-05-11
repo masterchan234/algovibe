@@ -1,19 +1,19 @@
 # Algovibe 🌊🤖
 
-**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang menggunakan arsitektur **Microservices**. Bot ini menggabungkan kecepatan eksekusi algoritma kuantitatif dengan kecerdasan kualitatif dari **AI Agent** (Gemma-4-E2B) untuk navigasi market yang presisi.
+**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang menggunakan arsitektur **Microservices**. Bot ini menggabungkan kecepatan eksekusi algoritma kuantitatif dengan analisis berbasis indikator teknikal murni untuk navigasi market yang presisi.
 
 ---
 
 ## 🎯 Fitur Utama
 
 - **Microservice Architecture:** Terbagi menjadi 5 layanan independen (Market-Pipe, Brain-Inference, LiteRT-LM-Decision, Executive-Core, Dashboard-API) untuk skalabilitas dan stabilitas tinggi.
-- **Autonomous AI Reasoning:** Terintegrasi dengan **LiteRT-LM** untuk analisis mikro-struktur pasar dan narasi teknikal otomatis.
-- **Grounded LLM Exit Service:** Service `litert-lm-decision` membaca indikator teknikal, order book, fee round-trip, dan PnL lalu mengirim sinyal SELL terstruktur agar eksekusi tetap dilakukan ExitManager.
-- **Market Regime Detection:** Oracle sentral yang mendeteksi fase market (Bullish, Bearish, Choppy) dan menyesuaikan strategi secara dinamis.
+- **TECHNICAL_ONLY_MODE:** Semua keputusan trading 100% berbasis indikator teknikal (11 indikator, max score ~19.5). LLM hanya aktif untuk article writing.
+- **Live Market Data:** Semua scoring dan sinyal menggunakan in-memory price history dari WebSocket stream — bukan data DB yang bisa stale.
+- **Market Regime Detection:** Oracle sentral mendeteksi fase market (Bullish, Bearish, Choppy, Ranging, Crash) dan menyesuaikan strategi secara dinamis.
 - **ZMQ-Driven Data Bus:** Komunikasi antar-layanan menggunakan ZeroMQ (IPC) untuk latency minimal.
-- **Indodax Tax Compliant:** Kalkulasi PnL akurat yang sudah termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
+- **Indodax Tax Compliant:** Kalkulasi PnL akurat termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
 - **Interactive Dashboard:** Monitoring realtime via Vue.js & SocketIO dengan visualisasi radar market dan eksekusi manual.
-- **RF Auto-Trainer:** Background service yang secara otomatis melatih ulang model RandomForest (Scalper V2) setiap jam berdasarkan data trade terbaru.
+- **RF Auto-Trainer:** Background service yang secara otomatis melatih ulang model RandomForest (Scalper V2) berdasarkan data trade terbaru.
 
 ---
 
@@ -22,32 +22,59 @@
 ```mermaid
 graph TD
     ID[Indodax WebSocket] -- WebSocket --> MP[Market Pipe]
-    MP -- ZMQ PUB (ipc:///tmp/market_stream.ipc) --> BI[Brain Inference]
+    MP -- ZMQ PUB ipc:market_stream.ipc --> BI[Brain Inference]
     MP -- ZMQ PUB --> EC[Executive Core]
-    
-    BI -- Scoring & Oracle Analysis --> BI
-    BI -- ZMQ PUB (ipc:///tmp/signal_stream.ipc) --> EC
-    
+
+    BI -- in-memory price history --> BI
+    BI -- 11-indikator scoring live --> BI
+    BI -- ZMQ PUB ipc:signal_stream.ipc --> EC
+
     EC -- Risk Check & Order Execution --> ID
-    EC -- PnL & Order Status --> DB[(SQLite WAL Mode)]
-    
+    EC -- PnL & Order Status --> DB[(PostgreSQL/TimescaleDB)]
+
     DB -- Shared State --> DA[Dashboard API]
     DA -- Web UI --> User((Trader))
-    
-    TR[Auto-Trainer] -- Retrain Loop --> DB
-    TR -- Atomic Swap --> BI
+
+    LLM[LiteRT-LM-Decision] -- Article Writing only --> DB
 ```
 
 ---
 
-## 🧠 Cara Kerja (Oracle & AI)
+## 🧠 Cara Kerja (Technical Engine)
 
-AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunakan sistem **"Tiered Contextual Reasoning"**:
+Algovibe menggunakan sistem **Multi-Confluence Technical Scoring** dengan 11 indikator:
 
-1.  **Oracle Contextualizer**: Mengumpulkan data dari 9 tier (VWAP, Orderbook Imbalance, Whale Prints, Momentum, dll) menjadi narasi yang kaya konteks.
-2.  **AI Veto Power**: LLM melakukan penalaran pada prompt yang dikirim Oracle. AI dapat membatalkan (*veto*) sinyal teknikal jika mendeteksi anomali atau risiko tinggi.
-3.  **Self-Learning Loop**: Setiap trade (Profit/Loss) dianalisis ulang melalui proses *Post-Mortem*. Hasilnya di-inject kembali ke memori jangka pendek bot ("Consciousness").
-4.  **RF Auto-Trainer**: Model probabilistik (`scalper_v2.joblib`) dilatih ulang secara otomatis oleh `indodax-trainer.service`. Model hanya di-deploy jika accuracy lebih baik dari model sebelumnya, dengan *hot-reload* otomatis.
+| # | Indikator | Bobot | Catatan |
+|---|-----------|-------|---------|
+| 1 | RSI-14 | 3.0 | Wilder smoothing |
+| 2 | MACD Histogram | 2.5 | Price-normalized (x1000) |
+| 3 | Bollinger %B | 2.0 | Posisi relatif band |
+| 4 | Stochastic RSI | 2.0 | K/D + crossover |
+| 5 | EMA 9/21 Crossover | 1.5 | Trend jangka menengah |
+| 6 | Williams %R | 1.5 | Oversold/overbought independent |
+| 7 | Slope/Momentum | 1.0 | Linear regression slope |
+| 8 | ROC-10 | 1.0 | Rate of Change, mean-reversion |
+| 9 | Order Book Pressure | 2.0 | Fallback ke Volume Ratio jika OB tidak ada |
+| 10 | Volume Ratio | 1.5 | Vol sekarang / MA-20; spike = breakout valid |
+| 11 | OBV Slope | 1.5 | Akumulasi/distribusi diam-diam |
+
+Syarat BUY: `buy_score >= 6.0` dan `sell_score < 4.0`. Max score ~19.5.
+
+### Entry Gate Sequence (`entry_gates.py`)
+
+1. Open position / blacklist guard
+2. Cooldown guard
+3. Radar recommendation + tracking log
+4. Multi-confluence technical gate (SELL block jika `sell_score >= 5.0`)
+5. **ATR Volatility Filter (4b)** — reject jika ATR > 3% harga (4.5% di loose gates)
+6. **EMA-50 Trend Filter (4c)** — reject jika harga < EMA-50 (dilewati di loose gates)
+7. Technical probability + imbalance threshold
+8. Trend / breakout requirement
+9. Radar recommendation guard
+10. Dynamic threshold based on volatility + trend
+11. Consecutive-loss halt / Shadow Recovery
+12. K-NN pattern scoring
+13. Final confidence threshold
 
 ---
 
@@ -56,22 +83,28 @@ AlgoVibe tidak hanya mengandalkan indikator teknikal statis, melainkan menggunak
 ```
 services/
 ├── market_pipe/        # Ingress: Indodax WS -> ZMQ Protobuf
-├── brain_inference/    # Analysis: Technical Scoring, Oracle, AI Inference
-├── litert_lm_decision/ # Grounded LiteRT-LM Exit Signal Publisher (SELL only)
+├── brain_inference/    # Scoring & Oracle: live in-memory history, 11 indikator
+├── litert_lm_decision/ # LLM: TECHNICAL_ONLY_MODE=true (article writing only)
 ├── executive_core/     # Execution: Risk Checks, P&L, Order Placement
 └── dashboard_api/      # UI: Flask Server + SocketIO
 
 app/
 ├── application/
-│   ├── entry_gates.py  # Gerbang filter entry (Technical + K-NN)
-│   ├── oracle.py       # Kecerdasan market regime & AI
-│   └── exit_manager.py # Pengelola keluar posisi (TP/SL/Trailing)
+│   ├── entry_gates.py          # Gerbang filter entry (11 gate + ATR + EMA50)
+│   ├── use_cases/
+│   │   ├── trade_execution.py  # BUY execution, fee-trap pure-% guard
+│   │   └── candidate_enrichment.py
+│   ├── oracle.py               # Market regime & K-NN pattern scoring
+│   └── exit_manager.py         # TP/SL/Trailing; amount_idr tidak ditimpa saat reconcile
 ├── domain/
-│   ├── predictor.py    # ML model inference (Scalper V2)
-│   └── technicals.py   # Rumus indikator (RSI, MACD, dll)
+│   ├── technicals.py   # 11 indikator: RSI, MACD, BB, StochRSI, EMA, WilliamsR,
+│   │                   # Slope, ROC, OB Pressure, Volume Ratio, OBV Slope
+│   ├── scoring.py      # Radar scoring; terima price_history (live) sebagai arg ke-4
+│   └── predictor.py    # ML model inference (Scalper V2, blend tech+ML)
 └── infrastructure/
-    ├── database.py     # SQLite Router (Live/Dry/Audit)
-    └── auto_trainer.py # Loop self-training otomatis
+    ├── database.py     # PostgreSQL/TimescaleDB connector
+    ├── ws_market.py    # WebSocket market stream + in-memory ticker/OB cache
+    └── auto_trainer.py # Loop self-training model
 ```
 
 ---
@@ -80,70 +113,52 @@ app/
 
 ### Docker (Rekomendasi - Production)
 
-Gunakan Docker Compose untuk menjalankan seluruh stack microservice:
-
 ```bash
 # 1. Setup Environment
 cp .env-example .env
-nano .env
+nano .env  # isi INDODAX_API_KEY dan INDODAX_API_SECRET
 
 # 2. Jalankan Stack
 docker compose up -d
 
 # 3. Cek Status
 docker compose ps
-docker compose logs -f brain-inference
+docker compose logs -f brain-inference executive-core
 ```
 
-### Catatan Operasional Penting (Update Terbaru)
+### Catatan Operasional Penting
 
-- Runtime utama adalah **Docker Compose**. Jika ada perubahan di `.env` (mis. `MIN_TRADE_IDR`), lakukan **force recreate** agar nilai env benar-benar ter-load ke container:
+- Jika ada perubahan di `.env` atau kode, lakukan restart/recreate yang sesuai:
 
 ```bash
-docker compose up -d --force-recreate executive-core dashboard-api brain-inference litert-lm-decision news-maker
+# Setelah perubahan kode:
+docker compose restart brain-inference executive-core
+
+# Setelah perubahan env/config:
+docker compose up -d --force-recreate brain-inference executive-core litert-lm-decision dashboard-api
 ```
 
-- Threshold minimum trade/DUST saat ini menggunakan `MIN_TRADE_IDR` (default **10000**). Pastikan semua container membaca nilai yang sama untuk mencegah mismatch log (contoh `min Rp 11,000` vs `min Rp 10,000`).
+- **TECHNICAL_ONLY_MODE = true** — LLM tidak akan membuat keputusan trading. Untuk mengaktifkan kembali LLM trading, set `technical_only_mode=false` di tabel `bot_state` DB dan ubah flag di `config.py`.
+- `MIN_TRADE_IDR` (default: **10000**) — pastikan konsisten di semua container.
+- Fee-trap guard menggunakan pure-percentage (0.5% dari nilai trade), bukan hard floor.
+- `MICRO_PROFIT_EXIT` dievaluasi di harga `bid` (bukan `last`) dengan safety cushion.
+- Cost basis (`amount_idr`) **tidak pernah** ditimpa saat reconcile — hanya `amount_crypto` yang disync dari exchange.
 
-- Exit path terbaru menambahkan hardening untuk pair integer-only di Indodax (mencegah error `amount can't be in decimal`) dan safety cushion untuk `MICRO_PROFIT_EXIT` agar tidak mengeksekusi profit terlalu tipis yang rawan berubah negatif saat fill.
-
-### Native (Development)
-
-Jika ingin menjalankan service secara manual untuk debugging:
+### Native (Development / Debugging)
 
 ```bash
-# Terminal 1: Market Pipe
-python3 -m services.market_pipe.main
-
-# Terminal 2: Brain Inference
-python3 -m services.brain_inference.main
-
-# Terminal 3: Executive Core
-python3 -m services.executive_core.main
-
-# Terminal 4: LiteRT-LM Decision Service
-python3 -m services.litert_lm_decision.main
-
-# Terminal 5: Dashboard
-python3 -m dashboard.server
+python3 -m services.market_pipe.main     # Terminal 1
+python3 -m services.brain_inference.main # Terminal 2
+python3 -m services.executive_core.main  # Terminal 3
+python3 -m services.litert_lm_decision.main # Terminal 4 (article writing only)
+python3 -m dashboard.server              # Terminal 5
 ```
-
-Konfigurasi opsional untuk `litert-lm-decision` (via `.env`):
-
-- `LLM_EXIT_INTERVAL_SEC` (default: `20`)
-- `LLM_EXIT_COOLDOWN_SEC` (default: `45`)
-- `LLM_EXIT_MIN_CONFIDENCE` (default: `80`)
-- `LLM_EXIT_MAX_PAIRS` (default: `4`)
-
-Konfigurasi trading inti terkait threshold minimum (via `.env`):
-
-- `MIN_TRADE_IDR` (default: `10000`)
 
 ---
 
-## 🎭 Kecerdasan Oracle: Market Regimes
+## 🎭 Market Regimes (Oracle)
 
-Oracle mendeteksi kondisi pasar global dan mengubah perilaku bot secara dinamis:
+Oracle mendeteksi kondisi pasar global dan menyesuaikan strategi secara dinamis:
 
 | Regime | Deskripsi | Perilaku Bot |
 | :--- | :--- | :--- |
