@@ -59,7 +59,7 @@ fi
 
 # ── Spinner ───────────────────────────────────────────────────────────────────
 _SPINNER_PID=""
-_START_TS=0
+_START_TS=$(date +%s)
 
 _spinner_loop() {
   local label="$1"
@@ -81,8 +81,8 @@ _spinner_loop() {
 }
 
 _start_spinner() {
-  [[ ! -t 2 ]] && return
   _START_TS=$(date +%s)
+  [[ ! -t 2 ]] && return
   _spinner_loop "$1" &
   _SPINNER_PID=$!
 }

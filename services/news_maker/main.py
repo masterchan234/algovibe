@@ -22,7 +22,6 @@ import time
 import requests
 from collections import deque
 from datetime import datetime
-from textwrap import dedent
 from zoneinfo import ZoneInfo
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -89,9 +88,8 @@ class NewsMaker:
             return hf_ok
         if provider in ("cloudflare", "cf"):
             return cf_ok
-        if provider == "auto":
-            return hf_ok or cf_ok
-        return False
+        # "local", "auto", or anything else: fall back to any configured remote
+        return hf_ok or cf_ok
 
     def _init_engine(self) -> bool:
         remote_ready = self._remote_provider_configured()
@@ -512,7 +510,7 @@ class NewsMaker:
             self._db_signals = db_signals
             self._depth_summary = depth_summary
 
-            # Enrich only live tickers that already have a valid price snapshot.
+            # ── Pass 1: enrich tickers yang sudah punya WS/live snapshot ────────
             for pair, sig in self._db_signals.items():
                 if pair not in self._tickers:
                     continue
@@ -526,12 +524,58 @@ class NewsMaker:
                 self._tickers[pair]["ch_5m"] = ch_5m_live if (ws_hist and abs(ch_5m_live) > 0) else sig["ch_5m"]
                 self._tickers[pair]["ch_15m"] = ch_15m_live if (ws_hist and abs(ch_15m_live) > 0) else sig["ch_15m"]
                 self._tickers[pair]["ch_1h"] = ch_1h_live if (ws_hist and abs(ch_1h_live) > 0) else sig["ch_1h"]
+                self._tickers[pair]["ch_24h"] = self._tickers[pair].get("ch_24h") or sig["ch_1h"]
                 self._tickers[pair]["volatility"] = sig["volatility"]
                 self._tickers[pair]["score"] = sig["score"]
                 self._tickers[pair]["trend"] = sig["trend"]
                 # Signal: prefer live IPC signal dari brain-inference, fallback ke DB.
                 ipc_sig = self._ipc_signals.get(pair)
                 self._tickers[pair]["signal"] = ipc_sig["signal"] if ipc_sig else sig["signal"]
+                if ipc_sig:
+                    self._tickers[pair]["confidence"] = ipc_sig["confidence"]
+
+            # ── Pass 2: bootstrap tickers dari DB untuk pair yang belum punya WS
+            # Ini memastikan scheduled jobs (08:00/14:00/20:00) punya data nyata
+            # meskipun WS stream belum menyampaikan tick untuk pair tersebut.
+            # Harga diambil dari best_bid market_depth (harga bid terbaik aktif).
+            for pair, dep in depth_summary.items():
+                if pair in self._tickers:
+                    # Sudah ada — tambal price jika 0 (WS mungkin kirim price=0 untuk stablecoin).
+                    if not float(self._tickers[pair].get("price") or 0.0):
+                        db_price = float(dep.get("best_bid") or dep.get("best_ask") or 0.0)
+                        if db_price > 0:
+                            self._tickers[pair]["price"] = db_price
+                    # Pastikan vol_idr terisi jika masih kosong.
+                    if not float(self._tickers[pair].get("vol_idr") or 0.0):
+                        ob_vol = float(dep.get("bid_vol") or 0.0) + float(dep.get("ask_vol") or 0.0)
+                        if ob_vol > 0:
+                            self._tickers[pair]["vol_idr"] = ob_vol
+                            self._tickers[pair]["vol"] = ob_vol
+                    continue
+
+                price = float(dep.get("best_bid") or dep.get("best_ask") or 0.0)
+                if price <= 0:
+                    continue
+
+                sig = db_signals.get(pair, {})
+                ob_vol = float(dep.get("bid_vol") or 0.0) + float(dep.get("ask_vol") or 0.0)
+                ipc_sig = self._ipc_signals.get(pair)
+
+                self._tickers[pair] = {
+                    "price": price,
+                    "ch_24h": float(sig.get("ch_1h") or 0.0),  # best proxy tanpa data 24h di DB
+                    "ch_1h": float(sig.get("ch_1h") or 0.0),
+                    "ch_15m": float(sig.get("ch_15m") or 0.0),
+                    "ch_5m": float(sig.get("ch_5m") or 0.0),
+                    "vol": ob_vol,
+                    "vol_idr": ob_vol,
+                    "volatility": float(sig.get("volatility") or 0.0),
+                    "score": float(sig.get("score") or 0.0),
+                    "trend": str(sig.get("trend") or "N/A"),
+                    "signal": ipc_sig["signal"] if ipc_sig else str(sig.get("signal") or "HOLD"),
+                    "updated_at": now_ts,
+                    "source": "db_depth",  # marker: data dari DB bukan WS live
+                }
                 if ipc_sig:
                     self._tickers[pair]["confidence"] = ipc_sig["confidence"]
 
@@ -614,7 +658,11 @@ class NewsMaker:
                     interval_count = 0
                     top_gainer = self._get_top_gainer()
                     if top_gainer:
-                        await self._generate_market_headline(top_gainer[0], top_gainer[1])
+                        # DB dedup: skip jika sudah ada artikel serupa baru-baru ini
+                        if not self._has_recent_article(top_gainer[0], category="REALTIME_HEADLINE", within_minutes=20):
+                            await self._generate_market_headline(top_gainer[0], top_gainer[1])
+                        else:
+                            logger.debug("[news-maker] Skip top-gainer headline %s (recent in DB)", top_gainer[0].upper())
                 
                 self._prev_tickers = dict(self._tickers)
                 await asyncio.sleep(30)
@@ -826,8 +874,9 @@ class NewsMaker:
             ch_24h = float(rt.get("pct_change") or 0.0)
             ch_1h = float(rt.get("ch_1h") or 0.0)
             trend = sig.get("trend") or "N/A"
+            src_label = "" if data.get("source") != "db_depth" else " [data-DB]"
             context += (
-                f"- {pair.upper()}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
+                f"- {pair.upper()}{src_label}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
                 f"ch_1h={ch_1h:+.2f}%  vol={vol_idr/1e6:.0f}M  "
                 f"signal={signal}({conf:.0%})  trend={trend}\n"
             )
@@ -917,7 +966,8 @@ class NewsMaker:
 
     def _build_market_context(self):
         """Build overall market context for briefing."""
-        valid_items = self._get_valid_market_items(require_fresh=True)
+        # require_fresh=False agar scheduled jobs tetap dapat data dari DB bootstrap
+        valid_items = self._get_valid_market_items(require_fresh=False)
         movers = sorted(
             valid_items,
             key=lambda x: abs(float(x[1].get("ch_24h") or 0.0)),
@@ -929,7 +979,8 @@ class NewsMaker:
             for pair, data in movers:
                 ch_24h = float(data.get("ch_24h") or 0.0)
                 price = float(data.get("price") or 0.0)
-                context += f"- {pair.upper()}: {price:,.0f} IDR ({ch_24h:+.1f}%)\n"
+                src_label = " [DB]" if data.get("source") == "db_depth" else ""
+                context += f"- {pair.upper()}{src_label}: {price:,.0f} IDR ({ch_24h:+.1f}%)\n"
         else:
             context += "- No valid live market snapshot available\n"
 
@@ -1165,7 +1216,11 @@ class NewsMaker:
         )
 
     def _ensure_min_content(self, article, context):
-        """Ensure article content meets minimum character requirement."""
+        """Ensure article content meets minimum character requirement.
+
+        Jika LLM menghasilkan konten terlalu pendek, tambahkan section data-driven
+        yang konkret berdasarkan context pasar — BUKAN instruksi prompt mentah.
+        """
         if not isinstance(article, dict):
             return article
 
@@ -1174,55 +1229,9 @@ class NewsMaker:
             article["content"] = content
             return article
 
-        ctx = re.sub(r"\s+", " ", str(context or "")).strip()[:1200]
-        extension = dedent(f"""
-    ## Ringkasan Pasar
+        # ── Build data-driven extension dari context yang sudah terstruktur ──
+        extension = self._build_content_extension(content, context)
 
-    Tulis lanjutan yang tetap ringkas, langsung ke poin, dan konsisten dengan section utama di atas.
-
-    ## Data Utama
-
-    Masukkan angka, level, atau sinyal penting secara singkat. Hindari penjelasan berputar.
-
-    ## Analisis Teknis
-
-    Jelaskan alasan utama pergerakan dengan paragraf pendek dan bullet singkat bila perlu.
-
-    ## Level & Strategi
-
-### Skenario Bullish
-Entry bertahap hanya setelah konfirmasi volume dan candle close di atas resistance intraday. Pastikan trend alignment di timeframe 5m/15m/1h sebelum scaling in.
-
-### Skenario Netral
-Fokus range trading dengan ukuran posisi kecil. Hindari overtrading saat spread melebar atau volatilitas extreme.
-
-### Skenario Bearish
-Utamakan proteksi modal dan batasi eksposur leverage. Gunakan stop-loss ketat berbasis struktur pasar yang terdekat.
-
-## Risiko & Skenario
-
-### Manajemen Risiko
-- Risiko per posisi: maksimal 1-2% ekuitas
-- Take-profit: gunakan partial tp untuk lock profit
-- Evaluasi ulang: jika volatilitas melonjak tiba-tiba
-
-## Validasi Teknikal Pre-Entry
-
-| Checklist | Status | Catatan |
-| --- | --- | --- |
-| Trend alignment 5m/15m/1h | ? | Harus searah |
-| Spread health | ? | Harus tight untuk eksekusi |
-| Orderbook imbalance | ? | Harus support arah posisi |
-| TP/SL realistic | ? | Versus volatilitas terbaru |
-
-## Kesimpulan
-
-Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
-
-## Konteks Data Pendukung
-
-{ctx}
-""").strip()
         _ext_count = 0
         while len(content) < MIN_NEWS_CONTENT_CHARS and _ext_count < 2:
             content += "\n\n" + extension
@@ -1232,6 +1241,130 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
         if not article.get("excerpt"):
             article["excerpt"] = self._strip_markdown_plain(content)[:220]
         return article
+
+    def _build_content_extension(self, existing_content, context):
+        """Build a data-driven article extension dari market context.
+
+        Tidak pernah menyertakan instruksi prompt atau raw context dump.
+        Semua section berisi data konkret atau narasi editorial yang layak baca.
+        """
+        existing_lower = str(existing_content or "").lower()
+        parts = []
+
+        # ── Parse context untuk data konkret ──
+        ctx_str = str(context or "")
+        movers = self._parse_context_movers(ctx_str)
+        regime = "NEUTRAL"
+        sentiment = "50"
+        regime_m = re.search(r"(?:Market\s+)?Regime[:\s]+([A-Z]+)", ctx_str, re.IGNORECASE)
+        if regime_m:
+            regime = regime_m.group(1).upper()
+        sentiment_m = re.search(r"Sentim(?:ent|en)[:\s]+(\d+)", ctx_str, re.IGNORECASE)
+        if sentiment_m:
+            sentiment = sentiment_m.group(1)
+
+        # ── Section: Level & Strategi (skip jika sudah ada) ──
+        if "level" not in existing_lower or "strategi" not in existing_lower:
+            strat = "## Level & Strategi\n\n"
+            if regime == "BULL":
+                strat += (
+                    "### Skenario Bullish\n"
+                    "Regime pasar saat ini mendukung posisi agresif. Entry bertahap setelah konfirmasi "
+                    "volume dan candle close di atas resistance intraday. Pastikan trend alignment di "
+                    "timeframe 5m/15m/1h sebelum scaling in.\n\n"
+                    "### Skenario Koreksi\n"
+                    "Jika terjadi koreksi, pantau area support terdekat. Koreksi sehat biasanya "
+                    "tidak menembus EMA-21 di timeframe 1h.\n"
+                )
+            elif regime == "BEAR":
+                strat += (
+                    "### Skenario Bearish\n"
+                    "Regime pasar sedang dalam tekanan. Utamakan proteksi modal dan batasi eksposur. "
+                    "Gunakan stop-loss ketat berbasis struktur pasar terdekat.\n\n"
+                    "### Skenario Recovery\n"
+                    "Tunggu konfirmasi reversal berupa double bottom atau bullish divergence RSI "
+                    "sebelum membuka posisi baru.\n"
+                )
+            else:
+                strat += (
+                    "### Skenario Bullish\n"
+                    "Entry bertahap setelah konfirmasi volume dan breakout resistance intraday. "
+                    "Pastikan trend alignment di timeframe 5m/15m/1h sebelum scaling in.\n\n"
+                    "### Skenario Netral\n"
+                    "Fokus range trading dengan ukuran posisi kecil. Hindari overtrading saat "
+                    "spread melebar atau volatilitas extreme.\n\n"
+                    "### Skenario Bearish\n"
+                    "Utamakan proteksi modal dan batasi eksposur leverage. Gunakan stop-loss ketat "
+                    "berbasis struktur pasar terdekat.\n"
+                )
+            parts.append(strat)
+
+        # ── Section: Risiko & Skenario (skip jika sudah ada) ──
+        if "risiko" not in existing_lower:
+            risk = (
+                "## Risiko & Manajemen\n\n"
+                "- Risiko per posisi: maksimal 1-2% ekuitas portofolio\n"
+                "- Take-profit: gunakan partial TP untuk lock profit secara bertahap\n"
+                "- Evaluasi ulang: segera review jika volatilitas melonjak tiba-tiba\n"
+                "- Stop-loss: wajib dipasang berbasis level teknikal, bukan persentase acak\n"
+            )
+            parts.append(risk)
+
+        # ── Section: Snapshot Pasar (data movers dari context, bukan raw dump) ──
+        if movers and "snapshot" not in existing_lower:
+            snap = "## Snapshot Pasar Terkini\n\n"
+            snap += f"Regime pasar: **{regime}** | Sentimen: **{sentiment}%**\n\n"
+            gainers = [m for m in movers if m.get("pct", 0) > 0]
+            losers = [m for m in movers if m.get("pct", 0) < 0]
+            if gainers:
+                snap += "**Top Gainers:**\n"
+                for m in gainers[:3]:
+                    snap += f"- {m['pair']}: {m['pct']:+.2f}%\n"
+                snap += "\n"
+            if losers:
+                snap += "**Top Losers:**\n"
+                for m in losers[:3]:
+                    snap += f"- {m['pair']}: {m['pct']:+.2f}%\n"
+                snap += "\n"
+            parts.append(snap)
+
+        # ── Section: Validasi Pre-Entry (checklist konkret) ──
+        if "validasi" not in existing_lower and "checklist" not in existing_lower:
+            check = (
+                "## Validasi Teknikal Pre-Entry\n\n"
+                "| Checklist | Keterangan |\n"
+                "| --- | --- |\n"
+                "| Trend alignment 5m/15m/1h | Semua timeframe harus searah |\n"
+                "| Spread health | Spread harus tight untuk eksekusi optimal |\n"
+                "| Orderbook imbalance | Harus mendukung arah posisi |\n"
+                "| TP/SL realistic | Target harus realistis terhadap volatilitas terbaru |\n"
+            )
+            parts.append(check)
+
+        # ── Section: Kesimpulan (skip jika sudah ada) ──
+        if "kesimpulan" not in existing_lower:
+            regime_narr = {
+                "BULL": "Kondisi pasar bullish mendukung posisi long dengan manajemen risiko ketat.",
+                "BEAR": "Kondisi pasar bearish menuntut kehati-hatian ekstra dan proteksi modal.",
+                "NEUTRAL": "Pasar dalam fase konsolidasi. Prioritaskan quality setup dan hindari overtrading.",
+            }.get(regime, "Pantau perkembangan pasar dan tunggu konfirmasi sinyal yang lebih jelas.")
+            parts.append(f"## Kesimpulan\n\n{regime_narr}")
+
+        return "\n".join(parts).strip() if parts else (
+            "## Catatan\n\n"
+            "Pergerakan harga kripto bersifat dinamis dan berisiko tinggi. "
+            "Selalu lakukan riset mandiri dan gunakan manajemen risiko yang ketat "
+            "sebelum mengambil keputusan trading."
+        )
+
+    def _parse_context_movers(self, ctx_str):
+        """Extract mover data (pair + pct) dari context string."""
+        movers = []
+        for m in re.finditer(r"-\s*([A-Z0-9]+(?:IDR)?)\s*:\s*([+\-]?\d+\.?\d*)%", str(ctx_str or "")):
+            pair = m.group(1)
+            pct = float(m.group(2))
+            movers.append({"pair": pair, "pct": pct})
+        return movers
 
     async def _ask_llm_raw(self, prompt):
         loop = asyncio.get_running_loop()
@@ -1871,6 +2004,60 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
             "content": content,
         }
 
+    def _strip_prompt_leakage(self, content):
+        """Safety net: strip instruksi prompt dan raw context yang bocor ke content.
+
+        Dipanggil sebelum save sebagai lapisan terakhir untuk mencegah prompt leak.
+        """
+        text = str(content or "")
+        if not text:
+            return text
+
+        # Pattern instruksi LLM yang tidak boleh ada di artikel final.
+        _PROMPT_INSTRUCTION_PATTERNS = [
+            r"^\s*Tulis\s+(?:lanjutan|artikel|ringkasan|analisis)\b[^\n]*$",
+            r"^\s*Masukkan\s+(?:angka|data|level|sinyal)\b[^\n]*$",
+            r"^\s*Jelaskan\s+(?:alasan|penyebab|dampak)\b[^\n]*$",
+            r"^\s*Hindari\s+(?:penjelasan|narasi|pengulangan)\b[^\n]*$",
+            r"^\s*Balas\s+HANYA\b[^\n]*$",
+            r"^\s*Return\s+exactly\s+one\b[^\n]*$",
+            r"^\s*Anda\s+adalah\s+(?:Market|Senior|Chief)\b[^\n]*$",
+            r"^\s*Persyaratan\s+Artikel\b[^\n]*$",
+            r"^\s*Aturan\s+(?:style|isi|output)\b[^\n]*$",
+        ]
+
+        lines = text.split("\n")
+        cleaned = []
+        skip_section = False
+        for line in lines:
+            stripped = line.strip()
+
+            # Skip "## Konteks Data Pendukung" section (raw context dump)
+            if re.match(r"^##\s*Konteks\s+Data\s+Pendukung", stripped, re.IGNORECASE):
+                skip_section = True
+                continue
+            # End skip when we hit the next heading (##)
+            if skip_section and re.match(r"^##\s", stripped):
+                skip_section = False
+            if skip_section:
+                continue
+
+            # Check against prompt instruction patterns
+            is_prompt = False
+            for pat in _PROMPT_INSTRUCTION_PATTERNS:
+                if re.match(pat, stripped, re.IGNORECASE | re.MULTILINE):
+                    is_prompt = True
+                    break
+            if is_prompt:
+                continue
+
+            cleaned.append(line)
+
+        result = "\n".join(cleaned)
+        # Collapse excessive blank lines left by removals
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
+
     def _save_article(self, art, category):
         try:
             art = self._sanitize_article_payload(art)
@@ -1879,9 +2066,17 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
                 return
 
             art = self._ensure_min_content(art, "")
-            title = str(art.get('title') or '').strip()
-            excerpt = str(art.get('excerpt') or '').strip()
-            content = str(art.get('content') or '').strip()
+
+            # Safety net: strip prompt leakage sebelum save.
+            for key in ("content", "title", "excerpt"):
+                val = str(art.get(key) or "").strip()
+                if key == "content":
+                    val = self._strip_prompt_leakage(val)
+                art[key] = val
+
+            title = art.get('title', '')
+            excerpt = art.get('excerpt', '')
+            content = art.get('content', '')
             if not (title and excerpt and content):
                 logger.warning("[news-maker] Invalid article payload, skip save.")
                 return
