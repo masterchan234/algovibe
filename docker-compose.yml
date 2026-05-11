@@ -4,8 +4,8 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: algovibe-timescaledb
     restart: always
-    ports:
-      - "5432:5432"
+    #ports:
+    #  - "5432:5432"
     environment:
       - POSTGRES_USER=algovibe
       - POSTGRES_PASSWORD=secretpassword

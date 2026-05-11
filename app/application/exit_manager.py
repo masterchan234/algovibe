@@ -2007,6 +2007,14 @@ class ExitManager:
                                 dust_budget_used_idr += float(topup_idr or 0)
                                 positions[pair]['status'] = 'OPEN'
                                 modified_pairs.add(pair)
+                        elif dust_reason == 'already_tradeable':
+                            # amount_idr sudah >= target_notional tanpa top-up — langsung promosi ke OPEN
+                            log_message(
+                                f"✅ [DUST PROMOTE] {pair}: amount_idr sudah >= target "
+                                f"(dust_sig={dust_signal} {dust_signal_conf:.0%}). Promoting to OPEN."
+                            )
+                            positions[pair]['status'] = 'OPEN'
+                            modified_pairs.add(pair)
                         elif dust_reason not in ('signal_not_buy', 'low_confidence', 'cooldown_active'):
                             # Log kondisi yang butuh perhatian (budget/limit habis), bukan sekadar tunggu sinyal
                             log_message(
@@ -2044,41 +2052,49 @@ class ExitManager:
 
                     # [MICRO-PROFIT AUTO-EXIT] Small positions that are already profitable: exit immediately
                     # Allows quick harvesting of small wins without waiting for tier thresholds
+                    # Gunakan BID price (buy) untuk evaluasi — market sell fill di sisi bid, bukan 'last' trade.
+                    # Ini mencegah false-positive saat 'last' spike di atas entry tapi bid masih di bawah.
+                    _micro_ticker = current_tickers.get(pair) or {}
+                    _bid_price = float(_micro_ticker.get('buy') or 0)
+                    micro_eval_price = _bid_price if _bid_price > 0 else current_price
                     micro_profit_guard = self._check_tp_market_sell_guard(
                         pair,
                         amount,
                         entry_price,
                         amount_idr_pos,
-                        market_price=current_price,
+                        market_price=micro_eval_price,
                     )
                     if MICRO_PROFIT_ENABLED and amount_idr_pos <= MICRO_PROFIT_MAX_SIZE_IDR:
-                        # Extra safety for micro exits: cushion berbasis CURRENT sell value
-                        # (bukan amount_idr yg bisa stale di DB), minimal 2% dari nilai jual
-                        # atau 200 IDR — cukup untuk menyerap spread+slippage saat fill.
-                        sell_value_micro = float(amount or 0) * float(current_price or 0)
-                        min_cushion_micro = max(200.0, sell_value_micro * 0.02)
+                        # Extra safety for micro exits: cushion berbasis CURRENT sell value (bid-based).
+                        # Minimal 3% dari nilai jual atau 300 IDR — cukup menyerap spread + slippage fill.
+                        sell_value_micro = float(amount or 0) * float(micro_eval_price or 0)
+                        min_cushion_micro = max(300.0, sell_value_micro * 0.03)
+                        # net_pnl_micro dihitung ulang dari bid price agar konsisten dengan fill asli
+                        fee_buy_micro = amount_idr_pos * FEE_BUY_TAKER
+                        fee_sell_micro = sell_value_micro * FEE_SELL_TAKER
+                        net_pnl_micro = (micro_eval_price - entry_price) * float(amount or 0) - (fee_buy_micro + fee_sell_micro)
                         micro_required_profit_idr = max(
                             float(micro_profit_guard.get('required_profit_idr') or 0.0),
                             min_cushion_micro,
                         )
                         if (
                             (not micro_profit_guard.get('ok'))
-                            or net_pnl_idr <= 0
-                            or net_pnl_idr < micro_required_profit_idr
+                            or net_pnl_micro <= 0
+                            or net_pnl_micro < micro_required_profit_idr
                         ):
                             log_message(
                                 f"⏭️ [MICRO-PROFIT SKIP] {pair}: net profit belum tercapai "
-                                f"(est={net_pnl_idr:,.0f} IDR, min={micro_required_profit_idr:,.0f}, "
-                                f"guard={micro_profit_guard.get('reason')})."
+                                f"(est_bid={net_pnl_micro:,.0f} IDR, min={micro_required_profit_idr:,.0f}, "
+                                f"bid={micro_eval_price}, guard={micro_profit_guard.get('reason')})."
                             )
                             continue
                         reason_tp = "MICRO_PROFIT_EXIT"
                         log_message(
                             f"🚀 [MICRO-PROFIT EXIT] {pair}: Position size Rp {amount_idr_pos:,.0f} "
-                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_idr:,.0f} IDR "
-                            f"(min {micro_required_profit_idr:,.0f}, {current_profit_pct*100:.2f}%), exiting immediately!"
+                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_micro:,.0f} IDR "
+                            f"(min {micro_required_profit_idr:,.0f}, bid={micro_eval_price}), exiting immediately!"
                         )
-                        order_id = self.execute_exit(pair, amount, current_price, reason_tp,
+                        order_id = self.execute_exit(pair, amount, micro_eval_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id:
                             log_message(f"✅ [MICRO-PROFIT ORDER PLACED] {pair}: Order {order_id}")
@@ -2154,6 +2170,14 @@ class ExitManager:
                             dust_budget_used_idr += float(topup_idr or 0)
                             positions[pair]['status'] = 'OPEN'
                             modified_pairs.add(pair)
+                    elif dust_reason == 'already_tradeable':
+                        # amount_idr sudah >= target_notional tanpa top-up — langsung promosi ke OPEN
+                        log_message(
+                            f"✅ [DUST PROMOTE] {pair}: amount_idr sudah >= target "
+                            f"(conf={technical_confidence:.2f}). Promoting to OPEN."
+                        )
+                        positions[pair]['status'] = 'OPEN'
+                        modified_pairs.add(pair)
                     elif dust_reason in ('cycle_topup_limit', 'insufficient_cycle_budget'):
                         log_message(
                             f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
