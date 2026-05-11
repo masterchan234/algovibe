@@ -31,7 +31,7 @@ if _REPO_ROOT not in sys.path:
 
 from app.infrastructure.database import db
 from config import MODEL_PATH, MODEL_CACHE_DIR
-from shared.transport import IPC_MARKET, ZMQSubscriber, install_uvloop
+from shared.transport import IPC_MARKET, IPC_SIGNAL, ZMQSubscriber, install_uvloop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +71,8 @@ class NewsMaker:
         self._ws_price_history = {}
         self._last_hist_sample_ts = {}
         self._market_sub = ZMQSubscriber(IPC_MARKET)
+        self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
+        self._ipc_signals: dict = {}  # pair -> {signal, confidence, ts}
 
     def _remote_provider_configured(self):
         provider = self._llm_provider
@@ -115,11 +117,13 @@ class NewsMaker:
     async def start(self):
         self._running = True
         self._market_sub.start()
+        self._signal_sub.start()
         logger.info("[news-maker] ✅ Service Started.")
         await asyncio.gather(
             self._scheduler_loop(),
             self._realtime_monitor_loop(),
-            self._consume_market_data()
+            self._consume_market_data(),
+            self._consume_signal_data(),
         )
 
     def _load_manual_market_snapshot(self, coin_symbol=None):
@@ -233,6 +237,31 @@ class NewsMaker:
                 if pair:
                     self._apply_tick_update(pair, float(tick.price or 0), float(tick.change_24h or 0), float(tick.vol_idr or 0))
             except: pass
+
+    async def _consume_signal_data(self):
+        """Konsumsi sinyal teknikal live dari brain-inference via IPC_SIGNAL."""
+        from shared.algovibe_pb2 import Signal
+        _action_map = {0: "HOLD", 1: "BUY", 2: "SELL"}
+        async for raw in self._signal_sub.aiter_messages():
+            try:
+                sig = Signal()
+                sig.ParseFromString(raw)
+                pair = str(sig.symbol or "").lower()
+                if not pair:
+                    continue
+                action = _action_map.get(int(sig.action), "HOLD")
+                entry = {
+                    "signal": action,
+                    "confidence": float(sig.confidence or 0.0),
+                    "ts": int(sig.timestamp or 0),
+                }
+                self._ipc_signals[pair] = entry
+                # Update ticker field langsung tanpa menunggu DB refresh cycle.
+                if pair in self._tickers:
+                    self._tickers[pair]["signal"] = action
+                    self._tickers[pair]["confidence"] = float(sig.confidence or 0.0)
+            except Exception:
+                pass
 
     def _apply_tick_update(self, pair, price, ch_24h, vol_idr):
         self._tickers[pair] = {
@@ -480,13 +509,22 @@ class NewsMaker:
                     continue
                 if not self._is_valid_market_entry(pair, self._tickers.get(pair, {}), require_fresh=False):
                     continue
-                self._tickers[pair]["ch_5m"] = sig["ch_5m"]
-                self._tickers[pair]["ch_15m"] = sig["ch_15m"]
-                self._tickers[pair]["ch_1h"] = sig["ch_1h"]
+                # Prefer WS-computed change values over DB (WS = live, DB = 1 cycle stale).
+                ws_hist = self._ws_price_history.get(pair)
+                ch_5m_live = self._compute_ws_change(pair, 300) if ws_hist else 0.0
+                ch_15m_live = self._compute_ws_change(pair, 900) if ws_hist else 0.0
+                ch_1h_live = self._compute_ws_change(pair, 3600) if ws_hist else 0.0
+                self._tickers[pair]["ch_5m"] = ch_5m_live if (ws_hist and abs(ch_5m_live) > 0) else sig["ch_5m"]
+                self._tickers[pair]["ch_15m"] = ch_15m_live if (ws_hist and abs(ch_15m_live) > 0) else sig["ch_15m"]
+                self._tickers[pair]["ch_1h"] = ch_1h_live if (ws_hist and abs(ch_1h_live) > 0) else sig["ch_1h"]
                 self._tickers[pair]["volatility"] = sig["volatility"]
                 self._tickers[pair]["score"] = sig["score"]
                 self._tickers[pair]["trend"] = sig["trend"]
-                self._tickers[pair]["signal"] = sig["signal"]
+                # Signal: prefer live IPC signal dari brain-inference, fallback ke DB.
+                ipc_sig = self._ipc_signals.get(pair)
+                self._tickers[pair]["signal"] = ipc_sig["signal"] if ipc_sig else sig["signal"]
+                if ipc_sig:
+                    self._tickers[pair]["confidence"] = ipc_sig["confidence"]
 
             self._last_db_refresh_ts = now_ts
         except Exception as exc:
@@ -616,10 +654,33 @@ class NewsMaker:
             if article:
                 article = self._ensure_min_content(article, context)
                 self._save_article(article, rtype)
+                # Update hero_ai_insight dengan excerpt artikel agar landing page fresh.
+                brief_text = re.sub(r"\s+", " ", str(article.get("excerpt") or "")).strip()[:260]
+                if brief_text:
+                    try:
+                        db.save_state("hero_ai_insight", brief_text)
+                        logger.debug("[news-maker] hero_ai_insight updated from %s", rtype)
+                    except Exception:
+                        pass
             else:
                 logger.warning("[news-maker] Empty/invalid article payload for %s", rtype)
         except Exception as e:
             logger.error("[news-maker] Failed to generate report: %s", e)
+
+    def _has_recent_article(self, pair, category="REALTIME_HEADLINE", within_minutes=20):
+        """Cek DB apakah sudah ada artikel untuk pair ini dalam N menit terakhir (persistent dedup)."""
+        from datetime import timedelta
+        try:
+            cutoff = datetime.now(WIB_TZ) - timedelta(minutes=int(within_minutes))
+            with db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM intelligence_reports WHERE category = %s "
+                    "AND title ILIKE %s AND created_at > %s LIMIT 1",
+                    (category, f"%{str(pair).upper()}%", cutoff)
+                ).fetchone()
+                return row is not None
+        except Exception:
+            return False
 
     async def _generate_market_headline(self, coin_symbol, move_data):
         """Generate headline for significant market move."""
@@ -635,6 +696,11 @@ class NewsMaker:
             move_data['pct_change'],
             pct_source,
         )
+
+        # Persistent dedup: skip jika artikel serupa sudah ada dalam 20 menit terakhir.
+        if self._has_recent_article(coin_symbol, category="REALTIME_HEADLINE", within_minutes=20):
+            logger.debug("[news-maker] Skip duplicate headline %s (recent article in DB)", coin_symbol.upper())
+            return
 
         # Build context about this coin and broader market
         context = self._build_market_context_for_coin(coin_symbol, move_data, realtime_only=True)
@@ -1033,12 +1099,14 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
 
 {ctx}
 """).strip()
-        while len(content) < MIN_NEWS_CONTENT_CHARS:
+        _ext_count = 0
+        while len(content) < MIN_NEWS_CONTENT_CHARS and _ext_count < 2:
             content += "\n\n" + extension
+            _ext_count += 1
 
         article["content"] = self._normalize_markdown_content(content[: max(MIN_NEWS_CONTENT_CHARS, len(content))])
         if not article.get("excerpt"):
-            article["excerpt"] = re.sub(r"\s+", " ", content).strip()[:220]
+            article["excerpt"] = self._strip_markdown_plain(content)[:220]
         return article
 
     async def _ask_llm_raw(self, prompt):
@@ -1333,6 +1401,23 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
 
         return str(response)
 
+    def _strip_markdown_plain(self, text):
+        """Return plain text stripped of markdown formatting for use in excerpt fields."""
+        t = str(text or "").strip()
+        t = re.sub(r"^#{1,6}\s+", "", t, flags=re.MULTILINE)     # headings
+        t = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", t)           # bold/italic
+        t = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", t)             # italic/underline
+        t = re.sub(r"~~([^~]+)~~", r"\1", t)                      # strikethrough
+        t = re.sub(r"`[^`]+`", "", t)                              # inline code
+        t = re.sub(r"^[-*+]\s+", "", t, flags=re.MULTILINE)       # unordered list
+        t = re.sub(r"^\d+\.\s+", "", t, flags=re.MULTILINE)       # ordered list
+        t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)            # links
+        t = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", t)                # images
+        t = re.sub(r"^[>|]\s*", "", t, flags=re.MULTILINE)        # blockquote/table pipe
+        t = re.sub(r"\|", " ", t)                                  # remaining table pipes
+        t = re.sub(r"\s{2,}", " ", t)
+        return t.strip()
+
     def _normalize_article(self, obj):
         if not isinstance(obj, dict):
             return None
@@ -1344,9 +1429,9 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
             return None
         if not title:
             first_line = content.splitlines()[0].strip() if content.splitlines() else "Algovibe Market Update"
-            title = first_line[:120] or "Algovibe Market Update"
+            title = re.sub(r"^#+\s*", "", first_line).strip()[:120] or "Algovibe Market Update"
         if not excerpt:
-            excerpt = re.sub(r"\s+", " ", content).strip()[:220]
+            excerpt = self._strip_markdown_plain(content)[:220]
 
         return {
             "title": title,
@@ -1660,7 +1745,7 @@ Tutupan artikel tetap singkat, konsisten, dan mudah dipindai di news feed.
 
         non_heading_lines = [ln for ln in lines if not ln.startswith("#")]
         excerpt_src = " ".join(non_heading_lines) if non_heading_lines else content
-        excerpt = re.sub(r"\s+", " ", excerpt_src).strip()[:220]
+        excerpt = self._strip_markdown_plain(excerpt_src)[:220]
 
         return {
             "title": title[:90],

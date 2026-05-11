@@ -88,7 +88,7 @@
           <article v-if="heroArticle" class="featured-story">
             <p class="art-cat">{{ heroArticle.category }}</p>
             <h2 id="featured-story-title">{{ heroArticle.title }}</h2>
-            <p class="feature-excerpt">{{ heroArticle.excerpt }}</p>
+            <p class="feature-excerpt">{{ stripMarkdown(heroArticle.excerpt) }}</p>
             <div class="art-meta">{{ formatDate(heroArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
           </article>
           <article v-else class="featured-story empty-story">
@@ -111,7 +111,7 @@
             >
               <div class="art-cat">{{ art.category }}</div>
               <h3 class="art-title">{{ art.title }}</h3>
-              <p class="art-excerpt">{{ art.excerpt }}</p>
+              <p class="art-excerpt">{{ stripMarkdown(art.excerpt) }}</p>
               <div class="art-meta">{{ formatDate(art.created_at) }} | BY_ALGOVIBE_ORACLE</div>
             </article>
           </div>
@@ -235,7 +235,7 @@ const heroArticle = computed(() => {
 })
 
 const remainingArticles = computed(() => {
-  if (landingData.articles.length <= 1) return landingData.articles
+  if (landingData.articles.length <= 1) return []
   return landingData.articles.slice(1)
 })
 
@@ -267,23 +267,17 @@ const DEFAULT_SEO = {
 
 let insightInterval = null
 let timeInterval = null
-let telemetryInterval = null
 let landingPollInterval = null
 
 onMounted(() => {
   fetchLandingData()
   startTime()
-  refreshFooterTelemetry()
 
   insightInterval = setInterval(() => {
     if (landingData.insights.length > 1) {
       currentInsightIdx.value = (currentInsightIdx.value + 1) % landingData.insights.length
     }
   }, 9000)
-
-  telemetryInterval = setInterval(() => {
-    refreshFooterTelemetry()
-  }, 10000)
 
   landingPollInterval = setInterval(() => {
     fetchLandingData()
@@ -293,7 +287,6 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(insightInterval)
   clearInterval(timeInterval)
-  clearInterval(telemetryInterval)
   clearInterval(landingPollInterval)
 })
 
@@ -319,6 +312,7 @@ function startTime() {
 }
 
 async function fetchLandingData() {
+  const started = performance.now()
   try {
     const res = await fetch(`${backendUrl}/api/public/landing-data?ts=${Date.now()}`, {
       cache: 'no-store',
@@ -327,8 +321,14 @@ async function fetchLandingData() {
         'pragma': 'no-cache',
       },
     })
+    latency.value = Math.max(0, Math.round(performance.now() - started))
+    if (!res.ok) {
+      dbState.value = 'DEGRADED'
+      return
+    }
     const data = await res.json()
     if (data.success) {
+      dbState.value = latency.value <= 1200 ? 'OPTIMAL' : 'DEGRADED'
       landingData.insights = data.insights
       landingData.signals = (data.signals || []).map((s) => ({
         pair: String(s.pair || '').toUpperCase().replace('IDR', ''),
@@ -360,44 +360,13 @@ async function fetchLandingData() {
       syncArticleFromRoute()
       applySeoMeta(selectedArticle.value || heroArticle.value || null)
       renderStructuredData()
-    }
-  } catch (err) { console.error(err) }
-}
-
-async function refreshFooterTelemetry() {
-  const started = performance.now()
-  try {
-    const res = await fetch(`${backendUrl}/api/public/landing-data`, {
-      cache: 'no-store',
-      headers: {
-        'cache-control': 'no-cache',
-      },
-    })
-    const elapsed = Math.max(0, Math.round(performance.now() - started))
-    latency.value = elapsed
-
-    if (!res.ok) {
-      dbState.value = 'DEGRADED'
-      return
-    }
-
-    const payload = await res.json()
-    if (payload?.success) {
-      const btc = Number(payload?.market?.btc_price || 0)
-      if (btc > 0) {
-        landingData.market.btc_price = btc
-      }
-
-      if (latency.value <= 1200) {
-        dbState.value = 'OPTIMAL'
-      } else {
-        dbState.value = 'DEGRADED'
-      }
     } else {
       dbState.value = 'DEGRADED'
     }
-  } catch {
+  } catch (err) {
+    latency.value = Math.max(0, Math.round(performance.now() - started))
     dbState.value = 'DEGRADED'
+    console.error(err)
   }
 }
 
@@ -697,6 +666,24 @@ function formatDate(v) {
   } catch {
     return v
   }
+}
+
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/^#{1,6}\s+/gm, '')       // headings
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')  // bold/italic
+    .replace(/_{1,2}([^_]+)_{1,2}/g, '$1')    // italic/underline
+    .replace(/~~([^~]+)~~/g, '$1')             // strikethrough
+    .replace(/`[^`]+`/g, '')                   // inline code
+    .replace(/^[-*+]\s+/gm, '')               // list bullets
+    .replace(/^\d+\.\s+/gm, '')              // ordered list
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // links
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')    // images
+    .replace(/^[>|]\s*/gm, '')                // blockquote / table pipes
+    .replace(/\|/g, ' ')                      // remaining table pipes
+    .replace(/\n{2,}/g, ' ')                  // collapse blank lines
+    .replace(/\s{2,}/g, ' ')                  // collapse spaces
+    .trim()
 }
 </script>
 
@@ -1191,11 +1178,158 @@ function formatDate(v) {
 
 .reader-content {
   color: #b5c6d2;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
   line-height: 1.7;
+  font-size: 15px;
 }
+
+/* ── Markdown-rendered elements (MarkdownIt → v-html) ── */
+.reader-content :deep(h2) {
+  color: #eef7ff;
+  font-size: 19px;
+  font-family: 'Source Serif 4', 'Georgia', serif;
+  font-weight: 700;
+  margin: 26px 0 10px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(119, 161, 184, 0.2);
+  line-height: 1.3;
+}
+
+.reader-content :deep(h3) {
+  color: #c8dde9;
+  font-size: 15px;
+  font-weight: 700;
+  margin: 20px 0 7px;
+  line-height: 1.35;
+}
+
+.reader-content :deep(h4) {
+  color: #a8c2d4;
+  font-size: 13px;
+  font-weight: 700;
+  margin: 16px 0 6px;
+  letter-spacing: 0.03em;
+}
+
+.reader-content :deep(p) {
+  color: #b5c6d2;
+  margin: 0 0 12px;
+  line-height: 1.75;
+  font-size: 15px;
+}
+
+.reader-content :deep(ul),
+.reader-content :deep(ol) {
+  color: #d0e2ec;
+  padding-left: 22px;
+  margin: 0 0 14px;
+}
+
+.reader-content :deep(li) {
+  line-height: 1.65;
+  font-size: 14px;
+  margin-bottom: 5px;
+}
+
+.reader-content :deep(li > p) {
+  margin: 0;
+}
+
+.reader-content :deep(strong) {
+  color: #daeaf5;
+  font-weight: 700;
+}
+
+.reader-content :deep(em) {
+  color: #a8c4d8;
+  font-style: italic;
+}
+
+.reader-content :deep(hr) {
+  border: none;
+  border-top: 1px solid rgba(119, 161, 184, 0.2);
+  margin: 22px 0;
+}
+
+.reader-content :deep(a) {
+  color: #5fc5e8;
+  text-decoration: none;
+}
+
+.reader-content :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.reader-content :deep(code) {
+  background: rgba(16, 31, 43, 0.8);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+  color: #9fd3e8;
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+.reader-content :deep(pre) {
+  background: rgba(8, 18, 27, 0.85);
+  border: 1px solid rgba(119, 161, 184, 0.18);
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin-bottom: 14px;
+}
+
+.reader-content :deep(pre code) {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  color: #9fd3e8;
+}
+
+.reader-content :deep(blockquote) {
+  border-left: 3px solid rgba(119, 161, 184, 0.4);
+  margin: 14px 0;
+  padding: 8px 16px;
+  color: #8fafc0;
+  font-style: italic;
+}
+
+.reader-content :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  font-size: 13px;
+  overflow-x: auto;
+  display: block;
+}
+
+.reader-content :deep(th) {
+  color: #eef7ff;
+  background: rgba(16, 31, 43, 0.92);
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 2px solid rgba(119, 161, 184, 0.28);
+  white-space: nowrap;
+}
+
+.reader-content :deep(td) {
+  color: #b5c6d2;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(119, 161, 184, 0.1);
+  font-size: 13px;
+  line-height: 1.5;
+  vertical-align: top;
+}
+
+.reader-content :deep(tr:last-child td) {
+  border-bottom: none;
+}
+
+.reader-content :deep(tr:nth-child(even) td) {
+  background: rgba(16, 31, 43, 0.35);
+}
+/* ── end markdown elements ── */
 
 .reader-content-fallback {
   color: #b5c6d2;

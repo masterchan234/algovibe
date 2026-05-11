@@ -931,15 +931,37 @@ def public_landing_data():
             insights = brief_items[:5]
         else:
             now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            top_vol_pair = _live_pairs[0][0].upper().replace('IDR', '') if _live_pairs else 'N/A'
+            _STABLECOIN_BASES_FB = {'usdt', 'usdc', 'busd', 'bidr', 'dai', 'tusd'}
+            _crypto_fb = [
+                (k, v) for k, v in _live_pairs
+                if k.lower().replace('idr', '') not in _STABLECOIN_BASES_FB
+            ]
+            def _mid_ch_fb(v):
+                last = float(v.get('last') or 0)
+                high = float(v.get('high') or 0)
+                low = float(v.get('low') or 0)
+                if high > 0 and low > 0 and high > low and last > 0:
+                    mid = (high + low) / 2.0
+                    return round(((last - mid) / mid) * 100.0, 2)
+                return float(v.get('change_24h') or 0)
+            _scored_fb = [(k.upper().replace('IDR', ''), _mid_ch_fb(v)) for k, v in _crypto_fb]
+            _fb_gainer = max(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
+            _fb_loser = min(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
+            _fb_trend = max(_scored_fb, key=lambda x: abs(x[1]), default=("N/A", 0.0))
             btc_str = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            regime_lbl = "Warming up" if regime == "SCANNING" else regime
+            movers_fb = " | ".join(p for p in [
+                f"↑ {_fb_gainer[0]} {_fb_gainer[1]:+.2f}%" if _fb_gainer[0] != "N/A" else "",
+                f"↓ {_fb_loser[0]} {_fb_loser[1]:+.2f}%" if _fb_loser[0] != "N/A" else "",
+                f"🔥 {_fb_trend[0]} {_fb_trend[1]:+.2f}%" if _fb_trend[0] != "N/A" else "",
+            ] if p)
             insights = [
                 {
                     "message": (
                         f"Market live: {len(_live_pairs)} pair aktif"
                         f"{btc_str}"
-                        f" | Regime {regime} | Sentimen {sentiment}%"
-                        f" | Top vol: {top_vol_pair}"
+                        f" | Regime {regime_lbl} | Sentimen {sentiment}%"
+                        + (f" | {movers_fb}" if movers_fb else "")
                     ),
                     "created_at": now_ts
                 }
@@ -3446,8 +3468,43 @@ def _build_llm_decisions_payload(limit: int = 20):
         now_str = datetime.datetime.now().isoformat()
         last_ticker_update = now_str
 
-        top_pair_key = _active_pairs[0][0].upper() if _active_pairs else "N/A"
-        top_ch_1h = float(_active_pairs[0][1].get('change_24h') or 0) if _active_pairs else 0
+        # Filter stablecoin agar tidak muncul di top mover stats
+        _STABLECOIN_BASES = {'usdt', 'usdc', 'busd', 'bidr', 'dai', 'tusd'}
+        _crypto_pairs = [
+            (k, v) for k, v in _active_pairs
+            if k.lower().replace('idr', '') not in _STABLECOIN_BASES
+        ]
+
+        # Hitung % change vs midpoint 24h range untuk setiap crypto pair
+        def _midpoint_ch(ticker_val):
+            last = float(ticker_val.get('last') or 0)
+            high = float(ticker_val.get('high') or 0)
+            low = float(ticker_val.get('low') or 0)
+            if high > 0 and low > 0 and high > low and last > 0:
+                mid = (high + low) / 2.0
+                return round(((last - mid) / mid) * 100.0, 2)
+            return float(ticker_val.get('change_24h') or 0)
+
+        _scored_crypto = [
+            (k.upper().replace('IDR', ''), _midpoint_ch(v))
+            for k, v in _crypto_pairs
+        ]
+
+        # Top gainer: % change tertinggi (positif)
+        _gainers = sorted(_scored_crypto, key=lambda x: x[1], reverse=True)
+        top_gainer = _gainers[0] if _gainers else ("N/A", 0.0)
+
+        # Top loser: % change terendah (negatif)
+        _losers = sorted(_scored_crypto, key=lambda x: x[1])
+        top_loser = _losers[0] if _losers else ("N/A", 0.0)
+
+        # Top trending: % change absolut tertinggi (paling bergerak)
+        _trending = sorted(_scored_crypto, key=lambda x: abs(x[1]), reverse=True)
+        top_trending = _trending[0] if _trending else ("N/A", 0.0)
+
+        # Fallback top_pair_key untuk market_vars backward compat
+        top_pair_key = top_trending[0]
+        top_ch_1h = top_trending[1]
 
         detail_tickers = []
         for k, v in _active_pairs[:12]:
@@ -3484,10 +3541,9 @@ def _build_llm_decisions_payload(limit: int = 20):
                 "sell": sell_count,
             },
             "avg_ai_score": avg_score,
-            "top_mover_1h": {
-                "pair": top_pair_key,
-                "ch_1h": top_ch_1h,
-            },
+            "top_trending": {"pair": top_trending[0], "ch": top_trending[1]},
+            "top_gainer": {"pair": top_gainer[0], "ch": top_gainer[1]},
+            "top_loser": {"pair": top_loser[0], "ch": top_loser[1]},
             "live_pairs_count": len(_active_pairs),
             "tickers": detail_tickers,
         }
@@ -3505,14 +3561,18 @@ def _build_llm_decisions_payload(limit: int = 20):
         else:
             # Synthesize brief dari live market data saat LLM belum merespons.
             # Tidak menggunakan persisted_brief dari DB agar konten selalu fresh dan valid.
-            top_label = top_pair_key.replace('IDR', '') if top_pair_key != 'N/A' else 'N/A'
             btc_part = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            regime_label = "Warming up" if regime == "SCANNING" else regime
+            gainer_part = f"↑ {top_gainer[0]} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
+            loser_part = f"↓ {top_loser[0]} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
+            trend_part = f"🔥 {top_trending[0]} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
+            movers = " | ".join(p for p in [gainer_part, loser_part, trend_part] if p)
             brief_message = (
                 f"Market live: {len(_active_pairs)} pair aktif"
                 f"{btc_part}"
-                f" | Regime {regime} | Sentimen {sentiment}%"
-                f" | Top vol: {top_label} {top_ch_1h:+.2f}%"
-                f" | Bullish-bias {buy_count} vs Bearish-bias {sell_count} pair"
+                f" | Regime {regime_label} | Sentimen {sentiment}%"
+                + (f" | {movers}" if movers else "")
+                + f" | Bullish {buy_count} vs Bearish {sell_count} pair"
             )
             brief_created_at = now_str
 
