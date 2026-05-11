@@ -1909,6 +1909,9 @@ class Oracle:
         distances = []
         for h in history:
             try:
+                # Ensure we strictly match IDR pairs only
+                if not str(h.get('pair') or '').lower().endswith("idr"):
+                    continue
                 # Normalisasi jarak k-NN (Backtest-Tuned: 5-Factor Feature Space)
                 # [Backtest Insight] ema_dist adalah PREDICTOR TERKUAT:
                 # Win avg_ema_dist=0.1148 vs Lose avg_ema_dist=0.0133 (8.6x lebih besar)

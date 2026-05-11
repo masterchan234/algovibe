@@ -795,9 +795,9 @@ class Database:
                 # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
                 # [Senior Fix] Ambil DNA dari data Live/Dry DAN data Backtest
                 query = """
-                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
                     UNION ALL
-                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL)
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
                     ORDER BY entry_timestamp DESC LIMIT %s
                 """
                 cursor = conn.execute(query, (limit,))

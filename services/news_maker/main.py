@@ -353,6 +353,16 @@ class NewsMaker:
             
         return p
 
+    def _clean_symbol(self, pair):
+        """Converts a pair key (e.g. 'ethidr', 'pippinidr') into its clean symbol (e.g. 'ETH', 'PIPPIN')."""
+        if not pair:
+            return ""
+        p = str(pair).upper().strip()
+        if p.endswith("IDR"):
+            return p[:-3]
+        return p
+
+
     def _resolve_realtime_move(self, pair):
         pair = self._normalize_pair_key(pair)
         data = self._tickers.get(pair, {})
@@ -906,7 +916,7 @@ class NewsMaker:
             trend = sig.get("trend") or "N/A"
             src_label = "" if data.get("source") != "db_depth" else " [data-DB]"
             context += (
-                f"- {pair.upper()}{src_label}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
+                f"- {self._clean_symbol(pair)}{src_label}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
                 f"ch_1h={ch_1h:+.2f}%  vol={vol_idr/1e6:.0f}M  "
                 f"signal={signal}({conf:.0%})  trend={trend}\n"
             )
@@ -1010,7 +1020,7 @@ class NewsMaker:
                 ch_24h = float(data.get("ch_24h") or 0.0)
                 price = float(data.get("price") or 0.0)
                 src_label = " [DB]" if data.get("source") == "db_depth" else ""
-                context += f"- {pair.upper()}{src_label}: {price:,.0f} IDR ({ch_24h:+.1f}%)\n"
+                context += f"- {self._clean_symbol(pair)}{src_label}: {price:,.0f} IDR ({ch_24h:+.1f}%)\n"
         else:
             context += "- No valid live market snapshot available\n"
 
@@ -1032,7 +1042,7 @@ class NewsMaker:
                     continue
                 appended = True
                 context += (
-                    f"- {pair.upper()}: trend={sig.get('trend', 'N/A')} signal={sig.get('signal', 'HOLD')} "
+                    f"- {self._clean_symbol(pair)}: trend={sig.get('trend', 'N/A')} signal={sig.get('signal', 'HOLD')} "
                     f"ch_1h={float(sig.get('ch_1h') or 0.0):+.2f}% score={float(sig.get('score') or 0.0):.2f}\n"
                 )
             if not appended:
@@ -1054,7 +1064,7 @@ class NewsMaker:
                     continue
                 appended = True
                 context += (
-                    f"- {pair.upper()}: spread={float(dep.get('spread_pct') or 0.0):.3f}% "
+                    f"- {self._clean_symbol(pair)}: spread={float(dep.get('spread_pct') or 0.0):.3f}% "
                     f"imbalance={float(dep.get('imbalance') or 0.0):+.2f} "
                     f"bidVol={float(dep.get('bid_vol') or 0.0):,.0f} "
                     f"askVol={float(dep.get('ask_vol') or 0.0):,.0f}\n"
@@ -1078,20 +1088,20 @@ class NewsMaker:
         gainers = all_movers[:3]
         losers = all_movers[-3:]
 
-        context = f"Coin Focus: {coin_symbol.upper()}\n"
+        context = f"Coin Focus: {self._clean_symbol(coin_symbol)}\n"
         context += f"Price: {move_data['price']:,.0f} IDR\n"
         context += f"Change 1h: {move_data['change_1h']:+.1f}% | Delta Active: {move_data['pct_change']:+.1f}% ({move_data.get('pct_source', 'auto')})\n"
         context += f"Volume 24h: {move_data['vol_idr']/1e9:.2f}B IDR\n"
         context += "\nTop Gainers (Realtime WS):\n"
         if gainers:
             for pair, _data, rt in gainers:
-                context += f"- {pair.upper()}: {float(rt.get('pct_change') or 0):+.2f}% ({rt.get('pct_source', '24h')})\n"
+                context += f"- {self._clean_symbol(pair)}: {float(rt.get('pct_change') or 0):+.2f}% ({rt.get('pct_source', '24h')})\n"
         else:
             context += "- No valid live gainers\n"
         context += "\nTop Losers (Realtime WS):\n"
         if losers:
             for pair, _data, rt in losers:
-                context += f"- {pair.upper()}: {float(rt.get('pct_change') or 0):+.2f}% ({rt.get('pct_source', '24h')})\n"
+                context += f"- {self._clean_symbol(pair)}: {float(rt.get('pct_change') or 0):+.2f}% ({rt.get('pct_source', '24h')})\n"
         else:
             context += "- No valid live losers\n"
 
@@ -1139,7 +1149,7 @@ class NewsMaker:
         )
         return (
             f"Anda adalah Market Analyst Algovibe. Tulis Breaking News pasar kripto dalam Bahasa Indonesia.\n"
-            f"Analisis: {coin_symbol.upper()} - {direction.upper()} {abs(move_data['pct_change']):.1f}%\n"
+            f"Analisis: {self._clean_symbol(coin_symbol)} - {direction.upper()} {abs(move_data['pct_change']):.1f}%\n"
             f"\nKonteks Data:\n{context}\n"
             f"{contract}\n"
             "Balas HANYA 1 JSON object tanpa wrapper block.\n"
@@ -2096,6 +2106,21 @@ class NewsMaker:
                 return
 
             art = self._ensure_min_content(art, "")
+
+            # Clean any stray raw ticker symbols (e.g. PIPPINIDR -> PIPPIN) in final article text
+            # We sort by length descending to replace longer strings first (e.g., 'pippinidr' before 'idr')
+            for pair in sorted(self._tickers.keys(), key=len, reverse=True):
+                raw_upper = pair.upper()
+                raw_lower = pair.lower()
+                clean_upper = self._clean_symbol(pair)
+                clean_lower = clean_upper.lower()
+                
+                for key in ("title", "excerpt", "content"):
+                    val = str(art.get(key) or "")
+                    val = val.replace(raw_upper, clean_upper)
+                    val = val.replace(raw_lower, clean_lower)
+                    val = val.replace(raw_upper.capitalize(), clean_upper.capitalize())
+                    art[key] = val
 
             # Safety net: strip prompt leakage sebelum save.
             for key in ("content", "title", "excerpt"):

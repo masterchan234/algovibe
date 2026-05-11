@@ -391,7 +391,7 @@ async function fetchLandingData() {
       dbState.value = latency.value <= 1200 ? 'OPTIMAL' : 'DEGRADED'
       landingData.insights = data.insights
       landingData.signals = (data.signals || []).map((s) => ({
-        pair: String(s.pair || '').toUpperCase().replace('IDR', ''),
+        pair: String(s.pair || '').replace(/idr$/i, '').toUpperCase(),
         score: Number(s.score ?? 0),
         sell_score: Number(s.sell_score ?? 0),
         confidence: Number(s.confidence ?? 50),
