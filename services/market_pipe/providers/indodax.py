@@ -80,7 +80,26 @@ class IndodaxProvider(MarketProvider):
         """Subscribe to essential and active-universe trade channels on startup."""
         time.sleep(2) # Wait for WS connection
         from app.infrastructure.database import db
-        watch_pair = db.get_state('current_watch_pair') or 'btcidr'
+        
+        # Wait gracefully for database migrations to be ready (up to 60 seconds)
+        watch_pair = 'btcidr'
+        db_ready = False
+        for i in range(30):
+            try:
+                watch_pair = db.get_state('current_watch_pair') or 'btcidr'
+                # Check if positions table is readable too
+                with db.get_connection() as conn:
+                    conn.execute("SELECT 1 FROM positions LIMIT 1")
+                logger.info("[IndodaxProvider] DB tables are ready for initial subscriptions.")
+                db_ready = True
+                break
+            except Exception as e:
+                logger.warning(f"[IndodaxProvider] DB not ready yet (attempt {i+1}/30): {e}")
+                time.sleep(2)
+        
+        if not db_ready:
+            logger.error("[IndodaxProvider] DB tables never became ready. Falling back to default subscriptions.")
+
         pairs = {'btcidr', str(watch_pair).lower()}
 
         # Also subscribe to all open positions
@@ -101,8 +120,8 @@ class IndodaxProvider(MarketProvider):
                     p = str(r['pair'] or '').lower().strip()
                     if p:
                         pairs.add(p)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[IndodaxProvider] Could not load positions or history from DB: {e}")
 
         # Subscribe dengan jeda kecil agar tidak burst request ke WS gateway.
         subscribed = 0

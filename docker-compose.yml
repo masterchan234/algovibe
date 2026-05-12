@@ -89,6 +89,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 15s
     network_mode: host             # Bypass Docker NAT for minimum WS latency
+    depends_on:
+      timescaledb:
+        condition: service_healthy
     env_file:
       - .env
     environment:
