@@ -24,7 +24,7 @@ fi
 echo -e "${YELLOW}[1/2] Menjalankan simulasi di dalam container...${NC}"
 docker exec -it algovibe-executive-core python3 backtester.py
 
-# 3. Verifikasi Hasil dari TimescaleDB
+# 3. Verifikasi Hasil & Tampilkan Laporan Tuning Otomatis
 if [ $? -eq 0 ]; then
     echo ""
     echo -e "${GREEN}==================================================${NC}"
@@ -32,8 +32,8 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}   Data telah disuntikkan ke TimescaleDB (Dry Run).${NC}"
     echo -e "${GREEN}==================================================${NC}"
     
-    echo -e "${BLUE}Rekap Data DNA Baru (Backtest Storage):${NC}"
-    docker exec -t algovibe-timescaledb psql -U algovibe -d algovibe_dryrun -c "SELECT count(*) FROM backtest_analytics WHERE status='CLOSED'"
+    # Jalankan analisa penalaan parameter otomatis (Tuning Advisor)
+    docker exec -it algovibe-executive-core python3 backtest_report.py
 else
     echo -e "${RED}[ERROR] Backtest gagal. Cek log di atas.${NC}"
     exit 1

@@ -40,7 +40,7 @@ LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan v
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.12    # Modal 100k: default sizing ~12k/trade (tetap tunduk pada MIN_TRADE_IDR)
-MAX_OPEN_POSITIONS = 6          # Modal 100k: batasi eksposur agar tidak over-fragmented
+MAX_OPEN_POSITIONS = 9999          # Modal 100k: batasi eksposur agar tidak over-fragmented
 MIN_BALANCE_THRESHOLD = 12000   # Jangan trading jika saldo < 12rb
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 12000)) # Minimum order Indodax (12rb)
 

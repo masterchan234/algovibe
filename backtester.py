@@ -11,12 +11,18 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.infrastructure.database import db
+from app.domain.technicals import get_technical_summary, derive_trade_signal
 
-TIMEFRAME       = '15m'
-SINCE_DAYS      = 90
+TIMEFRAME       = '1m'
+SINCE_DAYS      = 7
 MIN_VOL_PCT     = 0.3       # Skip koin dengan candle volatilitas < 0.3%
 MIN_VOLUME_IDR  = 10_000_000  # Min Rp 10 Juta volume 24h (filter koin zombie)
-MAX_PAIRS       = 300       # Batasi agar tidak terlalu lama (cukup 150 koin terlikuid)
+MAX_PAIRS       = 1000      # Set ke 1000 agar mencakup seluruh koin aktif IDR tanpa batas
+
+# --- Backtest Mode Config ---
+# 'PULLBACK' : Strategy Mean Reversion + Reversal Confirm + ATR (default)
+# 'BOT_CONFLUENCE' : Menggunakan 11 Indikator Aktif & Scoring dari Engine Bot (app.domain.technicals)
+BACKTEST_MODE = 'BOT_CONFLUENCE'
 
 from config import INITIAL_CAPITAL, CAPITAL_PER_TRADE_PCT, DEFAULT_BLACKLIST_COINS as BLACKLIST_COINS
 CAPITAL_PER_TRADE = INITIAL_CAPITAL * CAPITAL_PER_TRADE_PCT
@@ -84,30 +90,60 @@ class AlgovibeBacktester:
         pair_id = pair.replace('/', '').lower()
         print(f"  Analysing data availability for {pair}...")
         
-        # [Force Sync] Selalu fetch dari exchange untuk memastikan integritas data 90 hari
-        # (Melewati cache DB lokal agar tidak terjebak di data 1000 poin)
-        pass
-
-        # Jika data di DB tidak ada atau kurang, barulah fetch dari exchange
-        print(f"  ☁️ Fetching fresh data from Exchange for {pair}...")
+        print(f"  ☁️ Fetching 90-day 1m paginated history from Exchange for {pair}...")
         try:
             since = self.exchange.parse8601(
                 (datetime.now() - timedelta(days=SINCE_DAYS)).isoformat()
             )
-            ohlcv = self.exchange.fetch_ohlcv(pair, TIMEFRAME, since=since)
-            if not ohlcv: return None
+            all_ohlcv = []
+            current_since = since
+            end_timestamp = int(datetime.now().timestamp() * 1000)
             
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # 90 hari = 129.600 menit. Batas limit per fetch adalah 1000.
+            # Kita butuh sekitar 130 perulangan per koin untuk paritas penuh.
+            max_loops = 140
+            loops = 0
+            
+            while current_since < end_timestamp and loops < max_loops:
+                try:
+                    ohlcv = self.exchange.fetch_ohlcv(pair, TIMEFRAME, since=current_since, limit=1000)
+                    if not ohlcv or len(ohlcv) == 0:
+                        break
+                    
+                    all_ohlcv.extend(ohlcv)
+                    last_ts = ohlcv[-1][0]
+                    if last_ts <= current_since:
+                        break
+                    
+                    # Tambahkan 1 menit (60.000 ms) agar batch berikutnya tidak duplikat
+                    current_since = last_ts + 60000
+                    loops += 1
+                    
+                    # Menjaga rate limit dengan tenang
+                    time.sleep(0.08)
+                except ccxt.RateLimitExceeded:
+                    print(f"  ⚠️ [Rate Limit] Terdeteksi throttling Indodax. Menolak selama 15 detik...")
+                    time.sleep(15)
+                except Exception as e:
+                    print(f"  ⚠️ [Warning] Batch fetch error pada koin {pair}: {e}")
+                    break
+            
+            if not all_ohlcv:
+                return None
+                
+            df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.drop_duplicates(subset=['timestamp'], inplace=True)
+            df.sort_values(by='timestamp', inplace=True)
+            df.reset_index(drop=True, inplace=True)
             
             # [Smart Sync] Simpan hasil download ke DB agar Live Bot bisa memanfaatkannya
-            # Kita simpan history harga terakhir (close) ke ticker_history
             close_prices = df['close'].tolist()
             db.save_ticker_history(pair_id, close_prices, 0, "BACKFILLED")
             
             return df
         except Exception as e:
-            print(f"  [ERROR] Gagal fetching {pair}: {e}")
+            print(f"  [ERROR] Gagal fetching paginated {pair}: {e}")
             return None
 
     def run_simulation(self, pair, df):
@@ -170,14 +206,29 @@ class AlgovibeBacktester:
             low_wick  = min(row['close'], row['open']) - row['low']
             is_reversal_candle = (low_wick >= body * 0.5) or (row['close'] > row['open'])
 
-            entry_signal = (
-                row['ema_20'] > row['ema_50'] and   # Uptrend makro
-                row['rsi'] < 42 and                 # Oversold (dilonggarkan dari 40)
-                ema_dist_pct >= 0.10 and             # Ada pullback minimal 0.10% dari EMA
-                is_reversal_candle and               # Ada tanda penolakan turun
-                vol_surge and                        # Volume cukup
-                btc_up                              # BTC juga uptrend
-            )
+            if BACKTEST_MODE == 'BOT_CONFLUENCE':
+                # Slice data up to current candle (mimic real-time cache)
+                prices_slice = df['close'].iloc[max(0, i - 150): i + 1].tolist()
+                volumes_slice = df['volume'].iloc[max(0, i - 150): i + 1].tolist()
+                
+                tech = get_technical_summary(prices_slice, volumes_slice)
+                tech['buy_pressure'] = 50.0  # Default buy pressure (no live orderbook)
+                tech_sig = derive_trade_signal(tech)
+                
+                entry_signal = (tech_sig['verdict'] == 'BUY')
+                ai_prob_sim = tech_sig['confidence']
+                rsi_val = tech['rsi']
+            else:
+                entry_signal = (
+                    row['ema_20'] > row['ema_50'] and   # Uptrend makro
+                    row['rsi'] < 42 and                 # Oversold (dilonggarkan dari 40)
+                    ema_dist_pct >= 0.10 and             # Ada pullback minimal 0.10% dari EMA
+                    is_reversal_candle and               # Ada tanda penolakan turun
+                    vol_surge and                        # Volume cukup
+                    btc_up                              # BTC juga uptrend
+                )
+                ai_prob_sim = min(95, max(55, 95 - row['rsi']))
+                rsi_val = row['rsi']
 
             if entry_signal:
                 entry_price = row['close']  # Masuk di harga close candle reversal
@@ -196,7 +247,6 @@ class AlgovibeBacktester:
                 volatility     = avg_candle_vol
                 whale_boost    = 1.5 if row['volume'] > avg_vol_10 * 1.5 else 1.0
                 imbalance_proxy = min(3.5, max(1.0, 1.0 + ema_dist_pct))
-                ai_prob_sim    = min(95, max(55, 95 - row['rsi']))
 
                 dna = {
                     'timestamp':        entry_time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -205,7 +255,7 @@ class AlgovibeBacktester:
                     'sector_sentiment': round(random.uniform(0.9, 1.15), 2),
                     'imbalance':        round(imbalance_proxy, 2),
                     'volatility':       round(volatility, 2),
-                    'rsi':              round(row['rsi'], 2),
+                    'rsi':              round(rsi_val, 2),
                     'ema_dist':         round(ema_dist_pct, 4)
                 }
 
@@ -214,7 +264,9 @@ class AlgovibeBacktester:
                 exit_price = 0
                 pnl_pct    = 0
 
-                for j in range(i + 1, min(i + 96, len(df))):  # Max 24 jam (96 candle × 15m)
+                # Max 24 jam (1440 candle × 1m atau 96 candle × 15m)
+                max_hold_candles = 1440 if TIMEFRAME == '1m' else 96
+                for j in range(i + 1, min(i + max_hold_candles, len(df))):
                     fr = df.iloc[j]
                     if fr['low'] <= sl_price:
                         outcome    = "LOSS"
@@ -256,10 +308,9 @@ class AlgovibeBacktester:
 if __name__ == "__main__":
     print("=" * 60)
     print("  ALGOVIBE BACKTESTER v2.1 — Full Market Coverage")
-    print("  Strategy: Mean Reversion + Reversal Confirm + ATR TP/SL")
+    print(f"  Strategy Mode: {BACKTEST_MODE}")
     print("=" * 60)
 
-    # --- [Senior Feature] Fresh Brain Mode ---
     # Sebelum memulai backtest, kita bersihkan histori lama agar AI hanya belajar 
     # dari data simulasi terbaru yang sudah menggunakan strategi yang telah di-tuning.
     print("\n" + "="*50)
@@ -268,8 +319,8 @@ if __name__ == "__main__":
         from app.infrastructure.database import db
         # Hapus analytics dan history agar bot mulai dengan 'Slate' yang bersih
         with db.get_connection() as conn:
-            conn.execute("DELETE FROM trade_analytics")
-            conn.execute("DELETE FROM trade_history")
+            conn.execute("DELETE FROM backtest_analytics")
+            conn.execute("DELETE FROM backtest_history")
         print("✅ Database DNA dibersihkan. Memulai pembelajaran dari nol...")
     except Exception as e:
         print(f"⚠️ Gagal membersihkan database: {e}")
