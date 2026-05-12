@@ -119,6 +119,38 @@ class BaseExchangeAdapter(ABC):
         """
         return {}
 
+    def fetch_ticker_all(self) -> dict:
+        """Fetch all tickers in a single call. Optional; returns {} if unsupported."""
+        return {}
+
+    def fetch_trades(self, symbol: str, limit: int = 50) -> list:
+        """Fetch recent public trades. Optional; returns [] if unsupported."""
+        return []
+
+    def fetch_trade_flow(self, symbol: str, limit: int = 50) -> dict:
+        """Summarise recent trade flow. Optional; returns neutral result if unsupported."""
+        return {"buy_vol": 0.0, "sell_vol": 0.0, "flow_ratio": 0.5, "net_pressure": "NEUTRAL"}
+
+    def fetch_ohlc(self, symbol: str, tf: str = "1", from_ts=None, to_ts=None, limit: int = 100) -> list:
+        """Fetch OHLC candles. Optional; returns [] if unsupported."""
+        return []
+
+    def fetch_ohlc_closes(self, symbol: str, tf: str = "1", limit: int = 100) -> list:
+        """Fetch close prices from OHLC. Optional; returns [] if unsupported."""
+        return []
+
+    def fetch_pairs(self) -> list:
+        """Fetch all trading pairs metadata. Optional; returns [] if unsupported."""
+        return []
+
+    def fetch_idr_pairs(self) -> list:
+        """Return list of IDR pair IDs. Optional; returns [] if unsupported."""
+        return []
+
+    def fetch_market_movers(self, top_n: int = 20) -> dict:
+        """Return top gainers/losers/trending/7d momentum. Optional; returns {} if unsupported."""
+        return {}
+
     # ── Order management ─────────────────────────────────────────────────────
 
     @abstractmethod

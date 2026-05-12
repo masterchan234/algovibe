@@ -27,8 +27,38 @@ from config import (
     SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
 
+# ── Per-pair minimum trade IDR cache (dari fetch_pairs() API) ─────────────────
+# Di-refresh setiap jam, sehingga jarang hit API dan tidak memblokir eksekusi.
+_PAIR_MIN_IDR_CACHE: dict = {}   # {pair: min_idr_float}
+_PAIR_MIN_LAST_FETCH: float = 0.0
+_PAIR_MIN_REFRESH_SEC = 3600     # 1 jam
 
-def check_live_liquidity(exchange_client, pair: str, order_size_idr: float, max_spread_pct: float = 0.015) -> tuple:
+def _get_pair_min_idr(bot, pair: str) -> float:
+    """Return minimum trade IDR untuk pair tertentu.
+
+    Menggunakan data live dari API (di-cache 1 jam). Fallback ke konstanta
+    global MIN_TRADE_IDR jika adapter tidak tersedia atau API gagal.
+    """
+    global _PAIR_MIN_IDR_CACHE, _PAIR_MIN_LAST_FETCH
+    now = time.time()
+    if now - _PAIR_MIN_LAST_FETCH > _PAIR_MIN_REFRESH_SEC:
+        adapter = getattr(bot, '_adapter', None)
+        if adapter is not None:
+            try:
+                pairs = adapter.fetch_pairs()
+                _PAIR_MIN_IDR_CACHE = {
+                    str(p.get('id', '')).lower(): float(p.get('trade_min_base_currency', 0) or 0)
+                    for p in pairs
+                }
+                _PAIR_MIN_LAST_FETCH = now
+                log_message(f"[trade_execution] Per-pair min IDR cache diperbarui: {len(_PAIR_MIN_IDR_CACHE)} pair")
+            except Exception as e:
+                log_message(f"[trade_execution] fetch_pairs gagal, fallback ke MIN_TRADE_IDR global: {e}")
+    # Ambil nilai pair; jika 0 berarti tidak ada data spesifik, gunakan global
+    pair_min = _PAIR_MIN_IDR_CACHE.get(pair.lower(), 0)
+    return max(MIN_TRADE_IDR, pair_min)
+
+
     """Validate live order book liquidity from exchange before entry.
     
     Fetches real-time order book and checks:
@@ -277,9 +307,10 @@ def execute_trade(
             _mark_gate(f"Insufficient liquidity: need {required_vol:,.0f}, got {vol_24h:,.0f}")
             return False
 
-        if amount_idr < MIN_TRADE_IDR:
-            log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {MIN_TRADE_IDR}")
-            _mark_gate(f"Capital below minimum trade ({amount_idr:.0f})")
+        _pair_min_idr = _get_pair_min_idr(bot, pair)
+        if amount_idr < _pair_min_idr:
+            log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {_pair_min_idr:.0f} (pair-specific)")
+            _mark_gate(f"Capital below minimum trade ({amount_idr:.0f} < {_pair_min_idr:.0f})")
             return False
 
         from config import TP_PCT, SL_PCT, ROUND_TRIP_FEE_PCT

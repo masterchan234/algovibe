@@ -26,7 +26,6 @@ import threading
 from datetime import datetime, timedelta
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-import ccxt
 
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -91,11 +90,21 @@ class BrainInferenceService:
         self._history_maxlen = 100
         self._pre_load_history()
         
-        # [Restoration] Exchange for backfill
-        from app.infrastructure.exchange_factory import create_indodax_exchange
-        self._exchange = create_indodax_exchange()
-        self._exchange.timeout = 30000 # 30s
+        # Adapter for public REST API backfill (no API key needed)
+        from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
+        _api_key = os.getenv("INDODAX_API_KEY", "")
+        _api_secret = os.getenv("INDODAX_API_SECRET", "")
+        self._adapter = IndodaxAdapter(_api_key, _api_secret)
         self._backfill_thread = None
+
+        # OHLC H/L/Volume cache untuk ATR akurat + OBV/Volume Ratio aktif
+        self._ohlc_highs: dict = {}  # {pair: deque([highs])}
+        self._ohlc_lows:  dict = {}  # {pair: deque([lows])}
+        self._ohlc_vols:  dict = {}  # {pair: deque([volumes])} — untuk OBV & Volume Ratio
+
+        # Market movers (top gainer/loser/trending) — di-refresh tiap 5 menit
+        self._market_movers: dict = {}
+        self._movers_last_refresh: float = 0.0
         
         # Oracle initialization
         self.market_proxy = ZMQMarketProxy(self._tickers, self._history)
@@ -164,13 +173,17 @@ class BrainInferenceService:
                     self._history[symbol] = deque(maxlen=self._history_maxlen)
                 self._history[symbol].append(price)
 
-                # Derive change_24h from rolling price history now that we have data
+                # Derive change_24h dari rolling price history WS.
+                # Gunakan nilai dari summaries API jika history WS masih pendek (<60 candle),
+                # karena summaries menggunakan harga 24 jam lalu yang akurat.
                 hist = self._history[symbol]
-                if len(hist) >= 2:
+                if len(hist) >= 60:
                     oldest = float(hist[0] or price)
                     change_24h = ((price - oldest) / oldest * 100.0) if oldest > 0 else 0.0
                 else:
-                    change_24h = 0.0
+                    # Pertahankan nilai dari summaries (di-set oleh _refresh_market_movers) jika ada
+                    existing = self._tickers.get(symbol, {})
+                    change_24h = existing.get("change_24h", 0.0)
 
                 # Update Tickers
                 self._tickers[symbol] = {
@@ -228,7 +241,10 @@ class BrainInferenceService:
                         ranked.append(res)
                 
                 ranked.sort(key=lambda x: x['score'], reverse=True)
-                
+
+                # 2.5 Refresh market movers (top gainer/loser/trending) setiap 5 menit
+                self._refresh_market_movers()
+
                 # 3. AI Insights
                 # Request periodic analysis for top movers
                 self.oracle.request_periodic_analysis(ranked)
@@ -258,34 +274,40 @@ class BrainInferenceService:
                 logger.error("[brain-inference] Error in analysis loop: %s", e)
 
     def _backfill_historical_data(self):
-        """Restore full 1h history for all IDR pairs (Smart Backfill)."""
-        logger.info("[brain-inference] ⏳ Starting Smart Backfill (1h window)...")
+        """Restore 1h price history for all IDR pairs via Indodax public OHLC API."""
+        logger.info("[brain-inference] ⏳ Starting Smart Backfill (native OHLC API)...")
         db.save_state("backfill_status", "SYNCING")
 
         try:
-            markets = self._exchange.fetch_markets()
-            full_idr_list = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
-            
-            idr_pairs = []
-            for symbol in full_idr_list:
-                pair_id = symbol.replace('/', '').lower()
-                if len(self._history.get(pair_id, [])) < 50:
-                    idr_pairs.append(symbol)
-            
+            all_idr = self._adapter.fetch_idr_pairs()
+            idr_pairs = [
+                p for p in all_idr
+                if len(self._history.get(p, [])) < 50
+            ]
+
             total_pairs = len(idr_pairs)
             if not idr_pairs:
                 logger.info("[brain-inference] ✅ All pairs already warm. Skipping backfill.")
                 db.save_state("backfill_status", "COMPLETED")
                 return
 
-            logger.info(f"[brain-inference] 📦 Syncing {total_pairs} pairs...")
+            logger.info("[brain-inference] 📦 Syncing %d pairs via OHLC API...", total_pairs)
 
-            def fetch_one(symbol):
+            def fetch_one(pair_id):
                 try:
-                    ohlcv = self._exchange.fetch_ohlcv(symbol, timeframe='1m', limit=60)
-                    if not ohlcv: return None
-                    return (symbol.replace('/', '').lower(), [c[4] for c in ohlcv])
-                except Exception: return None
+                    # Ambil full OHLC (bukan hanya closes) agar H/L tersedia untuk ATR akurat
+                    candles = self._adapter.fetch_ohlc(pair_id, tf="1", limit=100)
+                    if not candles:
+                        return None
+                    closes = [c["close"]  for c in candles if c["close"] > 0]
+                    highs  = [c["high"]   for c in candles if c["close"] > 0]
+                    lows   = [c["low"]    for c in candles if c["close"] > 0]
+                    vols   = [c["volume"] for c in candles if c["close"] > 0]
+                    if not closes:
+                        return None
+                    return (pair_id, closes, highs, lows, vols)
+                except Exception:
+                    return None
 
             batch_size = 20
             all_updates = []
@@ -293,33 +315,90 @@ class BrainInferenceService:
                 for i in range(0, total_pairs, batch_size):
                     batch = idr_pairs[i:i + batch_size]
                     results = list(pool.map(fetch_one, batch))
-                    
+
                     for res in results:
-                        if res:
-                            pair_id, prices = res
-                            if pair_id not in self._history:
-                                self._history[pair_id] = deque(maxlen=self._history_maxlen)
-                            self._history[pair_id].extend(prices)
-                            
-                            # Prepare for DB update
-                            last = prices[-1]
-                            ch_5m = ((last - prices[-5]) / prices[-5] * 100) if len(prices) >= 5 else 0
-                            ch_15m = ((last - prices[-15]) / prices[-15] * 100) if len(prices) >= 15 else 0
-                            ch_1h = ((last - prices[0]) / prices[0] * 100) if len(prices) >= 60 else 0
-                            
-                            all_updates.append((pair_id, list(self._history[pair_id]), ch_5m, ch_15m, ch_1h))
-                    
-                    time.sleep(0.1)
+                        if not res:
+                            continue
+                        pair_id, prices, highs, lows, vols = res
+                        if pair_id not in self._history:
+                            self._history[pair_id] = deque(maxlen=self._history_maxlen)
+                        self._history[pair_id].extend(prices)
+
+                        # Simpan H/L dan Volume untuk ATR + OBV/Volume Ratio aktif
+                        if pair_id not in self._ohlc_highs:
+                            self._ohlc_highs[pair_id] = deque(maxlen=self._history_maxlen)
+                            self._ohlc_lows[pair_id]  = deque(maxlen=self._history_maxlen)
+                            self._ohlc_vols[pair_id]  = deque(maxlen=self._history_maxlen)
+                        self._ohlc_highs[pair_id].extend(highs)
+                        self._ohlc_lows[pair_id].extend(lows)
+                        self._ohlc_vols[pair_id].extend(vols)
+
+                        last = prices[-1]
+                        ch_5m  = ((last - prices[-5])  / prices[-5]  * 100) if len(prices) >= 5  else 0
+                        ch_15m = ((last - prices[-15]) / prices[-15] * 100) if len(prices) >= 15 else 0
+                        ch_1h  = ((last - prices[0])   / prices[0]   * 100) if len(prices) >= 60 else 0
+                        all_updates.append((pair_id, list(self._history[pair_id]), ch_5m, ch_15m, ch_1h))
+
+                    time.sleep(0.1)  # stay within public rate limit (180 req/min)
 
             if all_updates:
                 db.save_ticker_history_batch(all_updates)
-            
-            logger.info(f"[brain-inference] ✅ Backfill completed for {len(all_updates)} pairs.")
+
+            logger.info("[brain-inference] ✅ Backfill completed for %d pairs.", len(all_updates))
             db.save_state("backfill_status", "COMPLETED")
-            
+
         except Exception as e:
-            logger.error(f"[brain-inference] ⚠️ Backfill failed: {e}")
+            logger.error("[brain-inference] ⚠️ Backfill failed: %s", e)
             db.save_state("backfill_status", "FAILED")
+
+    def _refresh_market_movers(self):
+        """Refresh top gainer/loser/trending dari Indodax API setiap 5 menit.
+
+        Memperluas scan universe dengan pair yang belum masuk via WS tapi sudah
+        menunjukkan pergerakan harga signifikan (naik/turun/volume tinggi).
+        """
+        now = time.time()
+        if now - self._movers_last_refresh < 300:
+            return
+        try:
+            movers = self._adapter.fetch_market_movers(top_n=30)
+            if not movers:
+                return
+            self._market_movers = movers
+            self._movers_last_refresh = now
+
+            # Seed _tickers untuk pair mover yang belum diterima via WS
+            all_mover_pairs = {
+                m["pair"]: m
+                for cat in ("gainers", "losers", "trending", "momentum_7d")
+                for m in movers.get(cat, [])
+            }
+            seeded = 0
+            for pair_norm, m in all_mover_pairs.items():
+                if pair_norm not in self._tickers and m["last"] > 0:
+                    self._tickers[pair_norm] = {
+                        "pair":       pair_norm,
+                        "last":       m["last"],
+                        "bid":        m["last"],
+                        "ask":        m["last"],
+                        "high":       m["last"],
+                        "low":        m["last"],
+                        "vol_idr":    m["vol_idr"],
+                        "change_24h": m["change_24h"],
+                    }
+                    seeded += 1
+                elif pair_norm in self._tickers:
+                    # Update change_24h dengan nilai akurat dari summaries
+                    self._tickers[pair_norm]["change_24h"] = m["change_24h"]
+
+            gainers_preview  = [(g["pair"], f"+{g['change_24h']:.1f}%") for g in movers.get("gainers", [])[:5]]
+            trending_preview = [(t["pair"], f"{t['vol_idr']/1e9:.2f}B") for t in movers.get("trending", [])[:5]]
+            logger.info("[brain] 📈 Top Gainers 24h: %s", gainers_preview)
+            logger.info("[brain] 🔥 Trending (vol):  %s", trending_preview)
+            if seeded > 0:
+                logger.info("[brain] 🌱 Seeded %d mover pair ke scan universe.", seeded)
+        except Exception as e:
+            logger.warning("[brain] fetch_market_movers gagal: %s", e)
 
     def _scan_for_signals(self, ranked: list):
         """Evaluate ranked candidates for BUY signals and emit to Executive-Core."""
@@ -348,11 +427,14 @@ class BrainInferenceService:
         
         # Mocking bot-like interface for entry_gates use case
         class BotMock:
-            def __init__(self, oracle, blacklist, history, history_maxlen):
+            def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols):
                 self.oracle = oracle
                 self.blacklist = blacklist
                 self.price_history = history # Shared reference to self._history
                 self._history_maxlen = history_maxlen
+                self.ohlc_highs = ohlc_highs  # {pair: deque([highs])} — untuk ATR akurat
+                self.ohlc_lows  = ohlc_lows   # {pair: deque([lows])}
+                self.ohlc_vols  = ohlc_vols   # {pair: deque([volumes])} — untuk OBV aktif
 
             def update_history_and_trend(self, pair, price):
                 history_deque = self.price_history.get(pair)
@@ -373,7 +455,8 @@ class BrainInferenceService:
 
                 return "UP" if is_uptrend else "SIDEWAYS", is_pullback, history
 
-        bot_mock = BotMock(self.oracle, self.blacklist, self._history, self._history_maxlen)
+        bot_mock = BotMock(self.oracle, self.blacklist, self._history, self._history_maxlen,
+                           self._ohlc_highs, self._ohlc_lows, self._ohlc_vols)
         
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
@@ -408,6 +491,24 @@ class BrainInferenceService:
                 if isinstance(gate, dict) and gate.get("mode") == "LIVE":
                     gate_conf = float(gate.get('total_confidence', 0) or 0.0)
                     tq_prob = float(enriched.get('tq_prob', 0.0) or 0.0)
+
+                    # ── Trade Flow Guard ──────────────────────────────────────
+                    # Cek tape (50 transaksi publik terakhir) sebelum commit signal.
+                    # Jika seller mendominasi (net_pressure=SELL, flow_ratio <0.4),
+                    # tunda signal — hindari beli di tengah gelombang jual.
+                    try:
+                        flow = self._adapter.fetch_trade_flow(pair, limit=50)
+                        if flow.get("net_pressure") == "SELL" and flow.get("flow_ratio", 0.5) < 0.4:
+                            logger.info(
+                                "[brain] ⏸ FLOW GUARD: %s — tape seller-dominated "
+                                "(flow_ratio=%.2f), signal ditunda.",
+                                pair, flow["flow_ratio"]
+                            )
+                            continue
+                    except Exception:
+                        pass  # Jika API gagal, biarkan signal lanjut
+                    # ─────────────────────────────────────────────────────────
+
                     logger.info(
                         f"[brain-inference] 🔥 SIGNAL DETECTED: {pair} "
                         f"(gate={gate_conf:.1f}%, tq_prob={tq_prob * 100:.1f}%)"

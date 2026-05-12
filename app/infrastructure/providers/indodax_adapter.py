@@ -38,8 +38,13 @@ logger = logging.getLogger(__name__)
 
 # ── Indodax Trade API constants ───────────────────────────────────────────────
 TAPI_URL = "https://indodax.com/tapi"
+PUBLIC_API_BASE = "https://indodax.com/api"
+OHLC_URL = "https://indodax.com/tradingview/history_v2"
 TICKER_URL = "https://indodax.com/api/{pair}/ticker"
 ORDER_BOOK_URL = "https://indodax.com/api/{pair}/depth"
+
+# Public API timeout (no auth, lighter requests)
+_PUBLIC_TIMEOUT_SEC = 10
 
 # Primary quote asset for this exchange (used for get_balance default)
 QUOTE_ASSET = "IDR"
@@ -98,12 +103,288 @@ class IndodaxAdapter(BaseExchangeAdapter):
             Dictionay containing 'tickers' and 'prices_24h' or empty dict on failure.
         """
         try:
-            r = requests.get("https://indodax.com/api/summaries", timeout=8)
+            r = requests.get(f"{PUBLIC_API_BASE}/summaries", timeout=_PUBLIC_TIMEOUT_SEC)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
             logger.error(f"[IndodaxAdapter] Failed to fetch summaries: {e}")
         return {}
+
+    def fetch_ticker_all(self) -> dict:
+        """Fetch all ticker prices in a single public API call.
+
+        More efficient than per-pair calls. Returns a flat dict keyed by
+        normalised pair id (e.g. 'btc_idr') with unified ticker fields.
+
+        Returns
+        -------
+        dict
+            {"btc_idr": {"last": float, "bid": float, "ask": float, ...}, ...}
+        """
+        try:
+            r = requests.get(f"{PUBLIC_API_BASE}/ticker_all", timeout=_PUBLIC_TIMEOUT_SEC)
+            r.raise_for_status()
+            raw_tickers = r.json().get("tickers", {})
+        except Exception as exc:
+            logger.error("[IndodaxAdapter] fetch_ticker_all failed: %s", exc)
+            return {}
+
+        result = {}
+        for pair_key, t in raw_tickers.items():
+            # pair_key is underscore format e.g. "btc_idr"
+            pair_norm = pair_key.replace("_", "")  # "btcidr"
+            result[pair_norm] = {
+                "symbol":    pair_norm.upper(),
+                "last":      float(t.get("last", 0)),
+                "bid":       float(t.get("buy", 0)),
+                "ask":       float(t.get("sell", 0)),
+                "high":      float(t.get("high", 0)),
+                "low":       float(t.get("low", 0)),
+                "vol_idr":   float(t.get("vol_idr", 0)),
+                "timestamp": int(float(t.get("server_time", time.time())) * 1000),
+            }
+        return result
+
+    def fetch_trades(self, symbol: str, limit: int = 50) -> list[dict]:
+        """Fetch recent public trades for *symbol*.
+
+        Useful for tape-reading / buy-sell flow analysis.
+
+        Returns
+        -------
+        list[dict]
+            Each element: {"tid": str, "side": str, "price": float,
+                           "amount": float, "timestamp": int}
+        """
+        pair = self._normalise_symbol(symbol)
+        try:
+            r = requests.get(f"{PUBLIC_API_BASE}/trades/{pair}", timeout=_PUBLIC_TIMEOUT_SEC)
+            r.raise_for_status()
+            raw = r.json()
+        except Exception as exc:
+            logger.error("[IndodaxAdapter] fetch_trades(%s) failed: %s", symbol, exc)
+            return []
+
+        result = []
+        for t in raw[:limit]:
+            try:
+                result.append({
+                    "tid":       str(t.get("tid", "")),
+                    "side":      str(t.get("type", "")).lower(),
+                    "price":     float(t.get("price", 0)),
+                    "amount":    float(t.get("amount", 0)),
+                    "timestamp": int(float(t.get("date", 0))) * 1000,
+                })
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def fetch_trade_flow(self, symbol: str, limit: int = 50) -> dict:
+        """Summarise recent trade flow as buy/sell volume ratio.
+
+        Returns
+        -------
+        dict
+            {"buy_vol": float, "sell_vol": float, "flow_ratio": float,
+             "net_pressure": str}  # "BUY", "SELL", or "NEUTRAL"
+        """
+        trades = self.fetch_trades(symbol, limit=limit)
+        buy_vol = sum(t["price"] * t["amount"] for t in trades if t["side"] == "buy")
+        sell_vol = sum(t["price"] * t["amount"] for t in trades if t["side"] == "sell")
+        total = buy_vol + sell_vol
+        flow_ratio = buy_vol / total if total > 0 else 0.5
+        if flow_ratio >= 0.55:
+            pressure = "BUY"
+        elif flow_ratio <= 0.45:
+            pressure = "SELL"
+        else:
+            pressure = "NEUTRAL"
+        return {
+            "buy_vol":      buy_vol,
+            "sell_vol":     sell_vol,
+            "flow_ratio":   round(flow_ratio, 4),
+            "net_pressure": pressure,
+        }
+
+    def fetch_ohlc(
+        self,
+        symbol: str,
+        tf: str = "1",
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Fetch OHLC candle history from Indodax TradingView endpoint.
+
+        Parameters
+        ----------
+        symbol:  Pair in any format — normalised to uppercase, e.g. 'BTCIDR'.
+        tf:      Timeframe string: '1', '15', '30', '60', '240', '1D', '3D', '1W'.
+        from_ts: Start Unix timestamp (seconds). Auto-computed from *limit* if None.
+        to_ts:   End Unix timestamp (seconds). Defaults to now.
+        limit:   Number of candles to target when from_ts is auto-computed.
+
+        Returns
+        -------
+        list[dict]
+            Chronological list of {"time": int, "open": float, "high": float,
+            "low": float, "close": float, "volume": float}
+        """
+        pair_upper = self._normalise_symbol(symbol).upper()
+
+        # Compute time window when not provided
+        now = int(time.time())
+        if to_ts is None:
+            to_ts = now
+        if from_ts is None:
+            # Estimate window from limit + timeframe
+            _tf_minutes = {"1": 1, "15": 15, "30": 30, "60": 60, "240": 240,
+                           "1D": 1440, "3D": 4320, "1W": 10080}
+            tf_min = _tf_minutes.get(str(tf), 1)
+            from_ts = to_ts - limit * tf_min * 60 - tf_min * 60  # small buffer
+
+        params = {
+            "symbol": pair_upper,
+            "tf":     str(tf),
+            "from":   str(from_ts),
+            "to":     str(to_ts),
+        }
+        try:
+            r = requests.get(OHLC_URL, params=params, timeout=_PUBLIC_TIMEOUT_SEC)
+            r.raise_for_status()
+            raw = r.json()
+        except Exception as exc:
+            logger.error("[IndodaxAdapter] fetch_ohlc(%s, tf=%s) failed: %s", symbol, tf, exc)
+            return []
+
+        if not isinstance(raw, list):
+            return []
+
+        result = []
+        for candle in raw:
+            try:
+                result.append({
+                    "time":   int(candle.get("Time", 0)),
+                    "open":   float(candle.get("Open", 0)),
+                    "high":   float(candle.get("High", 0)),
+                    "low":    float(candle.get("Low", 0)),
+                    "close":  float(candle.get("Close", 0)),
+                    "volume": float(candle.get("Volume", 0) or 0),
+                })
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def fetch_ohlc_closes(
+        self,
+        symbol: str,
+        tf: str = "1",
+        limit: int = 100,
+    ) -> list[float]:
+        """Convenience wrapper: return only close prices from OHLC.
+
+        Useful for feeding into RSI/MACD/Bollinger calculations directly.
+
+        Returns
+        -------
+        list[float]  — chronological close prices (most-recent last).
+        """
+        candles = self.fetch_ohlc(symbol, tf=tf, limit=limit)
+        return [c["close"] for c in candles if c["close"] > 0]
+
+    def fetch_pairs(self) -> list[dict]:
+        """Fetch all available trading pairs with metadata.
+
+        Returns
+        -------
+        list[dict]
+            Each element includes: id, symbol, base_currency, traded_currency,
+            trade_min_base_currency (min IDR), trade_min_traded_currency.
+        """
+        try:
+            r = requests.get(f"{PUBLIC_API_BASE}/pairs", timeout=_PUBLIC_TIMEOUT_SEC)
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            logger.error("[IndodaxAdapter] fetch_pairs failed: %s", exc)
+            return []
+
+    def fetch_idr_pairs(self) -> list[str]:
+        """Return normalised pair IDs for all IDR-quoted pairs (e.g. 'btcidr').
+
+        Useful for building the scanning universe without needing ccxt.
+        """
+        pairs = self.fetch_pairs()
+        return [
+            str(p.get("id", "")).lower()
+            for p in pairs
+            if str(p.get("base_currency", "")).lower() == "idr"
+               or str(p.get("id", "")).lower().endswith("idr")
+        ]
+
+    def fetch_market_movers(self, top_n: int = 20) -> dict:
+        """Compute top gainers, losers, trending, dan 7d momentum dari /api/summaries.
+
+        Menggunakan data harga 24 jam dan 7 hari lalu dari Indodax untuk
+        menghitung perubahan persen secara akurat — bukan dari rolling history WS.
+
+        Parameters
+        ----------
+        top_n : int
+            Jumlah pair teratas yang dikembalikan per kategori.
+
+        Returns
+        -------
+        dict
+            {
+                "gainers":     list[dict],  # top gainer 24h
+                "losers":      list[dict],  # top loser 24h
+                "trending":    list[dict],  # teratas berdasarkan volume IDR
+                "momentum_7d": list[dict],  # top momentum 7 hari
+            }
+            Setiap elemen dict berisi: pair, name, last, change_24h, change_7d, vol_idr.
+            Mengembalikan dict kosong jika API gagal.
+        """
+        data = self.fetch_summaries()
+        if not data:
+            return {}
+
+        tickers   = data.get("tickers", {})
+        prices_24h = data.get("prices_24h", {})
+        prices_7d  = data.get("prices_7d", {})
+
+        movers = []
+        for raw_pair, t in tickers.items():
+            pair_norm = raw_pair.replace("_", "")  # "btc_idr" → "btcidr"
+            # Hanya proses pair IDR — cross-denominasi USDT akan menghasilkan angka salah
+            if not pair_norm.endswith("idr"):
+                continue
+            try:
+                last = float(t.get("last", 0) or 0)
+                if last <= 0:
+                    continue
+                p24h = float(prices_24h.get(pair_norm, 0) or 0)
+                p7d  = float(prices_7d.get(pair_norm, 0) or 0)
+                change_24h = ((last - p24h) / p24h * 100) if p24h > 0 else 0.0
+                change_7d  = ((last - p7d)  / p7d  * 100) if p7d  > 0 else 0.0
+                vol_idr    = float(t.get("vol_idr", 0) or 0)
+                movers.append({
+                    "pair":       pair_norm,
+                    "name":       str(t.get("name", pair_norm)),
+                    "last":       last,
+                    "change_24h": round(change_24h, 2),
+                    "change_7d":  round(change_7d, 2),
+                    "vol_idr":    vol_idr,
+                })
+            except (TypeError, ValueError):
+                continue
+
+        return {
+            "gainers":     sorted(movers, key=lambda x: x["change_24h"], reverse=True)[:top_n],
+            "losers":      sorted(movers, key=lambda x: x["change_24h"])[:top_n],
+            "trending":    sorted(movers, key=lambda x: x["vol_idr"], reverse=True)[:top_n],
+            "momentum_7d": sorted(movers, key=lambda x: x["change_7d"], reverse=True)[:top_n],
+        }
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 

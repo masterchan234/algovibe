@@ -155,7 +155,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     # ── 4. Multi-Confluence Technical Gate ────────────────────────────────
     # Kita tidak hanya cek RSI — harus ada konfirmasi multi-indikator.
-    tech = get_technical_summary(history)
+    # Sertakan volume per-candle dari OHLC backfill jika tersedia via BotMock,
+    # sehingga OBV Slope (w=1.5) dan Volume Ratio (w=1.5) dapat berfungsi aktif.
+    _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
+    tech = get_technical_summary(history, _candle_vols if len(_candle_vols) == len(history) else None)
     depth_data = db.get_market_depth(pair)
     if depth_data['bids'] and depth_data['asks']:
         total_bid = sum(b['vol'] for b in depth_data['bids'])
@@ -189,10 +192,18 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # Skip entry jika ATR > 3% harga — volatilitas terlalu tinggi, spread lebar,
     # slippage besar, TP/SL sering kena sebelum waktunya.
     # Loose gates: batas dinaikkan ke 4.5% agar tetap bisa trading di kondisi moderat.
+    # Jika bot memiliki data OHLC H/L nyata (dari backfill), gunakan True ATR.
+    # Fallback ke close-only approximation jika H/L tidak tersedia.
     if len(history) >= 15:
         try:
             _prices_arr = history[-15:]
-            _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
+            # Ambil H/L nyata dari backfill jika tersedia via BotMock
+            _raw_highs = list(getattr(bot, 'ohlc_highs', {}).get(pair, []))
+            _raw_lows  = list(getattr(bot, 'ohlc_lows',  {}).get(pair, []))
+            if len(_raw_highs) >= 15 and len(_raw_lows) >= 15:
+                _atr = calculate_atr(_raw_highs[-15:], _raw_lows[-15:], _prices_arr, period=14)
+            else:
+                _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
             _last = float(p.get('last', 1.0)) or 1.0
             _atr_pct = (_atr / _last) * 100.0
             _atr_limit = 4.5 if config.DRY_RUN_LOOSE_GATES else 3.0

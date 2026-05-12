@@ -26,6 +26,7 @@ from app.infrastructure.database import db
 from app.infrastructure.ws_market import MarketDataWS
 from app.domain.technicals import get_technical_summary, derive_trade_signal
 from app.infrastructure.llm_worker import LLMWorker
+from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
@@ -46,8 +47,8 @@ def broadcast_command(action, payload=None):
     _cmd_pub.send_multipart([b"CMD", json.dumps(msg).encode()])
     logging.info(f"📤 [IPC] Broadcasted command: {action}")
 
-# Exchange instance untuk public data (OHLCV)
-exchange = ccxt.indodax()
+# Public adapter untuk data pasar (OHLCV, ticker_all, market movers) — tidak butuh auth
+_public_adapter = IndodaxAdapter('', '')
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -375,22 +376,21 @@ _REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 
 _REST_TICKER_CACHE = {"data": {}, "last_check": 0}
 
 def _fetch_all_tickers_rest():
-    """Fetch all tickers from Indodax REST API as a fallback."""
+    """Fetch all tickers from Indodax REST API as a fallback (via native adapter)."""
     global _REST_TICKER_CACHE
     now = time.time()
     if (now - _REST_TICKER_CACHE["last_check"]) < 60:
         return _REST_TICKER_CACHE["data"]
-    
+
     try:
-        # Gunakan public API summaries via CCXT
-        tickers = exchange.fetch_tickers()
-        # Transform ke format yang mudah dibaca: {'axlidr': 2500, ...}
-        transformed = {}
-        for symbol, data in tickers.items():
-            if '/IDR' in symbol:
-                key = symbol.replace('/IDR', '').lower() + 'idr'
-                transformed[key] = float(data.get('last') or 0)
-        
+        raw = _public_adapter.fetch_ticker_all()
+        # fetch_ticker_all() already returns {pair_norm: {last, bid, ask, ...}}
+        # Flatten ke {'btcidr': last_price, ...} untuk backward-compat callers
+        transformed = {
+            pair_id: float(data.get('last') or 0)
+            for pair_id, data in raw.items()
+            if float(data.get('last') or 0) > 0
+        }
         _REST_TICKER_CACHE["data"] = transformed
         _REST_TICKER_CACHE["last_check"] = now
         return transformed
@@ -1831,6 +1831,68 @@ def get_market_context(pair):
     finally:
         conn.close()
 
+_MARKET_MOVERS_CACHE: dict = {"data": {}, "last_check": 0.0}
+_MARKET_MOVERS_TTL = 300  # 5 menit
+
+@app.route('/api/market-movers')
+@login_required
+def get_market_movers():
+    """Kembalikan top gainer, loser, trending, dan momentum 7d dari Indodax.
+
+    Data di-cache 5 menit agar tidak flood public API.
+    Fallback: ambil dari mws.get_tickers() jika API gagal.
+    """
+    global _MARKET_MOVERS_CACHE
+    now = time.time()
+    if now - _MARKET_MOVERS_CACHE["last_check"] < _MARKET_MOVERS_TTL and _MARKET_MOVERS_CACHE["data"]:
+        return jsonify(_MARKET_MOVERS_CACHE["data"])
+
+    try:
+        movers = _public_adapter.fetch_market_movers(top_n=20)
+        if movers:
+            _MARKET_MOVERS_CACHE["data"] = movers
+            _MARKET_MOVERS_CACHE["last_check"] = now
+            return jsonify(movers)
+    except Exception as e:
+        logging.warning(f"[market-movers] API call failed: {e}")
+
+    # Fallback: hitung dari WS tickers snapshot
+    try:
+        ws_snap = mws.get_tickers()
+        _STABLECOINS = {'usdt', 'usdc', 'busd', 'bidr', 'dai', 'tusd', 'idrt'}
+        candidates = []
+        for pair_id, data in ws_snap.items():
+            base = pair_id.lower().replace('idr', '')
+            if base in _STABLECOINS:
+                continue
+            last = float(data.get('last') or 0)
+            high = float(data.get('high') or 0)
+            low = float(data.get('low') or 0)
+            vol_idr = float(data.get('vol_idr') or 0)
+            if last <= 0 or vol_idr < 1_000_000:
+                continue
+            if high > 0 and low > 0 and high > low:
+                mid = (high + low) / 2.0
+                ch = round(((last - mid) / mid) * 100.0, 2)
+            else:
+                ch = 0.0
+            candidates.append({
+                "pair":       pair_id,
+                "symbol":     base.upper(),
+                "last":       last,
+                "change_24h": ch,
+                "vol_idr":    vol_idr,
+            })
+        gainers  = sorted(candidates, key=lambda x: x['change_24h'], reverse=True)[:20]
+        losers   = sorted(candidates, key=lambda x: x['change_24h'])[:20]
+        trending = sorted(candidates, key=lambda x: x['vol_idr'], reverse=True)[:20]
+        fallback = {"gainers": gainers, "losers": losers, "trending": trending, "momentum_7d": [], "_source": "ws_fallback"}
+        return jsonify(fallback)
+    except Exception as ef:
+        logging.error(f"[market-movers] Fallback also failed: {ef}")
+        return jsonify({"gainers": [], "losers": [], "trending": [], "momentum_7d": []}), 500
+
+
 @app.route('/api/analyze/<pair>')
 @login_required
 def trigger_analysis(pair):
@@ -2144,30 +2206,38 @@ def get_pair_history(pair):
 @app.route('/api/ohlcv/<pair>/<tf>')
 @login_required
 def get_ohlcv(pair, tf):
-    """Ambil data OHLCV dari bursa untuk timeframe tertentu."""
+    """Ambil data OHLCV dari bursa untuk timeframe tertentu (via native adapter)."""
     try:
-        # Convert pair dari btcidr ke BTC/IDR
-        symbol = pair.upper()
-        if symbol.endswith('IDR'):
-            symbol = symbol[:-3] + '/IDR'
-        
-        # Mapping timeframe
+        # Mapping timeframe (dashboard UI → TradingView resolution)
         tf_map = {
-            '5m': '5m',
-            '15m': '15m',
-            '1h': '1h',
-            '24h': '1d'
+            '1m':  '1',
+            '5m':  '5',
+            '15m': '15',
+            '30m': '30',
+            '1h':  '60',
+            '4h':  '240',
+            '24h': '1D',
+            '1d':  '1D',
         }
-        target_tf = tf_map.get(tf, '1h')
-        
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=target_tf, limit=100)
-        # Format untuk AlgoChart: [{time, value}, ...]
-        # AlgoChart area mode menggunakan property 'value'
-        # AlgoChart candle mode menggunakan history array (diproses di frontend)
-        # Kita kembalikan format yang konsisten
+        target_tf = tf_map.get(tf, '60')
+
+        candles = _public_adapter.fetch_ohlc(pair, tf=target_tf, limit=100)
+        # Convert ke format ccxt-compatible [[ts_ms, o, h, l, c, v], ...]
+        # agar frontend chart tidak perlu perubahan
+        ohlcv = [
+            [
+                int(c['time']) * 1000,  # seconds → ms
+                c['open'],
+                c['high'],
+                c['low'],
+                c['close'],
+                c.get('volume', 0),
+            ]
+            for c in candles
+        ]
         return jsonify(ohlcv)
     except Exception as e:
-        print(f"Error fetching OHLCV: {e}")
+        logging.warning(f"Error fetching OHLCV for {pair}/{tf}: {e}")
         return jsonify([])
 
 @app.route('/api/trades/sync', methods=['POST'])
