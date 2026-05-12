@@ -54,9 +54,9 @@ def _get_pair_min_idr(bot, pair: str) -> float:
                 log_message(f"[trade_execution] Per-pair min IDR cache diperbarui: {len(_PAIR_MIN_IDR_CACHE)} pair")
             except Exception as e:
                 log_message(f"[trade_execution] fetch_pairs gagal, fallback ke MIN_TRADE_IDR global: {e}")
-    # Ambil nilai pair; jika 0 berarti tidak ada data spesifik, gunakan global
+    # Gunakan nilai exact dari exchange jika tersedia; fallback ke global hanya jika tidak ada data.
     pair_min = _PAIR_MIN_IDR_CACHE.get(pair.lower(), 0)
-    return max(MIN_TRADE_IDR, pair_min)
+    return float(pair_min) if pair_min > 0 else float(MIN_TRADE_IDR)
 
 
     """Validate live order book liquidity from exchange before entry.

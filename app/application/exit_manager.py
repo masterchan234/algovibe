@@ -88,7 +88,48 @@ class ExitManager:
         self._dust_recovery_last_ts: dict = {}
         # Menghindari race condition readoption saat koin baru saja dijual manual atau otomatis
         self._recently_exited_pairs: dict = {}  # {pair: timestamp}
+        # Per-pair minimum trade IDR cache (dari fetch_pairs() API). Refresh 1 jam sekali.
+        self._pair_min_idr_cache: dict = {}  # {pair: min_idr_float}
+        self._pair_min_last_fetch: float = 0.0
+        # Public adapter untuk data pasar (tidak butuh auth, pakai native REST)
+        self._public_adapter = None
         self._sync_jaring_from_db()
+
+    def _get_public_adapter(self):
+        """Lazy-init IndodaxAdapter tanpa auth untuk public REST API calls."""
+        if self._public_adapter is None:
+            try:
+                from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
+                self._public_adapter = IndodaxAdapter('', '')
+            except Exception as e:
+                log_message(f"[ExitManager] Gagal init public adapter: {e}")
+        return self._public_adapter
+
+    def _get_pair_min_idr(self, pair: str) -> float:
+        """Return minimum trade IDR untuk pair tertentu dari exchange API.
+
+        Di-cache 1 jam. Fallback ke MIN_TRADE_IDR global jika API gagal atau
+        nilai per-pair tidak ada (0). Selalu gunakan max(global, pair_specific)
+        agar tidak pernah di bawah konstanta keamanan global.
+        """
+        from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
+        now = time.time()
+        if now - self._pair_min_last_fetch > 3600:
+            adapter = self._get_public_adapter()
+            if adapter is not None:
+                try:
+                    pairs = adapter.fetch_pairs()
+                    self._pair_min_idr_cache = {
+                        str(p.get('id', '')).lower(): float(p.get('trade_min_base_currency', 0) or 0)
+                        for p in pairs
+                    }
+                    self._pair_min_last_fetch = now
+                    log_message(f"[ExitManager] Per-pair min IDR cache diperbarui: {len(self._pair_min_idr_cache)} pair")
+                except Exception as e:
+                    log_message(f"[ExitManager] fetch_pairs gagal, pakai MIN_TRADE_IDR global: {e}")
+        pair_min = self._pair_min_idr_cache.get(pair.lower(), 0)
+        # Gunakan nilai exact dari exchange jika tersedia; fallback ke global hanya jika tidak ada data.
+        return float(pair_min) if pair_min > 0 else float(_MIN_TRADE_IDR)
 
     def _parse_iso_date(self, val):
         """Safely parse ISO date string, fallback to now() if missing or invalid."""
@@ -3270,17 +3311,37 @@ class ExitManager:
         try:
             log_message("Reality Check: Reconciling positions with Indodax balance...")
             if self.dry_run: return # Dry run tidak punya saldo asli untuk di-cek
-            
-            from config import MIN_TRADE_IDR
 
             balance = self.exchange.fetch_balance()
             open_positions = db.get_open_positions()
-            
+
+            # Ambil harga current untuk klasifikasi DUST — gunakan mark-to-market,
+            # bukan harga beli (cost basis), agar posisi bisa keluar dari status DUST
+            # saat harga naik meskipun fee awal memotong coin.
+            _tickers_snap: dict = {}
+            try:
+                adapter = self._get_public_adapter()
+                if adapter is not None:
+                    _tickers_snap = adapter.fetch_ticker_all() or {}
+            except Exception as _te:
+                log_message(f"[reconcile] fetch_ticker_all fallback: {_te}")
+
+            def _current_value_idr(pair: str, amount: float) -> float:
+                """Return mark-to-market IDR value untuk pair menggunakan harga current."""
+                current_price = float((_tickers_snap.get(pair) or {}).get('last') or 0)
+                if current_price <= 0:
+                    # Fallback ke harga beli jika ticker tidak tersedia
+                    entry_price = float((open_positions.get(pair) or {}).get('entry_price') or 0)
+                    current_price = entry_price
+                return amount * current_price
+
             for pair, pos in open_positions.items():
                 coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(balance['total'].get(coin, 0))
-                position_idr_value = self._position_open_value_idr(pos, amount_on_exchange)
-                
+                position_idr_value = _current_value_idr(pair, amount_on_exchange)
+                # Threshold minimum per pair dari exchange (bukan hardcoded global)
+                pair_min_idr = self._get_pair_min_idr(pair)
+
                 # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
                 if pos.get('status') == "PENDING_BUY":
                     if amount_on_exchange >= (pos['amount_crypto'] * 0.9):
@@ -3293,35 +3354,9 @@ class ExitManager:
                         # Order belum tersentuh/fill, jadi wajar saldonya 0. Skip cek hallucination.
                         continue
 
-                # Dust kecil tetap tracked, tapi jangan diperlakukan sebagai posisi aktif normal.
-                # Basisnya adalah nilai posisi OPEN dalam IDR, bukan mark-to-market terbaru.
-                if 0 < position_idr_value < MIN_TRADE_IDR:
-                    if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
-                        pos['status'] = 'DUST'
-                        pos['amount_crypto'] = amount_on_exchange
-                        # amount_idr adalah cost basis asli pembelian — JANGAN dioverwrite.
-                        # Overwrite dengan mark-to-market (amount_on_exchange × entry_price)
-                        # menyebabkan posisi terperangkap DUST selamanya karena fee exchange
-                        # memotong sisi coin sehingga nilainya selalu < MIN_TRADE_IDR.
-                        db.upsert_position(pair, pos)
-                        log_message(
-                            f"🧹 Reality Sync: {pair} converted to DUST "
-                            f"({amount_on_exchange:.12f} {coin} | open value Rp {position_idr_value:,.0f} < min Rp {MIN_TRADE_IDR:,.0f})."
-                        )
-                    continue
-
-                if pos.get('status') == 'DUST' and position_idr_value >= MIN_TRADE_IDR and amount_on_exchange > 0:
-                    pos['status'] = 'OPEN'
-                    pos['amount_crypto'] = amount_on_exchange
-                    # amount_idr: jaga cost basis asli, jangan overwrite.
-                    db.upsert_position(pair, pos)
-                    log_message(
-                        f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "
-                        f"({amount_on_exchange:.12f} {coin} | open value Rp {position_idr_value:,.0f} >= min Rp {MIN_TRADE_IDR:,.0f})."
-                    )
-
-                # Jika status EXITING namun koin masih ada di wallet dan tidak ada open SELL order,
-                # berarti state exit nyangkut dan harus dikembalikan ke OPEN agar bisa dieksekusi ulang.
+                # EXITING: periksa apakah ada active sell order.
+                # Jika tidak ada dan coin masih di wallet → reset ke OPEN (exit nyangkut).
+                # Jika ada → skip, biarkan order settlement berjalan.
                 if pos.get('status') == "EXITING":
                     try:
                         symbol = f"{pair[:-3].upper()}/IDR"
@@ -3348,9 +3383,39 @@ class ExitManager:
                                 f"↩️ Reality Sync: {pair} EXITING without active SELL order "
                                 f"(wallet {amount_on_exchange:.8f} {coin}). Reverted to OPEN."
                             )
-                            continue
                     except Exception as _exit_sync_err:
                         log_message(f"⚠️ Reality Sync EXITING check failed for {pair}: {_exit_sync_err}")
+                    continue  # jangan lakukan DUST classification pada posisi EXITING
+
+                # Dust kecil tetap tracked, tapi jangan diperlakukan sebagai posisi aktif normal.
+                # Klasifikasi DUST menggunakan:
+                #   1. Harga CURRENT (mark-to-market), bukan harga beli, agar posisi yang
+                #      harganya naik bisa keluar dari status DUST secara otomatis.
+                #   2. Threshold minimum PER PAIR dari exchange API, bukan konstanta global —
+                #      setiap pair punya minimum order berbeda di Indodax.
+                # CATATAN: tidak ada guard "0 <" — posisi dengan value 0 (harga tidak ada di
+                # ticker, atau amount = 0) juga harus masuk DUST, bukan dibiarkan OPEN.
+                if position_idr_value < pair_min_idr:
+                    if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
+                        pos['status'] = 'DUST'
+                        pos['amount_crypto'] = amount_on_exchange
+                        # amount_idr adalah cost basis asli pembelian — JANGAN dioverwrite.
+                        db.upsert_position(pair, pos)
+                        log_message(
+                            f"🧹 Reality Sync: {pair} converted to DUST "
+                            f"({amount_on_exchange:.12f} {coin} | current value Rp {position_idr_value:,.0f} < exchange min Rp {pair_min_idr:,.0f})."
+                        )
+                    continue
+
+                if pos.get('status') == 'DUST' and position_idr_value > pair_min_idr and amount_on_exchange > 0:
+                    pos['status'] = 'OPEN'
+                    pos['amount_crypto'] = amount_on_exchange
+                    # amount_idr: jaga cost basis asli, jangan overwrite.
+                    db.upsert_position(pair, pos)
+                    log_message(
+                        f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "
+                        f"({amount_on_exchange:.12f} {coin} | current value Rp {position_idr_value:,.0f} > exchange min Rp {pair_min_idr:,.0f})."
+                    )
 
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:

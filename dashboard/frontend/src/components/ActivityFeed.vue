@@ -59,7 +59,7 @@
             
             <div class="col-size">
               <div class="val-idr">{{ formatIdr(pos.amount_idr) }}</div>
-              <div class="val-coin">{{ (pos.amount_coin || 0).toFixed(2) }} units</div>
+              <div class="val-coin">{{ formatCoin(pos.amount_crypto ?? pos.amount_coin) }} units</div>
             </div>
 
             <div class="col-price-progress">
@@ -467,6 +467,16 @@ function calculatePosition(pos) {
 
 function formatNumber(val) {
   return Number(val || 0).toLocaleString('id-ID')
+}
+
+function formatCoin(val) {
+  const n = Number(val) || 0
+  if (n === 0) return '0'
+  if (n < 0.001) return n.toFixed(8)
+  if (n < 0.1) return n.toFixed(6)
+  if (n < 1) return n.toFixed(4)
+  if (n < 1000) return n.toFixed(2)
+  return n.toLocaleString('id-ID', { maximumFractionDigits: 2 })
 }
 
 function formatIdr(val) {
