@@ -1509,102 +1509,19 @@ def get_positions_summary():
 @login_required
 def sync_wallet():
     """
-    Sinkronisasi posisi di DB dengan saldo wallet Indodax secara real-time.
-    Mengadopsi koin yang ada di wallet tapi belum ada di DB (orphan adoption).
-    Menghapus posisi ghost di DB jika koin sudah tidak ada di wallet (dust < 1e-8).
+    Queue manual wallet reconcile request.
+    Reconcile dieksekusi oleh service khusus exchange-reconcile agar sinkron
+    dengan engine bot (single source of truth).
     """
     import config as cfg
     if cfg.DRY_RUN:
         return jsonify({"success": False, "message": "Wallet sync hanya tersedia di mode LIVE."}), 400
 
     try:
-        user = db.get_user('admin')
-        api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
-        api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
-
-        if not api_key or not api_secret:
-            return jsonify({"success": False, "message": "API key tidak tersedia."}), 400
-
-        import ccxt as _ccxt
-        ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
-        balance = ex.fetch_balance()
-        total_bal = balance.get('total', {})
-
-        conn = get_db_connection()
-        try:
-            current_positions = {row['pair']: dict(row) for row in conn.execute("SELECT * FROM positions").fetchall()}
-            blacklist = set(r['pair'] for r in conn.execute("SELECT pair FROM blacklist").fetchall())
-        finally:
-            conn.close()
-
-        adopted = []
-        removed = []
-        ws_tickers = mws.get_tickers()
-
-        # 1. Ghost removal: posisi di DB tapi koin tidak ada di wallet
-        for pair, pos in list(current_positions.items()):
-            if int(pos.get('dry_run') or 0) != 0:
-                continue
-            coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
-            amount_on_exchange = float(total_bal.get(coin, 0) or 0)
-            if amount_on_exchange < 1e-8:
-                db.delete_position(pair)
-                current_positions.pop(pair, None)
-                removed.append(pair)
-                logging.info(f"[WalletSync] Ghost removed: {pair}")
-
-        # 2. Orphan adoption: koin di wallet tapi belum ada di DB sebagai LIVE posisi
-        from config import TP_PCT, SL_PCT
-        for coin, amount in total_bal.items():
-            if coin in ('IDR', 'info') or not amount or float(amount) <= 0:
-                continue
-            pair = f"{coin.lower()}idr"
-            if pair in blacklist:
-                continue
-            live_pos = current_positions.get(pair)
-            if live_pos and int(live_pos.get('dry_run') or 0) == 0:
-                continue  # Sudah ada posisi LIVE untuk koin ini
-
-            # Coba ambil harga dari WS dulu, fallback REST
-            price = float(ws_tickers.get(pair, {}).get('last', 0))
-            if price <= 0:
-                try:
-                    symbol = f"{coin}/IDR"
-                    ticker = ex.fetch_ticker(symbol)
-                    price = float(ticker.get('last', 0))
-                except Exception:
-                    pass
-
-            amount = float(amount)
-            value_idr = amount * price
-
-            if value_idr < 1000:  # Abaikan dust (< Rp 1.000)
-                continue
-
-            adopt_data = {
-                "entry_price": price,
-                "amount": amount,
-                "amount_crypto": amount,
-                "amount_idr": value_idr,
-                "timestamp": datetime.datetime.now().isoformat(),
-                "dry_run": False,
-                "status": "OPEN",
-                "entry_order_id": f"WALLET-SYNC-{int(time.time())}",
-                "exit_order_id": None,
-                "target_tp_pct": TP_PCT,
-                "target_sl_pct": SL_PCT,
-                "reason_backup": "WALLET_SYNC"
-            }
-            db.upsert_position(pair, adopt_data)
-            current_positions[pair] = adopt_data
-            adopted.append({"pair": pair, "amount": amount, "value_idr": round(value_idr, 0)})
-            logging.info(f"[WalletSync] Adopted orphan: {pair} ({amount} @ Rp {price:,.0f})")
-
+        db.save_state("trigger_wallet_reconcile", "1")
         return jsonify({
             "success": True,
-            "adopted": adopted,
-            "removed": removed,
-            "message": f"Sync selesai. Diadopsi: {len(adopted)} koin, dihapus: {len(removed)} posisi ghost."
+            "message": "Permintaan wallet sync dikirim. Exchange-reconcile service akan memproses sinkronisasi."
         })
     except Exception as e:
         logging.error(f"[WalletSync] Error: {e}")
@@ -4363,7 +4280,12 @@ def _background_wallet_sync_loop():
 
         socketio.sleep(300)  # 5 menit
 
-socketio.start_background_task(_background_wallet_sync_loop)
+_enable_dashboard_wallet_sync = os.getenv("ENABLE_DASHBOARD_WALLET_SYNC", "false").lower() in ("1", "true", "yes")
+if _enable_dashboard_wallet_sync:
+    socketio.start_background_task(_background_wallet_sync_loop)
+    logging.warning("⚠️ ENABLE_DASHBOARD_WALLET_SYNC=true: dashboard wallet sync loop aktif (legacy mode).")
+else:
+    logging.info("[WalletSync] Dashboard background wallet sync dinonaktifkan; gunakan service exchange-reconcile.")
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=8080, debug=False)

@@ -320,7 +320,20 @@ SECTOR_MAP = {
     # RWA & DEFI
     "ondoidr": "RWA", "linkidr": "DEFI", "uniidr": "DEFI", "aaveidr": "DEFI", "mkrp_idr": "RWA", "chzidr": "RWA",
     # STORAGE & INFRA
-    "filidr": "STORAGE", "aridr": "STORAGE", "storjidr": "STORAGE", "ldoidr": "DEFI"
+    "filidr": "STORAGE", "aridr": "STORAGE", "storjidr": "STORAGE", "ldoidr": "DEFI",
+    # L1 (additional)
+    "trxidr": "L1", "ltcidr": "L1", "xlmidr": "L1", "algoidr": "L1", "atomidr": "L1",
+    "suiidr": "L1", "aptidr": "L1", "icpidr": "L1", "minaidr": "L1", "vetidr": "L1",
+    "thetaidr": "L1", "xmridr": "L1", "etcidr": "L1", "ksmidr": "L1",
+    # L2 (additional)
+    "imxidr": "L2", "loopidr": "L2",
+    # AI (additional)
+    "taoidr": "AI", "pendidr": "AI", "akashidr": "AI", "nfpidr": "AI",
+    # MEME (additional) — termasuk gaming tokens (volatilitas sentiment-driven)
+    "wifidr": "MEME", "axsidr": "MEME", "manaidr": "MEME", "sandidr": "MEME",
+    "galaidr": "MEME", "enjidr": "MEME",
+    # DEFI (additional)
+    "cakeidr": "DEFI", "sushiidr": "DEFI", "compidr": "DEFI", "curvedaoidr": "DEFI",
 }
 
 # Set ke True untuk keamanan (Safety First). 

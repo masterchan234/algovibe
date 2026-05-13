@@ -120,6 +120,9 @@ class BrainInferenceService:
         
         # Load blacklist
         self.blacklist = set(db.get_blacklist())
+        # Cache per-pair untuk compute_adaptive_thresholds (TTL 5 menit).
+        # Menghindari O(n²) recalculation tiap tick untuk 200+ pair.
+        self._adaptive_cache: dict = {}  # {pair: (timestamp, thresholds|None)}
 
     async def start(self) -> None:
         self._running = True
@@ -172,6 +175,15 @@ class BrainInferenceService:
                 if symbol not in self._history:
                     self._history[symbol] = deque(maxlen=self._history_maxlen)
                 self._history[symbol].append(price)
+
+                # Sinkronisasi OHLC H/L cache agar panjang == hist (proxy ATR).
+                # Volume TIDAK diisi dari WS tick karena nilai per-candle tidak tersedia;
+                # mengisi dengan 0.0 akan mendilusi data volume asli dari backfill OHLC API.
+                # Volume deque hanya diisi oleh _backfill_historical_data().
+                if symbol in self._ohlc_highs:
+                    self._ohlc_highs[symbol].append(float(tick.high_24h) if tick.high_24h else price)
+                if symbol in self._ohlc_lows:
+                    self._ohlc_lows[symbol].append(float(tick.low_24h) if tick.low_24h else price)
 
                 # Derive change_24h dari rolling price history WS.
                 # Gunakan nilai dari summaries API jika history WS masih pendek (<60 candle),
@@ -544,7 +556,16 @@ class BrainInferenceService:
                 _vols_bi = list(self._ohlc_vols.get(pair, []))
                 tech = get_technical_summary(hist, _vols_bi if len(_vols_bi) == len(hist) else None)
                 _sector_bi = config.SECTOR_MAP.get(pair)
-                _adaptive_bi = compute_adaptive_thresholds(hist) if len(hist) >= 30 else None
+                _now_at = time.time()
+                _at_cached = self._adaptive_cache.get(pair)
+                if _at_cached and (_now_at - _at_cached[0]) < 300:  # 5-menit TTL
+                    _adaptive_bi = _at_cached[1]
+                else:
+                    _adaptive_bi = compute_adaptive_thresholds(hist) if len(hist) >= 30 else None
+                    # Hanya cache jika compute berhasil menghasilkan nilai;
+                    # jika None (history pendek), biarkan tanpa cache agar dicoba lagi tiap siklus.
+                    if _adaptive_bi is not None:
+                        self._adaptive_cache[pair] = (_now_at, _adaptive_bi)
                 _vol_idr_bi = (self._tickers.get(pair) or {}).get('vol_idr')
                 signal_info = derive_trade_signal(tech, sector=_sector_bi, adaptive_thresholds=_adaptive_bi, vol_idr_24h=_vol_idr_bi)
 

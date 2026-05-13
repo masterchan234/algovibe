@@ -227,6 +227,49 @@ services:
       - default
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # [Microservice] exchange-reconcile — Exchange → DB state reconciler
+  # Periodically runs ExitManager.reconcile_with_exchange() to keep bot/live
+  # dashboard state aligned with wallet + open-order reality on exchange.
+  # ─────────────────────────────────────────────────────────────────────────────
+  exchange-reconcile:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-exchange-reconcile
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      executive-core:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - RECONCILE_INTERVAL_SEC=${RECONCILE_INTERVAL_SEC:-10}
+      - RECONCILE_STARTUP_DELAY_SEC=${RECONCILE_STARTUP_DELAY_SEC:-20}
+    volumes:
+      - algovibe_data:/app/data
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    shm_size: 256mb
+    command: ["python", "-m", "services.exchange_reconcile.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # [Microservice 4] litert-lm-decision — Grounded LLM Exit Signals
   # Reads open-position context (technical + orderbook + fee + PnL),
   # then publishes SELL signals for ExitManager execution.
@@ -330,6 +373,8 @@ services:
       timescaledb:
         condition: service_healthy
       executive-core:
+        condition: service_started
+      exchange-reconcile:
         condition: service_started
     env_file:
       - .env

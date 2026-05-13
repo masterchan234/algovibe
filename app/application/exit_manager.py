@@ -3260,6 +3260,10 @@ class ExitManager:
             if self.dry_run: return # Dry run tidak punya saldo asli untuk di-cek
 
             balance = self.exchange.fetch_balance()
+            try:
+                db.save_balances(balance)
+            except Exception as _bal_err:
+                log_message(f"[reconcile] save_balances skipped: {_bal_err}")
             open_positions = db.get_open_positions()
 
             # Ambil harga current untuk klasifikasi DUST — gunakan mark-to-market,
@@ -3503,11 +3507,14 @@ class ExitManager:
                         current_price = float(ticker_rest['last'])
                             
                         value_idr = coin_amount * current_price
-                        
-                        # Adopsi hanya jika nilainya di atas Rp 10.000 (mengabaikan dust)
-                        if value_idr >= 10000:
-                            log_message(f"👼 Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting into Dashboard!")
-                            
+                        pair_min_idr_adopt = self._get_pair_min_idr(pair)
+
+                        # Adopsi semua aset yang punya nilai > 0, termasuk dust
+                        if value_idr > 0 or coin_amount > 0:
+                            is_dust = value_idr < pair_min_idr_adopt
+                            adopt_status = "DUST" if is_dust else "OPEN"
+                            log_message(f"👼 Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting as {adopt_status}!")
+
                             adopt_data = {
                                 "entry_price": current_price,
                                 "amount":      coin_amount,
@@ -3515,7 +3522,7 @@ class ExitManager:
                                 "amount_idr":  value_idr,
                                 "timestamp":   datetime.now().isoformat(),
                                 "dry_run":     False,
-                                "status":      "OPEN",
+                                "status":      adopt_status,
                                 "entry_order_id": f"ADOPT-{int(time.time())}",
                                 "exit_order_id": None,
                                 "target_tp_pct": TP_PCT,
@@ -3523,7 +3530,8 @@ class ExitManager:
                                 "reason_backup": "ORPHAN_ADOPTION"
                             }
                             db.upsert_position(pair, adopt_data)
-                            send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
+                            if not is_dust:
+                                send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
                     except Exception as e:
                         log_message(f"Failed to adopt orphan {pair}: {e}")
             
