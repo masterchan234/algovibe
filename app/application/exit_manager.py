@@ -26,7 +26,6 @@ from config import (
     NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
     TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT,
-    MICRO_PROFIT_ENABLED, MICRO_PROFIT_MAX_SIZE_IDR,
     DUST_RECOVERY_ENABLED, DUST_RECOVERY_MIN_CONFIDENCE, DUST_RECOVERY_COOLDOWN_SEC,
     DUST_RECOVERY_MIN_VOL_IDR, DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE,
     DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE,
@@ -2109,58 +2108,6 @@ class ExitManager:
                     is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
                     is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
-                    # [MICRO-PROFIT AUTO-EXIT] Small positions that are already profitable: exit immediately
-                    # Allows quick harvesting of small wins without waiting for tier thresholds
-                    # Gunakan BID price (buy) untuk evaluasi — market sell fill di sisi bid, bukan 'last' trade.
-                    # Ini mencegah false-positive saat 'last' spike di atas entry tapi bid masih di bawah.
-                    _micro_ticker = current_tickers.get(pair) or {}
-                    _bid_price = float(_micro_ticker.get('buy') or 0)
-                    micro_eval_price = _bid_price if _bid_price > 0 else current_price
-                    micro_profit_guard = self._check_tp_market_sell_guard(
-                        pair,
-                        amount,
-                        entry_price,
-                        amount_idr_pos,
-                        market_price=micro_eval_price,
-                    )
-                    if MICRO_PROFIT_ENABLED and amount_idr_pos <= MICRO_PROFIT_MAX_SIZE_IDR:
-                        # Extra safety for micro exits: cushion berbasis CURRENT sell value (bid-based).
-                        # Minimal 3% dari nilai jual atau 300 IDR — cukup menyerap spread + slippage fill.
-                        sell_value_micro = float(amount or 0) * float(micro_eval_price or 0)
-                        min_cushion_micro = max(300.0, sell_value_micro * 0.03)
-                        # net_pnl_micro dihitung ulang dari bid price agar konsisten dengan fill asli
-                        fee_buy_micro = amount_idr_pos * FEE_BUY_TAKER
-                        fee_sell_micro = sell_value_micro * FEE_SELL_TAKER
-                        net_pnl_micro = (micro_eval_price - entry_price) * float(amount or 0) - (fee_buy_micro + fee_sell_micro)
-                        micro_required_profit_idr = max(
-                            float(micro_profit_guard.get('required_profit_idr') or 0.0),
-                            min_cushion_micro,
-                        )
-                        if (
-                            (not micro_profit_guard.get('ok'))
-                            or net_pnl_micro <= 0
-                            or net_pnl_micro < micro_required_profit_idr
-                        ):
-                            log_message(
-                                f"⏭️ [MICRO-PROFIT SKIP] {pair}: net profit belum tercapai "
-                                f"(est_bid={net_pnl_micro:,.0f} IDR, min={micro_required_profit_idr:,.0f}, "
-                                f"bid={micro_eval_price}, guard={micro_profit_guard.get('reason')})."
-                            )
-                            continue
-                        reason_tp = "MICRO_PROFIT_EXIT"
-                        log_message(
-                            f"🚀 [MICRO-PROFIT EXIT] {pair}: Position size Rp {amount_idr_pos:,.0f} "
-                            f"<= Rp {MICRO_PROFIT_MAX_SIZE_IDR:,.0f} with net profit {net_pnl_micro:,.0f} IDR "
-                            f"(min {micro_required_profit_idr:,.0f}, bid={micro_eval_price}), exiting immediately!"
-                        )
-                        order_id = self.execute_exit(pair, amount, micro_eval_price, reason_tp,
-                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
-                        if order_id:
-                            log_message(f"✅ [MICRO-PROFIT ORDER PLACED] {pair}: Order {order_id}")
-                            mark_exit_requested(pair, order_id)
-                        else:
-                            log_message(f"⚠️ [MICRO-PROFIT ORDER FAILED] {pair}: execute_exit returned None")
-                        continue
                     # Logika Tier 3: FORCE EXIT (Profit sangat bagus, amankan)
                     if is_tier3_high_profit:
                         reason_tp = "FORCE_PROFIT_HIGH_TIER"
@@ -2251,14 +2198,18 @@ class ExitManager:
                 # remaining position continues to hard SL / manual exit below.
 
                 # 2. Take Profit (Hard TP)
-                # DEBUG: Log TP status for all open positions (helps diagnose missing exits)
+                # Evaluasi menggunakan BID price — market sell fill di sisi bid, bukan 'last' trade.
+                # Mencegah false-positive saat 'last' spike di atas entry tapi bid masih di bawah.
+                _tp_ticker = current_tickers.get(pair) or {}
+                _tp_bid = float(_tp_ticker.get('buy') or 0)
+                tp_eval_price = _tp_bid if _tp_bid > 0 else current_price
                 log_message(
-                    f"📊 [{pair}] TP-Status: current_price={current_price:.0f} vs tp_price={tp_price:.0f} | "
+                    f"📊 [{pair}] TP-Status: tp_eval_price={tp_eval_price:.0f} (bid) vs tp_price={tp_price:.0f} | "
                     f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
                 )
-                
-                if current_price >= tp_price:
-                    order_id = self.execute_exit(pair, amount, current_price, "TAKE_PROFIT",
+
+                if tp_eval_price >= tp_price:
+                    order_id = self.execute_exit(pair, amount, tp_eval_price, "TAKE_PROFIT",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         msg = (
@@ -2491,27 +2442,23 @@ class ExitManager:
             # Semua exit dipaksa market sell (taker) sesuai kebijakan eksekusi cepat.
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
-            is_tp_exit = reason in ("RAPID_TP_SECURE", "RAPID_TP_MOMENTUM", "STAGNANT_EXIT", "TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT", "STAGNANT_PROFIT_EXIT", "MICRO_PROFIT_EXIT")
+            is_tp_exit = reason in ("TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT")
             symbol = f"{pair[:-3].upper()}/IDR"
 
             if is_tp_exit and not self.dry_run:
                 amount_idr_effective = float(amount_idr or 0)
                 if amount_idr_effective <= 0 and position_data:
                     amount_idr_effective = float(position_data.get('amount_idr', 0) or 0)
-                # MICRO_PROFIT_EXIT bypasses TP guard entirely (small profitable positions)
-                if reason != "MICRO_PROFIT_EXIT":
-                    tp_guard = self._check_tp_market_sell_guard(
-                        pair,
-                        amount,
-                        entry_price,
-                        amount_idr_effective,
-                        market_price=price,
-                    )
-                else:
-                    tp_guard = {'ok': True, 'reason': 'micro_profit_bypass'}
+                tp_guard = self._check_tp_market_sell_guard(
+                    pair,
+                    amount,
+                    entry_price,
+                    amount_idr_effective,
+                    market_price=price,
+                )
                 if not tp_guard.get('ok'):
                     guard_reason = str(tp_guard.get('reason') or '')
-                    if reason in ("FORCE_PROFIT_HIGH_TIER", "MICRO_PROFIT_EXIT") and guard_reason == 'below_profit_floor':
+                    if reason == "FORCE_PROFIT_HIGH_TIER" and guard_reason == 'below_profit_floor':
                         log_message(
                             f"⚠️ [GOD-MODE OVERRIDE] {pair}: bypass TP guard ({guard_reason}) untuk eksekusi cepat."
                         )

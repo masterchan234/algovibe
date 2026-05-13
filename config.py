@@ -72,11 +72,6 @@ TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
 TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.01))  # 1% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 10% for faster exits on profitable positions)
 TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 20%)
 
-# MICRO-PROFIT AUTO-EXIT: Exit immediately if position is small AND already profitable net
-# Allows quick harvesting of small wins without waiting for tier thresholds
-MICRO_PROFIT_MAX_SIZE_IDR = 15000  # Positions under 15k IDR
-MICRO_PROFIT_ENABLED = True        # Can disable if too aggressive
-
 # DUST Recovery Policy (quantitative controls)
 # Dust positions are only topped-up when signal quality is high and
 # runtime budget/cooldown constraints are satisfied.
