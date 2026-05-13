@@ -160,7 +160,7 @@
     <div class="radar-section">
       <div class="section-label radar-header-row">
         <span>Signal Radar</span>
-        <span class="radar-total">{{ radarDisplayPairs.length }}/{{ sortedRadarPairs.length }} Coins</span>
+        <span class="radar-total">{{ radarDisplayPairs.held.length + radarDisplayPairs.others.length }}/{{ sortedRadarPairs.length }} Coins</span>
       </div>
 
       <!-- BTC Condition Bar -->
@@ -195,6 +195,15 @@
           <button class="radar-filter-btn" :class="{ active: radarFilter === 'blocked' }" @click="radarFilter = 'blocked'">Blocked {{ radarCounts.blocked }}</button>
           <button class="radar-filter-btn" :class="{ active: radarFilter === 'veto' }" @click="radarFilter = 'veto'">AI Veto {{ radarCounts.veto }}</button>
         </div>
+        <div class="radar-search-wrap">
+          <input
+            v-model="radarSearch"
+            class="radar-search"
+            type="text"
+            placeholder="🔍 Cari coin…"
+            spellcheck="false"
+          />
+        </div>
         <div class="radar-audit-mini" title="Histori 24 jam, bukan status live saat ini">
           <span class="audit-label">Audit 24h</span>
           <span>BUY {{ radarAudit.buy_signals_24h || 0 }}</span>
@@ -203,21 +212,66 @@
         </div>
       </div>
       <div class="radar-scroll-wrap">
-        <div class="radar-list">
-          <div
-            v-for="pair in radarDisplayPairs"
-            :key="pair.pair"
-            class="radar-item"
-            :class="{ 'active-radar': radarDetailPair?.pair === pair.pair }"
-            :style="heatmapStyle(pair)"
-            :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '')"
-            @click="onRadarClick(pair)"
-          >
-            <span class="ri-name">
-              {{ formatPair(pair.pair) }}
-              <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
-              <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
-            </span>
+        <!-- Held coins group -->
+        <template v-if="radarDisplayPairs.held.length">
+          <div class="radar-group-label">📦 Dipegang ({{ radarDisplayPairs.held.length }})</div>
+          <div class="radar-list">
+            <div
+              v-for="pair in radarDisplayPairs.held"
+              :key="pair.pair"
+              class="radar-item radar-held"
+              :class="{ 'active-radar': chartModalPair === pair.pair }"
+              :style="heatmapStyle(pair)"
+              :title="formatPair(pair.pair) + ' [DIPEGANG] · klik = chart, kanan = detail'"
+              @click="onRadarClick(pair)"
+              @contextmenu="onRadarRightClick($event, pair)"
+            >
+              <span class="ri-name">
+                {{ formatPair(pair.pair) }}
+                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
+                <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
+              </span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Other coins group -->
+        <template v-if="radarDisplayPairs.others.length">
+          <div v-if="radarDisplayPairs.held.length" class="radar-group-label">📡 Radar ({{ radarDisplayPairs.others.length }})</div>
+          <div class="radar-list">
+            <div
+              v-for="pair in radarDisplayPairs.others"
+              :key="pair.pair"
+              class="radar-item"
+              :class="{ 'active-radar': chartModalPair === pair.pair }"
+              :style="heatmapStyle(pair)"
+              :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '') + ' · klik = chart, kanan = detail'"
+              @click="onRadarClick(pair)"
+              @contextmenu="onRadarRightClick($event, pair)"
+            >
+              <span class="ri-name">
+                {{ formatPair(pair.pair) }}
+                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
+                <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
+              </span>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="radarSearch && !radarDisplayPairs.held.length && !radarDisplayPairs.others.length" class="radar-empty">
+          Tidak ada coin yang cocok dengan "{{ radarSearch }}"
+        </div>
+      </div>
+
+      <!-- Chart Modal -->
+      <div v-if="showChartModal" class="chart-modal-overlay" @click.self="showChartModal = false">
+        <div class="chart-modal">
+          <div class="chart-modal-header">
+            <span class="chart-modal-title">{{ (chartModalPair || '').replace('idr','').toUpperCase() }} / IDR</span>
+            <button class="chart-modal-close" @click="showChartModal = false">✕</button>
+          </div>
+          <div class="chart-modal-body">
+            <ChartPanel :forcePair="chartModalPair" />
           </div>
         </div>
       </div>
@@ -247,6 +301,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
 import AiAnalysisModal from './AiAnalysisModal.vue'
 import RadarDetailModal from './RadarDetailModal.vue'
+import ChartPanel from './ChartPanel.vue'
 
 let echarts = null
 let chartInitialized = false
@@ -275,6 +330,9 @@ const { getAuthHeaders } = useAuth()
 const stats = computed(() => store.stats)
 const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
 const radarFilter = ref('all')
+const radarSearch = ref('')
+const showChartModal = ref(false)
+const chartModalPair = ref('')
 const radarAudit = ref({
   buy_signals_24h: 0,
   buy_blocked_total_24h: 0,
@@ -362,6 +420,18 @@ const radarDetailPair = ref(null)
 
 function onRadarClick(pairObj) {
   // Enrich data if coming from heatmap (which only has {pair: '...'})
+  let fullData = pairObj
+  if (store.radarPairs && store.radarPairs.length > 0) {
+    const match = store.radarPairs.find(p => p.pair === pairObj.pair)
+    if (match) fullData = { ...match, ...pairObj }
+  }
+  // Jika klik kanan (Ctrl+click) → buka AI detail; klik biasa → chart
+  chartModalPair.value = fullData.pair
+  showChartModal.value = true
+}
+
+function onRadarRightClick(e, pairObj) {
+  e.preventDefault()
   let fullData = pairObj
   if (store.radarPairs && store.radarPairs.length > 0) {
     const match = store.radarPairs.find(p => p.pair === pairObj.pair)
@@ -589,13 +659,21 @@ function signalClass(pair) {
 
 const radarDisplayPairs = computed(() => {
   const filter = radarFilter.value
-  const filtered = sortedRadarPairs.value.filter((pair) => {
+  const search = radarSearch.value.trim().toLowerCase()
+  const heldPairSet = new Set((store.positions || []).map(p => (p.pair || '').toLowerCase()))
+  let filtered = sortedRadarPairs.value.filter((pair) => {
     if (filter === 'tradable') return pair?.tradable !== false
     if (filter === 'blocked') return pair?.tradable === false
     if (filter === 'veto') return !!pair?.ai_veto
     return true
   })
-  return filtered
+  if (search) {
+    filtered = filtered.filter(p => (p.pair || '').toLowerCase().includes(search))
+  }
+  // Pisahkan held vs others
+  const held = filtered.filter(p => heldPairSet.has((p.pair || '').toLowerCase()))
+  const others = filtered.filter(p => !heldPairSet.has((p.pair || '').toLowerCase()))
+  return { held, others }
 })
 
 const sortedRadarPairs = computed(() => {
@@ -1753,6 +1831,78 @@ onUnmounted(() => {
   flex-shrink: 0;
   line-height: 1;
 }
+
+/* Search box */
+.radar-search-wrap { padding: 4px 10px 2px; }
+.radar-search {
+  width: 100%;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
+  box-sizing: border-box;
+}
+.radar-search::placeholder { color: #6e7681; }
+.radar-search:focus { border-color: #58a6ff; }
+
+/* Held / Radar group labels */
+.radar-group-label {
+  padding: 4px 10px 2px;
+  font-size: 9px;
+  font-weight: 800;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.radar-held { outline: 1px solid rgba(88,166,255,0.4); }
+
+.radar-empty { padding: 12px 10px; font-size: 11px; color: #6e7681; text-align: center; }
+
+/* Chart Modal */
+.chart-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chart-modal {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  width: min(92vw, 860px);
+  height: min(88vh, 620px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+.chart-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
+}
+.chart-modal-title { font-size: 14px; font-weight: 800; color: #e6edf3; }
+.chart-modal-close {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.chart-modal-close:hover { background: #21262d; color: #e6edf3; }
+.chart-modal-body { flex: 1; min-height: 0; overflow: hidden; }
+
 .radar-trend { font-size: 7.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; }
 .trend-up   { color: #3fb950; }
 .trend-down { color: #f85149; }

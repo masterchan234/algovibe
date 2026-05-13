@@ -96,7 +96,7 @@ const mobileTab = ref('activity')
 const wsStaleMs = 7000
 
 // Resizer for panel width control
-const leftPanelWidth = ref(400)
+const leftPanelWidth = ref(440)
 const isResizing = ref(false)
 
 function startResize(e) {

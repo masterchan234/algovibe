@@ -1505,12 +1505,45 @@ def get_positions_summary():
     finally:
         conn.close()
 
+@app.route('/api/chart/<pair>')
+@login_required
+def get_chart_data(pair):
+    """Fetch OHLC candles + technical indicators untuk pair yang dipegang."""
+    tf = request.args.get('tf', '15')
+    limit = min(int(request.args.get('limit', 100)), 300)
+    try:
+        adapter = IndodaxAdapter('', '')
+        candles = adapter.fetch_ohlc(pair, tf=tf, limit=limit)
+        if not candles:
+            return jsonify({"success": False, "message": "Tidak ada data OHLC"}), 404
+
+        closes  = [c['close']  for c in candles]
+        highs   = [c['high']   for c in candles]
+        lows    = [c['low']    for c in candles]
+        volumes = [c['volume'] for c in candles]
+
+        indicators = {}
+        try:
+            indicators = get_technical_summary(closes, volumes)
+        except Exception as _ti_err:
+            logging.warning(f"[chart] technical summary failed for {pair}: {_ti_err}")
+
+        return jsonify({
+            "success": True,
+            "pair": pair,
+            "tf": tf,
+            "candles": candles,
+            "indicators": indicators,
+        })
+    except Exception as e:
+        logging.error(f"[chart] Error for {pair}: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @app.route('/api/wallet/sync', methods=['POST'])
 @login_required
 def sync_wallet():
-    """
-    Queue manual wallet reconcile request.
-    Reconcile dieksekusi oleh service khusus exchange-reconcile agar sinkron
+    """Reconcile dieksekusi oleh service khusus exchange-reconcile agar sinkron
     dengan engine bot (single source of truth).
     """
     import config as cfg
