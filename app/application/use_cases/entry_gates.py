@@ -29,7 +29,7 @@ from app.infrastructure.database import db
 from app.domain.technicals import (
     calculate_rsi, derive_trade_signal, get_technical_summary,
     calculate_macd, calculate_bollinger_bands, calculate_stochastic_rsi, calculate_ema,
-    calculate_atr,
+    calculate_atr, compute_adaptive_thresholds,
     _MACD_NORM_FACTOR,
 )
 from utils.logger import log_message
@@ -166,7 +166,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         total_depth = total_bid + total_ask
         if total_depth > 0:
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-    tech_sig = derive_trade_signal(tech)
+    _sector_eg = config.SECTOR_MAP.get(pair.lower())
+    _adaptive_eg = compute_adaptive_thresholds(history) if len(history) >= 30 else None
+    _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
+    tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg)
 
     # Block jika sinyal SELL dengan skor cukup (multi-confluence, bukan hanya RSI).
     # Threshold diturunkan dari 8.0 → 5.0: skor 5/16.5 sudah cukup membuktikan tekanan jual.

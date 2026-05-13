@@ -301,6 +301,12 @@ WHALE_THRESHOLD_IDR = 300_000_000 # Minimal Rp 300 Juta untuk disebut "Paus"
 JARING_ALLOCATION_PCT = 0.05      # Sisihkan 5% modal untuk jaring (flash crash)
 JARING_DEPTH_PCT = -0.07          # Pasang jaring 7% di bawah harga pasar
 
+# --- Adaptive Indicator Settings ---
+# Volume reliability guard: coin dengan vol 24h < threshold akan mendapatkan
+# bobot OBV Slope dan Volume Ratio yang diturunkan (×0.3) di derive_trade_signal().
+# Karena data volume tipis = sinyal OBV/VolumeRatio noise tinggi.
+VOLUME_RELIABILITY_THRESHOLD = int(os.getenv("VOLUME_RELIABILITY_THRESHOLD", 200_000_000))  # 200M IDR
+
 # --- Sector Mapping (Indodax Pro) ---
 SECTOR_MAP = {
     # MEME

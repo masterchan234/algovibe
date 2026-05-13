@@ -40,7 +40,7 @@ from shared.algovibe_pb2 import Tick, Signal, SignalAction, SignalSource  # type
 from app.application.oracle import Oracle
 from app.infrastructure.database import db
 from app.domain.scoring import calculate_score
-from app.domain.technicals import get_technical_summary, derive_trade_signal
+from app.domain.technicals import get_technical_summary, derive_trade_signal, compute_adaptive_thresholds
 from app.application.use_cases.candidate_enrichment import enrich_pair
 from app.application.use_cases.entry_gates import check_entry_gates
 import config
@@ -541,8 +541,12 @@ class BrainInferenceService:
                 continue
 
             try:
-                tech = get_technical_summary(hist)
-                signal_info = derive_trade_signal(tech)
+                _vols_bi = list(self._ohlc_vols.get(pair, []))
+                tech = get_technical_summary(hist, _vols_bi if len(_vols_bi) == len(hist) else None)
+                _sector_bi = config.SECTOR_MAP.get(pair)
+                _adaptive_bi = compute_adaptive_thresholds(hist) if len(hist) >= 30 else None
+                _vol_idr_bi = (self._tickers.get(pair) or {}).get('vol_idr')
+                signal_info = derive_trade_signal(tech, sector=_sector_bi, adaptive_thresholds=_adaptive_bi, vol_idr_24h=_vol_idr_bi)
 
                 # Hitung trend dari history (avg_20 vs avg_50)
                 avg_20 = sum(hist[-20:]) / 20 if len(hist) >= 20 else hist[-1]

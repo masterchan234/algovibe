@@ -470,7 +470,7 @@ def get_technical_summary(prices, volumes=None):
     }
 
 
-def derive_trade_signal(tech):
+def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h=None):
     """
     Multi-Confluence Technical Signal Engine (v2.0)
     ────────────────────────────────────────────────
@@ -481,6 +481,15 @@ def derive_trade_signal(tech):
     - Setiap indikator berkontribusi skor +/- ke pool BUY atau SELL.
     - Keputusan akhir diambil hanya jika ambang minimum terpenuhi.
     - Confidence = fungsi dari kekuatan sinyal dan jumlah indikator yang agree.
+
+    Args:
+        tech               : dict hasil get_technical_summary()
+        sector             : str | None — sektor coin dari SECTOR_MAP ('MEME','AI','L1','L2','DEFI',dst)
+                             None = gunakan weight default (backward compatible)
+        adaptive_thresholds: dict | None — {'rsi_oversold': float, 'rsi_overbought': float}
+                             dari compute_adaptive_thresholds(). None = pakai threshold tetap.
+        vol_idr_24h        : float | None — volume 24h IDR coin. Digunakan untuk volume
+                             reliability guard: jika < threshold, bobot OBV/VolumeRatio diturunkan.
 
     Indikator & Bobot:
     1. RSI (w=3.0)            — momentum overbought/oversold klasik
@@ -502,6 +511,63 @@ def derive_trade_signal(tech):
     Syarat SELL: sell_score >= 6.0 DAN buy_score < 4.0
     Else       : HOLD
     """
+    # ── Sector-based weight modifiers ────────────────────────────────────────
+    # Setiap sektor punya karakteristik berbeda — weight disesuaikan agar
+    # indikator yang paling relevan mendapat bobot lebih besar.
+    # Default = 1.0 (perilaku identik dengan sebelumnya untuk unknown sector).
+    _SECTOR_WEIGHTS = {
+        # MEME: pump cepat, RSI sering terlambat, momentum & volume lebih relevan
+        'MEME': {
+            'rsi': 0.7, 'macd': 1.4, 'bb': 1.3, 'stoch': 1.5,
+            'ema': 0.6, 'wr': 1.2, 'slope': 1.0, 'roc': 1.0,
+            'ob': 1.0, 'vol': 1.3, 'obv': 0.5,
+        },
+        # AI: mid-term momentum lebih predictable
+        'AI': {
+            'rsi': 1.0, 'macd': 1.2, 'bb': 1.0, 'stoch': 1.2,
+            'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
+            'ob': 1.0, 'vol': 1.0, 'obv': 0.8,
+        },
+        # L1: bluechip slow-mover, semua indikator relevan secara default
+        'L1': {
+            'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0,
+            'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
+            'ob': 1.0, 'vol': 1.0, 'obv': 1.0,
+        },
+        # L2: mirip L1
+        'L2': {
+            'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0,
+            'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
+            'ob': 1.0, 'vol': 1.0, 'obv': 1.0,
+        },
+        # DEFI: OBV lebih relevan (smart money flows), sisanya default
+        'DEFI': {
+            'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0,
+            'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
+            'ob': 1.0, 'vol': 1.0, 'obv': 1.2,
+        },
+    }
+    _DEFAULT_W = {'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0,
+                  'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
+                  'ob': 1.0, 'vol': 1.0, 'obv': 1.0}
+    sw = _SECTOR_WEIGHTS.get(str(sector or '').upper(), _DEFAULT_W)
+
+    # ── Volume Reliability Guard ──────────────────────────────────────────────
+    # Coin dengan volume harian sangat tipis: OBV & Volume Ratio tidak reliable.
+    _VOL_RELIABILITY_THRESHOLD = 200_000_000  # 200M IDR
+    vol_mult = 1.0
+    if vol_idr_24h is not None and float(vol_idr_24h or 0) < _VOL_RELIABILITY_THRESHOLD:
+        vol_mult = 0.3  # downgrade bobot volume-based indicators
+
+    # ── Adaptive RSI thresholds ───────────────────────────────────────────────
+    _at = adaptive_thresholds or {}
+    RSI_OVERSOLD   = float(_at.get('rsi_oversold',  35.0))
+    RSI_OVERBOUGHT = float(_at.get('rsi_overbought', 70.0))
+    # Turunkan deep-oversold/deep-overbought secara proporsional
+    RSI_DEEP_OVERSOLD   = max(15.0, RSI_OVERSOLD - 10.0)
+    RSI_MILD_OVERSOLD   = RSI_OVERSOLD + 10.0
+    RSI_EXTREME_OB      = min(95.0, RSI_OVERBOUGHT + 10.0)
+    RSI_MILD_OB         = RSI_OVERBOUGHT - 10.0
     rsi     = float(tech.get('rsi', 50))
     slope   = float(tech.get('slope', 0))
     bp      = float(tech.get('buy_pressure', 50))  # order book imbalance
@@ -520,189 +586,200 @@ def derive_trade_signal(tech):
     sell_score = 0.0
     signals    = []   # List alasan untuk logging
 
-    # ── 1. RSI (Bobot 3.0) ────────────────────────────────────────────────────
-    if rsi < 25:
-        buy_score += 3.0
+    # ── 1. RSI (Bobot 3.0 × sector_weight) ───────────────────────────────────
+    _w_rsi = 3.0 * sw['rsi']
+    if rsi < RSI_DEEP_OVERSOLD:
+        buy_score += _w_rsi
         signals.append(f"RSI deep-oversold({rsi:.0f})")
-    elif rsi < 35:
-        buy_score += 2.5
+    elif rsi < RSI_OVERSOLD:
+        buy_score += _w_rsi * (2.5 / 3.0)
         signals.append(f"RSI oversold({rsi:.0f})")
-    elif rsi < 45:
-        buy_score += 1.5
+    elif rsi < RSI_MILD_OVERSOLD:
+        buy_score += _w_rsi * (1.5 / 3.0)
         signals.append(f"RSI mild-oversold({rsi:.0f})")
-    elif rsi > 80:
-        sell_score += 3.0
+    elif rsi > RSI_EXTREME_OB:
+        sell_score += _w_rsi
         signals.append(f"RSI extreme-overbought({rsi:.0f})")
-    elif rsi > 70:
-        sell_score += 2.5
+    elif rsi > RSI_OVERBOUGHT:
+        sell_score += _w_rsi * (2.5 / 3.0)
         signals.append(f"RSI overbought({rsi:.0f})")
-    elif rsi > 60:
-        sell_score += 1.0
+    elif rsi > RSI_MILD_OB:
+        sell_score += _w_rsi * (1.0 / 3.0)
         signals.append(f"RSI high({rsi:.0f})")
 
-    # ── 2. MACD Histogram (Bobot 2.5) ─────────────────────────────────────────
+    # ── 2. MACD Histogram (Bobot 2.5 × sector_weight) ────────────────────────
     # Normalisasi price-relative: hindari scale bias antar koin IDR.
     # Menggunakan (|hist| / harga) * _MACD_NORM_FACTOR agar sinyal konsisten.
+    _w_macd = sw['macd']
     if mh > 0:
         strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
-        buy_score += min(2.5, 1.0 + strength * 1.5)
+        buy_score += min(2.5, 1.0 + strength * 1.5) * _w_macd
         signals.append(f"MACD bullish({mh:+.4f})")
     elif mh < 0:
         strength = min(1.0, (abs(mh) / last_price) * _MACD_NORM_FACTOR)
-        sell_score += min(2.5, 1.0 + strength * 1.5)
+        sell_score += min(2.5, 1.0 + strength * 1.5) * _w_macd
         signals.append(f"MACD bearish({mh:+.4f})")
 
-    # ── 3. Bollinger %B (Bobot 2.0) ───────────────────────────────────────────
+    # ── 3. Bollinger %B (Bobot 2.0 × sector_weight) ──────────────────────────
+    _w_bb = sw['bb']
     if bb < 0.10:
-        buy_score += 2.0
+        buy_score += 2.0 * _w_bb
         signals.append(f"BB extreme-low({bb:.2f})")
     elif bb < 0.25:
-        buy_score += 1.2
+        buy_score += 1.2 * _w_bb
         signals.append(f"BB low({bb:.2f})")
     elif bb > 0.90:
-        sell_score += 2.0
+        sell_score += 2.0 * _w_bb
         signals.append(f"BB extreme-high({bb:.2f})")
     elif bb > 0.75:
-        sell_score += 1.2
+        sell_score += 1.2 * _w_bb
         signals.append(f"BB high({bb:.2f})")
 
-    # ── 4. Stochastic RSI (Bobot 2.0) ─────────────────────────────────────────
+    # ── 4. Stochastic RSI (Bobot 2.0 × sector_weight) ────────────────────────
     # K dan D harus bergerak bersama (konfirmasi)
+    _w_stoch = sw['stoch']
     if sk < 20 and sd < 30:
-        buy_score += 2.0
+        buy_score += 2.0 * _w_stoch
         signals.append(f"StochRSI oversold(K={sk:.0f},D={sd:.0f})")
     elif sk < 30:
-        buy_score += 1.0
+        buy_score += 1.0 * _w_stoch
         signals.append(f"StochRSI mild-oversold(K={sk:.0f})")
     elif sk > 80 and sd > 70:
-        sell_score += 2.0
+        sell_score += 2.0 * _w_stoch
         signals.append(f"StochRSI overbought(K={sk:.0f},D={sd:.0f})")
     elif sk > 70:
-        sell_score += 1.0
+        sell_score += 1.0 * _w_stoch
         signals.append(f"StochRSI mild-overbought(K={sk:.0f})")
 
     # Stoch crossover (K memotong D dari bawah = bullish signal)
     if sk > sd and sk < 50:
-        buy_score += 0.5
+        buy_score += 0.5 * _w_stoch
         signals.append("StochRSI K>D bullish-cross")
     elif sk < sd and sk > 50:
-        sell_score += 0.5
+        sell_score += 0.5 * _w_stoch
         signals.append("StochRSI K<D bearish-cross")
 
-    # ── 5. EMA Crossover (Bobot 1.5) ──────────────────────────────────────────
+    # ── 5. EMA Crossover (Bobot 1.5 × sector_weight) ─────────────────────────
+    _w_ema = sw['ema']
     if ema_cr == "BULLISH":
-        buy_score += 1.5
+        buy_score += 1.5 * _w_ema
         signals.append("EMA9>EMA21 bullish")
     elif ema_cr == "BEARISH":
-        sell_score += 1.5
+        sell_score += 1.5 * _w_ema
         signals.append("EMA9<EMA21 bearish")
 
-    # ── 6. Williams %R (Bobot 1.5) ────────────────────────────────────────────
+    # ── 6. Williams %R (Bobot 1.5 × sector_weight) ───────────────────────────
     # Konfirmator oversold/overbought yang independen dari RSI — range -100 s/d 0.
     # Oversold (<=-80) memperkuat sinyal BUY; overbought (>=-20) memperkuat SELL.
+    _w_wr = sw['wr']
     if wr <= -85:
-        buy_score += 1.5
+        buy_score += 1.5 * _w_wr
         signals.append(f"W%R deep-oversold({wr:.0f})")
     elif wr <= -70:
-        buy_score += 1.0
+        buy_score += 1.0 * _w_wr
         signals.append(f"W%R oversold({wr:.0f})")
     elif wr >= -15:
-        sell_score += 1.5
+        sell_score += 1.5 * _w_wr
         signals.append(f"W%R deep-overbought({wr:.0f})")
     elif wr >= -30:
-        sell_score += 1.0
+        sell_score += 1.0 * _w_wr
         signals.append(f"W%R overbought({wr:.0f})")
 
-    # ── 7. Slope/Momentum (Bobot 1.0) ─────────────────────────────────────────
+    # ── 7. Slope/Momentum (Bobot 1.0 × sector_weight) ────────────────────────
+    _w_slope = sw['slope']
     if slope > 0.005:
-        buy_score += 1.0
+        buy_score += 1.0 * _w_slope
         signals.append(f"slope strong-up({slope:.4f})")
     elif slope > 0.001:
-        buy_score += 0.5
+        buy_score += 0.5 * _w_slope
         signals.append(f"slope up({slope:.4f})")
     elif slope < -0.005:
-        sell_score += 1.0
+        sell_score += 1.0 * _w_slope
         signals.append(f"slope strong-down({slope:.4f})")
     elif slope < -0.001:
-        sell_score += 0.5
+        sell_score += 0.5 * _w_slope
         signals.append(f"slope down({slope:.4f})")
 
-    # ── 8. Rate of Change / ROC-10 (Bobot 1.0) ────────────────────────────────
+    # ── 8. Rate of Change / ROC-10 (Bobot 1.0 × sector_weight) ──────────────
     # Interpretasi mean-reversion: harga turun tajam = potensi bounce (BUY),
     # harga naik tajam = potensi koreksi (SELL).
+    _w_roc = sw['roc']
     if roc < -3.0:
-        buy_score += 1.0
+        buy_score += 1.0 * _w_roc
         signals.append(f"ROC oversold({roc:.2f}%)")
     elif roc < -1.0:
-        buy_score += 0.5
+        buy_score += 0.5 * _w_roc
         signals.append(f"ROC mild-down({roc:.2f}%)")
     elif roc > 3.0:
-        sell_score += 1.0
+        sell_score += 1.0 * _w_roc
         signals.append(f"ROC overbought({roc:.2f}%)")
     elif roc > 1.0:
-        sell_score += 0.5
+        sell_score += 0.5 * _w_roc
         signals.append(f"ROC mild-up({roc:.2f}%)")
 
-    # ── 9. Order Book Buy Pressure (Bobot 2.0) ────────────────────────────────
+    # ── 9. Order Book Buy Pressure (Bobot 2.0 × sector_weight) ───────────────
     # Jika data OB tersedia (bp != 50.0 default), gunakan langsung.
     # Jika OB tidak ada, fallback: volume spike → proxy demand, volume kering → proxy supply.
+    _w_ob = sw['ob']
     if bp != 50.0:
         if bp >= 65:
-            buy_score += 2.0
+            buy_score += 2.0 * _w_ob
             signals.append(f"OB strong-bid({bp:.0f}%)")
         elif bp >= 55:
-            buy_score += 1.0
+            buy_score += 1.0 * _w_ob
             signals.append(f"OB bid-dom({bp:.0f}%)")
         elif bp <= 35:
-            sell_score += 2.0
+            sell_score += 2.0 * _w_ob
             signals.append(f"OB strong-ask({100 - bp:.0f}%)")
         elif bp <= 45:
-            sell_score += 1.0
+            sell_score += 1.0 * _w_ob
             signals.append(f"OB ask-dom({100 - bp:.0f}%)")
     elif vr != 1.0:
         # Fallback: volume ratio sebagai proxy demand jika OB tidak tersedia
         # Spike volume saat harga naik = demand nyata (partial credit 1.0 maks)
         if vr >= 2.0:
-            buy_score += 1.0
+            buy_score += 1.0 * _w_ob
             signals.append(f"OB-fallback: Vol spike({vr:.1f}x) demand proxy")
         elif vr <= 0.4:
-            sell_score += 1.0
+            sell_score += 1.0 * _w_ob
             signals.append(f"OB-fallback: Vol dry({vr:.1f}x) supply proxy")
 
-    # ── 10. Volume Ratio (Bobot 1.5) ─────────────────────────────────────────
+    # ── 10. Volume Ratio (Bobot 1.5 × sector_weight × vol_reliability) ───────
     # Hanya aktif jika data volume tersedia (vr != 1.0 default berarti ada data nyata).
     # Spike volume (>1.5x) mengkonfirmasi breakout valid.
     # Volume sepi (<0.5x) memperlemah sinyal arah apapun.
+    _w_vol = sw['vol'] * vol_mult
     if vr != 1.0:
         if vr >= 2.0:
-            buy_score += 1.5
+            buy_score += 1.5 * _w_vol
             signals.append(f"Vol spike({vr:.1f}x) BUY confirm")
         elif vr >= 1.5:
-            buy_score += 0.8
+            buy_score += 0.8 * _w_vol
             signals.append(f"Vol high({vr:.1f}x)")
         elif vr <= 0.4:
-            sell_score += 1.5
+            sell_score += 1.5 * _w_vol
             signals.append(f"Vol dry({vr:.1f}x) SELL confirm")
         elif vr <= 0.6:
-            sell_score += 0.5
+            sell_score += 0.5 * _w_vol
             signals.append(f"Vol low({vr:.1f}x)")
 
-    # ── 11. OBV Slope (Bobot 1.5) ────────────────────────────────────────────
+    # ── 11. OBV Slope (Bobot 1.5 × sector_weight × vol_reliability) ──────────
     # OBV naik = akumulasi (smart money beli diam-diam) → BUY bias.
     # OBV turun = distribusi (smart money jual diam-diam) → SELL bias.
     # Divergence: harga naik tapi OBV turun adalah sinyal jual kuat.
+    _w_obv = sw['obv'] * vol_mult
     if obv_sl != 0.0:
         if obv_sl >= 5.0:
-            buy_score += 1.5
+            buy_score += 1.5 * _w_obv
             signals.append(f"OBV accumulate({obv_sl:+.1f}%)")
         elif obv_sl >= 2.0:
-            buy_score += 0.8
+            buy_score += 0.8 * _w_obv
             signals.append(f"OBV rising({obv_sl:+.1f}%)")
         elif obv_sl <= -5.0:
-            sell_score += 1.5
+            sell_score += 1.5 * _w_obv
             signals.append(f"OBV distribute({obv_sl:+.1f}%)")
         elif obv_sl <= -2.0:
-            sell_score += 0.8
+            sell_score += 0.8 * _w_obv
             signals.append(f"OBV falling({obv_sl:+.1f}%)")
 
     # ── KEPUTUSAN AKHIR (Multi-Confluence Gate) ───────────────────────────────
@@ -712,27 +789,28 @@ def derive_trade_signal(tech):
 
     verdict    = 'HOLD'
     confidence = 50
-    reason     = 'Sinyal campuran, tidak ada confluence yang cukup kuat.'
+    _sector_tag = f"[sector={sector}] " if sector else ""
+    reason     = f'{_sector_tag}Sinyal campuran, tidak ada confluence yang cukup kuat.'
 
     if buy_score >= BUY_THRESHOLD and sell_score < OPPOSING_MAX:
         verdict    = 'BUY'
         # Confidence: skala 50-95, berbanding lurus dengan selisih skor
         net_score  = buy_score - sell_score
         confidence = int(min(95, 50 + net_score * 3.5))
-        reason     = f"Multi-Confluence BUY [{', '.join(signals[:4])}] | BS={buy_score:.1f} SS={sell_score:.1f}"
+        reason     = f"{_sector_tag}Multi-Confluence BUY [{', '.join(signals[:4])}] | BS={buy_score:.1f} SS={sell_score:.1f}"
 
     elif sell_score >= SELL_THRESHOLD and buy_score < OPPOSING_MAX:
         verdict    = 'SELL'
         net_score  = sell_score - buy_score
         confidence = int(min(95, 50 + net_score * 3.5))
-        reason     = f"Multi-Confluence SELL [{', '.join(signals[:4])}] | BS={buy_score:.1f} SS={sell_score:.1f}"
+        reason     = f"{_sector_tag}Multi-Confluence SELL [{', '.join(signals[:4])}] | BS={buy_score:.1f} SS={sell_score:.1f}"
 
     elif buy_score >= 4.0 and sell_score < 3.0:
         # Sinyal lemah tapi satu arah — HOLD tapi beri tahu
-        reason = f"Sinyal BUY lemah (skor={buy_score:.1f}) — tunggu konfirmasi lebih lanjut."
+        reason = f"{_sector_tag}Sinyal BUY lemah (skor={buy_score:.1f}) — tunggu konfirmasi lebih lanjut."
 
     elif sell_score >= 4.0 and buy_score < 3.0:
-        reason = f"Sinyal SELL lemah (skor={sell_score:.1f}) — tunggu konfirmasi lebih lanjut."
+        reason = f"{_sector_tag}Sinyal SELL lemah (skor={sell_score:.1f}) — tunggu konfirmasi lebih lanjut."
 
     return {
         'verdict':    verdict,
@@ -741,4 +819,54 @@ def derive_trade_signal(tech):
         'buy_score':  round(buy_score, 2),
         'sell_score': round(sell_score, 2),
         'signals':    signals,
+    }
+
+
+def compute_adaptive_thresholds(price_history, n_candles=50):
+    """
+    Hitung threshold RSI adaptif dari distribusi RSI historis coin itu sendiri.
+
+    Prinsip: threshold 'oversold' bukan fixed 35, tapi percentile ke-20 dari
+    RSI historis coin tersebut. Coin yang secara alami berada di RSI 30-40 (MEME)
+    akan memiliki threshold lebih rendah secara otomatis.
+
+    Args:
+        price_history : list/deque harga penutupan
+        n_candles     : jumlah candle terakhir yang digunakan (default 50)
+
+    Returns:
+        dict {
+            'rsi_oversold'   : float,  # percentile ke-20 RSI historis, clamp [20, 45]
+            'rsi_overbought' : float,  # percentile ke-80 RSI historis, clamp [55, 85]
+        }
+        Jika data tidak cukup (< 30 candle), kembalikan threshold default.
+    """
+    DEFAULT = {'rsi_oversold': 35.0, 'rsi_overbought': 70.0}
+
+    prices = list(price_history or [])
+    if len(prices) < 30:
+        return DEFAULT
+
+    # Hitung RSI untuk setiap titik dalam window n_candles terakhir
+    window = prices[-n_candles:] if len(prices) >= n_candles else prices
+    rsi_values = []
+    for i in range(15, len(window) + 1):
+        r = calculate_rsi(window[:i])
+        if r != 50.0 or i >= 16:  # 50.0 hanya valid default jika data benar-benar cukup
+            rsi_values.append(r)
+
+    if len(rsi_values) < 10:
+        return DEFAULT
+
+    arr = np.array(rsi_values, dtype=float)
+    oversold  = float(np.percentile(arr, 20))
+    overbought = float(np.percentile(arr, 80))
+
+    # Clamp agar tidak terlalu ekstrem
+    oversold   = max(20.0, min(45.0, oversold))
+    overbought = max(55.0, min(85.0, overbought))
+
+    return {
+        'rsi_oversold':   round(oversold, 1),
+        'rsi_overbought': round(overbought, 1),
     }

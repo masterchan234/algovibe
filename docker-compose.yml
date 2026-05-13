@@ -156,8 +156,6 @@ services:
       - ./shared:/app/shared
       - ./utils:/app/utils
       - ./config.py:/app/config.py
-      - ./backtester.py:/app/backtester.py
-      - ./backtest_report.py:/app/backtest_report.py
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
     shm_size: 256mb
