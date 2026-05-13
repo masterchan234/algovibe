@@ -1417,7 +1417,14 @@ class NewsMaker:
                 return text
 
         if remote_only or self._remote_provider_configured():
-            text = await loop.run_in_executor(None, self._ask_llm_remote_raw_sync, prompt)
+            try:
+                text = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._ask_llm_remote_raw_sync, prompt),
+                    timeout=REMOTE_TIMEOUT_SEC + 15,  # sedikit lebih longgar dari requests timeout
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[news-maker] Remote LLM executor timeout >%ss, skipping.", REMOTE_TIMEOUT_SEC + 15)
+                text = ""
             if text:
                 return text
 

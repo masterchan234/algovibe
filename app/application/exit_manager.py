@@ -3385,7 +3385,9 @@ class ExitManager:
                 if pos.get('status') == 'DUST' and position_idr_value > pair_min_idr and amount_on_exchange > 0:
                     pos['status'] = 'OPEN'
                     pos['amount_crypto'] = amount_on_exchange
-                    # amount_idr: jaga cost basis asli, jangan overwrite.
+                    # amount_idr: update ke current mark-to-market saat dipromosikan dari DUST,
+                    # karena cost basis Rp 10 (dust adoption) akan membuat P&L % tidak valid.
+                    pos['amount_idr'] = position_idr_value
                     db.upsert_position(pair, pos)
                     log_message(
                         f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "

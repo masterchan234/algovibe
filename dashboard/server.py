@@ -1214,6 +1214,7 @@ def get_positions():
 
             # Harga live dari ticker_history
             last_price = entry_price
+            bid_price = 0.0  # best bid — sama dengan yang dipakai bot untuk TP evaluation
             pnl_idr = 0.0
             pnl_pct = 0.0
             try:
@@ -1229,11 +1230,23 @@ def get_positions():
             except Exception:
                 pass
 
-            exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, amount_idr)
+            # Ambil bid price dari market WS (sama persis dengan logika bot)
+            try:
+                md = (mws.get_tickers() or {}).get(pair) or {}
+                bid_price = float(md.get('buy') or md.get('bid') or 0)
+            except Exception:
+                pass
+            if bid_price <= 0:
+                bid_price = last_price  # fallback ke last jika bid tidak tersedia
+
+            # NET EXIT EST: hitung dari bid price (sama dengan bot), bukan orderbook depth simulation
+            # Ini mencegah outlier bid di depth menggelembungkan estimasi P&L
             fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
-            fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-            pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - fee_buy - fee_sell)
-            pnl_net_pct = (pnl_net_idr / amount_idr * 100) if amount_idr > 0 else 0.0
+            fee_sell = (bid_price * amount_crypto) * cfg.FEE_SELL_TAKER
+            pnl_net_idr = (bid_price - entry_price) * amount_crypto - fee_buy - fee_sell
+            # Cost basis dari entry_price × amount agar % konsisten dengan pnl_pct
+            cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else amount_idr
+            pnl_net_pct = (pnl_net_idr / cost_basis * 100) if cost_basis > 0 else 0.0
 
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
             duration_sec = 0
@@ -1249,6 +1262,7 @@ def get_positions():
                 "pair": pair,
                 "entry_price": entry_price,
                 "last_price": last_price,
+                "bid_price": round(bid_price, 8),
                 "amount_crypto": amount_crypto,
                 "amount_idr": amount_idr,
                 "pnl_idr": round(pnl_idr, 0),
@@ -3356,11 +3370,22 @@ def _build_trades_payload():
                 current_tp_pct = stored_tp_pct
 
                 _amount_idr = float(p.get('amount_idr') or 0)
-                exec_guard = _estimate_market_sell_net_from_orderbook(pair, amount_crypto, entry_price, _amount_idr)
+
+                # Bid price dari market WS (sama dengan logika bot untuk TP evaluation)
+                _bid_price = 0.0
+                try:
+                    _md = (mws.get_tickers() or {}).get(pair) or {}
+                    _bid_price = float(_md.get('buy') or _md.get('bid') or 0)
+                except Exception:
+                    pass
+                if _bid_price <= 0:
+                    _bid_price = last_price  # fallback ke last_price
+
                 _fee_buy  = _amount_idr * cfg.FEE_BUY_TAKER
-                _fee_sell = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
-                pnl_net_idr = exec_guard['net_pnl_idr'] if exec_guard.get('ok') else (pnl_idr - _fee_buy - _fee_sell)
-                pnl_net_pct = (pnl_net_idr / _amount_idr * 100) if _amount_idr > 0 else 0.0
+                _fee_sell = (_bid_price * amount_crypto) * cfg.FEE_SELL_TAKER
+                pnl_net_idr = (_bid_price - entry_price) * amount_crypto - _fee_buy - _fee_sell
+                _cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else _amount_idr
+                pnl_net_pct = (pnl_net_idr / _cost_basis * 100) if _cost_basis > 0 else 0.0
                 is_fast_opp = int(p.get('is_high_opportunity_fast') or 0)
 
                 results.append({
@@ -3372,7 +3397,7 @@ def _build_trades_payload():
                     "pnl_pct":      round(pnl_pct, 2),
                     "pnl_net_pct":  round(pnl_net_pct, 2),
                     "entry_price":  entry_price,
-                    "exit_price":   last_price,
+                    "exit_price":   _bid_price if _bid_price > 0 else last_price,
                     "target_tp":    current_tp_pct * 100,
                     "target_sl":    current_sl_pct * 100,
                     "confidence":   int(p.get('ai_confidence') or 0),
