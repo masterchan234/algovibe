@@ -903,13 +903,23 @@ class ExitManager:
                 for pair in list(positions.keys()):
                     coin = pair[:-3].upper() # Ambil simbol koin (e.g., 'AXL' dari 'axlidr')
                     amount_on_exchange = float(total_balances.get(coin, 0) or 0)
+                    is_dust_status = str(positions[pair].get('status', '')).upper() == 'DUST'
                     
                     # Ambil ticker untuk estimasi nilai IDR sisa saldo
                     ticker_data = current_tickers.get(pair) or {}
                     price = float(ticker_data.get('last') or ticker_data.get('buy') or 0)
                     value_idr = amount_on_exchange * price if price > 0 else 0
                     
-                    # Jika saldo di exchange sangat kecil/nol, atau nilainya di bawah Rp 5.000, anggap sudah terjual
+                    # DUST: hanya hapus jika crypto benar-benar nol di exchange (bukan karena nilai IDR kecil)
+                    if is_dust_status:
+                        if amount_on_exchange < 1e-8:
+                            log_message(f"👻 [AUTO-RECONCILE] Removing ghost DUST {pair} (balance nol di exchange)")
+                            db.delete_position(pair)
+                            positions.pop(pair, None)
+                            ghosts_removed.append(pair)
+                        continue
+
+                    # OPEN: hapus jika saldo sangat kecil/nol atau nilai di bawah Rp 5.000
                     if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000):
                         log_message(f"👻 [AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value IDR: Rp {value_idr:,.0f})")
                         db.delete_position(pair)
@@ -2005,6 +2015,20 @@ class ExitManager:
                 if status == 'DUST':
                     from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
                     current_dust_value_idr = float(amount or 0) * float(current_price or 0)
+
+                    # Fallback: jika price_history dari WS terlalu pendek (pair jarang aktif),
+                    # fetch OHLC langsung dari exchange agar evaluasi tidak selalu UNCERTAIN.
+                    if len(hist) < 35:
+                        try:
+                            from app.infrastructure.providers.indodax_adapter import IndodaxAdapter as _Adapter
+                            _ohlc = _Adapter('', '').fetch_ohlc(pair, tf='15', limit=100)
+                            if _ohlc:
+                                _closes = [c['close'] for c in _ohlc if c.get('close', 0) > 0]
+                                if len(_closes) >= 35:
+                                    hist = _closes[-180:]
+                                    log_message(f"[DUST] {pair}: OHLC fallback {len(hist)} candles (WS history kosong)")
+                        except Exception as _fe:
+                            log_message(f"[DUST] {pair}: OHLC fallback gagal: {_fe}")
 
                     # Evaluasi sinyal DUST khusus dengan multiple indicator confirmation
                     dust_signal, dust_signal_conf = self._evaluate_dust_signal(
