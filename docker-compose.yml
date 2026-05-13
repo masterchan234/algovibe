@@ -268,6 +268,47 @@ services:
       - default
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # [Service] backtester
+  # Download OHLCV 90-hari dari Indodax ke DB `algovibe`, lalu jalankan
+  # backtest 1:1 terhadap bot logic untuk semua active backtest_profiles.
+  # Command: fetch | run | all
+  # Default: idle (restart=no) — trigger manual via:
+  #   docker compose run --rm backtester all
+  # ─────────────────────────────────────────────────────────────────────────────
+  backtester:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-backtester
+    restart: "no"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+    volumes:
+      - algovibe_data:/app/data
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+      - ./alembic_backtest:/app/alembic_backtest
+      - ./alembic_backtest.ini:/app/alembic_backtest.ini
+    shm_size: 128mb
+    entrypoint: ["python", "-m", "services.backtester.main"]
+    command: ["all"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # [Microservice 4] litert-lm-decision — Grounded LLM Exit Signals
   # Reads open-position context (technical + orderbook + fee + PnL),
   # then publishes SELL signals for ExitManager execution.
