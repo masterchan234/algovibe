@@ -662,7 +662,6 @@ class Database:
             with self.get_connection() as conn:
                 # 'ai_prob' is the canonical key (set in trade_execution.py).
                 # 'tq_prob' is the legacy key used before the rename; kept as fallback
-                db_backtest = Database(DATABASE_URL_BACKTEST)
                 # so backtest or external callers that still use the old key work correctly.
                 # 'sector_sentiment' is canonical; 'sector_boost' is the legacy parameter name.
                 ai_prob = dna_data.get('ai_prob', dna_data.get('tq_prob', 0.0))
@@ -1376,6 +1375,25 @@ class DatabaseRouter:
         return getattr(self._active(), name)
 
 
-# Instantiate a global db object for ease of use
+
+class LazyDatabase:
+    """Wrapper that only instantiates the Database connection when first accessed."""
+    def __init__(self, db_url):
+        self.db_url = db_url
+        self._instance = None
+    
+    def _get_instance(self):
+        if self._instance is None:
+            logger.info(f"[DB] Lazy-initializing connection to {self.db_url}")
+            self._instance = Database(self.db_url)
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get_instance(), name)
+
+# Instantiate global db objects
 db = DatabaseRouter()
-db_backtest = Database(DATABASE_URL_BACKTEST)
+# db_backtest is lazy-loaded to prevent OperationalError in host-networked 
+# containers (like market-pipe) that don't have access to 'timescaledb' DNS 
+# and don't actually need backtest data.
+db_backtest = LazyDatabase(DATABASE_URL_BACKTEST)
