@@ -25,6 +25,9 @@ import logging
 import os
 import sys
 import time
+import requests
+import numpy as _np
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -78,10 +81,44 @@ CANDLE_WINDOW   = 100         # jumlah candle yang di-feed ke indikator per tick
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_active_pairs() -> list[str]:
-    """Ambil semua pair aktif dari SECTOR_MAP + pair yang ada di ticker Indodax."""
-    pairs = sorted(set(cfg.SECTOR_MAP.keys()))
-    logger.info("[fetch] %d pairs dari SECTOR_MAP", len(pairs))
-    return pairs
+    """
+    Ambil semua pair aktif dari SECTOR_MAP yang memenuhi kriteria 'legit' bot:
+    1. Ada di SECTOR_MAP.
+    2. Volume 24 jam >= MIN_VOLUME_FILTER (10jt IDR).
+    """
+    all_pairs = sorted(set(cfg.SECTOR_MAP.keys()))
+    min_vol   = getattr(cfg, "MIN_VOLUME_FILTER", 10000000)
+    
+    logger.info("[fetch] memvalidasi %d pairs dari SECTOR_MAP...", len(all_pairs))
+    
+    legit_pairs = []
+    try:
+        r = requests.get("https://indodax.com/api/summaries", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            tickers = data.get("tickers", {})
+            for p in all_pairs:
+                # Format di summaries adalah btc_idr
+                key = p.lower()
+                if "idr" in key and "_" not in key:
+                    key = key.replace("idr", "_idr")
+                
+                t = tickers.get(key, {})
+                vol = float(t.get("vol_idr", 0))
+                if vol >= min_vol:
+                    legit_pairs.append(p)
+                else:
+                    logger.debug("[fetch] %s skip (vol %.1f < %.1f)", p, vol, min_vol)
+        else:
+            logger.warning("[fetch] gagal fetch summaries, fallback ke semua pair.")
+            return all_pairs
+    except Exception as e:
+        logger.error("[fetch] error saat validasi legit coins: %s", e)
+        return all_pairs
+
+    logger.info("[fetch] %d/%d pairs memenuhi kriteria volume >= %d IDR", 
+                len(legit_pairs), len(all_pairs), min_vol)
+    return sorted(legit_pairs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,11 +204,153 @@ def fetch_ohlcv(days: int = OHLCV_DAYS) -> None:
 
     _progress(n_pairs, n_pairs, label="selesai")
     logger.info("[fetch] selesai. Total %d candle dari %d pairs.", total_saved[0], n_pairs)
+ 
+ 
+def resample_ohlcv(candles: list[dict], interval_minutes: int) -> list[dict]:
+    """
+    Resample 1m candles ke interval yang lebih besar (misal 5m, 15m).
+    """
+    if interval_minutes <= 1:
+        return candles
+
+    resampled = []
+    for i in range(0, len(candles), interval_minutes):
+        batch = candles[i : i + interval_minutes]
+        if not batch:
+            continue
+        
+        # Agregasi OHLCV
+        resampled.append({
+            "ts":     batch[0]["ts"],
+            "open":   batch[0]["open"],
+            "high":   max(c["high"] for c in batch),
+            "low":    min(c["low"] for c in batch),
+            "close":  batch[-1]["close"],
+            "volume": sum(c["volume"] for c in batch),
+        })
+    return resampled
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Profile helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def get_vectorized_indicators(candles: list[dict], p: dict) -> pd.DataFrame:
+    """
+    Hitung semua indikator untuk seluruh series secara vectorized menggunakan Pandas.
+    Sangat cepat dibanding hitung per tick (O(N) vs O(N*M)).
+    """
+    if not candles:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(candles)
+    # Ensure columns exist
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col not in df.columns:
+            df[col] = 0.0
+    
+    close = df["close"]
+    high  = df["high"]
+    low   = df["low"]
+    vol   = df["volume"]
+
+    # 1. RSI (Wilder's Smoothing Parity)
+    rsi_p = int(p.get("rsi_period", 14))
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    # First value is SMA
+    avg_gain = gain.rolling(window=rsi_p, min_periods=rsi_p).mean()
+    avg_loss = loss.rolling(window=rsi_p, min_periods=rsi_p).mean()
+    
+    # Wilder's smoothing loop (only done once per series)
+    gain_arr = gain.values
+    loss_arr = loss.values
+    ag_arr = _np.copy(avg_gain.values)
+    al_arr = _np.copy(avg_loss.values)
+    for i in range(rsi_p, len(df)):
+        ag_arr[i] = (ag_arr[i-1] * (rsi_p - 1) + gain_arr[i]) / rsi_p
+        al_arr[i] = (al_arr[i-1] * (rsi_p - 1) + loss_arr[i]) / rsi_p
+    
+    # Update df with smoothed values
+    df["avg_gain"] = ag_arr
+    df["avg_loss"] = al_arr
+    rs = _np.divide(ag_arr, al_arr, out=_np.full_like(ag_arr, _np.nan), where=al_arr != 0)
+    df["rsi"] = 100.0 - (100.0 / (1.0 + rs))
+    df["rsi"] = df["rsi"].fillna(50.0)
+
+    # 2. MACD
+    m_fast = int(p.get("macd_fast", 12))
+    m_slow = int(p.get("macd_slow", 26))
+    m_sig  = int(p.get("macd_signal_period", 9))
+    ema_f = close.ewm(span=m_fast, adjust=False).mean()
+    ema_s = close.ewm(span=m_slow, adjust=False).mean()
+    df["macd_line"] = ema_f - ema_s
+    df["macd_sig"]  = df["macd_line"].ewm(span=m_sig, adjust=False).mean()
+    df["macd_hist"] = df["macd_line"] - df["macd_sig"]
+
+    # 3. Bollinger Bands
+    bb_p = int(p.get("bb_period", 20))
+    bb_std = float(p.get("bb_std_dev", 2.0))
+    df["bb_mid"] = close.rolling(window=bb_p).mean()
+    df["bb_std"] = close.rolling(window=bb_p).std(ddof=1)
+    df["bb_upper"] = df["bb_mid"] + bb_std * df["bb_std"]
+    df["bb_lower"] = df["bb_mid"] - bb_std * df["bb_std"]
+    denom = df["bb_upper"] - df["bb_lower"]
+    df["bb_pct"] = (close - df["bb_lower"]) / denom.replace(0, _np.nan)
+    df["bb_pct"] = df["bb_pct"].fillna(0.5)
+
+    # 4. Stochastic RSI
+    stoch_p = int(p.get("stoch_period", 14))
+    k_smooth = int(p.get("stoch_k_smooth", 3))
+    d_smooth = int(p.get("stoch_d_smooth", 3))
+    rsi_min = df["rsi"].rolling(window=stoch_p).min()
+    rsi_max = df["rsi"].rolling(window=stoch_p).max()
+    stoch_rsi = (df["rsi"] - rsi_min) / (rsi_max - rsi_min).replace(0, _np.nan) * 100
+    df["stoch_k"] = stoch_rsi.rolling(window=k_smooth).mean().fillna(50.0)
+    df["stoch_d"] = df["stoch_k"].rolling(window=d_smooth).mean().fillna(50.0)
+
+    # 5. EMA Crossover
+    df["ema9"]  = close.ewm(span=9, adjust=False).mean()
+    df["ema21"] = close.ewm(span=21, adjust=False).mean()
+
+    # 6. Williams %R
+    wr_p = int(p.get("williams_r_period", 14))
+    w_high = close.rolling(window=wr_p).max()
+    w_low  = close.rolling(window=wr_p).min()
+    df["williams_r"] = (w_high - close) / (w_high - w_low).replace(0, _np.nan) * -100
+    df["williams_r"] = df["williams_r"].fillna(-50.0)
+
+    # 7. ROC
+    roc_p = int(p.get("roc_period", 10))
+    df["roc"] = close.pct_change(periods=roc_p) * 100
+    df["roc"] = df["roc"].fillna(0.0)
+
+    # 8. Volume Ratio
+    v_p = int(p.get("volume_ma_period", 20))
+    df["vol_ma"] = vol.rolling(window=v_p).mean().shift(1)
+    df["volume_ratio"] = vol / df["vol_ma"].replace(0, _np.nan)
+    df["volume_ratio"] = df["volume_ratio"].fillna(1.0)
+
+    # 9. OBV
+    df["obv"] = (vol * _np.sign(delta)).fillna(0.0).cumsum()
+    obv_lookback = int(p.get("obv_slope_lookback", 5))
+    obv_prev = df["obv"].shift(obv_lookback)
+    df["obv_slope"] = (df["obv"] - obv_prev) / obv_prev.abs().replace(0, _np.nan) * 100
+    df["obv_slope"] = df["obv_slope"].fillna(0.0)
+
+    # 10. Slope Proxy
+    df["slope"] = (close.diff(5) / close.shift(5) * 100) 
+    
+    # 11. EMA 50 (Trend Filter)
+    ema_trend_p = int(p.get("ema_trend", 50))
+    df["ema50"] = close.ewm(span=ema_trend_p, adjust=False).mean()
+
+    # ATR (Standard) for gate 4b
+    atr_p = int(p.get("atr_period", 14))
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(window=atr_p).mean() # SMA proxy for speed, Wilder's better but slower
+
+    return df
 
 def _load_active_profiles() -> list[dict]:
     conn = get_connection()
@@ -426,11 +605,14 @@ def _patched_derive(tech: dict, p: dict, sector: str | None,
         confidence = int(min(95, 50 + net_score * 3.5))
         reason     = f"Multi-Confluence SELL [{', '.join(signals[:4])}] | BS={buy_score:.1f} SS={sell_score:.1f}"
 
-    return {
+    # Merge indicators into result for strategy gates
+    res = {
         "verdict": verdict, "confidence": confidence, "reason": reason,
         "buy_score": round(buy_score, 2), "sell_score": round(sell_score, 2),
         "signals": signals,
     }
+    res.update(tech) # Include rsi, stoch_k, macd_hist, etc.
+    return res
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -466,18 +648,38 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
     sell_block  = float(p.get("sell_block_threshold", 5.0))
     ema_trend_f = bool(p.get("ema_trend_filter_enabled", True))
     ema_trend_p = int(p.get("ema_trend", 50))
+    strat_mode  = p.get("strategy_mode", "scalping")
     from app.domain.technicals import calculate_ema as _ema
-
+ 
     trades: list[dict] = []
     position: dict | None = None  # active trade
     cooldown_until = 0.0
     cooldown_sec   = int(p.get("cooldown_seconds", 300))
     current_cap    = capital
 
-    prices  = [c["close"] for c in candles]
-    volumes = [c["volume"] for c in candles]
+    prices_1m  = [c["close"] for c in candles]
+    
+    # Resample untuk indikator jika timeframe > 1m
+    tf_min = int(p.get("timeframe_minutes", 1))
+    if tf_min > 1:
+        candles_tf = resample_ohlcv(candles, tf_min)
+        prices_tf  = [c["close"] for c in candles_tf]
+        volumes_tf = [c["volume"] for c in candles_tf]
+    else:
+        candles_tf = candles
+        prices_tf  = prices_1m
+        volumes_tf = [c["volume"] for c in candles]
+    
+    volumes_1m = [c["volume"] for c in candles]
 
-    for i in range(min_candles, len(candles)):
+    # 1. Pre-calculate technicals for entire TF series
+    df_tf = get_vectorized_indicators(pd.DataFrame(candles_tf).to_dict('records'), p)
+    
+    # 2. Pre-calculate signals (O(M)) to avoid calling derive_signal in the loop
+    # We'll use a local cache for signals to keep it 1:1 with bot logic
+    sig_cache = {}
+
+    for i in range(min_candles * tf_min, len(candles)):
         candle   = candles[i]
         ts       = candle["ts"]
         close    = candle["close"]
@@ -485,16 +687,51 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
         low      = candle["low"]
         ts_epoch = ts.timestamp()
 
-        window_prices  = prices[max(0, i - CANDLE_WINDOW): i + 1]
-        window_volumes = volumes[max(0, i - CANDLE_WINDOW): i + 1]
+        # ── Update TF windows & signals ONLY on TF candle boundaries ─────
+        idx_tf = i // tf_min
+        if idx_tf not in sig_cache:
+            row_tf = df_tf.iloc[idx_tf].to_dict()
+            # Adaptive thresholds simplified for backtest speed
+            at = {"rsi_oversold": float(p.get("rsi_oversold", 35.0)), 
+                  "rsi_overbought": float(p.get("rsi_overbought", 70.0))}
+            sig_cache[idx_tf] = _derive_signal_with_profile(row_tf, p, sector, at, None)
+        
+        sig = sig_cache[idx_tf]
 
-        # ── Manage open position first ────────────────────────────────────
+        # ── Manage open position first (EVERY MINUTE) ─────────────────────
         if position is not None:
             entry_px  = position["entry_price"]
             entry_idr = position["amount_idr"]
             crypto    = position["amount_crypto"]
             highest   = max(position.get("highest_price", entry_px), high)
             position["highest_price"] = highest
+
+            # DCA (Averaging Down) Logic
+            if dca_enabled and position["dca_tier"] < dca_max:
+                next_dca_px = entry_px * (1.0 + dca_step)
+                if close <= next_dca_px:
+                    # Trigger DCA buy
+                    dca_idr = entry_idr * dca_mult
+                    if current_cap >= dca_idr:
+                        dca_buy_fee = dca_idr * fee_buy
+                        dca_crypto = (dca_idr - dca_buy_fee) / close
+                        
+                        # Recalculate average price (Weighted Average)
+                        new_total_idr = entry_idr + dca_idr
+                        new_total_crypto = crypto + dca_crypto
+                        new_entry_px = new_total_idr / new_total_crypto
+                        
+                        position["entry_price"] = new_entry_px
+                        position["amount_idr"] = new_total_idr
+                        position["amount_crypto"] = new_total_crypto
+                        position["buy_fee"] += dca_buy_fee
+                        position["dca_tier"] += 1
+                        current_cap -= dca_idr
+                        logger.info("[backtest] DCA Triggered for %s (Tier %d) at %.2f", pair, position["dca_tier"], close)
+                        # Re-update local variables for exit check
+                        entry_px = new_entry_px
+                        entry_idr = new_total_idr
+                        crypto = new_total_crypto
 
             # Trailing SL
             trail_sl_px = position.get("trailing_sl_price", 0.0)
@@ -524,10 +761,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
                 exit_price  = close
             # Signal reverse
             else:
-                tech_exit = get_technical_summary(window_prices, window_volumes)
-                at_exit   = _build_adaptive_thresholds(p, window_prices)
-                sig_exit  = _derive_signal_with_profile(tech_exit, p, sector, at_exit, None)
-                if sig_exit["verdict"] == "SELL" and sig_exit["sell_score"] >= sell_block:
+                if sig["verdict"] == "SELL" and sig["sell_score"] >= sell_block:
                     exit_reason = "SIGNAL_REVERSE"
                     exit_price  = close
 
@@ -550,47 +784,57 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
                     "pnl_pct":             round(pnl_pct, 4),
                     "exit_reason":         exit_reason,
                     "buy_score":           position.get("buy_score", 0),
-                    "sell_score_at_exit":  sig_exit["sell_score"] if exit_reason == "SIGNAL_REVERSE" else None,
+                    "sell_score_at_exit":  sig["sell_score"] if exit_reason == "SIGNAL_REVERSE" else None,
                     "duration_seconds":    duration,
                 })
                 current_cap += net_pnl
                 position     = None
                 cooldown_until = ts_epoch + cooldown_sec
-            continue  # skip entry check when position is open
+            continue 
 
-        # ── Entry logic (mirror entry_gates.py) ──────────────────────────
+        # ── Entry logic ───────────────────────────────────────────────────
         if ts_epoch < cooldown_until:
             continue
         if current_cap < float(p.get("min_position_idr", 10000)):
-            break  # ruined
-
-        tech  = get_technical_summary(window_prices, window_volumes)
-        at    = _build_adaptive_thresholds(p, window_prices)
-        sig   = _derive_signal_with_profile(tech, p, sector, at, None)
+            break 
 
         if sig["verdict"] != "BUY":
             continue
 
-        # Sell-block gate (mirror gate 4)
+        # Sell-block gate
         if sig["sell_score"] >= sell_block:
             continue
 
-        # ATR filter (mirror gate 4b)
-        try:
-            highs_w  = [c["high"]  for c in candles[max(0, i-14): i+1]]
-            lows_w   = [c["low"]   for c in candles[max(0, i-14): i+1]]
-            closes_w = [c["close"] for c in candles[max(0, i-14): i+1]]
-            _atr = calculate_atr(highs_w, lows_w, closes_w, period=int(p.get("atr_period", 14)))
-            if (_atr / close * 100) > atr_max * 100:
-                continue
-        except Exception:
-            pass
+        # ATR filter (vectorized ATR use)
+        _atr = df_tf.iloc[idx_tf]["atr"]
+        if (_atr / close) > atr_max:
+            continue
 
-        # EMA-50 trend filter (mirror gate 4c)
-        if ema_trend_f and len(window_prices) >= ema_trend_p:
-            ema50 = _ema(window_prices, ema_trend_p)
+        # Strategy-specific gates
+        if strat_mode == "trend_pullback":
+            ema50 = df_tf.iloc[idx_tf]["ema50"]
             if close < ema50:
                 continue
+            
+            rsi = sig["rsi"]
+            stoch_k = sig["stoch_k"]
+            is_dip = (rsi < 50) and (rsi < float(p.get("rsi_oversold", 35)) + 10 or stoch_k < 40)
+            if not is_dip:
+                continue
+            
+            if sig["macd_hist"] < -(close * 0.002):
+                continue
+
+        # EMA-50 trend filter (General - mirror gate 4c)
+        if strat_mode != "trend_pullback" and ema_trend_f:
+            ema50 = df_tf.iloc[idx_tf]["ema50"]
+            if close < ema50:
+                continue
+
+        # TP Floor check (overcome fee drag)
+        fee_rt = fee_buy + fee_sell
+        if tp_pct < fee_rt + 0.005: # Minimum 0.5% net profit target
+             continue
 
         # Entry
         trade_idr = min(pos_idr, current_cap * 0.9)

@@ -2,6 +2,7 @@ import eventlet
 eventlet.monkey_patch()
 from eventlet.green import zmq as zmq_eventlet  # eventlet-native zmq (no gevent dependency)
 import os
+import re
 import sys
 import time
 import uuid
@@ -15,6 +16,7 @@ from collections import deque
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import psycopg2
+from psycopg2.extras import DictCursor
 import json
 import jwt as pyjwt
 from flask import Flask, jsonify, send_from_directory, request, session, redirect, url_for, abort, make_response, render_template, g
@@ -360,6 +362,10 @@ def get_db_connection():
     active_db = db._active()
     conn = active_db.get_raw_connection()
     return conn
+
+def get_backtest_db_connection():
+    """Membuka koneksi ke database Backtest (TimescaleDB)."""
+    return psycopg2.connect(cfg.DATABASE_URL_BACKTEST, cursor_factory=DictCursor)
 
 # [Project Predator] Sync Trade Streams for Open Positions on Startup
 try:
@@ -1100,7 +1106,7 @@ def login():
     old_sessions = db._live.get_active_sessions_for_user(user['id'])
     for old_sess in old_sessions:
         old_sid = old_sess['session_id']
-        socketio.emit('FORCE_LOGOUT', {"reason": "logged_in_elsewhere"}, room=f'session_{old_sid}')
+        socketio.emit('FORCE_LOGOUT', {"reason": "logged_in_elsewhere"}, to=f'session_{old_sid}')
         db._live.deactivate_session(old_sid)
         logging.info(f"🔐 Force-logout emitted to session {old_sid[:8]}... (user: {user['username']})")
 
@@ -1747,6 +1753,77 @@ def get_live_pnl_history(tf):
     """PnL history from live DB (auth required)."""
     g._dry_run_override = False
     return get_pnl_history_api(tf)
+
+# ── Backtest Endpoints ──
+
+@app.route('/api/backtest/profiles', methods=['GET'])
+@login_required
+def get_backtest_profiles():
+    try:
+        conn = get_backtest_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM backtest_profiles ORDER BY id DESC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/backtest/results', methods=['GET'])
+@login_required
+def get_backtest_results():
+    try:
+        profile_id = request.args.get('profile_id')
+        conn = get_backtest_db_connection()
+        cur = conn.cursor()
+        
+        query = """
+            SELECT r.*, p.profile_name 
+            FROM backtest_results r
+            JOIN backtest_profiles p ON r.profile_id = p.id
+        """
+        params = []
+        if profile_id:
+            query += " WHERE r.profile_id = %s"
+            params.append(profile_id)
+        
+        query += " ORDER BY r.created_at DESC LIMIT 50"
+        
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/backtest/results/<int:result_id>', methods=['GET'])
+@login_required
+def get_backtest_result_detail(result_id):
+    try:
+        conn = get_backtest_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Summary
+        cur.execute("SELECT * FROM backtest_results WHERE id = %s", (result_id,))
+        res = cur.fetchone()
+        if not res:
+            return jsonify({"error": "Result not found"}), 404
+        
+        # 2. Trades
+        cur.execute("SELECT * FROM backtest_trades WHERE result_id = %s ORDER BY entry_time ASC", (result_id,))
+        trades = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "summary": dict(res),
+            "trades": [dict(t) for t in trades]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3831,10 +3908,10 @@ def push_data_loop():
                         and bec.get("exit_id") != _last_bracket_exit_id
                     ):
                         _last_bracket_exit_id = bec.get("exit_id")
-                        socketio.emit('bracket_exit_confirm', bec, room='authenticated')
+                        socketio.emit('bracket_exit_confirm', bec, to='authenticated')
                 elif _last_bracket_exit_id is not None:
                     # Resolved — tell frontend to dismiss
-                    socketio.emit('bracket_exit_confirm_cleared', {}, room='authenticated')
+                    socketio.emit('bracket_exit_confirm_cleared', {}, to='authenticated')
                     _last_bracket_exit_id = None
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
@@ -3848,13 +3925,13 @@ def push_data_loop():
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
-                }, room='public')
+                }, to='public')
                 # Also emit to authenticated room for dashboard users
                 socketio.emit('regime_update', {
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
-                }, room='authenticated')
+                }, to='authenticated')
             except Exception as _re:
                 logging.warning(f"[push_data_loop] regime_update error: {_re}")
 
@@ -3873,8 +3950,8 @@ def push_data_loop():
 
                 try: 
                     _radar_payload = _build_radar_payload()
-                    socketio.emit('radar_update', _radar_payload, room='public')
-                    socketio.emit('radar_update', _radar_payload, room='authenticated')
+                    socketio.emit('radar_update', _radar_payload, to='public')
+                    socketio.emit('radar_update', _radar_payload, to='authenticated')
                 except Exception as _e: logging.error(f"radar_update emit error: {_e}")
 
                 try: socketio.emit('trades_update',         _build_trades_update_packet())
@@ -3882,15 +3959,15 @@ def push_data_loop():
 
                 try: 
                     _logs_payload = _build_logs_payload()
-                    socketio.emit('logs_update', _logs_payload, room='authenticated')
+                    socketio.emit('logs_update', _logs_payload, to='authenticated')
                     # Emit a sanitized version to public
-                    socketio.emit('public_activity', _logs_payload[:10], room='public')
+                    socketio.emit('public_activity', _logs_payload[:10], to='public')
                 except Exception as _e: logging.error(f"logs_update emit error: {_e}")
 
                 try: 
                     _llm_payload = _build_llm_decisions_payload()
-                    socketio.emit('llm_decisions_update', _llm_payload, room='public')
-                    socketio.emit('llm_decisions_update', _llm_payload, room='authenticated')
+                    socketio.emit('llm_decisions_update', _llm_payload, to='public')
+                    socketio.emit('llm_decisions_update', _llm_payload, to='authenticated')
                 except Exception as _e: logging.error(f"llm_decisions_update emit error: {_e}")
         except Exception as e:
             print(f"WS Error: {e}")
@@ -4231,7 +4308,7 @@ socketio.start_background_task(_zmq_market_bridge)
 try:
     from app.infrastructure.resilience import emergency_notifier as _emergency_notifier
     _emergency_notifier.set_socketio_fn(
-        lambda event, data: socketio.emit(event, data, room="public")
+        lambda event, data: socketio.emit(event, data, to="public")
     )
     logging.info("✅ EmergencyNotifier SocketIO channel wired.")
 except Exception as _wire_err:
