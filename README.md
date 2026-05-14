@@ -114,7 +114,16 @@ docker compose run --rm backtester run --days 30 --pairs BTC-IDR,ETH-IDR
 
 # 4. Lihat laporan ringkasan terakhir
 docker compose run --rm backtester report
+
+# 5. Rekursif Optimasi (Auto-Tuning) — Loop 5 generasi
+# Sistem akan berhenti otomatis jika target profit harian tercapai
+docker compose run --rm backtester optimize --generations 5
 ```
+
+> [!TIP]
+> Anda dapat menetapkan target harian (misal: 10rb/hari) di tabel `backtest_profiles` kolom `target_pnl_idr` untuk mengaktifkan fitur *Early Exit*.
+
+Dokumentasi teknis lengkap tersedia di: [Functional Specification Document (Backtesting)](docs/backtesting_fsd.md)
 
 Data historis disimpan di tabel `ohlcv_1m` pada database `algovibe` (TimescaleDB).
 
