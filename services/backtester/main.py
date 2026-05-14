@@ -482,16 +482,53 @@ def _print_comparison_table() -> None:
 # INFRASTRUCTURE: DB & Workers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_backtest_migrations():
+    """Run Alembic migrations for the backtest database."""
+    try:
+        from alembic import command
+        from alembic.config import Config
+        from services.backtester.db_backtest import DATABASE_URL_BACKTEST
+        
+        logger.info(f"[schema] 🚀 Running backtest migrations for {DATABASE_URL_BACKTEST}...")
+        alembic_cfg = Config("alembic_backtest.ini")
+        alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL_BACKTEST)
+        command.upgrade(alembic_cfg, "head")
+        logger.info("[schema] ✅ Backtest migrations complete.")
+    except Exception as e:
+        logger.warning(f"[schema] ⚠️ Backtest migration failed (might already be up to date): {e}")
+
 def _ensure_schema_upgraded() -> None:
+    # First, run alembic migrations
+    _run_backtest_migrations()
+    
     with transaction() as cur:
-        # 1. Add target columns to backtest_profiles
+        # Check if backtest_profiles table exists
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'backtest_profiles'
+            );
+        """)
+        if not cur.fetchone()['exists']:
+            logger.error("[schema] ❌ Table 'backtest_profiles' still missing after migrations. Check your DB setup.")
+            return
+
+        # 1. Add target columns to backtest_profiles (Legacy support for old DBs)
         cols = [
             ("target_roi_pct", "DOUBLE PRECISION DEFAULT 0.0"),
             ("target_pnl_idr", "DOUBLE PRECISION DEFAULT 0.0"),
         ]
         for col, ctype in cols:
-            try: cur.execute(f"ALTER TABLE backtest_profiles ADD COLUMN IF NOT EXISTS {col} {ctype}")
-            except: pass
+            try:
+                # Use a separate check to avoid transaction abort
+                cur.execute(f"""
+                    SELECT COUNT(*) FROM information_schema.columns 
+                    WHERE table_name='backtest_profiles' AND column_name='{col}'
+                """)
+                if cur.fetchone()['count'] == 0:
+                    cur.execute(f"ALTER TABLE backtest_profiles ADD COLUMN {col} {ctype}")
+            except Exception as e:
+                logger.warning(f"[schema] Failed to add column {col}: {e}")
 
         # 2. Bootstrap Default Profiles if empty
         cur.execute("SELECT COUNT(*) as count FROM backtest_profiles")
