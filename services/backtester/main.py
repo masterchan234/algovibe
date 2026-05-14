@@ -555,8 +555,9 @@ def _ensure_schema_upgraded() -> None:
             cur.execute("""
                 INSERT INTO backtest_profiles (
                     profile_name, initial_capital_idr, max_position_idr, min_position_idr, max_open_positions,
-                    timeframe_minutes, strategy_mode, buy_threshold, target_tp_pct, target_pnl_idr, use_loose_gates
-                ) VALUES ('anglingdharma', 100000, 10000, 10000, 5, 1, 'scalping', 5.8, 0.02, 10000, true)
+                    timeframe_minutes, strategy_mode, buy_threshold, target_tp_pct, target_sl_pct,
+                    target_pnl_idr, use_loose_gates, max_hold_minutes
+                ) VALUES ('anglingdharma', 100000, 10000, 10000, 5, 15, 'scalping', 4.5, 0.035, -0.02, 10000, true, 2880)
             """)
             logger.info("[schema] ✅ Bootstrap complete.")
 
