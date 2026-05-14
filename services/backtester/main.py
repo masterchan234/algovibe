@@ -444,8 +444,9 @@ def _ensure_schema_upgraded() -> None:
             except: pass
 
         # 2. Bootstrap Default Profiles if empty
-        cur.execute("SELECT COUNT(*) FROM backtest_profiles")
-        if cur.fetchone()[0] == 0:
+        cur.execute("SELECT COUNT(*) as count FROM backtest_profiles")
+        row = cur.fetchone()
+        if row and row['count'] == 0:
             logger.info("[schema] 🚀 Bootstrapping default backtest profiles...")
             
             # Profile 1: Trend Pullback 5m (Conservative)
@@ -595,7 +596,7 @@ def run_backtest(days=OHLCV_DAYS, pairs_filter=None):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT pair FROM ohlcv_1m")
-    pairs = [r[0] for r in cur.fetchall()]
+    pairs = [r['pair'] for r in cur.fetchall()]
     if pairs_filter:
         filter_list = [px.strip().upper() for px in pairs_filter.split(",")]
         pairs = [px for px in pairs if px in filter_list]
