@@ -103,19 +103,19 @@ def calculate_score(args):
                     if _ph:
                         _prices = list(_ph)
                 else:
-                    # DB fallback — hanya digunakan jika caller adalah monolith lama
-                    # yang belum meneruskan price_history
+                    # DB fallback — Ambil dari tabel ohlcv_1m (algovibe DB)
+                    # Menghasilkan paritas indikator yang jauh lebih baik saat bot startup.
                     try:
-                        from app.infrastructure.database import db as _db
-                        import json
-                        with _db.get_connection() as _conn:
-                            row_h = _conn.execute(
-                                "SELECT history_json FROM ticker_history WHERE pair = %s", (pair.lower(),)
-                            ).fetchone()
-                        if row_h and row_h['history_json']:
-                            _prices = json.loads(row_h['history_json'])
-                    except Exception:
-                        pass
+                        from app.infrastructure.database import db_backtest
+                        with db_backtest.get_connection() as _conn:
+                            rows = _conn.execute(
+                                "SELECT close FROM ohlcv_1m WHERE pair = %s ORDER BY ts DESC LIMIT 100", (pair.upper(),)
+                            ).fetchall()
+                        if rows:
+                            # Balikkan urutan agar ASC (chronological) untuk indikator
+                            _prices = [float(r['close']) for r in reversed(rows)]
+                    except Exception as e:
+                        logger.warning(f"[scoring] Fallback history failed for {pair}: {e}")
                 if _prices:
                     if len(_prices) >= 14:
                         _rsi = calculate_rsi(_prices)

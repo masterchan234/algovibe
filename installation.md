@@ -149,3 +149,31 @@ To minimize networking latency on the market WebSocket ingress, the `market-pipe
 > [!NOTE]
 > - Since `market-pipe` shares the host namespace, it connects to Postgres via **`localhost:5432`** rather than the internal Docker DNS name `timescaledb:5432`.
 > - Ensure no other service on your host machine is actively binding to port `5432` to avoid container initialization failures.
+---
+
+## 💾 Moving Data to a New Server
+
+Algovibe dirancang agar mudah dipindahkan antar VPS. Ada dua jenis data yang perlu diperhatikan:
+
+### 1. Strategi & Profil (Otomatis)
+Semua strategi (`jokobodo`, `anglingdharma`, dkk) dapat dipindahkan menggunakan file `seed_data.sql`.
+- Bot akan otomatis mengeksekusi file ini jika database baru masih kosong.
+- File ini dihasilkan otomatis oleh bot atau bisa dibuat manual via `pg_dump`.
+
+### 2. Data History 90 Hari (Manual)
+Karena ukurannya yang besar (GB), data OHLCV harus dipindahkan secara manual menggunakan skrip utilitas:
+
+**Di Server Lama:**
+```bash
+./migrate_history.sh export
+# Ini akan menghasilkan file ohlcv_90d_dump.sql.gz
+```
+
+**Di Server Baru:**
+1. Pindahkan file `ohlcv_90d_dump.sql.gz` ke server baru.
+2. Jalankan impor:
+```bash
+./migrate_history.sh import
+```
+
+---

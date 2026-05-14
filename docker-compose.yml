@@ -147,6 +147,7 @@ services:
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
       - MIGRATION_PRIMARY=true
       - MODEL_PATH=/tmp/disabled_model
     volumes:
@@ -202,6 +203,7 @@ services:
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
       - GLOG_minloglevel=2          # Suppress C++ glog WARNING from litert/MediaPipe (mel_filterbank etc.)
       - MODEL_PATH=/tmp/disabled_model
     volumes:
@@ -370,6 +372,7 @@ services:
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
       - MODEL_PATH=/app/models/gemma-4-E2B-it.litertlm
       - NEWS_LLM_PROVIDER=${NEWS_LLM_PROVIDER:-local}
       - NEWS_REMOTE_TIMEOUT_SEC=${NEWS_REMOTE_TIMEOUT_SEC:-60}
@@ -421,6 +424,7 @@ services:
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
     ports:
       - "8080:8080"
     volumes:

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN, DATA_PATH
+from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN, DATABASE_URL_BACKTEST, DATA_PATH
 from .migrations import run_migrations
 import subprocess
 import re
@@ -69,7 +69,52 @@ class Database:
     def _init_db(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
+
+            # 1. Khusus Database Backtest (algovibe)
+            if self.db_url == DATABASE_URL_BACKTEST:
+                logger.info("[db] 🛠️  Bootstrapping backtest schema (ohlcv_1m)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ohlcv_1m (
+                        ts TIMESTAMPTZ NOT NULL,
+                        pair TEXT NOT NULL,
+                        open DOUBLE PRECISION,
+                        high DOUBLE PRECISION,
+                        low DOUBLE PRECISION,
+                        close DOUBLE PRECISION,
+                        volume DOUBLE PRECISION,
+                        PRIMARY KEY (pair, ts)
+                    )
+                """)
+                # Ubah ke hypertable jika belum (TimescaleDB)
+                try:
+                    cursor.execute("SELECT create_hypertable('ohlcv_1m', 'ts', if_not_exists => TRUE)")
+                except: pass
+                
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_pair_ts ON ohlcv_1m (pair, ts DESC)")
+                
+                # ── Data Seeding (From Local SQL Dump) ──
+                cursor.execute("SELECT COUNT(*) as count FROM backtest_profiles")
+                if cursor.fetchone()['count'] == 0:
+                    seed_file = os.path.join(os.getcwd(), "seed_data.sql")
+                    if os.path.exists(seed_file):
+                        logger.info(f"[db] 📥 Loading seed data from {seed_file}...")
+                        try:
+                            with open(seed_file, 'r') as f:
+                                sql = f.read()
+                                # Eksekusi per statement untuk menghindari masalah transaksi
+                                for statement in sql.split(';'):
+                                    if statement.strip():
+                                        cursor.execute(statement)
+                            logger.info("[db] ✅ Seed data loaded successfully.")
+                        except Exception as e:
+                            logger.error(f"[db] ❌ Failed to load seed data: {e}")
+                    else:
+                        logger.warning("[db] ⚠️  seed_data.sql not found. Skipping data bootstrap.")
+                
+                logger.info("[db] ✅ Backtest schema ready.")
+                return
+
+            # 2. Database Live/Dryrun (algovibe_live / algovibe_dryrun)
             # Seeding data awal yang dibutuhkan bot untuk running pertama kali
             # (Tabel sudah dibuat oleh run_migrations di __init__)
             
@@ -609,6 +654,7 @@ class Database:
             with self.get_connection() as conn:
                 # 'ai_prob' is the canonical key (set in trade_execution.py).
                 # 'tq_prob' is the legacy key used before the rename; kept as fallback
+                db_backtest = Database(DATABASE_URL_BACKTEST)
                 # so backtest or external callers that still use the old key work correctly.
                 # 'sector_sentiment' is canonical; 'sector_boost' is the legacy parameter name.
                 ai_prob = dna_data.get('ai_prob', dna_data.get('tq_prob', 0.0))
@@ -1324,3 +1370,4 @@ class DatabaseRouter:
 
 # Instantiate a global db object for ease of use
 db = DatabaseRouter()
+db_backtest = Database(DATABASE_URL_BACKTEST)
