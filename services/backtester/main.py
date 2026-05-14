@@ -707,6 +707,13 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
     high_arr  = _np.array([c["high"] for c in candles])
     low_arr   = _np.array([c["low"] for c in candles])
     
+    # Pre-extract technicals from df_tf to NumPy for fast lookup
+    atr_arr   = df_tf["atr"].values if "atr" in df_tf else _np.zeros(len(df_tf))
+    ema50_arr = df_tf["ema50"].values if "ema50" in df_tf else _np.zeros(len(df_tf))
+    macd_arr  = df_tf["macd_hist"].values if "macd_hist" in df_tf else _np.zeros(len(df_tf))
+    stoch_k_arr = df_tf["stoch_k"].values if "stoch_k" in df_tf else _np.zeros(len(df_tf))
+    rsi_arr_tf = df_tf["rsi"].values if "rsi" in df_tf else _np.zeros(len(df_tf))
+    
     for i in range(min_candles * tf_min, len(candles)):
         ts_epoch = ts_epochs[i]
         close    = close_arr[i]
@@ -826,28 +833,28 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
             continue
 
         # ATR filter (vectorized ATR use)
-        _atr = df_tf.iloc[idx_tf]["atr"]
+        _atr = atr_arr[idx_tf]
         if (_atr / close) > atr_max:
             continue
 
         # Strategy-specific gates
         if strat_mode == "trend_pullback":
-            ema50 = df_tf.iloc[idx_tf]["ema50"]
+            ema50 = ema50_arr[idx_tf]
             if close < ema50:
                 continue
             
-            rsi = sig["rsi"]
-            stoch_k = sig["stoch_k"]
+            rsi = rsi_arr_tf[idx_tf]
+            stoch_k = stoch_k_arr[idx_tf]
             is_dip = (rsi < 50) and (rsi < float(p.get("rsi_oversold", 35)) + 10 or stoch_k < 40)
             if not is_dip:
                 continue
             
-            if sig["macd_hist"] < -(close * 0.002):
+            if macd_arr[idx_tf] < -(close * 0.002):
                 continue
 
         # EMA-50 trend filter (General - mirror gate 4c)
         if strat_mode != "trend_pullback" and ema_trend_f:
-            ema50 = df_tf.iloc[idx_tf]["ema50"]
+            ema50 = ema50_arr[idx_tf]
             if close < ema50:
                 continue
 
@@ -1077,43 +1084,48 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
     try:
         cur = conn.cursor()
         
-        # 1. Aggregate Stats
+        # 1. Aggregate Stats (Latest Run)
         cur.execute("""
             SELECT 
-                COUNT(*) as pairs_tested,
-                SUM(total_trades) as total_trades,
-                SUM(winning_trades) as winning_trades,
-                SUM(total_pnl_idr) as net_pnl_idr,
-                AVG(win_rate) as avg_win_rate,
-                AVG(profit_factor) as avg_pf,
-                SUM(initial_capital_idr) as total_cap
+                id,
+                total_trades,
+                winning_trades,
+                total_pnl_idr,
+                win_rate,
+                profit_factor,
+                initial_capital_idr as total_cap,
+                created_at
             FROM backtest_results
-            WHERE profile_id = %s AND created_at >= NOW() - INTERVAL '15 minutes'
+            WHERE profile_id = %s
+            ORDER BY created_at DESC LIMIT 1
         """, (profile_id,))
         row = cur.fetchone()
         
         if not row or not row["total_trades"]:
-            print(f"\n[REPORT] Profile: {profile_name} — No trades generated.")
+            print(f"\n[REPORT] Profile: {profile_name} — No completed trades found in database.")
+            print("         Note: Results are only saved AFTER the 'run' process finishes completely.")
             return
 
+        result_id = row["id"]
         total_t = row["total_trades"]
         wins    = row["winning_trades"]
         losses  = total_t - wins
-        wr      = (wins / total_t * 100) if total_t else 0
-        pnl     = row["net_pnl_idr"]
+        wr      = row["win_rate"]
+        pnl     = row["total_pnl_idr"]
         pnl_pct = (pnl / row["total_cap"] * 100) if row["total_cap"] else 0
         
-        # 2. Detailed Trade Metrics
+        # 2. Detailed Trade Metrics for this specific result
         cur.execute("""
-            SELECT pnl_idr, pnl_pct 
+            SELECT pair, pnl_idr, pnl_pct 
             FROM backtest_trades 
-            WHERE result_id IN (SELECT id FROM backtest_results WHERE profile_id = %s AND created_at >= NOW() - INTERVAL '15 minutes')
+            WHERE result_id = %s
             ORDER BY entry_time ASC
-        """, (profile_id,))
+        """, (result_id,))
         trade_data = cur.fetchall()
         
         pnls = [float(t['pnl_idr']) for t in trade_data]
         pnl_pcts = [float(t['pnl_pct']) for t in trade_data]
+        n_pairs_tested = len(set(t['pair'] for t in trade_data))
         
         avg_win = sum(p for p in pnls if p > 0) / wins if wins > 0 else 0
         avg_loss = abs(sum(p for p in pnls if p < 0) / losses) if losses > 0 else 0
@@ -1132,11 +1144,11 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
         print("\n" + "╔" + "═"*68 + "╗")
         print(f"║  QUANTITATIVE PERFORMANCE REPORT: {profile_name:<28} ║")
         print("╠" + "═"*68 + "╣")
-        print(f"║  Pairs Tested    : {row['pairs_tested']:<10} | Total Trades : {total_t:<10} ║")
+        print(f"║  Pairs Tested    : {n_pairs_tested:<10} | Total Trades : {total_t:<10} ║")
         print(f"║  Win Rate        : {wr:6.2f}%    | Net PnL (IDR): Rp {pnl:>12,.0f} ║")
         print(f"║  ROI             : {pnl_pct:>+6.2f}%     | Expectancy   : Rp {expectancy:>12,.0f} ║")
         print(f"║  Avg Win         : Rp {avg_win:>8,.0f} | Avg Loss     : Rp {avg_loss:>12,.0f} ║")
-        print(f"║  Profit Factor   : {row['avg_pf']:>8.2f} | Sharpe Ratio : {sharpe:>12.2f} ║")
+        print(f"║  Profit Factor   : {row['profit_factor']:>8.2f} | Sharpe Ratio : {sharpe:>12.2f} ║")
         
         # New Metrics
         cur.execute("SELECT AVG(sharpe_ratio) as avg_sharpe FROM backtest_results WHERE profile_id = %s", (profile_id,))
@@ -1300,6 +1312,50 @@ def _clear_previous_results() -> None:
         logger.error("[run] Gagal membersihkan data lama: %s", e)
 
 
+def _process_pair_worker(pair_name: str, start_time: datetime, end_time: datetime, profiles_list: list) -> list:
+    """Worker function for multiprocessing. Harus di top-level agar bisa dipickle."""
+    # Setup logger in worker process
+    import logging
+    logger = logging.getLogger("backtester.worker")
+    
+    from services.backtester.db_backtest import get_connection
+    import pandas as pd
+    
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        # OPTIMIZATION: Manually fetch to DataFrame to avoid SQLAlchemy warnings while keeping speed
+        query = """
+            SELECT ts, open, high, low, close, volume 
+            FROM ohlcv_1m 
+            WHERE pair = %s AND ts >= %s 
+            ORDER BY ts ASC
+        """
+        cur.execute(query, (pair_name, start_time))
+        rows = cur.fetchall()
+        
+        if not rows:
+            return []
+
+        df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+
+        # Convert to list of dicts for simulation parity (or optimize further)
+        candles = df.to_dict('records')
+        
+        pair_trades = []
+        for prof in profiles_list:
+            res = _run_backtest_pair(prof, pair_name, candles, start_time, end_time)
+            if res and res["trades"]:
+                pair_trades.extend(res["trades"])
+        return pair_trades
+
+    except Exception as e:
+        logger.error("[run] Error processing pair %s: %s", pair_name, e)
+        return []
+    finally:
+        conn.close()
+
+
 def run_backtest(days: int = OHLCV_DAYS, pairs_filter: str | None = None) -> None:
     _ensure_schema_upgraded()
     _clear_previous_results()
@@ -1325,42 +1381,37 @@ def run_backtest(days: int = OHLCV_DAYS, pairs_filter: str | None = None) -> Non
     logger.info("[run] Memulai backtest untuk %d profiles x %d pairs...", len(profiles), n_pairs)
 
     # Collect all trades per profile
-    profile_trades = {p["id"]: [] for p in profiles}
+    all_results = []
+    completed = [0]
 
-    def _process_pair(pair: str) -> None:
-        conn = get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT ts, open, high, low, close, volume FROM ohlcv_1m "
-                "WHERE pair = %s AND ts >= %s ORDER BY ts ASC",
-                (pair, w_start),
-            )
-            rows = cur.fetchall()
-
-            if not rows:
-                logger.debug("[run] %s — tidak ada data OHLCV, skip", pair)
-                return
-
-            candles = [dict(r) for r in rows]
+    from concurrent.futures import ProcessPoolExecutor
+    
+    # We use cpu_count / 2 or full count depending on IO/CPU balance
+    # Since we have 90 days of data, the CPU (simulation) is now the bottleneck
+    max_workers = os.cpu_count() or 4
+    
+    logger.info("[run] Starting parallel simulation with %d workers...", max_workers)
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process_pair_worker, p, w_start, now, profiles): p for p in pairs}
+        
+        for i, future in enumerate(as_completed(futures)):
+            pair_name = futures[future]
+            try:
+                trades = future.result()
+                all_results.extend(trades)
+            except Exception as e:
+                logger.error("[run] Worker failed for %s: %s", pair_name, e)
             
-            for prof in profiles:
-                pid   = prof["id"]
-                result = _run_backtest_pair(prof, pair, candles, w_start, now)
-                if result and result["trades"]:
-                    profile_trades[pid].extend(result["trades"])
-
-        except Exception as e:
-            logger.error("[run] Error processing pair %s: %s", pair, e)
-        finally:
-            conn.close()
             completed[0] += 1
-            _progress(completed[0], n_pairs, label=f"running ({completed[0]}/{n_pairs})", suffix=f"last={pair}")
+            _progress(completed[0], n_pairs, label=f"running ({completed[0]}/{n_pairs})", suffix=f"last={pair_name}")
 
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
-        futures = {pool.submit(_process_pair, pair): pair for pair in pairs}
-        for future in as_completed(futures):
-            future.result()
+    # Group trades by profile ID
+    profile_trades = {p["id"]: [] for p in profiles}
+    for t in all_results:
+        pid = t.get("profile_id")
+        if pid in profile_trades:
+            profile_trades[pid].append(t)
 
     # Now run portfolio simulation and save results
     for prof in profiles:
