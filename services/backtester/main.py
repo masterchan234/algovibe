@@ -91,8 +91,32 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         return {"trades": [], "stats": {}}
     
     # Derive signals (Vectorized Indicator Calculation + Row-wise Scoring)
-    history = _get_signal_history(pair, candles, p)
-    if not history:
+    if tf_min > 1:
+        # Resample dataframe for indicators
+        df_ts = df.copy()
+        df_ts['ts'] = pd.to_datetime(df_ts['ts'])
+        df_res = df_ts.set_index('ts').resample(f'{tf_min}min').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna()
+        
+        resampled_candles = df_res.reset_index().to_dict('records')
+        res_history = _get_signal_history(pair, resampled_candles, p)
+        
+        if not res_history:
+            return {"trades": [], "stats": {}}
+            
+        # Forward-fill signals back to 1m resolution
+        sig_map = pd.Series(res_history, index=df_res.index)
+        df_sig = df_ts[['ts']].set_index('ts')
+        df_sig['sig'] = sig_map
+        df_sig['sig'] = df_sig['sig'].ffill()
+        
+        empty_sig = {"verdict": "HOLD", "buy_score": 0.0, "sell_score": 0.0}
+        history = [s if isinstance(s, dict) else empty_sig for s in df_sig['sig'].tolist()]
+    else:
+        history = _get_signal_history(pair, candles, p)
+
+    if not history or len(history) != len(candles):
         return {"trades": [], "stats": {}}
     
     # 3. High-Speed Simulation Loop
@@ -101,7 +125,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     cooldown_until = 0
     
     close_arr   = df['close'].values
-    ts_epochs   = df['ts'].apply(lambda x: x.timestamp()).values
+    ts_epochs   = _np.array([c["ts"].timestamp() for c in candles])
     
     # Warm up indicators for gates (if not in history)
     # (In high fidelity, history already has all scores per candle)
@@ -246,6 +270,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             "pnl_pct":       round(net_pnl / position["amount_idr"] * 100, 4),
             "exit_reason":   "END_OF_DATA",
             "buy_score":     position["buy_score"],
+            "sell_score_at_exit": None,
             "duration_seconds": int(ts_epochs[-1] - position["entry_ts"]),
         })
 
@@ -296,17 +321,20 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
     df['ema9'] = df['ema9'].fillna(close)
     df['ema21'] = df['ema21'].fillna(close)
     
+    # Pre-calculate normalized macd_hist
+    df['macd_hist_norm'] = _np.where(df['close'] > 0, df['macd_hist'] * 1000 / df['close'], 0)
+    
     # 2. Row-wise Scoring for 1:1 Parity
     # Kita panggil derive_trade_signal (logika asli) untuk setiap bar
     history = []
     from app.domain.technicals import derive_trade_signal
     
-    for i in range(len(df)):
-        row = df.iloc[i]
+    records = df.to_dict('records')
+    for row in records:
         # Buat dummy tech dict untuk parity
         tech = {
             "rsi": row['rsi'],
-            "macd_hist": row['macd_hist'] * 1000 / row['close'] if row['close'] > 0 else 0, # Normalized
+            "macd_hist": row['macd_hist_norm'],
             "bb_pct": row['bb_pct'],
             "ema9": row['ema9'],
             "ema21": row['ema21'],
@@ -482,13 +510,37 @@ def _ensure_schema_upgraded() -> None:
 
 def _process_pair_worker(pair_name, start_time, end_time, profiles_list):
     from services.backtester.db_backtest import get_connection
+    
+    # Dynamic Time Bucket optimization
+    min_tf = min([int(p.get("timeframe_minutes", 1)) for p in profiles_list] + [1])
+    if min_tf < 1: min_tf = 1
+
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT ts, open, high, low, close, volume FROM ohlcv_1m WHERE pair = %s AND ts >= %s ORDER BY ts ASC", (pair_name, start_time))
+        if min_tf > 1:
+            query = f"""
+                SELECT 
+                    time_bucket('{min_tf} minutes', ts) AS ts,
+                    first(open, ts) AS open,
+                    max(high) AS high,
+                    min(low) AS low,
+                    last(close, ts) AS close,
+                    sum(volume) AS volume
+                FROM ohlcv_1m 
+                WHERE pair = %s AND ts >= %s 
+                GROUP BY ts 
+                ORDER BY ts ASC
+            """
+        else:
+            query = "SELECT ts, open, high, low, close, volume FROM ohlcv_1m WHERE pair = %s AND ts >= %s ORDER BY ts ASC"
+            
+        cur.execute(query, (pair_name, start_time))
         rows = cur.fetchall()
         if not rows: return []
-        candles = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume']).to_dict('records')
+        
+        # Fast DB tuple to dict mapping without pandas overhead
+        candles = [{'ts': r['ts'], 'open': r['open'], 'high': r['high'], 'low': r['low'], 'close': r['close'], 'volume': r['volume']} for r in rows]
         
         pair_trades = []
         for p in profiles_list:
@@ -572,8 +624,11 @@ def tune_profile(profile_id: int) -> bool:
         total_pnl = res['total_pnl_idr']
         total_roi = res['total_pnl_pct']
         
-        # Calculate days (Assume 90 if no range available)
-        days_tested = 90.0 
+        # Calculate actual days tested
+        w_start = res['window_start']
+        w_end = res['window_end']
+        days_tested = (w_end - w_start).total_seconds() / 86400.0 if w_end and w_start and w_end > w_start else 90.0
+        
         target_roi_daily = p.get('target_roi_pct', 0.0)
         target_pnl_daily = p.get('target_pnl_idr', 0.0)
 
@@ -599,13 +654,32 @@ def tune_profile(profile_id: int) -> bool:
         new_p['profile_name'] = f"{p['profile_name'].split('_v')[0]}_v{v}"
         
         changes = []
-        if res['win_rate'] < 0.45:
+        
+        # 1. Dynamic Risk/Reward Adjustment
+        if res['profit_factor'] < 1.2:
+            if res['win_rate'] > 0.5:
+                # Good win rate but low PF: Let profits run higher
+                new_p['target_tp_pct'] = round(p['target_tp_pct'] + 0.005, 4)
+                changes.append("Increased TP target")
+            
+        if res['max_drawdown_pct'] > 15.0 or (res['losing_trades'] > res['winning_trades'] * 1.5):
+            # Cut losses quicker to preserve capital
+            # SL is negative, so tightening means getting closer to zero
+            current_sl = p['target_sl_pct']
+            new_p['target_sl_pct'] = round(min(-0.01, current_sl + 0.005), 4)
+            changes.append("Tightened SL target")
+            
+        # 2. Overtrading Penalty (Quality vs Quantity)
+        avg_pnl_pct = res['avg_pnl_per_trade_pct']
+        if avg_pnl_pct < 0.2 and res['total_trades'] > (days_tested * 5):
+            # Too many low-quality trades eaten by fees
+            new_p['buy_threshold'] = min(8.5, p['buy_threshold'] + 0.5)
+            changes.append("Strict entry gate (Overtrading protection)")
+        elif res['win_rate'] < 0.45:
+            # Baseline win-rate enhancement
             new_p['buy_threshold'] = min(8.5, p['buy_threshold'] + 0.2)
             changes.append("Higher threshold for quality")
-        if res['profit_factor'] < 1.2:
-            new_p['target_tp_pct'] = round(p['target_tp_pct'] + 0.005, 4)
-            changes.append("Increased TP target")
-        
+            
         if not changes: return False
         
         cols = ", ".join(new_p.keys())
@@ -637,7 +711,9 @@ def run_backtest(days=OHLCV_DAYS, pairs_filter=None):
     
     # 1. Multi-process sim
     all_results = []
-    with ProcessPoolExecutor() as pool:
+    import multiprocessing
+    max_w = min(4, multiprocessing.cpu_count())
+    with ProcessPoolExecutor(max_workers=max_w) as pool:
         future_to_pair = {pool.submit(_process_pair_worker, px, start, now, profiles): px for px in pairs}
         for i, f in enumerate(as_completed(future_to_pair)):
             pair = future_to_pair[f]
