@@ -92,26 +92,34 @@ class Database:
                 
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_pair_ts ON ohlcv_1m (pair, ts DESC)")
                 
-                # ── Data Seeding (From Local SQL Dump) ──
-                cursor.execute("SELECT COUNT(*) as count FROM backtest_profiles")
-                if cursor.fetchone()['count'] == 0:
-                    seed_file = os.path.join(os.getcwd(), "seed_data.sql")
-                    if os.path.exists(seed_file):
-                        logger.info(f"[db] 📥 Loading seed data from {seed_file}...")
-                        try:
-                            with open(seed_file, 'r') as f:
-                                sql = f.read()
-                                # Eksekusi per statement untuk menghindari masalah transaksi
-                                for statement in sql.split(';'):
-                                    if statement.strip():
-                                        cursor.execute(statement)
-                            logger.info("[db] ✅ Seed data loaded successfully.")
-                        except Exception as e:
-                            logger.error(f"[db] ❌ Failed to load seed data: {e}")
-                    else:
-                        logger.warning("[db] ⚠️  seed_data.sql not found. Skipping data bootstrap.")
+                # ── Data Seeding (Safe check for table existence) ──
+                try:
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'backtest_profiles'
+                        );
+                    """)
+                    table_exists = cursor.fetchone()[0]
+                    
+                    if table_exists:
+                        cursor.execute("SELECT COUNT(*) as count FROM backtest_profiles")
+                        if cursor.fetchone()['count'] == 0:
+                            seed_file = os.path.join(os.getcwd(), "seed_data.sql")
+                            if os.path.exists(seed_file):
+                                logger.info(f"[db] 📥 Loading seed data from {seed_file}...")
+                                with open(seed_file, 'r') as f:
+                                    sql = f.read()
+                                    for statement in sql.split(';'):
+                                        if statement.strip():
+                                            cursor.execute(statement)
+                                logger.info("[db] ✅ Seed data loaded successfully.")
+                            else:
+                                logger.warning("[db] ⚠️  seed_data.sql not found. Skipping data bootstrap.")
+                except Exception as e:
+                    logger.warning(f"[db] ⚠️  Backtest bootstrap check skipped or failed: {e}")
                 
-                logger.info("[db] ✅ Backtest schema ready.")
+                logger.info("[db] ✅ Backtest schema check complete.")
                 return
 
             # 2. Database Live/Dryrun (algovibe_live / algovibe_dryrun)
