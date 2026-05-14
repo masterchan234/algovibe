@@ -1770,6 +1770,33 @@ def get_backtest_profiles():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/backtest/run', methods=['POST'])
+@login_required
+def trigger_backtest():
+    """Trigger the backtester service in the background."""
+    import subprocess
+    import sys
+    
+    data = request.json or {}
+    days = data.get('days', 7)
+    
+    try:
+        # Run as a non-blocking background process
+        # We use sys.executable to ensure we use the same python interpreter
+        cmd = [sys.executable, "-m", "services.backtester.main", "run", "--days", str(days)]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Backtest for {days} days started in background."
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
 @app.route('/api/backtest/results', methods=['GET'])
 @login_required
 def get_backtest_results():

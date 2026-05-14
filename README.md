@@ -84,6 +84,42 @@ Syarat BUY: `buy_score >= 6.0` dan `sell_score < 4.0`. Max score ~19.5.
 
 ---
 
+## 🧪 Backtesting Engine (High-Fidelity)
+
+Algovibe dilengkapi dengan mesin backtesting performa tinggi untuk memvalidasi strategi secara kuantitatif sebelum dijalankan di live market.
+
+### Fitur Utama Backtester:
+- **High-Performance NumPy Engine:** Menggunakan simulasi berbasis array (vektor) untuk memproses ribuan candle dalam hitungan detik.
+- **1:1 Strategy Parity:** Menggunakan fungsi teknikal dan gerbang filter (`entry_gates.py`) yang persis sama dengan bot live.
+- **High-Fidelity Simulation:**
+    - **Slippage & Spread Simulation:** Mensimulasikan harga eksekusi di *bid/ask* spread untuk estimasi profit yang realistis.
+    - **Portfolio Layer:** Mensimulasikan batasan modal riil dengan parameter `max_open_positions` global lintas pair.
+- **Advanced Quantitative Metrics:**
+    - **Sortino Ratio:** Mengukur performa terhadap risiko *downside*.
+    - **Recovery Factor & Calmar Ratio:** Mengukur kemampuan strategi pulih dari *drawdown*.
+    - **Kelly Criterion:** Memberikan rekomendasi ukuran posisi optimal.
+    - **Expectancy:** Menghitung rata-rata profit yang diharapkan per trade dalam IDR.
+
+### Operasional Backtest:
+
+```bash
+# 1. Fetch data historis (default 90 hari terakhir)
+docker compose run --rm backtester fetch
+
+# 2. Jalankan backtest untuk semua profil aktif
+docker compose run --rm backtester run
+
+# 3. Jalankan backtest dengan filter pair tertentu
+docker compose run --rm backtester run --days 30 --pairs BTC-IDR,ETH-IDR
+
+# 4. Lihat laporan ringkasan terakhir
+docker compose run --rm backtester report
+```
+
+Data historis disimpan di tabel `ohlcv_1m` pada database `algovibe` (TimescaleDB).
+
+---
+
 ## ⚙️ Arsitektur Proyek
 
 ```

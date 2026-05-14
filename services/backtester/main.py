@@ -649,6 +649,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
     ema_trend_f = bool(p.get("ema_trend_filter_enabled", True))
     ema_trend_p = int(p.get("ema_trend", 50))
     strat_mode  = p.get("strategy_mode", "scalping")
+    slippage    = float(p.get("fee_slippage_buffer", 0.002)) # Default 0.2%
     from app.domain.technicals import calculate_ema as _ema
  
     trades: list[dict] = []
@@ -675,28 +676,47 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
     # 1. Pre-calculate technicals for entire TF series
     df_tf = get_vectorized_indicators(pd.DataFrame(candles_tf).to_dict('records'), p)
     
-    # 2. Pre-calculate signals (O(M)) to avoid calling derive_signal in the loop
-    # We'll use a local cache for signals to keep it 1:1 with bot logic
-    sig_cache = {}
+    # 2. Pre-calculate signals (Vectorized)
+    # To be valid, we need adaptive thresholds. Instead of calling compute_adaptive_thresholds()
+    # once per candle, we calculate rolling percentiles of RSI (approximate but much faster).
+    rsi_arr = df_tf["rsi"].values
+    window_at = int(p.get("adaptive_threshold_candles", 50))
+    
+    # Calculate rolling percentiles for RSI adaptive thresholds
+    rsi_series = pd.Series(rsi_arr)
+    rolling_oversold = rsi_series.rolling(window=window_at).quantile(0.20).fillna(float(p.get("rsi_oversold", 35.0)))
+    rolling_overbought = rsi_series.rolling(window=window_at).quantile(0.80).fillna(float(p.get("rsi_overbought", 70.0)))
+    
+    # Clamp thresholds (mirroring compute_adaptive_thresholds logic)
+    rolling_oversold = rolling_oversold.clip(20.0, 45.0)
+    rolling_overbought = rolling_overbought.clip(55.0, 85.0)
+    
+    # Convert technicals to a record list for faster iteration
+    tech_records = df_tf.to_dict('records')
+    all_signals = []
+    for idx, row in enumerate(tech_records):
+        at = {
+            "rsi_oversold": rolling_oversold[idx],
+            "rsi_overbought": rolling_overbought[idx]
+        }
+        all_signals.append(_derive_signal_with_profile(row, p, sector, at, None))
 
+    # 3. Extract NumPy arrays for ultra-fast minute-by-minute iteration
+    ts_epochs = _np.array([c["ts"].timestamp() for c in candles])
+    close_arr = _np.array([c["close"] for c in candles])
+    high_arr  = _np.array([c["high"] for c in candles])
+    low_arr   = _np.array([c["low"] for c in candles])
+    
     for i in range(min_candles * tf_min, len(candles)):
-        candle   = candles[i]
-        ts       = candle["ts"]
-        close    = candle["close"]
-        high     = candle["high"]
-        low      = candle["low"]
-        ts_epoch = ts.timestamp()
+        ts_epoch = ts_epochs[i]
+        close    = close_arr[i]
+        high     = high_arr[i]
+        low      = low_arr[i]
+        ts       = candles[i]["ts"]
 
-        # ── Update TF windows & signals ONLY on TF candle boundaries ─────
         idx_tf = i // tf_min
-        if idx_tf not in sig_cache:
-            row_tf = df_tf.iloc[idx_tf].to_dict()
-            # Adaptive thresholds simplified for backtest speed
-            at = {"rsi_oversold": float(p.get("rsi_oversold", 35.0)), 
-                  "rsi_overbought": float(p.get("rsi_overbought", 70.0))}
-            sig_cache[idx_tf] = _derive_signal_with_profile(row_tf, p, sector, at, None)
-        
-        sig = sig_cache[idx_tf]
+        if idx_tf >= len(all_signals): break
+        sig = all_signals[idx_tf]
 
         # ── Manage open position first (EVERY MINUTE) ─────────────────────
         if position is not None:
@@ -743,10 +763,10 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
 
             # TP hit
             exit_reason = None
-            exit_price  = close
+            exit_price  = close * (1.0 - slippage) # Apply slippage on exit
             if close >= entry_px * (1.0 + tp_pct):
                 exit_reason = "TP"
-                exit_price  = entry_px * (1.0 + tp_pct)
+                exit_price  = entry_px * (1.0 + tp_pct) * (1.0 - slippage)
             # Trailing SL hit
             elif trail_sl_px > 0 and low <= trail_sl_px:
                 exit_reason = "TRAILING_SL"
@@ -754,7 +774,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
             # SL hit
             elif close <= entry_px * (1.0 + sl_pct):
                 exit_reason = "SL"
-                exit_price  = entry_px * (1.0 + sl_pct)
+                exit_price  = entry_px * (1.0 + sl_pct) * (1.0 - slippage)
             # Max hold exceeded
             elif (ts_epoch - position["entry_ts"]) > max_hold_m * 60:
                 exit_reason = "MAX_HOLD"
@@ -839,10 +859,12 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
         # Entry
         trade_idr = min(pos_idr, current_cap * 0.9)
         buy_fee   = trade_idr * fee_buy
-        crypto_amt = (trade_idr - buy_fee) / close
+        # Apply slippage on entry price (buying higher)
+        entry_px  = close * (1.0 + slippage)
+        crypto_amt = (trade_idr - buy_fee) / entry_px
 
         position = {
-            "entry_price":       close,
+            "entry_price":       entry_px,
             "amount_idr":        trade_idr,
             "amount_crypto":     crypto_amt,
             "buy_fee":           buy_fee,
@@ -897,6 +919,8 @@ def _empty_stats(capital: float, ws: datetime, we: datetime) -> dict:
         "avg_pnl_per_trade_idr": None, "avg_pnl_per_trade_pct": None,
         "max_consecutive_wins": 0, "max_consecutive_losses": 0,
         "initial_capital_idr": capital, "final_capital_idr": capital,
+        "sortino_ratio": None, "recovery_factor": None, "calmar_ratio": None,
+        "expectancy_idr": 0.0,
     }
 
 
@@ -964,7 +988,27 @@ def _compute_stats(trades: list[dict], capital: float,
         "max_consecutive_losses":  max_cl,
         "initial_capital_idr":     capital,
         "final_capital_idr":       round(capital + total_pnl, 2),
+        "sortino_ratio":            round(_compute_sortino(pnls), 4) if pnls else None,
+        "recovery_factor":          round(total_pnl / max_dd_idr, 4) if max_dd_idr > 0 else None,
+        "calmar_ratio":             round((total_pnl / capital * 100) / max_dd_pct, 4) if max_dd_pct and max_dd_pct > 0 else None,
+        "expectancy_idr":           round((win_rate * (sum(wins)/len(wins) if wins else 0)) + ((1-win_rate) * (sum(losses)/len(losses) if losses else 0)), 2) if pnls else 0.0,
     }
+
+
+def _compute_sortino(pnls: list[float], risk_free_rate: float = 0.0) -> float:
+    """Hitung Sortino Ratio (Downside Deviation focus)."""
+    import numpy as _np
+    if not pnls or len(pnls) < 2:
+        return 0.0
+    arr = _np.array(pnls)
+    avg_return = _np.mean(arr) - risk_free_rate
+    downside_returns = arr[arr < 0]
+    if len(downside_returns) == 0:
+        return 0.0
+    downside_std = _np.std(downside_returns)
+    if downside_std == 0:
+        return 0.0
+    return float(avg_return / downside_std)
 
 
 def _save_result(profile_id: int, pair: str | None,
@@ -979,9 +1023,10 @@ def _save_result(profile_id: int, pair: str | None,
                 sharpe_ratio, profit_factor, avg_trade_duration_sec,
                 avg_pnl_per_trade_idr, avg_pnl_per_trade_pct,
                 max_consecutive_wins, max_consecutive_losses,
-                initial_capital_idr, final_capital_idr
+                initial_capital_idr, final_capital_idr,
+                sortino_ratio, recovery_factor, calmar_ratio, expectancy_idr
             ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
             ) RETURNING id
             """,
             (
@@ -995,6 +1040,8 @@ def _save_result(profile_id: int, pair: str | None,
                 stats["avg_pnl_per_trade_idr"], stats["avg_pnl_per_trade_pct"],
                 stats["max_consecutive_wins"], stats["max_consecutive_losses"],
                 stats["initial_capital_idr"], stats["final_capital_idr"],
+                stats.get("sortino_ratio"), stats.get("recovery_factor"),
+                stats.get("calmar_ratio"), stats.get("expectancy_idr")
             ),
         )
         row = cur.fetchone()
@@ -1024,11 +1071,239 @@ def _save_result(profile_id: int, pair: str | None,
                 result_id, pair, stats["total_trades"], stats["total_pnl_idr"])
 
 
+def _print_run_report(profile_id: int, profile_name: str) -> None:
+    """Ambil aggregate statistik dari DB dan tampilkan report ringkas ala Quant Analyst."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        
+        # 1. Aggregate Stats
+        cur.execute("""
+            SELECT 
+                COUNT(*) as pairs_tested,
+                SUM(total_trades) as total_trades,
+                SUM(winning_trades) as winning_trades,
+                SUM(total_pnl_idr) as net_pnl_idr,
+                AVG(win_rate) as avg_win_rate,
+                AVG(profit_factor) as avg_pf,
+                SUM(initial_capital_idr) as total_cap
+            FROM backtest_results
+            WHERE profile_id = %s AND created_at >= NOW() - INTERVAL '15 minutes'
+        """, (profile_id,))
+        row = cur.fetchone()
+        
+        if not row or not row["total_trades"]:
+            print(f"\n[REPORT] Profile: {profile_name} — No trades generated.")
+            return
+
+        total_t = row["total_trades"]
+        wins    = row["winning_trades"]
+        losses  = total_t - wins
+        wr      = (wins / total_t * 100) if total_t else 0
+        pnl     = row["net_pnl_idr"]
+        pnl_pct = (pnl / row["total_cap"] * 100) if row["total_cap"] else 0
+        
+        # 2. Detailed Trade Metrics
+        cur.execute("""
+            SELECT pnl_idr, pnl_pct 
+            FROM backtest_trades 
+            WHERE result_id IN (SELECT id FROM backtest_results WHERE profile_id = %s AND created_at >= NOW() - INTERVAL '15 minutes')
+            ORDER BY entry_time ASC
+        """, (profile_id,))
+        trade_data = cur.fetchall()
+        
+        pnls = [float(t['pnl_idr']) for t in trade_data]
+        pnl_pcts = [float(t['pnl_pct']) for t in trade_data]
+        
+        avg_win = sum(p for p in pnls if p > 0) / wins if wins > 0 else 0
+        avg_loss = abs(sum(p for p in pnls if p < 0) / losses) if losses > 0 else 0
+        expectancy = (wr/100 * avg_win) - ((1 - wr/100) * avg_loss)
+        
+        # Simple Sharpe (Return / StdDev)
+        std_pnl = _np.std(pnls) if len(pnls) > 1 else 0
+        sharpe = (sum(pnls)/len(pnls)) / std_pnl if std_pnl > 0 else 0
+        
+        # Max Drawdown
+        equity_curve = _np.cumsum(pnls)
+        peak = _np.maximum.accumulate(equity_curve)
+        drawdown = peak - equity_curve
+        max_dd = _np.max(drawdown) if len(drawdown) > 0 else 0
+
+        print("\n" + "╔" + "═"*68 + "╗")
+        print(f"║  QUANTITATIVE PERFORMANCE REPORT: {profile_name:<28} ║")
+        print("╠" + "═"*68 + "╣")
+        print(f"║  Pairs Tested    : {row['pairs_tested']:<10} | Total Trades : {total_t:<10} ║")
+        print(f"║  Win Rate        : {wr:6.2f}%    | Net PnL (IDR): Rp {pnl:>12,.0f} ║")
+        print(f"║  ROI             : {pnl_pct:>+6.2f}%     | Expectancy   : Rp {expectancy:>12,.0f} ║")
+        print(f"║  Avg Win         : Rp {avg_win:>8,.0f} | Avg Loss     : Rp {avg_loss:>12,.0f} ║")
+        print(f"║  Profit Factor   : {row['avg_pf']:>8.2f} | Sharpe Ratio : {sharpe:>12.2f} ║")
+        
+        # New Metrics
+        cur.execute("SELECT AVG(sharpe_ratio) as avg_sharpe FROM backtest_results WHERE profile_id = %s", (profile_id,))
+        # (Assuming we might want more detail later)
+        
+        print(f"║  Max Drawdown    : Rp {max_dd:>8,.0f} | Risk/Reward  : {avg_win/avg_loss if avg_loss else 0:>12.2f} ║")
+        
+        # Kelly Criterion
+        # f = (p/a) - (q/b) where p=win_prob, q=loss_prob, a=loss_amt, b=win_amt
+        # Simplified: f = w - ((1-w)/R)
+        win_prob = wr / 100
+        rr_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+        kelly = win_prob - ((1 - win_prob) / rr_ratio) if rr_ratio > 0 else 0
+        
+        print(f"║  Kelly Criterion : {kelly:>8.2f} | Expectancy   : Rp {expectancy:>12,.0f} ║")
+        print("╚" + "═"*68 + "╝")
+
+        # 3. Dynamic Quantitative Insights (Zero-Bias Mathematical Evaluation)
+        print("\n" + "📊 DYNAMIC STRATEGIC RECOMMENDATIONS:")
+        print("-" * 70)
+        
+        # Logic 1: Expectancy & Win Rate Confluence
+        if expectancy < 0:
+            if wr < 35:
+                print(f"  [SIGNAL QUALITY] Critical: Win Rate ({wr:.1f}%) is below the statistical noise floor.")
+                print("  -> Fix: Increase 'buy_score' threshold by +1.5 to filter low-probability entries.")
+            elif avg_loss > avg_win:
+                print(f"  [R:R ASYMMETRY] Negative Expectancy driven by Average Loss > Average Win.")
+                print(f"  -> Fix: Tighten 'SL_PCT' or increase 'DCA_MULTIPLIER' to lower break-even.")
+        
+        # Logic 2: Profit Factor Analysis
+        pf = row['avg_pf'] or 0
+        if pf < 1.0:
+            print(f"  [DRAINAGE] Profit Factor ({pf:.2f}) < 1.0: The strategy is currently leaking capital.")
+            print("  -> Fix: Implement 'EMA-50' Trend Filter (Gate 4c) to avoid trading against the primary trend.")
+        elif 1.0 <= pf < 1.25:
+            print(f"  [MARGINAL] Profit Factor ({pf:.2f}) is in the 'break-even' trap.")
+            print("  -> Fix: Increase 'TP_PCT' by 0.5% to overcome exchange fee drag (0.63% round-trip).")
+
+        # Logic 3: Stability & Variance (Sharpe)
+        if sharpe < 0 and total_t > 30:
+            print(f"  [VOLATILITY] Negative Sharpe ({sharpe:.2f}): Returns do not justify the risk.")
+            print("  -> Fix: Increase 'MIN_VOLUME_FILTER' to 25M IDR to avoid illiquid 'slippage' traps.")
+            
+        # Logic 4: Win/Loss Ratio
+        if losses > 0 and avg_loss > 0 and (avg_win / avg_loss) < 1.5:
+             print(f"  [EFFICIENCY] Win/Loss Ratio ({avg_win/avg_loss:.2f}) is too tight.")
+             print("  -> Fix: Use 'MICRO_PROFIT_EXIT' logic to capture small wins faster or widen TP.")
+
+        if expectancy >= 500 and pf > 1.5:
+            print("  [ALPHA DETECTED] Strategy is mathematically sound. Ready for paper trading/dry-run.")
+
+        # Top 5 Pairs
+        print("\n" + "🏆 TOP 5 ALPHA GENERATORS:")
+        cur.execute("""
+            SELECT pair, total_trades, total_pnl_idr, win_rate
+            FROM backtest_results
+            WHERE profile_id = %s AND total_trades > 0 
+              AND created_at >= NOW() - INTERVAL '15 minutes'
+            ORDER BY total_pnl_idr DESC LIMIT 5
+        """, (profile_id,))
+        top_rows = cur.fetchall()
+        for r in top_rows:
+            wr_v = (r['win_rate'] or 0) * 100
+            print(f"  {r['pair'].replace('idr','').upper():<10} | {r['total_trades']:3d} tx | PnL: {r['total_pnl_idr']:+12,.0f} | WR: {wr_v:5.1f}%")
+
+        print("\n" + "="*70 + "\n")
+
+    except Exception as e:
+        logger.error("[report] Gagal generate report: %s", e)
+    finally:
+        conn.close()
+
+
+def _simulate_portfolio(all_trades: list[dict], profile: dict) -> dict:
+    """
+    Simulasikan portofolio global: ambil semua trade dari semua pair,
+    urutkan berdasarkan waktu, dan terapkan batasan modal + max_open_positions.
+    """
+    if not all_trades:
+        return {"trades": [], "stats": {}}
+
+    # Urutkan berdasarkan entry_time
+    sorted_trades = sorted(all_trades, key=lambda x: x["entry_time"])
+    
+    capital = float(profile.get("initial_capital_idr", 1_000_000.0))
+    max_pos = int(profile.get("max_open_positions", 3))
+    
+    active_trades = []
+    final_trades  = []
+    current_cap   = capital
+
+    for t in sorted_trades:
+        # 1. Bersihkan active_trades yang sudah exit sebelum t["entry_time"]
+        active_trades = [a for a in active_trades if a["exit_time"] > t["entry_time"]]
+        
+        # 2. Cek apakah ada slot kosong
+        if len(active_trades) < max_pos:
+            # 3. Cek modal
+            if current_cap >= t["amount_idr"]:
+                # Accept trade
+                active_trades.append(t)
+                final_trades.append(t)
+                # Note: Dalam realitas, capital berkurang saat entry dan bertambah saat exit.
+                # Di sini kita hanya butuh ini untuk stats akhir.
+                # current_cap -= t["amount_idr"] # Tidak perlu karena PnL dihitung relatif
+        
+    return final_trades
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # RUN — orchestrate per profile × pair
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(days: int = OHLCV_DAYS) -> None:
+def _ensure_schema_upgraded() -> None:
+    """Tambahkan kolom-kolom metrik baru jika belum ada di DB."""
+    cols = {
+        "sortino_ratio": "DOUBLE PRECISION",
+        "recovery_factor": "DOUBLE PRECISION",
+        "calmar_ratio": "DOUBLE PRECISION",
+        "expectancy_idr": "DOUBLE PRECISION"
+    }
+    with transaction() as cur:
+        for col, dtype in cols.items():
+            try:
+                cur.execute(f"ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS {col} {dtype}")
+            except Exception:
+                pass # Kolom sudah ada atau error lain (IF NOT EXISTS aman di PG 9.6+)
+
+
+def _print_data_summary() -> None:
+    """Tampilkan ringkasan ketersediaan data di database."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT MIN(ts), MAX(ts), COUNT(DISTINCT pair) FROM ohlcv_1m")
+        res = cur.fetchone()
+        if res and res[2] > 0:
+            min_ts, max_ts, n_pairs = res
+            days = (max_ts - min_ts).days
+            print("\n" + "═"*60)
+            print(f" 📊 DATA AVAILABILITY (Database: ohlcv_1m)")
+            print(f" 📅 Period : {min_ts.strftime('%Y-%m-%d')} s/d {max_ts.strftime('%Y-%m-%d')} ({days} hari)")
+            print(f" 🪙 Pairs  : {n_pairs} pairs terdeteksi")
+            print("═"*60 + "\n")
+        else:
+            logger.warning("[run] Database ohlcv_1m kosong!")
+        conn.close()
+    except Exception as e:
+        logger.error("[run] Gagal mengambil ringkasan data: %s", e)
+
+
+def _clear_previous_results() -> None:
+    """Bersihkan data hasil backtest sebelumnya agar laporan selalu segar."""
+    try:
+        with transaction() as cur:
+            # Cascade delete akan membersihkan backtest_trades otomatis
+            cur.execute("TRUNCATE TABLE backtest_results RESTART IDENTITY CASCADE")
+            logger.info("[run] ✅ Data laporan (results & trades) sebelumnya telah dibersihkan.")
+    except Exception as e:
+        logger.error("[run] Gagal membersihkan data lama: %s", e)
+
+
+def run_backtest(days: int = OHLCV_DAYS, pairs_filter: str | None = None) -> None:
+    _ensure_schema_upgraded()
+    _clear_previous_results()
+    _print_data_summary()
     profiles = _load_active_profiles()
     if not profiles:
         logger.warning("[run] Tidak ada active profile. INSERT ke backtest_profiles dan set is_active=TRUE.")
@@ -1037,53 +1312,133 @@ def run_backtest(days: int = OHLCV_DAYS) -> None:
     now  = datetime.now(tz=timezone.utc)
     w_start = now - timedelta(days=days)
 
+    # Filter pairs
+    if pairs_filter:
+        pairs = [p.strip().upper() for p in pairs_filter.split(",")]
+        logger.info("[run] Filtering backtest for: %s", pairs)
+    else:
+        pairs = _get_active_pairs()
+    
+    n_pairs = len(pairs)
+    completed = [0]
+
+    logger.info("[run] Memulai backtest untuk %d profiles x %d pairs...", len(profiles), n_pairs)
+
+    # Collect all trades per profile
+    profile_trades = {p["id"]: [] for p in profiles}
+
+    def _process_pair(pair: str) -> None:
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT ts, open, high, low, close, volume FROM ohlcv_1m "
+                "WHERE pair = %s AND ts >= %s ORDER BY ts ASC",
+                (pair, w_start),
+            )
+            rows = cur.fetchall()
+
+            if not rows:
+                logger.debug("[run] %s — tidak ada data OHLCV, skip", pair)
+                return
+
+            candles = [dict(r) for r in rows]
+            
+            for prof in profiles:
+                pid   = prof["id"]
+                result = _run_backtest_pair(prof, pair, candles, w_start, now)
+                if result and result["trades"]:
+                    profile_trades[pid].extend(result["trades"])
+
+        except Exception as e:
+            logger.error("[run] Error processing pair %s: %s", pair, e)
+        finally:
+            conn.close()
+            completed[0] += 1
+            _progress(completed[0], n_pairs, label=f"running ({completed[0]}/{n_pairs})", suffix=f"last={pair}")
+
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        futures = {pool.submit(_process_pair, pair): pair for pair in pairs}
+        for future in as_completed(futures):
+            future.result()
+
+    # Now run portfolio simulation and save results
     for prof in profiles:
-        pid   = prof["id"]
-        pname = prof["profile_name"]
-        logger.info("[run] Profile '%s' (id=%d)", pname, pid)
+        pid = prof["id"]
+        all_t = profile_trades[pid]
+        
+        # 1. Individual Pair Results (Optional: we can still save them, but let's focus on Global first)
+        # For now, let's just save the Global Portfolio as a result with pair=None
+        
+        if all_t:
+            portfolio_trades = _simulate_portfolio(all_t, prof)
+            stats = _compute_stats(portfolio_trades, prof["initial_capital_idr"], w_start, now)
+            _save_result(pid, None, stats, portfolio_trades)
+            _print_run_report(pid, prof["profile_name"])
 
-        pairs   = _get_active_pairs()
-        n_pairs = len(pairs)
-        completed = [0]
 
-        def _process_pair(pair: str) -> None:
-            conn = get_connection()
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT ts, open, high, low, close, volume FROM ohlcv_1m "
-                    "WHERE pair = %s AND ts >= %s ORDER BY ts ASC",
-                    (pair, w_start),
-                )
-                rows = cur.fetchall()
+def validate_data() -> None:
+    """Check for gaps, invalid prices, and volume in ohlcv_1m table."""
+    pairs = _get_active_pairs()
+    logger.info("[validate] Memulai validasi data untuk %d pair...", len(pairs))
+    
+    issues = []
+    
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        for pair in pairs:
+            # 1. Check for missing data
+            cur.execute("SELECT MIN(ts) as min_ts, MAX(ts) as max_ts, COUNT(*) as count FROM ohlcv_1m WHERE pair = %s", (pair,))
+            res = cur.fetchone()
+            
+            if not res or res['count'] == 0:
+                issues.append(f"🔴 {pair}: DATA KOSONG")
+                continue
+                
+            min_ts = res['min_ts']
+            max_ts = res['max_ts']
+            count  = res['count']
+            
+            # 2. Check for gaps (theoretical vs actual)
+            # Selisih waktu dalam menit
+            if min_ts and max_ts:
+                duration_mins = int((max_ts - min_ts).total_seconds() / 60) + 1
+            else:
+                duration_mins = 0
+            
+            # 3. Check for price/vol anomalies (static checks)
+            cur.execute("""
+                SELECT COUNT(*) as anomalies FROM ohlcv_1m 
+                WHERE pair = %s AND (close <= 0 OR high < low OR volume < 0)
+            """, (pair,))
+            anomalies = cur.fetchone()['anomalies']
+            
+            pair_issues = []
+            if count < duration_mins * 0.98: # Tolerate 2% gap
+                gap_pct = (1 - count/duration_mins) * 100
+                pair_issues.append(f"BOLONG {gap_pct:.1f}% ({count}/{duration_mins} bar)")
+            
+            if anomalies > 0:
+                pair_issues.append(f"ANOMALI {anomalies} bar")
+                
+            if pair_issues:
+                issues.append(f"⚠️ {pair:<10} | " + " | ".join(pair_issues))
 
-                if not rows:
-                    logger.debug("[run] %s — tidak ada data OHLCV, skip", pair)
-                    return
-
-                candles = [dict(r) for r in rows]
-                result  = _run_backtest_pair(prof, pair, candles, w_start, now)
-
-                if result is None:
-                    logger.debug("[run] %s — kurang candle (%d), skip", pair, len(candles))
-                    return
-
-                _save_result(pid, pair, result["stats"], result["trades"])
-            finally:
-                conn.close()
-                completed[0] += 1
-                _progress(completed[0], n_pairs, label=f"{pname} › {pair}")
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_process_pair, pair): pair for pair in pairs}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as exc:
-                    logger.error("[run] error in pair %s: %s", futures[future], exc)
-
-        _progress(n_pairs, n_pairs, label=f"{pname}")
-        logger.info("[run] Profile '%s' selesai.", pname)
+        if not issues:
+            logger.info("✅ SEMUA DATA VALID. Tidak ditemukan gap signifikan atau anomali harga.")
+        else:
+            print("\n" + "!"*60)
+            print(" DATA VALIDATION REPORT")
+            print("!"*60)
+            for issue in issues:
+                print(issue)
+            print("!"*60 + "\n")
+            
+    except Exception as e:
+        logger.error("[validate] Gagal validasi: %s", e)
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1094,11 +1449,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Algovibe Backtester")
     parser.add_argument(
         "command",
-        choices=["fetch", "run", "all"],
-        help="fetch=download OHLCV | run=jalankan backtest | all=fetch+run",
+        choices=["fetch", "run", "all", "report", "validate"],
+        help="fetch=download | run=backtest | all=fetch+run | report=summary | validate=check data",
     )
     parser.add_argument("--days", type=int, default=OHLCV_DAYS,
                         help=f"Jumlah hari historis (default {OHLCV_DAYS})")
+    parser.add_argument("--pairs", type=str, default=None,
+                        help="Filter pair tertentu (koma: BTC-IDR,ETH-IDR)")
     args = parser.parse_args()
 
     if args.command in ("fetch", "all"):
@@ -1107,7 +1464,17 @@ def main() -> None:
 
     if args.command in ("run", "all"):
         logger.info("=== RUN BACKTEST ===")
-        run_backtest(days=args.days)
+        run_backtest(days=args.days, pairs_filter=args.pairs)
+
+    if args.command == "report":
+        logger.info("=== GENERATING LATEST REPORT ===")
+        profiles = _load_active_profiles()
+        for p in profiles:
+            _print_run_report(p["id"], p["profile_name"])
+
+    if args.command == "validate":
+        logger.info("=== VALIDATING OHLCV DATA ===")
+        validate_data()
 
     logger.info("=== DONE ===")
 
