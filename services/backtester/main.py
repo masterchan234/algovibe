@@ -106,7 +106,10 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             return {"trades": [], "stats": {}}
             
         # Forward-fill signals back to 1m resolution
-        sig_map = pd.Series(res_history, index=df_res.index)
+        # Shift signals by 1 period to eliminate look-ahead bias
+        # (Signal from period N is only available at the start of period N+1)
+        sig_map = pd.Series(res_history, index=df_res.index).shift(1)
+        
         df_sig = df_ts[['ts']].set_index('ts')
         df_sig['sig'] = sig_map
         df_sig['sig'] = df_sig['sig'].ffill()
@@ -288,67 +291,79 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
     df = pd.DataFrame(candles)
     if len(df) < 50: return []
 
-    # 1. Vectorized Indicators (Fast)
+    # 1. Vectorized Indicators (Wilder's Smoothing for Parity)
     close = df['close']
+    high  = df['high']
+    low   = df['low']
     
-    # RSI
+    # Wilder's RSI (EWM with alpha=1/period)
     delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+    loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain / loss.replace(0, _np.nan)
     df['rsi'] = 100 - (100 / (1 + rs))
+    df['rsi'] = df['rsi'].fillna(50.0)
     
-    # MACD
+    # ATR (Wilder's Smoothing)
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    df['tr'] = _np.maximum(tr1, _np.maximum(tr2, tr3))
+    df['atr'] = df['tr'].ewm(alpha=1/14, adjust=False).mean()
+    df['atr_pct'] = (df['atr'] / close) * 100.0
+    
+    # MACD & EMA
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
-    df['macd_line'] = ema12 - ema26
-    df['macd_sig'] = df['macd_line'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd_line'] - df['macd_sig']
+    df['macd_hist'] = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
     
-    # EMA
-    df['ema9'] = close.ewm(span=9, adjust=False).mean()
+    df['ema9']  = close.ewm(span=9, adjust=False).mean()
     df['ema21'] = close.ewm(span=21, adjust=False).mean()
+    df['ema50'] = close.ewm(span=50, adjust=False).mean()
     
     # BB
-    df['sma20'] = close.rolling(window=20).mean()
-    df['std20'] = close.rolling(window=20).std()
-    df['bb_pct'] = (close - (df['sma20'] - 2*df['std20'])) / (4 * df['std20'])
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    df['bb_pct'] = (close - (sma20 - 2*std20)) / (4 * std20)
     
-    # NaN Handling during warmup periods
-    df['rsi'] = df['rsi'].fillna(50.0)
-    df['macd_hist'] = df['macd_hist'].fillna(0.0)
-    df['bb_pct'] = df['bb_pct'].fillna(0.5)
-    df['ema9'] = df['ema9'].fillna(close)
-    df['ema21'] = df['ema21'].fillna(close)
-    
-    # Pre-calculate normalized macd_hist
-    df['macd_hist_norm'] = _np.where(df['close'] > 0, df['macd_hist'] * 1000 / df['close'], 0)
-    
-    # 2. Row-wise Scoring for 1:1 Parity
-    # Kita panggil derive_trade_signal (logika asli) untuk setiap bar
+    # 2. Row-wise Scoring with Entry Gates (EMA-50 Trend + ATR Filter)
     history = []
     from app.domain.technicals import derive_trade_signal
     
     records = df.to_dict('records')
     for row in records:
+        # Gate 4c: EMA-50 Trend Filter (Standard Spot Scalping Safety)
+        ema_enabled = p.get("ema_trend_filter_enabled", True)
+        is_uptrend = (not ema_enabled) or (row['close'] > row['ema50'])
+        
+        # Gate 4b: ATR Volatility Filter
+        atr_limit = float(p.get("atr_max_pct", 3.0))
+        is_stable = row['atr_pct'] < atr_limit
+        
         # Buat dummy tech dict untuk parity
         tech = {
             "rsi": row['rsi'],
-            "macd_hist": row['macd_hist_norm'],
+            "macd_hist": row['macd_hist'],
+            "last_price": row['close'],
             "bb_pct": row['bb_pct'],
             "ema9": row['ema9'],
             "ema21": row['ema21'],
-            "stoch_k": 50, # Fallback
-            "stoch_d": 50,
-            "williams_r": -50,
-            "roc": 0,
-            "slope": 0,
-            "volume_ratio": 1.0,
-            "obv_slope": 0.0
+            "ema_cross": "BULLISH" if row['ema9'] > row['ema21'] else "BEARISH",
+            "stoch_k": 50, "stoch_d": 50, "williams_r": -50,
+            "roc": 0, "slope": 0, "volume_ratio": 1.0, "obv_slope": 0.0
         }
         
-        # Sinyal asli bot
         sig = derive_trade_signal(tech)
+        
+        # Enforce Entry Gates
+        if sig["verdict"] == "BUY":
+            if not is_uptrend:
+                sig["verdict"] = "HOLD"
+                sig["reason"]  = "REJECTED (EMA50 Trend Filter)"
+            elif not is_stable:
+                sig["verdict"] = "HOLD"
+                sig["reason"]  = "REJECTED (ATR Volatility Filter)"
+        
         history.append(sig)
         
     return history
@@ -679,6 +694,16 @@ def tune_profile(profile_id: int) -> bool:
             # Baseline win-rate enhancement
             new_p['buy_threshold'] = min(8.5, p['buy_threshold'] + 0.2)
             changes.append("Higher threshold for quality")
+
+        # 3. Frequency Guard (Under-trading protection)
+        trades_per_day = res['total_trades'] / days_tested
+        if trades_per_day < 1.0:
+            # Not enough signals to reach targets: Lower threshold aggressively
+            new_p['buy_threshold'] = max(4.0, p['buy_threshold'] - 0.5)
+            changes.append("Lower threshold for signal frequency")
+        elif trades_per_day < 2.0:
+            new_p['buy_threshold'] = max(4.0, p['buy_threshold'] - 0.2)
+            changes.append("Mildly lower threshold for signal frequency")
             
         if not changes: return False
         

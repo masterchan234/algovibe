@@ -59,6 +59,7 @@ def _get_pair_min_idr(bot, pair: str) -> float:
     return float(pair_min) if pair_min > 0 else float(MIN_TRADE_IDR)
 
 
+def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0.005):
     """Validate live order book liquidity from exchange before entry.
     
     Fetches real-time order book and checks:
