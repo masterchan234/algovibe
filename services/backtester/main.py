@@ -800,6 +800,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
                 duration  = int(ts_epoch - position["entry_ts"])
 
                 trades.append({
+                    "profile_id":          p["id"],
                     "pair":                pair,
                     "entry_time":          datetime.fromtimestamp(position["entry_ts"], tz=timezone.utc),
                     "exit_time":           ts,
@@ -894,6 +895,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict],
         sell_fee  = exit_px * crypto * fee_sell
         net_pnl   = gross_pnl - position["buy_fee"] - sell_fee
         trades.append({
+            "profile_id":         p["id"],
             "pair":               pair,
             "entry_time":         datetime.fromtimestamp(position["entry_ts"], tz=timezone.utc),
             "exit_time":          last_c["ts"],
@@ -1223,6 +1225,58 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
         conn.close()
 
 
+def _print_comparison_table() -> None:
+    """Tampilkan tabel perbandingan antar semua profil aktif."""
+    profiles = _load_active_profiles()
+    if not profiles or len(profiles) < 2:
+        return
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        data = []
+        for p in profiles:
+            cur.execute("""
+                SELECT 
+                    total_trades, win_rate, total_pnl_idr, profit_factor, 
+                    initial_capital_idr, sharpe_ratio, max_drawdown_idr
+                FROM backtest_results
+                WHERE profile_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (p["id"],))
+            row = cur.fetchone()
+            if row:
+                roi = (row["total_pnl_idr"] / row["initial_capital_idr"] * 100) if row["initial_capital_idr"] else 0
+                data.append({
+                    "name": p["profile_name"],
+                    "trades": row["total_trades"],
+                    "wr": (row["win_rate"] * 100) if row["win_rate"] < 1 else row["win_rate"], # Safety for WR format
+                    "roi": roi,
+                    "pf": row["profit_factor"],
+                    "mdd": row["max_drawdown_idr"]
+                })
+        
+        if not data:
+            return
+
+        print("\n" + "═"*90)
+        print(f" 🏁 STRATEGY COMPARISON TABLE (Latest Results)")
+        print("─"*90)
+        header = f"{'Profile Name':<25} | {'WR%':>6} | {'Trades':>6} | {'ROI%':>8} | {'PF':>6} | {'MaxDD (IDR)':>12}"
+        print(header)
+        print("─"*90)
+        
+        for d in data:
+            row_str = f"{d['name']:<25} | {d['wr']:6.1f} | {d['trades']:6} | {d['roi']:>+7.2f}% | {d['pf']:6.2f} | {d['mdd']:>12,.0f}"
+            print(row_str)
+        print("═"*90 + "\n")
+
+    except Exception as e:
+        logger.error("[report] Gagal cetak tabel perbandingan: %s", e)
+    finally:
+        conn.close()
+
+
 def _simulate_portfolio(all_trades: list[dict], profile: dict) -> dict:
     """
     Simulasikan portofolio global: ambil semua trade dari semua pair,
@@ -1522,6 +1576,9 @@ def main() -> None:
         profiles = _load_active_profiles()
         for p in profiles:
             _print_run_report(p["id"], p["profile_name"])
+        
+        # New: Add comparison table at the end
+        _print_comparison_table()
 
     if args.command == "validate":
         logger.info("=== VALIDATING OHLCV DATA ===")
