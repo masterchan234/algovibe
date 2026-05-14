@@ -289,6 +289,13 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
     df['std20'] = close.rolling(window=20).std()
     df['bb_pct'] = (close - (df['sma20'] - 2*df['std20'])) / (4 * df['std20'])
     
+    # NaN Handling during warmup periods
+    df['rsi'] = df['rsi'].fillna(50.0)
+    df['macd_hist'] = df['macd_hist'].fillna(0.0)
+    df['bb_pct'] = df['bb_pct'].fillna(0.5)
+    df['ema9'] = df['ema9'].fillna(close)
+    df['ema21'] = df['ema21'].fillna(close)
+    
     # 2. Row-wise Scoring for 1:1 Parity
     # Kita panggil derive_trade_signal (logika asli) untuk setiap bar
     history = []
@@ -507,21 +514,44 @@ def _simulate_portfolio(all_trades: list[dict], profile: dict) -> list[dict]:
 
 def _save_result(pid, pair, stats, trades):
     with transaction() as cur:
+        # Deep cast numpy types to avoid "schema np does not exist"
+        def _c(val):
+            if hasattr(val, 'item'): return val.item() # for numpy types
+            return val
+
         cur.execute("""
             INSERT INTO backtest_results (
-                profile_id, pair, total_trades, winning_trades, win_rate, 
+                profile_id, window_start, window_end, pair, total_trades, winning_trades, losing_trades, win_rate, 
                 total_pnl_idr, total_pnl_pct, max_drawdown_idr, max_drawdown_pct,
-                profit_factor, initial_capital_idr, final_capital_idr, avg_trade_duration_sec
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-        """, (pid, pair, stats['total_trades'], stats['winning_trades'], stats['win_rate'],
-              stats['total_pnl_idr'], stats['total_pnl_pct'], stats['max_drawdown_idr'], stats['max_drawdown_pct'],
-              stats['profit_factor'], stats['initial_capital_idr'], stats['final_capital_idr'], stats['avg_trade_duration_sec']))
+                profit_factor, sharpe_ratio, initial_capital_idr, final_capital_idr, 
+                avg_trade_duration_sec, avg_pnl_per_trade_idr, avg_pnl_per_trade_pct
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (
+            int(pid), stats['window_start'], stats['window_end'], pair, 
+            int(_c(stats['total_trades'])), int(_c(stats['winning_trades'])), int(_c(stats['losing_trades'])), float(_c(stats['win_rate'])),
+            float(_c(stats['total_pnl_idr'])), float(_c(stats['total_pnl_pct'])), 
+            float(_c(stats['max_drawdown_idr'])), float(_c(stats['max_drawdown_pct'])),
+            float(_c(stats['profit_factor'])), float(_c(stats['sharpe_ratio'])), float(_c(stats['initial_capital_idr'])), 
+            float(_c(stats['final_capital_idr'])), int(_c(stats['avg_trade_duration_sec'])),
+            float(_c(stats['avg_pnl_per_trade_idr'])), float(_c(stats['avg_pnl_per_trade_pct']))
+        ))
         rid = cur.fetchone()['id']
         for t in trades:
             cur.execute("""
-                INSERT INTO backtest_trades (result_id, pair, entry_time, exit_time, pnl_idr, pnl_pct, exit_reason)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-            """, (rid, t['pair'], t['entry_time'], t['exit_time'], t['pnl_idr'], t['pnl_pct'], t['exit_reason']))
+                INSERT INTO backtest_trades (
+                    result_id, pair, entry_time, exit_time, entry_price, exit_price, 
+                    amount_idr, amount_crypto, pnl_idr, pnl_pct, exit_reason, 
+                    buy_score, sell_score_at_exit, duration_seconds
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                rid, t['pair'], t['entry_time'], t['exit_time'], 
+                float(_c(t['entry_price'])), float(_c(t['exit_price'])),
+                float(_c(t['amount_idr'])), float(_c(t['amount_crypto'])),
+                float(_c(t['pnl_idr'])), float(_c(t['pnl_pct'])), t['exit_reason'],
+                float(_c(t['buy_score'])), 
+                float(_c(t['sell_score_at_exit'])) if t['sell_score_at_exit'] is not None else None,
+                int(_c(t['duration_seconds']))
+            ))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EVOLUTIONARY ENGINE: Self-Correction
@@ -608,24 +638,48 @@ def run_backtest(days=OHLCV_DAYS, pairs_filter=None):
     # 1. Multi-process sim
     all_results = []
     with ProcessPoolExecutor() as pool:
-        futures = {pool.submit(_process_pair_worker, px, start, now, profiles): px for px in pairs}
-        for i, f in enumerate(as_completed(futures)):
-            all_results.extend(f.result())
+        future_to_pair = {pool.submit(_process_pair_worker, px, start, now, profiles): px for px in pairs}
+        for i, f in enumerate(as_completed(future_to_pair)):
+            pair = future_to_pair[f]
+            try:
+                res = f.result()
+                if res:
+                    all_results.extend(res)
+            except Exception as e:
+                logger.error(f"[run] Worker failed for {pair}: {e}")
             _progress(i+1, n_pairs)
     
-    # 2. Portfolio & Stats
+    # 2. Checkpoint (Save to temporary cache)
+    cache_file = "/app/data/backtest_cache.pkl"
+    try:
+        import pickle
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, "wb") as f:
+            pickle.dump({"results": all_results, "days": days, "start": start, "now": now}, f)
+        logger.info(f"[run] 💾 Results cached to {cache_file}")
+    except Exception as e:
+        logger.warning(f"[run] ⚠️  Failed to cache results: {e}")
+
+    # 3. Portfolio & Stats (Database Save)
+    _persist_results(all_results, profiles, start, now)
+    conn.close()
+
+def _persist_results(all_results, profiles, start, now):
+    logger.info("[db] 📥 Persisting results to database...")
     for p in profiles:
         p_trades = [t for t in all_results if t['profile_id'] == p['id']]
         if p_trades:
             portfolio = _simulate_portfolio(p_trades, p)
             stats = _compute_stats(portfolio, p['initial_capital_idr'], start, now)
-            _save_result(p['id'], None, stats, portfolio)
-    conn.close()
+            if stats:
+                _save_result(p['id'], None, stats, portfolio)
+                print(f"   ✅ Saved: {p['profile_name']} ({len(portfolio)} trades)")
 
 def main():
     _ensure_schema_upgraded()
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["fetch", "run", "report", "tune", "optimize"])
+    parser.add_argument("command", choices=["fetch", "run", "report", "tune", "optimize", "restore"])
     parser.add_argument("--days", type=int, default=OHLCV_DAYS)
     parser.add_argument("--pairs", type=str)
     parser.add_argument("--generations", type=int, default=3)
@@ -639,6 +693,21 @@ def main():
         _print_comparison_table()
     elif args.command == "tune":
         for p in _load_active_profiles(): tune_profile(p['id'])
+    elif args.command == "restore":
+        cache_file = "/app/data/backtest_cache.pkl"
+        import pickle
+        if not os.path.exists(cache_file):
+            print(f"❌ Error: No cache file found at {cache_file}")
+            return
+        
+        print(f"📥 Restoring results from {cache_file}...")
+        with open(cache_file, "rb") as f:
+            data = pickle.load(f)
+        
+        profiles = _load_active_profiles()
+        _persist_results(data['results'], profiles, data['start'], data['now'])
+        print("🏁 Restore complete.")
+
     elif args.command == "optimize":
         for g in range(1, args.generations + 1):
             print(f"\n--- GENERATION {g} ---")
