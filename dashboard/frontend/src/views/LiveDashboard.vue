@@ -130,12 +130,78 @@ const liveState = ref({
   net_pnl_velocity: 0,
 })
 
+const uptimeBaseSec = ref(0)
+const uptimeBaseAt = ref(0)
+const uptimeStartedAt = ref('')
+
+function restoreUptimeSnapshot() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('algovibe_uptime_snapshot') || '{}')
+    uptimeBaseSec.value = Math.max(0, Number(saved.uptimeSec || 0))
+    uptimeBaseAt.value = Math.max(0, Number(saved.baseAt || 0))
+    uptimeStartedAt.value = String(saved.startedAt || '')
+  } catch {}
+}
+
+function persistUptimeSnapshot() {
+  try {
+    sessionStorage.setItem('algovibe_uptime_snapshot', JSON.stringify({
+      uptimeSec: uptimeBaseSec.value,
+      baseAt: uptimeBaseAt.value,
+      startedAt: uptimeStartedAt.value,
+    }))
+  } catch {}
+}
+
+function applyUptimeSnapshot(nextSec, startedAtRaw) {
+  const nextUptimeSec = Math.max(0, Number(nextSec || 0))
+  const nextStartedAt = String(startedAtRaw || '')
+  const currentElapsed = uptimeBaseAt.value > 0
+    ? uptimeBaseSec.value + Math.max(0, Math.floor((Date.now() - uptimeBaseAt.value) / 1000))
+    : Math.max(0, uptimeBaseSec.value)
+
+  if (nextStartedAt && uptimeStartedAt.value && nextStartedAt !== uptimeStartedAt.value) {
+    uptimeStartedAt.value = nextStartedAt
+    uptimeBaseSec.value = nextUptimeSec
+    uptimeBaseAt.value = Date.now()
+    store.stats.uptime_sec = nextUptimeSec
+    persistUptimeSnapshot()
+    return
+  }
+
+  if (nextStartedAt && !uptimeStartedAt.value) {
+    uptimeStartedAt.value = nextStartedAt
+  }
+
+  const acceptedUptime = Math.max(currentElapsed, nextUptimeSec)
+  uptimeBaseSec.value = acceptedUptime
+  uptimeBaseAt.value = Date.now()
+  store.stats.uptime_sec = acceptedUptime
+  persistUptimeSnapshot()
+}
+
 const uptimeStr = computed(() => {
-  const sec = store.stats.uptime_sec || 0
+  const baseSec = Number(uptimeBaseSec.value || 0)
+  const baseAt = Number(uptimeBaseAt.value || 0)
+  const localDrift = baseAt > 0 ? Math.max(0, Math.floor((now.value - baseAt) / 1000)) : 0
+  const sec = baseSec + localDrift
   if (sec < 60) return `${sec}s`
   if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
 })
+
+async function fetchBotStatus() {
+  try {
+    const res = await fetch(`${backendUrl}/api/bot-status`, { headers: getAuthHeaders() })
+    if (!res.ok) return
+
+    const data = await res.json()
+    applyUptimeSnapshot(
+      data.uptime_sec,
+      data.bot_state?.executive_core_started_at,
+    )
+  } catch {}
+}
 
 const socketIsFresh = computed(() => {
   const lastAt = Number(store.lastSocketStatsAt || 0)
@@ -259,11 +325,14 @@ let pollInt = null
 let clockInt = null
 
 onMounted(() => {
+  restoreUptimeSnapshot()
   store.connect()
+  fetchBotStatus()
   fetchLiveSnapshot()
   fetchLiveState()
 
   pollInt = setInterval(() => {
+    fetchBotStatus()
     if (!socketIsFresh.value) {
       fetchLiveSnapshot()
     }

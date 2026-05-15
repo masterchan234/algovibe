@@ -26,6 +26,8 @@ from config import (
     NET_ZERO_PNL_FLOOR_IDR, NET_ZERO_MIN_UNREALIZED_LOSS_PCT,
     NET_ZERO_MIN_POSITIONS, NET_ZERO_AUTO_RESET_SEC,
     TIER2_PROFIT_PCT, TIER3_PROFIT_PCT, TIER2_PROFIT_IDR_PCT, TIER3_PROFIT_IDR_PCT,
+    MICRO_PROFIT_EXIT_AUTO, MICRO_PROFIT_BALANCE_THRESHOLD, MICRO_PROFIT_TP_PCT,
+    MICRO_PROFIT_MIN_NET_PCT,
     DUST_RECOVERY_ENABLED, DUST_RECOVERY_MIN_CONFIDENCE, DUST_RECOVERY_COOLDOWN_SEC,
     DUST_RECOVERY_MIN_VOL_IDR, DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE,
     DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE,
@@ -55,6 +57,11 @@ class ExitManager:
         self._btc_price_history: list = []
         # Throttle bypass log: timestamp of last "BASKET_EXIT Bypassed" log to avoid spam.
         self._last_basket_bypass_log_ts: float = 0.0
+        # Throttle micro-profit mode status log.
+        self._last_micro_mode_log_ts: float = 0.0
+        self._last_micro_mode_state = None
+        self._cached_effective_balance_idr: float = 0.0
+        self._cached_effective_balance_ts: float = 0.0
         # Prevents concurrent execution from the background exit-monitor thread and
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
         self._monitor_lock = threading.Lock()
@@ -92,6 +99,10 @@ class ExitManager:
         self._pair_min_last_fetch: float = 0.0
         # Public adapter untuk data pasar (tidak butuh auth, pakai native REST)
         self._public_adapter = None
+        try:
+            self._peak_net_pnl_session = float(db.get_state("peak_net_pnl_session", 0.0) or 0.0)
+        except Exception:
+            self._peak_net_pnl_session = 0.0
         self._sync_jaring_from_db()
 
     def _get_public_adapter(self):
@@ -302,6 +313,11 @@ class ExitManager:
         dynamic_min_profit = get_dynamic_min_net_profit()
         required_profit_idr = min(dynamic_min_profit, amount_idr * SMART_BREAK_EVEN_PCT)
 
+        # MICRO_PROFIT_EXIT: use a lighter net floor (still net-positive) to avoid
+        # holding small winners too long on low-balance accounts.
+        if self._is_micro_profit_mode_active():
+            required_profit_idr = max(1.0, amount_idr * float(MICRO_PROFIT_MIN_NET_PCT))
+
         est_net = float(estimate.get('net_pnl_idr') or 0)
         if est_net < required_profit_idr:
             return {
@@ -336,6 +352,61 @@ class ExitManager:
     def _format_tp_hold_log(self, label, pair, guard):
         """Build a consistent log line for TP holds and emergency exit deferrals."""
         return f"⏳ [{label}] {pair}: {guard.get('message')}."
+
+    def _get_effective_idr_balance(self) -> float:
+        """Best-effort balance source for runtime policy toggles.
+
+        Priority:
+        1) Live exchange free IDR (cached short TTL)
+        2) cached_idr_balance in bot_state (updated from live balance sync)
+        3) opening_balance + total_pnl_idr from daily stats
+        """
+        now_ts = time.time()
+        if self._cached_effective_balance_idr > 0 and (now_ts - self._cached_effective_balance_ts) < 60:
+            return self._cached_effective_balance_idr
+
+        if not self.dry_run:
+            try:
+                bal = self.exchange.fetch_balance()
+                free_idr = float((bal or {}).get('free', {}).get('IDR', 0) or 0)
+                if free_idr > 0:
+                    self._cached_effective_balance_idr = free_idr
+                    self._cached_effective_balance_ts = now_ts
+                    return free_idr
+            except Exception:
+                pass
+
+        try:
+            bal_str = db.get_state("cached_idr_balance")
+            if bal_str is not None:
+                bal = float(bal_str)
+                if bal > 0:
+                    self._cached_effective_balance_idr = bal
+                    self._cached_effective_balance_ts = now_ts
+                    return bal
+        except Exception:
+            pass
+
+        try:
+            stats = db.get_daily_stats()
+            opening_balance = float((stats or {}).get('opening_balance') or INITIAL_CAPITAL)
+            total_pnl = float((stats or {}).get('total_pnl_idr') or 0.0)
+            est = opening_balance + total_pnl
+            if est > 0:
+                self._cached_effective_balance_idr = est
+                self._cached_effective_balance_ts = now_ts
+                return est
+        except Exception:
+            pass
+
+        self._cached_effective_balance_idr = float(INITIAL_CAPITAL)
+        self._cached_effective_balance_ts = now_ts
+        return float(INITIAL_CAPITAL)
+
+    def _is_micro_profit_mode_active(self) -> bool:
+        if not MICRO_PROFIT_EXIT_AUTO:
+            return False
+        return self._get_effective_idr_balance() < float(MICRO_PROFIT_BALANCE_THRESHOLD)
 
     def _evaluate_dust_recovery(
         self,
@@ -757,11 +828,9 @@ class ExitManager:
         # ── Reset HWM and execute BASKET_EXIT ────────────────────────────────
         self._portfolio_hwm = 0.0
         self._was_above_safety_zone = False
-        self._peak_net_pnl_session = 0.0
         self._target_fired_session.discard("TARGET_REACHED")
         try:
             db.save_state("target_protection_active", "false")
-            db.save_state("peak_net_pnl_session", "0")
         except Exception:
             pass
 
@@ -1686,11 +1755,9 @@ class ExitManager:
                     # Reset HWM setelah semua posisi ditutup
                     self._portfolio_hwm = 0.0
                     self._was_above_safety_zone = False  # reset floor protection
-                    self._peak_net_pnl_session = 0.0
                     self._target_fired_session.discard("TARGET_REACHED")
                     try:
                         db.save_state("target_protection_active", "false")
-                        db.save_state("peak_net_pnl_session", "0")
                     except Exception:
                         pass
 
@@ -1961,6 +2028,25 @@ class ExitManager:
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else get_dynamic_tp_pct()
 
+                # Auto MICRO_PROFIT_EXIT: tighten TP for low-balance accounts.
+                # Keep safety model intact (evaluation still uses bid price below).
+                micro_mode_active = self._is_micro_profit_mode_active()
+                if micro_mode_active:
+                    dynamic_tp_pct = min(float(dynamic_tp_pct or TP_PCT), float(MICRO_PROFIT_TP_PCT))
+                if (
+                    self._last_micro_mode_state is None
+                    or self._last_micro_mode_state != micro_mode_active
+                    or (time.time() - self._last_micro_mode_log_ts) > 300
+                ):
+                    self._last_micro_mode_state = micro_mode_active
+                    self._last_micro_mode_log_ts = time.time()
+                    log_message(
+                        f"[MICRO_PROFIT_EXIT] mode={'ON' if micro_mode_active else 'OFF'} | "
+                        f"balance={self._get_effective_idr_balance():,.0f} | "
+                        f"threshold={MICRO_PROFIT_BALANCE_THRESHOLD:,.0f} | "
+                        f"tp_pct={dynamic_tp_pct*100:.2f}%"
+                    )
+
                 # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%)
                 # over a 30-minute transition window from the moment the mode was activated.
                 if harvest_only:
@@ -1989,6 +2075,8 @@ class ExitManager:
                 amount_idr_pos = float(data.get('amount_idr', 0))
                 dynamic_min_profit = get_dynamic_min_net_profit()
                 dynamic_min_net = min(dynamic_min_profit, amount_idr_pos * SMART_BREAK_EVEN_PCT)
+                if micro_mode_active:
+                    dynamic_min_net = max(1.0, amount_idr_pos * float(MICRO_PROFIT_MIN_NET_PCT))
                 exact_tp_price = (dynamic_min_net + (entry_price * amount * (1 + FEE_BUY_TAKER))) / denom_tp
 
                 # Target TP minimal agar tidak rugi fee
@@ -2250,6 +2338,22 @@ class ExitManager:
                 )
 
                 if tp_eval_price >= tp_price:
+                    if micro_mode_active and not self.dry_run:
+                        tp_guard = self._check_tp_market_sell_guard(
+                            pair,
+                            amount,
+                            entry_price,
+                            data.get('amount_idr', 0) or 0,
+                            market_price=tp_eval_price,
+                        )
+                        est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
+                        if (not tp_guard.get('ok')) or est_net <= 0:
+                            log_message(
+                                f"⛔ [MICRO_PROFIT_EXIT] {pair}: TP ditahan, net belum positif "
+                                f"(est_net={est_net:,.0f}, reason={tp_guard.get('reason')})."
+                            )
+                            continue
+
                     order_id = self.execute_exit(pair, amount, tp_eval_price, "TAKE_PROFIT",
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
@@ -2497,6 +2601,16 @@ class ExitManager:
                     amount_idr_effective,
                     market_price=price,
                 )
+                # MICRO_PROFIT_EXIT safety: TAKE_PROFIT wajib net positif after fees.
+                if reason == "TAKE_PROFIT" and self._is_micro_profit_mode_active():
+                    est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
+                    if (not tp_guard.get('ok')) or est_net <= 0:
+                        log_message(
+                            f"⛔ [MICRO_PROFIT_EXIT] {pair}: cancel TAKE_PROFIT, net belum positif "
+                            f"(est_net={est_net:,.0f}, reason={tp_guard.get('reason')})."
+                        )
+                        return None
+
                 if not tp_guard.get('ok'):
                     guard_reason = str(tp_guard.get('reason') or '')
                     if reason == "FORCE_PROFIT_HIGH_TIER" and guard_reason == 'below_profit_floor':

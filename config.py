@@ -38,10 +38,10 @@ MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
 LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan volume sedang 15x besar modal per trade
 
 # --- [Timeframe Policy] ---
-# Strategy baseline: decision quality on 5m candles, with 15m trend confirmation.
-SIGNAL_CANDLE_TIMEFRAME = os.getenv("SIGNAL_CANDLE_TIMEFRAME", "5m")
-BACKFILL_TF_MIN = os.getenv("BACKFILL_TF_MIN", "5")
-TREND_FILTER_TF_MIN = os.getenv("TREND_FILTER_TF_MIN", "15")
+# Default reverted to 1m for fast scalp execution.
+SIGNAL_CANDLE_TIMEFRAME = os.getenv("SIGNAL_CANDLE_TIMEFRAME", "1m")
+BACKFILL_TF_MIN = os.getenv("BACKFILL_TF_MIN", "1")
+TREND_FILTER_TF_MIN = os.getenv("TREND_FILTER_TF_MIN", "1")
 TREND_FILTER_MIN_CHANGE_PCT = float(os.getenv("TREND_FILTER_MIN_CHANGE_PCT", 0.0))
 TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 60))
 
@@ -80,6 +80,14 @@ TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.020))  # 2.0% default (
 TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
 TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.01))  # 1% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 10% for faster exits on profitable positions)
 TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 20%)
+
+# --- [Micro Profit Exit] ---
+# Auto-enable micro TP behavior when effective balance drops below threshold.
+MICRO_PROFIT_EXIT_AUTO = os.getenv("MICRO_PROFIT_EXIT_AUTO", "true").lower() in ("1", "true", "yes", "on")
+MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 200000))
+MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.012))
+# Net floor for micro mode (after-fee estimate). Keep > 0 to avoid pseudo-profit exits.
+MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
 
 # DUST Recovery Policy (quantitative controls)
 # Dust positions are only topped-up when signal quality is high and

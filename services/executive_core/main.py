@@ -88,6 +88,10 @@ class ExecutiveCoreService:
         self._unrealized_pnl: float = 0.0
         self._pnl_samples: list = []   # [(ts, net_pnl), ...]
         self._peak_equity: float = 0.0
+        try:
+            self._peak_equity = float(db.get_state("peak_net_pnl_session", 0.0) or 0.0)
+        except Exception:
+            self._peak_equity = 0.0
 
         # Velocity (IDR/s)
         self._velocity: float = 0.0
@@ -184,6 +188,10 @@ class ExecutiveCoreService:
 
     async def start(self) -> None:
         self._running = True
+        try:
+            db.save_state("executive_core_started_at", str(time.time()))
+        except Exception:
+            pass
         self._tick_sub.start()
         self._signal_sub.start()
         self._llm_signal_sub.start()

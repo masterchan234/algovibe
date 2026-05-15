@@ -2239,6 +2239,13 @@ def get_bot_status():
         # Full Bot State from DB
         all_states = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM bot_state").fetchall()}
 
+        try:
+            started_at_ts = float(all_states.get("executive_core_started_at") or 0)
+            if started_at_ts > 0:
+                uptime_sec = max(0, int(time.time() - started_at_ts))
+        except Exception:
+            pass
+
         return jsonify({
             "is_running": bot_alive,
             "dry_run": bool(cfg.DRY_RUN),
@@ -2359,7 +2366,8 @@ def get_radar_data():
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, history_json FROM ticker_history"
+            "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, history_json, updated_at "
+            "FROM ticker_history"
         ).fetchall()
         results = []
         for row in rows:
@@ -3336,7 +3344,7 @@ def _build_radar_payload():
                 # Jika feed WS tidak memberi perubahan 24h (sering 0 di mode dashboard),
                 # gunakan fallback dari indikator DB agar UI tidak selalu 0.00%.
                 if abs(ch_24h) < 1e-9:
-                    ch_24h = float(row['ch_1h'] or 0) if row else 0
+                    ch_24h = float(row['ch_1h'] or 0) if row else 0.0
                     if abs(ch_24h) < 1e-9:
                         ch_24h = change
                 
@@ -3796,7 +3804,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             {
                 "id": 0,
                 "pair": "MARKET",
-                "side": "MARKET_INTEL_BRIEF",
+                "side": "MARKET_INTELLIGENCE_BRIEF",
                 "message": brief_message,
                 "level": "INFO",
                 "created_at": brief_created_at,
