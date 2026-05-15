@@ -2157,6 +2157,20 @@ class ExitManager:
                     )
 
                     if is_tier2_good_profit and exit_signal in ('SELL_CONFIRMED', 'CONSIDER'):
+                        # [Senior Strategy] Profit Floor Guard: Block TIER2 exit if net profit < 1.2%
+                        # Ensures every exit meets minimum 1% net profit target after fees.
+                        # Fee: 0.6322% round-trip → 1.2% net = 1.8322% gross minimum.
+                        MIN_NET_PROFIT_FLOOR_PCT = 0.012  # 1.2% net minimum
+                        current_net_pct = net_pnl_idr / amount_idr_pos if amount_idr_pos > 0 else 0.0
+                        
+                        if current_net_pct < MIN_NET_PROFIT_FLOOR_PCT:
+                            log_message(
+                                f"🛡️ [PROFIT FLOOR] {pair}: TIER2 exit blocked | "
+                                f"net {current_net_pct*100:.2f}% < floor {MIN_NET_PROFIT_FLOOR_PCT*100:.1f}% | "
+                                f"Hold until 1.2%+ net (current: {net_pnl_idr:,.0f} IDR)"
+                            )
+                            continue
+                        
                         reason_tp = "RAPID_TP_GOOD_PROFIT"
                         log_message(
                             f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "

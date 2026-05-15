@@ -123,6 +123,15 @@ class BrainInferenceService:
         # Cache per-pair untuk compute_adaptive_thresholds (TTL 5 menit).
         # Menghindari O(n²) recalculation tiap tick untuk 200+ pair.
         self._adaptive_cache: dict = {}  # {pair: (timestamp, thresholds|None)}
+        # Cache trend filter 15m (TTL 2 menit) agar tidak membanjiri API.
+        self._trend15_cache: dict = {}  # {pair: (timestamp, passed, detail)}
+        self._trend15_stats = {
+            "window_start": time.time(),
+            "checked": 0,
+            "passed": 0,
+            "blocked": 0,
+            "errors": 0,
+        }
 
     async def start(self) -> None:
         self._running = True
@@ -308,7 +317,7 @@ class BrainInferenceService:
             def fetch_one(pair_id):
                 try:
                     # Ambil full OHLC (bukan hanya closes) agar H/L tersedia untuk ATR akurat
-                    candles = self._adapter.fetch_ohlc(pair_id, tf="1", limit=100)
+                    candles = self._adapter.fetch_ohlc(pair_id, tf=config.BACKFILL_TF_MIN, limit=100)
                     if not candles:
                         return None
                     closes = [c["close"]  for c in candles if c["close"] > 0]
@@ -412,6 +421,88 @@ class BrainInferenceService:
         except Exception as e:
             logger.warning("[brain] fetch_market_movers gagal: %s", e)
 
+    @staticmethod
+    def _ema(values, period):
+        if not values:
+            return []
+        period = max(1, int(period))
+        alpha = 2.0 / (period + 1.0)
+        out = [float(values[0])]
+        for v in values[1:]:
+            out.append((float(v) * alpha) + (out[-1] * (1.0 - alpha)))
+        return out
+
+    def _passes_15m_trend_filter(self, pair: str):
+        now = time.time()
+        cached = self._trend15_cache.get(pair)
+        if cached and (now - cached[0]) < 120:
+            return cached[1], cached[2]
+
+        passed = False
+        detail = "insufficient_data"
+        try:
+            candles = self._adapter.fetch_ohlc(pair, tf=config.TREND_FILTER_TF_MIN, limit=60)
+            closes = [c["close"] for c in candles if float(c.get("close") or 0) > 0]
+
+            if len(closes) >= 50:
+                ema50 = self._ema(closes, 50)
+                ema50_now = ema50[-1]
+                ema50_prev = ema50[-2] if len(ema50) > 1 else ema50_now
+                last = float(closes[-1])
+                ch_15m = ((last - float(closes[-2])) / float(closes[-2]) * 100.0) if len(closes) >= 2 and closes[-2] > 0 else 0.0
+
+                is_above_ema = last >= ema50_now
+                is_ema_rising = ema50_now >= ema50_prev
+                is_change_ok = ch_15m >= config.TREND_FILTER_MIN_CHANGE_PCT
+
+                passed = bool(is_above_ema and is_ema_rising and is_change_ok)
+                detail = (
+                    f"last={last:.8f}, ema50={ema50_now:.8f}, "
+                    f"ema_slope={'up' if is_ema_rising else 'down'}, ch15={ch_15m:.2f}%"
+                )
+        except Exception as exc:
+            detail = f"error={exc}"
+
+        self._trend15_cache[pair] = (now, passed, detail)
+        return passed, detail
+
+    def _record_trend15_stat(self, pair: str, passed: bool, detail: str):
+        now = time.time()
+        stats = self._trend15_stats
+        stats["checked"] += 1
+
+        if detail.startswith("error="):
+            stats["errors"] += 1
+            if stats["errors"] <= 3:
+                logger.warning("[brain] ⚠️ TREND15 ERROR: %s (%s)", pair, detail)
+
+        if passed:
+            stats["passed"] += 1
+        else:
+            stats["blocked"] += 1
+
+        window_sec = max(30, int(getattr(config, "TREND_FILTER_STATS_WINDOW_SEC", 300)))
+        elapsed = now - stats["window_start"]
+        if elapsed >= window_sec:
+            checked = max(1, stats["checked"])
+            pass_rate = (stats["passed"] / checked) * 100.0
+            block_rate = (stats["blocked"] / checked) * 100.0
+            logger.info(
+                "[brain] 📊 TREND15 STATS %ds | checked=%d pass=%d (%.1f%%) block=%d (%.1f%%) error=%d",
+                int(elapsed),
+                stats["checked"],
+                stats["passed"], pass_rate,
+                stats["blocked"], block_rate,
+                stats["errors"],
+            )
+            self._trend15_stats = {
+                "window_start": now,
+                "checked": 0,
+                "passed": 0,
+                "blocked": 0,
+                "errors": 0,
+            }
+
     def _scan_for_signals(self, ranked: list):
         """Evaluate ranked candidates for BUY signals and emit to Executive-Core."""
         if not ranked:
@@ -503,6 +594,13 @@ class BrainInferenceService:
                 if isinstance(gate, dict) and gate.get("mode") == "LIVE":
                     gate_conf = float(gate.get('total_confidence', 0) or 0.0)
                     tq_prob = float(enriched.get('tq_prob', 0.0) or 0.0)
+
+                    # 15m trend guard: only allow entries when higher-timeframe trend supports it.
+                    trend_passed, trend_detail = self._passes_15m_trend_filter(pair)
+                    self._record_trend15_stat(pair, trend_passed, trend_detail)
+                    if not trend_passed:
+                        logger.info("[brain] ⏸ TREND15 FILTER: %s blocked (%s)", pair, trend_detail)
+                        continue
 
                     # ── Trade Flow Guard ──────────────────────────────────────
                     # Cek tape (50 transaksi publik terakhir) sebelum commit signal.

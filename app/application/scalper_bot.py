@@ -246,7 +246,7 @@ class ScalperBot:
 
             def fetch_one(symbol):
                 try:
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=60)
+                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=60)
                     if not ohlcv:
                         return None
                     prices = [c[4] for c in ohlcv]

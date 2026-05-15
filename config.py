@@ -37,6 +37,14 @@ MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
 LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan volume sedang 15x besar modal per trade
 
+# --- [Timeframe Policy] ---
+# Strategy baseline: decision quality on 5m candles, with 15m trend confirmation.
+SIGNAL_CANDLE_TIMEFRAME = os.getenv("SIGNAL_CANDLE_TIMEFRAME", "5m")
+BACKFILL_TF_MIN = os.getenv("BACKFILL_TF_MIN", "5")
+TREND_FILTER_TF_MIN = os.getenv("TREND_FILTER_TF_MIN", "15")
+TREND_FILTER_MIN_CHANGE_PCT = float(os.getenv("TREND_FILTER_MIN_CHANGE_PCT", 0.0))
+TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 60))
+
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
@@ -68,7 +76,7 @@ AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as req
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 # Dynamic tiered profit thresholds for exit_manager
-TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.015))  # 1.5% default
+TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.020))  # 2.0% default (1.5% → 2.0% for 1%+ net after 0.6322% fee)
 TIER3_PROFIT_PCT = float(os.getenv("TIER3_PROFIT_PCT", 0.045))  # 4.5% default
 TIER2_PROFIT_IDR_PCT = float(os.getenv("TIER2_PROFIT_IDR_PCT", 0.01))  # 1% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 10% for faster exits on profitable positions)
 TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of MIN_NET_PROFIT_IDR or amount_idr (lowered from 20%)
@@ -120,9 +128,9 @@ def get_dynamic_min_net_profit(current_balance: float = None) -> int:
 def get_dynamic_tp_pct(current_balance: float = None) -> float:
     """Calculate TP_PCT dynamically based on current account balance.
     
-    Small accounts need faster TP to compound gains without waiting for full scalp:
-    - Balance ≤ 100k: 1.5% TP (fast 15-min scalp)
-    - Balance 100k-250k: 2.0% TP
+        Small accounts optimized for 1%+ net profit after 0.6322% round-trip fee:
+        - Balance ≤ 100k: 2.0% TP (net 1.37% after fee) ✅
+        - Balance 100k-250k: 2.2% TP (net 1.59% after fee) ✅
     - Balance 250k-1M: 2.5% TP
     - Balance > 1M: 3.5% TP (original aggressive scalp)
     
@@ -140,9 +148,9 @@ def get_dynamic_tp_pct(current_balance: float = None) -> float:
     current_balance = max(current_balance, INITIAL_CAPITAL)
     
     if current_balance <= 100_000:
-        return 0.015  # 1.5% untuk small account
+            return 0.020  # 2.0% untuk small account (net 1.37% after 0.6322% fee)
     elif current_balance <= 250_000:
-        return 0.020  # 2.0% untuk medium-small account
+            return 0.022  # 2.2% untuk medium-small account (net 1.59% after fee)
     elif current_balance <= 1_000_000:
         return 0.025  # 2.5% untuk medium account
     else:
