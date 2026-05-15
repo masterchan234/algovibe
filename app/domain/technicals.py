@@ -559,10 +559,56 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     if vol_idr_24h is not None and float(vol_idr_24h or 0) < _VOL_RELIABILITY_THRESHOLD:
         vol_mult = 0.3  # downgrade bobot volume-based indicators
 
-    # ── Adaptive RSI thresholds ───────────────────────────────────────────────
+    # ── Adaptive thresholds (per-coin overrides) ─────────────────────────────
     _at = adaptive_thresholds or {}
     RSI_OVERSOLD   = float(_at.get('rsi_oversold',  35.0))
     RSI_OVERBOUGHT = float(_at.get('rsi_overbought', 70.0))
+
+    BB_EXTREME_LOW  = float(_at.get('bb_extreme_low', 0.10))
+    BB_LOW          = float(_at.get('bb_low', 0.25))
+    BB_HIGH         = float(_at.get('bb_high', 0.75))
+    BB_EXTREME_HIGH = float(_at.get('bb_extreme_high', 0.90))
+
+    STOCH_K_OVERSOLD   = float(_at.get('stoch_k_oversold', 20.0))
+    STOCH_D_OVERSOLD   = float(_at.get('stoch_d_oversold', 30.0))
+    STOCH_K_OVERBOUGHT = float(_at.get('stoch_k_overbought', 80.0))
+    STOCH_D_OVERBOUGHT = float(_at.get('stoch_d_overbought', 70.0))
+    STOCH_K_MILD_OVERSOLD = STOCH_K_OVERSOLD + 10.0
+    STOCH_K_MILD_OVERBOUGHT = STOCH_K_OVERBOUGHT - 10.0
+
+    WR_DEEP_OVERSOLD   = float(_at.get('williams_deep_oversold', -85.0))
+    WR_OVERSOLD        = float(_at.get('williams_oversold', -70.0))
+    WR_OVERBOUGHT      = float(_at.get('williams_overbought', -30.0))
+    WR_DEEP_OVERBOUGHT = float(_at.get('williams_deep_overbought', -15.0))
+
+    SLOPE_STRONG_UP   = float(_at.get('slope_strong_up', 0.005))
+    SLOPE_UP          = float(_at.get('slope_up', 0.001))
+    SLOPE_DOWN        = float(_at.get('slope_down', -0.001))
+    SLOPE_STRONG_DOWN = float(_at.get('slope_strong_down', -0.005))
+
+    ROC_OVERSOLD  = float(_at.get('roc_oversold', -3.0))
+    ROC_MILD_DOWN = float(_at.get('roc_mild_down', -1.0))
+    ROC_MILD_UP   = float(_at.get('roc_mild_up', 1.0))
+    ROC_OVERBOUGHT = float(_at.get('roc_overbought', 3.0))
+
+    OB_STRONG_BID = float(_at.get('ob_strong_bid', 65.0))
+    OB_BID_DOM    = float(_at.get('ob_bid_dom', 55.0))
+    OB_ASK_DOM    = float(_at.get('ob_ask_dom', 45.0))
+    OB_STRONG_ASK = float(_at.get('ob_strong_ask', 35.0))
+
+    VOL_SPIKE = float(_at.get('volume_spike', 2.0))
+    VOL_HIGH  = float(_at.get('volume_high', 1.5))
+    VOL_LOW   = float(_at.get('volume_low', 0.6))
+    VOL_DRY   = float(_at.get('volume_dry', 0.4))
+
+    OBV_ACCUMULATE = float(_at.get('obv_accumulate', 5.0))
+    OBV_RISING     = float(_at.get('obv_rising', 2.0))
+    OBV_FALLING    = float(_at.get('obv_falling', -2.0))
+    OBV_DISTRIBUTE = float(_at.get('obv_distribute', -5.0))
+
+    BUY_THRESHOLD  = float(_at.get('buy_score_threshold', 6.0))
+    SELL_THRESHOLD = float(_at.get('sell_score_threshold', 6.0))
+    OPPOSING_MAX   = float(_at.get('opposing_max', 4.0))
     # Turunkan deep-oversold/deep-overbought secara proporsional
     RSI_DEEP_OVERSOLD   = max(15.0, RSI_OVERSOLD - 10.0)
     RSI_MILD_OVERSOLD   = RSI_OVERSOLD + 10.0
@@ -622,32 +668,32 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
 
     # ── 3. Bollinger %B (Bobot 2.0 × sector_weight) ──────────────────────────
     _w_bb = sw['bb']
-    if bb < 0.10:
+    if bb < BB_EXTREME_LOW:
         buy_score += 2.0 * _w_bb
         signals.append(f"BB extreme-low({bb:.2f})")
-    elif bb < 0.25:
+    elif bb < BB_LOW:
         buy_score += 1.2 * _w_bb
         signals.append(f"BB low({bb:.2f})")
-    elif bb > 0.90:
+    elif bb > BB_EXTREME_HIGH:
         sell_score += 2.0 * _w_bb
         signals.append(f"BB extreme-high({bb:.2f})")
-    elif bb > 0.75:
+    elif bb > BB_HIGH:
         sell_score += 1.2 * _w_bb
         signals.append(f"BB high({bb:.2f})")
 
     # ── 4. Stochastic RSI (Bobot 2.0 × sector_weight) ────────────────────────
     # K dan D harus bergerak bersama (konfirmasi)
     _w_stoch = sw['stoch']
-    if sk < 20 and sd < 30:
+    if sk < STOCH_K_OVERSOLD and sd < STOCH_D_OVERSOLD:
         buy_score += 2.0 * _w_stoch
         signals.append(f"StochRSI oversold(K={sk:.0f},D={sd:.0f})")
-    elif sk < 30:
+    elif sk < STOCH_K_MILD_OVERSOLD:
         buy_score += 1.0 * _w_stoch
         signals.append(f"StochRSI mild-oversold(K={sk:.0f})")
-    elif sk > 80 and sd > 70:
+    elif sk > STOCH_K_OVERBOUGHT and sd > STOCH_D_OVERBOUGHT:
         sell_score += 2.0 * _w_stoch
         signals.append(f"StochRSI overbought(K={sk:.0f},D={sd:.0f})")
-    elif sk > 70:
+    elif sk > STOCH_K_MILD_OVERBOUGHT:
         sell_score += 1.0 * _w_stoch
         signals.append(f"StochRSI mild-overbought(K={sk:.0f})")
 
@@ -672,31 +718,31 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     # Konfirmator oversold/overbought yang independen dari RSI — range -100 s/d 0.
     # Oversold (<=-80) memperkuat sinyal BUY; overbought (>=-20) memperkuat SELL.
     _w_wr = sw['wr']
-    if wr <= -85:
+    if wr <= WR_DEEP_OVERSOLD:
         buy_score += 1.5 * _w_wr
         signals.append(f"W%R deep-oversold({wr:.0f})")
-    elif wr <= -70:
+    elif wr <= WR_OVERSOLD:
         buy_score += 1.0 * _w_wr
         signals.append(f"W%R oversold({wr:.0f})")
-    elif wr >= -15:
+    elif wr >= WR_DEEP_OVERBOUGHT:
         sell_score += 1.5 * _w_wr
         signals.append(f"W%R deep-overbought({wr:.0f})")
-    elif wr >= -30:
+    elif wr >= WR_OVERBOUGHT:
         sell_score += 1.0 * _w_wr
         signals.append(f"W%R overbought({wr:.0f})")
 
     # ── 7. Slope/Momentum (Bobot 1.0 × sector_weight) ────────────────────────
     _w_slope = sw['slope']
-    if slope > 0.005:
+    if slope > SLOPE_STRONG_UP:
         buy_score += 1.0 * _w_slope
         signals.append(f"slope strong-up({slope:.4f})")
-    elif slope > 0.001:
+    elif slope > SLOPE_UP:
         buy_score += 0.5 * _w_slope
         signals.append(f"slope up({slope:.4f})")
-    elif slope < -0.005:
+    elif slope < SLOPE_STRONG_DOWN:
         sell_score += 1.0 * _w_slope
         signals.append(f"slope strong-down({slope:.4f})")
-    elif slope < -0.001:
+    elif slope < SLOPE_DOWN:
         sell_score += 0.5 * _w_slope
         signals.append(f"slope down({slope:.4f})")
 
@@ -704,16 +750,16 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     # Interpretasi mean-reversion: harga turun tajam = potensi bounce (BUY),
     # harga naik tajam = potensi koreksi (SELL).
     _w_roc = sw['roc']
-    if roc < -3.0:
+    if roc < ROC_OVERSOLD:
         buy_score += 1.0 * _w_roc
         signals.append(f"ROC oversold({roc:.2f}%)")
-    elif roc < -1.0:
+    elif roc < ROC_MILD_DOWN:
         buy_score += 0.5 * _w_roc
         signals.append(f"ROC mild-down({roc:.2f}%)")
-    elif roc > 3.0:
+    elif roc > ROC_OVERBOUGHT:
         sell_score += 1.0 * _w_roc
         signals.append(f"ROC overbought({roc:.2f}%)")
-    elif roc > 1.0:
+    elif roc > ROC_MILD_UP:
         sell_score += 0.5 * _w_roc
         signals.append(f"ROC mild-up({roc:.2f}%)")
 
@@ -722,25 +768,25 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     # Jika OB tidak ada, fallback: volume spike → proxy demand, volume kering → proxy supply.
     _w_ob = sw['ob']
     if bp != 50.0:
-        if bp >= 65:
+        if bp >= OB_STRONG_BID:
             buy_score += 2.0 * _w_ob
             signals.append(f"OB strong-bid({bp:.0f}%)")
-        elif bp >= 55:
+        elif bp >= OB_BID_DOM:
             buy_score += 1.0 * _w_ob
             signals.append(f"OB bid-dom({bp:.0f}%)")
-        elif bp <= 35:
+        elif bp <= OB_STRONG_ASK:
             sell_score += 2.0 * _w_ob
             signals.append(f"OB strong-ask({100 - bp:.0f}%)")
-        elif bp <= 45:
+        elif bp <= OB_ASK_DOM:
             sell_score += 1.0 * _w_ob
             signals.append(f"OB ask-dom({100 - bp:.0f}%)")
     elif vr != 1.0:
         # Fallback: volume ratio sebagai proxy demand jika OB tidak tersedia
         # Spike volume saat harga naik = demand nyata (partial credit 1.0 maks)
-        if vr >= 2.0:
+        if vr >= VOL_SPIKE:
             buy_score += 1.0 * _w_ob
             signals.append(f"OB-fallback: Vol spike({vr:.1f}x) demand proxy")
-        elif vr <= 0.4:
+        elif vr <= VOL_DRY:
             sell_score += 1.0 * _w_ob
             signals.append(f"OB-fallback: Vol dry({vr:.1f}x) supply proxy")
 
@@ -750,16 +796,16 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     # Volume sepi (<0.5x) memperlemah sinyal arah apapun.
     _w_vol = sw['vol'] * vol_mult
     if vr != 1.0:
-        if vr >= 2.0:
+        if vr >= VOL_SPIKE:
             buy_score += 1.5 * _w_vol
             signals.append(f"Vol spike({vr:.1f}x) BUY confirm")
-        elif vr >= 1.5:
+        elif vr >= VOL_HIGH:
             buy_score += 0.8 * _w_vol
             signals.append(f"Vol high({vr:.1f}x)")
-        elif vr <= 0.4:
+        elif vr <= VOL_DRY:
             sell_score += 1.5 * _w_vol
             signals.append(f"Vol dry({vr:.1f}x) SELL confirm")
-        elif vr <= 0.6:
+        elif vr <= VOL_LOW:
             sell_score += 0.5 * _w_vol
             signals.append(f"Vol low({vr:.1f}x)")
 
@@ -769,24 +815,20 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     # Divergence: harga naik tapi OBV turun adalah sinyal jual kuat.
     _w_obv = sw['obv'] * vol_mult
     if obv_sl != 0.0:
-        if obv_sl >= 5.0:
+        if obv_sl >= OBV_ACCUMULATE:
             buy_score += 1.5 * _w_obv
             signals.append(f"OBV accumulate({obv_sl:+.1f}%)")
-        elif obv_sl >= 2.0:
+        elif obv_sl >= OBV_RISING:
             buy_score += 0.8 * _w_obv
             signals.append(f"OBV rising({obv_sl:+.1f}%)")
-        elif obv_sl <= -5.0:
+        elif obv_sl <= OBV_DISTRIBUTE:
             sell_score += 1.5 * _w_obv
             signals.append(f"OBV distribute({obv_sl:+.1f}%)")
-        elif obv_sl <= -2.0:
+        elif obv_sl <= OBV_FALLING:
             sell_score += 0.8 * _w_obv
             signals.append(f"OBV falling({obv_sl:+.1f}%)")
 
     # ── KEPUTUSAN AKHIR (Multi-Confluence Gate) ───────────────────────────────
-    BUY_THRESHOLD  = 6.0   # Minimal skor BUY untuk trigger entry
-    SELL_THRESHOLD = 6.0   # Minimal skor SELL untuk trigger exit/block
-    OPPOSING_MAX   = 4.0   # Skor lawanan tidak boleh lebih dari ini
-
     verdict    = 'HOLD'
     confidence = 50
     _sector_tag = f"[sector={sector}] " if sector else ""

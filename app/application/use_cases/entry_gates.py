@@ -167,7 +167,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         if total_depth > 0:
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
     _sector_eg = config.SECTOR_MAP.get(pair.lower())
-    _adaptive_eg = compute_adaptive_thresholds(history) if len(history) >= 30 else None
+    _adaptive_db = db.get_coin_indicator_setup(pair)
+    _adaptive_eg = _adaptive_db or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
     tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg)
 

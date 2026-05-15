@@ -47,7 +47,8 @@ def enrich_pair(bot, p, tickers):
     sector_boost = bot.oracle.get_sector_boost(pair)
 
     tech = get_technical_summary(history)
-    tech_sig = derive_trade_signal(tech)
+    pair_setup = db.get_coin_indicator_setup(pair)
+    tech_sig = derive_trade_signal(tech, adaptive_thresholds=(pair_setup or None))
     signal_verdict = tech_sig['verdict']
 
     db.save_ticker_history(

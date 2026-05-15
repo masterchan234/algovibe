@@ -1072,7 +1072,8 @@ class ExitManager:
                                 total_depth = total_bid + total_ask
                                 if total_depth > 0:
                                     tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-                            tech_sig = derive_trade_signal(tech)
+                            pair_setup = db.get_coin_indicator_setup(pair)
+                            tech_sig = derive_trade_signal(tech, adaptive_thresholds=(pair_setup or None))
                             momentum_signal = tech_sig.get('verdict', 'HOLD')
                             technical_confidence = float(tech_sig.get('confidence', 50) or 50) / 100.0
 
@@ -1811,7 +1812,8 @@ class ExitManager:
                                 total_depth = total_bid + total_ask
                                 if total_depth > 0:
                                     tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-                            tech_sig = derive_trade_signal(tech)
+                            pair_setup = db.get_coin_indicator_setup(pair)
+                            tech_sig = derive_trade_signal(tech, adaptive_thresholds=(pair_setup or None))
                             momentum_signal = tech_sig.get('verdict', 'HOLD')
                             technical_confidence = float(tech_sig.get('confidence', 50) or 50) / 100.0
 
@@ -1893,7 +1895,8 @@ class ExitManager:
                             if total_depth > 0:
                                 tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
 
-                        tech_sig = derive_trade_signal(tech)
+                        pair_setup = db.get_coin_indicator_setup(pair)
+                        tech_sig = derive_trade_signal(tech, adaptive_thresholds=(pair_setup or None))
                         momentum_signal = tech_sig.get('verdict', 'HOLD')
                         momentum_conf = int(tech_sig.get('confidence', 50) or 50)
                         current_rsi = float(tech.get('rsi', 50) or 50)

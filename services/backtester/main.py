@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 import argparse
 import numpy as _np
@@ -14,7 +15,10 @@ from app.domain.technicals import derive_trade_signal
 # Configuration
 OHLCV_DAYS = 90
 MIN_TRADE_IDR = 10000
-DEFAULT_DAILY_TARGET_PNL_IDR = 5000.0
+DEFAULT_DAILY_TARGET_PNL_IDR = 1000.0
+DEFAULT_BALANCE_IDR = 100000.0
+DEFAULT_MIN_LIQUIDITY_24H_IDR = 0.0
+DEFAULT_MIN_PRICE_IDR = 0.0
 
 RSI_OVERSOLD_BASE = 35.0
 RSI_OVERBOUGHT_BASE = 70.0
@@ -72,6 +76,17 @@ def _load_active_profiles() -> list[dict]:
     finally:
         conn.close()
 
+
+def _get_latest_ohlcv_ts() -> datetime | None:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(ts) AS max_ts FROM ohlcv_1m")
+        row = cur.fetchone()
+        return row["max_ts"] if row else None
+    finally:
+        conn.close()
+
 def _progress(count, total, label="", suffix=""):
     bar_len = 30
     filled_len = int(round(bar_len * count / float(total)))
@@ -90,11 +105,12 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     Menggunakan NumPy untuk performa tinggi dalam sinyal & indikator.
     """
     trades = []
+    pair_cfg = p.get("pair_setup") or {}
     
     # 1. Parameter Extraction
     strat_mode = p.get("strategy_mode", "scalping")
     tf_min     = int(p.get("timeframe_minutes", 1))
-    pos_idr    = float(p.get("max_position_idr", 100000))
+    pos_idr    = float(pair_cfg.get("max_position_idr", p.get("max_position_idr", 100000)))
     min_candles = 50 # Standard warm-up for EMA-50/MACD
     
     # Fees & Slippage
@@ -103,13 +119,13 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     slippage = float(p.get("fee_slippage_buffer", 0.001)) # 0.1% buffer
     
     # Adaptive Thresholds
-    buy_threshold = float(p.get("buy_threshold", 6.0))
-    sell_block    = float(p.get("sell_block_threshold", 5.0))
-    opp_max       = 4.0 # Mirror production opposing logic
+    buy_threshold = float(pair_cfg.get("buy_score_threshold", p.get("buy_threshold", 6.0)))
+    sell_block    = float(pair_cfg.get("sell_block_threshold", p.get("sell_block_threshold", 5.0)))
+    opp_max       = float(pair_cfg.get("opposing_max", 4.0)) # Mirror production opposing logic
     
     # Exit Parameters
-    tp_pct    = float(p.get("target_tp_pct", 0.035))
-    sl_pct    = float(p.get("target_sl_pct", -0.035))
+    tp_pct    = float(pair_cfg.get("target_tp_pct", p.get("target_tp_pct", 0.035)))
+    sl_pct    = float(pair_cfg.get("target_sl_pct", p.get("target_sl_pct", -0.035)))
     
     # Trailing SL
     trail_enabled = p.get("trailing_sl_enabled", False)
@@ -117,14 +133,15 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     trail_dist    = float(p.get("trailing_sl_distance_pct", 0.015))
     
     # DCA
-    dca_enabled = p.get("dca_enabled", False)
-    dca_max     = int(p.get("dca_max_tiers", 1))
+    dca_enabled = pair_cfg.get("dca_enabled", p.get("dca_enabled", False))
+    dca_max     = int(pair_cfg.get("dca_max_tiers", p.get("dca_max_tiers", 1)))
     dca_step    = float(p.get("dca_step_pct", -0.02))
     
     # Other gates
-    ema_trend_f = p.get("ema_trend_filter_enabled", True)
-    max_hold_m  = int(p.get("max_hold_minutes", 1440)) # Default 24h
-    cooldown_sec = int(p.get("cooldown_seconds", 300))
+    ema_trend_f = pair_cfg.get("ema_trend_filter_enabled", p.get("ema_trend_filter_enabled", True))
+    max_hold_m  = int(pair_cfg.get("max_hold_minutes", p.get("max_hold_minutes", 1440))) # Default 24h
+    cooldown_sec = int(pair_cfg.get("cooldown_seconds", p.get("cooldown_seconds", 300)))
+    min_position_idr = float(pair_cfg.get("min_position_idr", p.get("min_position_idr", MIN_TRADE_IDR)))
     
     # 2. Vectorized Pre-processing (Indicators)
     df = pd.DataFrame(candles)
@@ -141,7 +158,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         }).dropna()
         
         resampled_candles = df_res.reset_index().to_dict('records')
-        res_history = _get_signal_history(pair, resampled_candles, p)
+        res_history = _get_signal_history(pair, resampled_candles, p, pair_cfg)
         
         if not res_history:
             return {"trades": [], "stats": {}}
@@ -158,7 +175,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         empty_sig = {"verdict": "HOLD", "buy_score": 0.0, "sell_score": 0.0}
         history = [s if isinstance(s, dict) else empty_sig for s in df_sig['sig'].tolist()]
     else:
-        history = _get_signal_history(pair, candles, p)
+        history = _get_signal_history(pair, candles, p, pair_cfg)
 
     if not history or len(history) != len(candles):
         return {"trades": [], "stats": {}}
@@ -256,7 +273,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         # ── Entry logic ───────────────────────────────────────────────────
         if ts_epoch < cooldown_until:
             continue
-        if current_cap < float(p.get("min_position_idr", 10000)):
+        if current_cap < min_position_idr:
             break 
 
         # Gate 1: Verdict & Thresholds
@@ -326,7 +343,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
 # ANALYTICS: Quantitative Performance
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
+def _get_signal_history(pair: str, candles: list[dict], p: dict, pair_cfg: dict | None = None) -> list[dict]:
     """
     Menghasilkan riwayat sinyal teknikal (verdict, score) untuk seluruh candle.
     Menggunakan kombinasi Pandas (vectorized indicators) dan Logic Parity.
@@ -407,11 +424,12 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
     records = df.to_dict('records')
     for row in records:
         # Gate 4c: EMA-50 Trend Filter (Standard Spot Scalping Safety)
-        ema_enabled = p.get("ema_trend_filter_enabled", True)
+        cfg = pair_cfg or {}
+        ema_enabled = cfg.get("ema_trend_filter_enabled", p.get("ema_trend_filter_enabled", True))
         is_uptrend = (not ema_enabled) or (row['close'] > row['ema50'])
         
         # Gate 4b: ATR Volatility Filter
-        atr_limit = float(p.get("atr_max_pct", 3.0))
+        atr_limit = float(cfg.get("atr_max_pct", p.get("atr_max_pct", 3.0)))
         is_stable = row['atr_pct'] < atr_limit
         
         # Buat dummy tech dict untuk parity
@@ -432,7 +450,7 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict) -> list[dict]:
             "obv_slope": row['obv_slope'],
         }
         
-        sig = derive_trade_signal(tech)
+        sig = derive_trade_signal(tech, adaptive_thresholds=cfg)
         
         # Enforce Entry Gates
         if sig["verdict"] == "BUY":
@@ -735,6 +753,35 @@ def _ensure_schema_upgraded() -> None:
             except Exception:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
 
+        # 0b. Snapshot table: setup teknikal per-pair yang dipakai pada setiap result run.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backtest_result_pair_setups (
+                id BIGSERIAL PRIMARY KEY,
+                result_id BIGINT NOT NULL,
+                profile_id BIGINT NOT NULL,
+                pair TEXT NOT NULL,
+                setup_json JSONB NOT NULL,
+                source_analysis_ts TIMESTAMPTZ NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (result_id, pair)
+            )
+            """
+        )
+
+        # 0c. Scope pair per profile agar profile quant tidak diterapkan lintas pair secara tidak sengaja.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backtest_profile_pair_scope (
+                id BIGSERIAL PRIMARY KEY,
+                profile_id BIGINT NOT NULL,
+                pair TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (profile_id, pair)
+            )
+            """
+        )
+
         # 1. Add target columns to backtest_profiles (Legacy support for old DBs)
         cols = [
             ("target_roi_pct", "DOUBLE PRECISION DEFAULT 0.0"),
@@ -821,8 +868,15 @@ def _process_pair_worker(pair_name, start_time, end_time, profiles_list):
         candles = [{'ts': r['ts'], 'open': r['open'], 'high': r['high'], 'low': r['low'], 'close': r['close'], 'volume': r['volume']} for r in rows]
         
         pair_trades = []
+        pair_lc = str(pair_name).lower()
         for p in profiles_list:
-            res = _run_backtest_pair(p, pair_name, candles, start_time, end_time)
+            p_local = dict(p)
+            allowed_pairs = set(str(x).lower() for x in (p_local.get("allowed_pairs") or []))
+            if allowed_pairs and pair_lc not in allowed_pairs:
+                continue
+            pair_setup_map = p_local.get("pair_setup_map") or {}
+            p_local["pair_setup"] = pair_setup_map.get(str(pair_name).lower(), {})
+            res = _run_backtest_pair(p_local, pair_name, candles, start_time, end_time)
             if res["trades"]: pair_trades.extend(res["trades"])
         return pair_trades
     finally:
@@ -901,6 +955,219 @@ def _save_result(pid, pair, stats, trades):
                 float(_c(t['sell_score_at_exit'])) if t['sell_score_at_exit'] is not None else None,
                 int(_c(t['duration_seconds']))
             ))
+        return rid
+
+
+def _save_result_pair_setups(result_id: int, profile_id: int, trades: list[dict], pair_setup_map: dict[str, dict] | None) -> None:
+    if not result_id or not trades or not pair_setup_map:
+        return
+
+    used_pairs = {str(t.get("pair", "")).lower() for t in trades if t.get("pair")}
+    if not used_pairs:
+        return
+
+    with transaction() as cur:
+        for pair in sorted(used_pairs):
+            raw_cfg = pair_setup_map.get(pair)
+            if not raw_cfg:
+                continue
+
+            cfg = dict(raw_cfg)
+            source_ts = cfg.pop("analysis_ts", None)
+            setup_json = json.dumps(cfg, ensure_ascii=True, sort_keys=True)
+            cur.execute(
+                """
+                INSERT INTO backtest_result_pair_setups (
+                    result_id, profile_id, pair, setup_json, source_analysis_ts
+                ) VALUES (%s, %s, %s, %s::jsonb, %s)
+                ON CONFLICT (result_id, pair)
+                DO UPDATE SET
+                    setup_json = EXCLUDED.setup_json,
+                    source_analysis_ts = EXCLUDED.source_analysis_ts,
+                    created_at = NOW()
+                """,
+                (int(result_id), int(profile_id), pair, setup_json, source_ts),
+            )
+
+
+def _load_latest_coin_setup(pairs: list[str]) -> dict[str, dict]:
+    pair_keys = [str(px).lower() for px in pairs if px]
+    if not pair_keys:
+        return {}
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT ON (pair)
+                lower(pair) AS pair,
+                rec_buy_score_threshold,
+                rec_sell_score_threshold,
+                rec_opposing_max,
+                rec_sell_block_threshold,
+                rec_target_tp_pct,
+                rec_target_sl_pct,
+                rec_cooldown_seconds,
+                rec_max_hold_minutes,
+                rec_ema_trend_filter_enabled,
+                rec_atr_max_pct,
+                rec_max_position_idr,
+                rec_dca_enabled,
+                rec_dca_max_tiers,
+                rec_rsi_oversold,
+                rec_rsi_overbought,
+                rec_bb_extreme_low,
+                rec_bb_low,
+                rec_bb_high,
+                rec_bb_extreme_high,
+                rec_stoch_k_oversold,
+                rec_stoch_d_oversold,
+                rec_stoch_k_overbought,
+                rec_stoch_d_overbought,
+                rec_williams_deep_oversold,
+                rec_williams_oversold,
+                rec_williams_overbought,
+                rec_williams_deep_overbought,
+                rec_slope_strong_up,
+                rec_slope_up,
+                rec_slope_down,
+                rec_slope_strong_down,
+                rec_roc_oversold,
+                rec_roc_mild_down,
+                rec_roc_mild_up,
+                rec_roc_overbought,
+                rec_ob_strong_bid,
+                rec_ob_bid_dom,
+                rec_ob_ask_dom,
+                rec_ob_strong_ask,
+                rec_volume_spike,
+                rec_volume_high,
+                rec_volume_low,
+                rec_volume_dry,
+                rec_obv_accumulate,
+                rec_obv_rising,
+                rec_obv_falling,
+                rec_obv_distribute,
+                analysis_ts
+            FROM backtest_coin_analysis
+            WHERE lower(pair) = ANY(%s)
+            ORDER BY pair, analysis_ts DESC
+            """,
+            (pair_keys,),
+        )
+        rows = cur.fetchall()
+
+        setup = {}
+        for r in rows:
+            setup[r["pair"]] = {
+                "buy_score_threshold": float(r["rec_buy_score_threshold"] or 6.0),
+                "sell_score_threshold": float(r["rec_sell_score_threshold"] or 6.0),
+                "opposing_max": float(r["rec_opposing_max"] or 4.0),
+                "sell_block_threshold": float(r["rec_sell_block_threshold"] or 5.0),
+                "target_tp_pct": float(r["rec_target_tp_pct"] or 0.02),
+                "target_sl_pct": float(r["rec_target_sl_pct"] or -0.02),
+                "cooldown_seconds": int(r["rec_cooldown_seconds"] or 300),
+                "max_hold_minutes": int(r["rec_max_hold_minutes"] or 1440),
+                "ema_trend_filter_enabled": bool(r["rec_ema_trend_filter_enabled"]),
+                "atr_max_pct": float(r["rec_atr_max_pct"] or 3.0),
+                "max_position_idr": float(r["rec_max_position_idr"] or 100000.0),
+                "dca_enabled": bool(r["rec_dca_enabled"]),
+                "dca_max_tiers": int(r["rec_dca_max_tiers"] or 1),
+                "rsi_oversold": float(r["rec_rsi_oversold"] or 35.0),
+                "rsi_overbought": float(r["rec_rsi_overbought"] or 70.0),
+                "bb_extreme_low": float(r["rec_bb_extreme_low"] or 0.10),
+                "bb_low": float(r["rec_bb_low"] or 0.25),
+                "bb_high": float(r["rec_bb_high"] or 0.75),
+                "bb_extreme_high": float(r["rec_bb_extreme_high"] or 0.90),
+                "stoch_k_oversold": float(r["rec_stoch_k_oversold"] or 20.0),
+                "stoch_d_oversold": float(r["rec_stoch_d_oversold"] or 30.0),
+                "stoch_k_overbought": float(r["rec_stoch_k_overbought"] or 80.0),
+                "stoch_d_overbought": float(r["rec_stoch_d_overbought"] or 70.0),
+                "williams_deep_oversold": float(r["rec_williams_deep_oversold"] or -85.0),
+                "williams_oversold": float(r["rec_williams_oversold"] or -70.0),
+                "williams_overbought": float(r["rec_williams_overbought"] or -30.0),
+                "williams_deep_overbought": float(r["rec_williams_deep_overbought"] or -15.0),
+                "slope_strong_up": float(r["rec_slope_strong_up"] or 0.005),
+                "slope_up": float(r["rec_slope_up"] or 0.001),
+                "slope_down": float(r["rec_slope_down"] or -0.001),
+                "slope_strong_down": float(r["rec_slope_strong_down"] or -0.005),
+                "roc_oversold": float(r["rec_roc_oversold"] or -3.0),
+                "roc_mild_down": float(r["rec_roc_mild_down"] or -1.0),
+                "roc_mild_up": float(r["rec_roc_mild_up"] or 1.0),
+                "roc_overbought": float(r["rec_roc_overbought"] or 3.0),
+                "ob_strong_bid": float(r["rec_ob_strong_bid"] or 65.0),
+                "ob_bid_dom": float(r["rec_ob_bid_dom"] or 55.0),
+                "ob_ask_dom": float(r["rec_ob_ask_dom"] or 45.0),
+                "ob_strong_ask": float(r["rec_ob_strong_ask"] or 35.0),
+                "volume_spike": float(r["rec_volume_spike"] or 2.0),
+                "volume_high": float(r["rec_volume_high"] or 1.5),
+                "volume_low": float(r["rec_volume_low"] or 0.6),
+                "volume_dry": float(r["rec_volume_dry"] or 0.4),
+                "obv_accumulate": float(r["rec_obv_accumulate"] or 5.0),
+                "obv_rising": float(r["rec_obv_rising"] or 2.0),
+                "obv_falling": float(r["rec_obv_falling"] or -2.0),
+                "obv_distribute": float(r["rec_obv_distribute"] or -5.0),
+                "analysis_ts": r["analysis_ts"],
+            }
+        return setup
+    finally:
+        conn.close()
+
+
+def _load_profile_pair_scopes(profile_ids: list[int]) -> dict[int, set[str]]:
+    ids = [int(x) for x in profile_ids if x is not None]
+    if not ids:
+        return {}
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT profile_id, lower(pair) AS pair
+            FROM backtest_profile_pair_scope
+            WHERE profile_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        rows = cur.fetchall()
+        out: dict[int, set[str]] = {}
+        for r in rows:
+            pid = int(r["profile_id"])
+            out.setdefault(pid, set()).add(str(r["pair"]))
+        return out
+    finally:
+        conn.close()
+
+
+def _backfill_profile_pair_scope_for_quant_profiles(profiles: list[dict]) -> None:
+    if not profiles:
+        return
+
+    import re
+
+    rows_to_add: list[tuple[int, str]] = []
+    for p in profiles:
+        name = str(p.get("profile_name") or "")
+        m = re.match(r"^quant_([a-z0-9]+idr)(?:_|$)", name.lower())
+        if not m:
+            continue
+        rows_to_add.append((int(p["id"]), m.group(1)))
+
+    if not rows_to_add:
+        return
+
+    with transaction() as cur:
+        for pid, pair in rows_to_add:
+            cur.execute(
+                """
+                INSERT INTO backtest_profile_pair_scope (profile_id, pair)
+                VALUES (%s, %s)
+                ON CONFLICT (profile_id, pair) DO NOTHING
+                """,
+                (pid, pair),
+            )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EVOLUTIONARY ENGINE: Self-Correction
@@ -1225,6 +1492,39 @@ def _build_coin_recommendation(
     }
 
 
+def _apply_backtest_optimized_overrides(recommendation: dict, balance_idr: float, target_daily_pnl: float) -> dict:
+    """
+    Mode khusus backtesting (bukan parity bot live).
+    Fokus: meningkatkan frekuensi sinyal terkontrol untuk target harian kecil (mis. 1k/100k).
+    """
+    rec = dict(recommendation)
+
+    rec["buy_threshold"] = round(_clamp(float(rec.get("buy_threshold", 6.0)) - 0.8, 4.0, 7.0), 2)
+    rec["buy_score_threshold"] = round(_clamp(float(rec.get("buy_score_threshold", 6.0)) - 0.5, 5.0, 7.0), 3)
+    rec["sell_score_threshold"] = round(_clamp(float(rec.get("sell_score_threshold", 6.0)) - 0.2, 4.8, 6.8), 3)
+    rec["sell_block_threshold"] = round(_clamp(float(rec.get("sell_block_threshold", 5.0)) - 0.4, 4.2, 6.0), 3)
+    rec["opposing_max"] = round(_clamp(float(rec.get("opposing_max", 4.0)) + 0.3, 3.5, 5.0), 3)
+
+    # TP lebih realistis untuk hit-rate, SL dipersempit agar drawdown tetap terkendali.
+    rec["target_tp_pct"] = round(_clamp(float(rec.get("target_tp_pct", 0.02)), 0.010, 0.020), 4)
+    rec["target_sl_pct"] = round(-_clamp(abs(float(rec.get("target_sl_pct", -0.015))), 0.008, 0.015), 4)
+
+    rec["cooldown_seconds"] = int(_clamp(float(rec.get("cooldown_seconds", 300)) * 0.5, 90, 600))
+    rec["max_hold_minutes"] = int(_clamp(float(rec.get("max_hold_minutes", 240)), 45, 240))
+    rec["ema_trend_filter_enabled"] = False
+    rec["atr_max_pct"] = round(_clamp(float(rec.get("atr_max_pct", 3.0)) + 0.7, 2.5, 5.0), 3)
+
+    # Position sizing khusus target 1k/day dari 100k balance.
+    est_trades = max(2, min(12, int(round(target_daily_pnl / max(1.0, balance_idr * 0.0035)))))
+    pos_target = target_daily_pnl / max(1e-9, est_trades * 0.0035)
+    rec["max_position_idr"] = round(_clamp(pos_target, MIN_TRADE_IDR, balance_idr * 0.30), 2)
+    rec["max_open_positions"] = 2 if rec["max_position_idr"] <= (0.2 * balance_idr) else 1
+
+    rec["dca_enabled"] = False
+    rec["dca_max_tiers"] = 1
+    return rec
+
+
 def _upsert_coin_analysis(
     window_start: datetime,
     window_end: datetime,
@@ -1443,17 +1743,116 @@ def _upsert_coin_analysis(
             )
 
 
+def _create_profile_from_analysis(
+    *,
+    pair: str,
+    recommendation: dict,
+    target_daily_pnl: float,
+    profile_name: str | None = None,
+    timeframe_minutes: int = 1,
+    strategy_mode: str = "scalping",
+    backtest_optimized: bool = False,
+    activate_new_profile: bool = False,
+    activate_only_new: bool = False,
+) -> dict:
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    effective_name = profile_name or f"quant_{pair}_{ts}"
+
+    payload = {
+        "profile_name": effective_name,
+        "initial_capital_idr": float(recommendation["initial_capital_idr"]),
+        "min_position_idr": float(recommendation["min_position_idr"]),
+        "max_position_idr": float(recommendation["max_position_idr"]),
+        "max_open_positions": int(recommendation["max_open_positions"]),
+        "timeframe_minutes": int(max(1, timeframe_minutes)),
+        "strategy_mode": "backtest_optimized" if backtest_optimized else str(strategy_mode),
+        "buy_threshold": float(recommendation["buy_threshold"]),
+        "sell_block_threshold": float(recommendation["sell_block_threshold"]),
+        "target_tp_pct": float(recommendation["target_tp_pct"]),
+        "target_sl_pct": float(recommendation["target_sl_pct"]),
+        "cooldown_seconds": int(recommendation["cooldown_seconds"]),
+        "max_hold_minutes": int(recommendation["max_hold_minutes"]),
+        "ema_trend_filter_enabled": bool(recommendation["ema_trend_filter_enabled"]),
+        "atr_max_pct": float(recommendation["atr_max_pct"]),
+        "dca_enabled": bool(recommendation["dca_enabled"]),
+        "dca_max_tiers": int(recommendation["dca_max_tiers"]),
+        "target_pnl_idr": float(target_daily_pnl),
+        "target_roi_pct": 0.0,
+        "is_active": bool(activate_new_profile),
+    }
+
+    with transaction() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'backtest_profiles'
+            """
+        )
+        existing_cols = {r["column_name"] for r in cur.fetchall()}
+
+        data = {k: v for k, v in payload.items() if k in existing_cols}
+        cols = list(data.keys())
+        placeholders = ", ".join(["%s"] * len(cols))
+        columns_sql = ", ".join(cols)
+
+        if activate_new_profile and activate_only_new and "is_active" in existing_cols:
+            cur.execute("UPDATE backtest_profiles SET is_active = false WHERE is_active = true")
+
+        cur.execute(
+            f"INSERT INTO backtest_profiles ({columns_sql}) VALUES ({placeholders}) RETURNING id",
+            [data[c] for c in cols],
+        )
+        new_id = cur.fetchone()["id"]
+        cur.execute(
+            """
+            INSERT INTO backtest_profile_pair_scope (profile_id, pair)
+            VALUES (%s, %s)
+            ON CONFLICT (profile_id, pair) DO NOTHING
+            """,
+            (int(new_id), str(pair).lower()),
+        )
+        cur.execute("SELECT * FROM backtest_profiles WHERE id = %s", (new_id,))
+        return cur.fetchone()
+
+
+def _sort_auto_selection_candidates(rows: list[dict]) -> list[dict]:
+    """
+    Urutkan kandidat pair secara pragmatis untuk auto-selection:
+    1) edge_raw paling baik (least-negative / positive),
+    2) momentum quality,
+    3) likuiditas notional harian.
+    """
+    return sorted(
+        rows,
+        key=lambda x: (
+            float(x.get("math", {}).get("edge_trade_raw", -1e9) or -1e9),
+            float(x.get("momentum_quality", 0.0) or 0.0),
+            float(x.get("avg_day_notional_window", 0.0) or 0.0),
+            float(x.get("up_ratio", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+
+
 def analyze_ohlcv_target_setup(
     target_daily_pnl: float = DEFAULT_DAILY_TARGET_PNL_IDR,
     balance_idr: float = 100000.0,
     days: int = OHLCV_DAYS,
     pairs_filter: str | None = None,
+    min_liquidity_24h_idr: float = DEFAULT_MIN_LIQUIDITY_24H_IDR,
+    min_price_idr: float = DEFAULT_MIN_PRICE_IDR,
 ) -> dict:
     """
     Analisis statistik murni dari ohlcv_1m untuk menyarankan setup parameter
     teknikal di backtest_profiles menuju target profit harian.
     """
-    end = datetime.now(tz=timezone.utc)
+    end = _get_latest_ohlcv_ts()
+    if end is None:
+        print("❌ Tidak ada data ohlcv_1m untuk dianalisis.")
+        return {}
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
     start = end - timedelta(days=days)
     filter_set = {p.strip().lower() for p in pairs_filter.split(",") if p.strip()} if pairs_filter else None
 
@@ -1521,6 +1920,28 @@ def analyze_ohlcv_target_setup(
                     AVG(CASE WHEN c > 0 THEN (hi - lo) / c ELSE NULL END) AS avg_day_range
                 FROM day_bar
                 GROUP BY pair
+            ), liq AS (
+                SELECT
+                    pair,
+                    AVG(day_notional) AS avg_day_notional_window
+                FROM (
+                    SELECT
+                        pair,
+                        date_trunc('day', ts) AS d,
+                        SUM(close::double precision * volume::double precision) AS day_notional
+                    FROM ohlcv_1m
+                    WHERE ts >= %s AND ts <= %s
+                    GROUP BY pair, date_trunc('day', ts)
+                ) q
+                GROUP BY pair
+            ), px_guard AS (
+                SELECT
+                    pair,
+                    AVG(close::double precision) AS avg_close_window,
+                    MAX(ts) AS last_ts
+                FROM ohlcv_1m
+                WHERE ts >= %s AND ts <= %s
+                GROUP BY pair
             )
             SELECT
                 s.pair,
@@ -1532,13 +1953,30 @@ def analyze_ohlcv_target_setup(
                 s.jump_1pct_ratio,
                 s.acf1,
                 d.n_days,
-                d.avg_day_range
+                d.avg_day_range,
+                                l.avg_day_notional_window,
+                                g.avg_close_window
             FROM stats s
             JOIN day_stats d USING (pair)
-            WHERE s.n > 10000 AND d.n_days >= 10
+            JOIN liq l USING (pair)
+                        JOIN px_guard g USING (pair)
+                        WHERE s.n > 10000
+                            AND d.n_days >= 10
+                            AND COALESCE(l.avg_day_notional_window, 0) >= %s
+                            AND (%s <= 0 OR COALESCE(g.avg_close_window, 0) >= %s)
             ORDER BY s.pair ASC
             """,
-            (start, start),
+                        (
+                                start,
+                                start,
+                                start,
+                                end,
+                                start,
+                                end,
+                                float(min_liquidity_24h_idr),
+                                float(min_price_idr),
+                                float(min_price_idr),
+                        ),
         )
         rows = cur.fetchall()
     finally:
@@ -1580,6 +2018,8 @@ def analyze_ohlcv_target_setup(
                 "pair": pair,
                 "n": int(r["n"]),
                 "n_days": int(r["n_days"]),
+                "avg_day_notional_window": float(r["avg_day_notional_window"] or 0.0),
+                "avg_close_window": float(r["avg_close_window"] or 0.0),
                 "mu_1m": mu_1m,
                 "sigma_1m": sigma_1m,
                 "mad_1m": mad_1m,
@@ -1690,7 +2130,13 @@ def analyze_ohlcv_target_setup(
     recommendation = best["recommendation"]
 
     print("\n📊 OHLCV_1M QUANT ANALYSIS (DATA-DRIVEN)")
-    print(f"Window: {days} hari | Pair dianalisis: {len(universe)} | Target: Rp {target_daily_pnl:,.0f}/hari | Balance: Rp {balance_idr:,.0f}")
+    print(
+        f"Window: {days} hari | Pair dianalisis: {len(universe)} | "
+        f"Target: Rp {target_daily_pnl:,.0f}/hari | Balance: Rp {balance_idr:,.0f} | "
+        f"Min Avg Daily Notional: Rp {float(min_liquidity_24h_idr):,.0f}"
+    )
+    if float(min_price_idr) > 0:
+        print(f"Min Price filter aktif: Rp {float(min_price_idr):,.0f}")
     print("\nTop momentum-quality pairs:")
     for i, p in enumerate(top_k, start=1):
         print(
@@ -1745,31 +2191,89 @@ def analyze_ohlcv_target_setup(
 # CLI ENTRY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(days=OHLCV_DAYS, pairs_filter=None):
-    profiles = _load_active_profiles()
+def run_backtest(
+    days=OHLCV_DAYS,
+    pairs_filter=None,
+    profiles_override: list[dict] | None = None,
+    strict_per_coin: bool = True,
+    min_liquidity_24h_idr: float = DEFAULT_MIN_LIQUIDITY_24H_IDR,
+    min_price_idr: float = DEFAULT_MIN_PRICE_IDR,
+):
+    profiles = profiles_override if profiles_override is not None else _load_active_profiles()
+    if not profiles:
+        logger.warning("[run] No profile available to run.")
+        return
+
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT pair FROM ohlcv_1m")
+    data_end = _get_latest_ohlcv_ts()
+    if data_end is None:
+        logger.warning("[run] No ohlcv_1m data available.")
+        conn.close()
+        return
+    if data_end.tzinfo is None:
+        data_end = data_end.replace(tzinfo=timezone.utc)
+    data_start = data_end - timedelta(days=days)
+
+    cur.execute(
+        """
+        SELECT DISTINCT pair
+        FROM ohlcv_1m
+        WHERE ts >= %s AND ts <= %s
+        ORDER BY pair ASC
+        """,
+        (
+            data_start,
+            data_end,
+        ),
+    )
     pairs = [r['pair'] for r in cur.fetchall()]
     if pairs_filter:
         filter_set = {px.strip().lower() for px in pairs_filter.split(",") if px.strip()}
         pairs = [px for px in pairs if str(px).lower() in filter_set]
 
     if not pairs:
-        logger.warning("[run] No pairs selected. Check --pairs filter against DB symbols in ohlcv_1m.")
+        logger.warning("[run] No pairs selected in requested time window.")
         conn.close()
         return
+
+    if float(min_liquidity_24h_idr) > 0 or float(min_price_idr) > 0:
+        print("ℹ️ Catatan: filter likuiditas/harga diabaikan pada mode strict per-koin ini.")
+
+    pair_setup_map = _load_latest_coin_setup(pairs)
+
+    logger.info(f"[run] Loaded per-coin setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
+    print(f"ℹ️ Loaded per-coin technical setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
+
+    missing_pairs = sorted([px for px in pairs if str(px).lower() not in pair_setup_map])
+
+    if missing_pairs:
+        conn.close()
+        preview = ", ".join(missing_pairs[:10])
+        if len(missing_pairs) > 10:
+            preview += f", ... (+{len(missing_pairs)-10} lainnya)"
+        print("❌ Strict per-coin aktif: setup teknikal per-koin belum lengkap.")
+        print(f"   Missing pair setup: {preview}")
+        print("   Jalankan `analyze` dulu agar backtest_coin_analysis terisi untuk semua pair tersebut.")
+        return
+
+    enriched_profiles = []
+    for p in profiles:
+        p2 = dict(p)
+        p2["pair_setup_map"] = pair_setup_map
+        p2["allowed_pairs"] = []
+        enriched_profiles.append(p2)
     
     n_pairs = len(pairs)
-    now = datetime.now(tz=timezone.utc)
-    start = now - timedelta(days=days)
+    now = data_end
+    start = data_start
     
     # 1. Multi-process sim
     all_results = []
     import multiprocessing
     max_w = min(4, multiprocessing.cpu_count())
     with ProcessPoolExecutor(max_workers=max_w) as pool:
-        future_to_pair = {pool.submit(_process_pair_worker, px, start, now, profiles): px for px in pairs}
+        future_to_pair = {pool.submit(_process_pair_worker, px, start, now, enriched_profiles): px for px in pairs}
         for i, f in enumerate(as_completed(future_to_pair)):
             pair = future_to_pair[f]
             try:
@@ -1793,7 +2297,7 @@ def run_backtest(days=OHLCV_DAYS, pairs_filter=None):
         logger.warning(f"[run] ⚠️  Failed to cache results: {e}")
 
     # 3. Portfolio & Stats (Database Save)
-    _persist_results(all_results, profiles, start, now)
+    _persist_results(all_results, enriched_profiles, start, now)
     conn.close()
 
 def _persist_results(all_results, profiles, start, now):
@@ -1804,17 +2308,38 @@ def _persist_results(all_results, profiles, start, now):
             portfolio = _simulate_portfolio(p_trades, p)
             stats = _compute_stats(portfolio, p['initial_capital_idr'], start, now)
             if stats:
-                _save_result(p['id'], None, stats, portfolio)
+                rid = _save_result(p['id'], None, stats, portfolio)
+                _save_result_pair_setups(
+                    result_id=rid,
+                    profile_id=int(p['id']),
+                    trades=portfolio,
+                    pair_setup_map=p.get('pair_setup_map'),
+                )
                 print(f"   ✅ Saved: {p['profile_name']} ({len(portfolio)} trades)")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["fetch", "run", "report", "tune", "optimize", "restore", "analyze"])
+    parser.add_argument("command", choices=["fetch", "run", "report", "tune", "optimize", "restore", "analyze", "sync-coin-analysis"])
     parser.add_argument("--days", type=int, default=OHLCV_DAYS)
     parser.add_argument("--pairs", type=str)
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--target-daily-pnl", type=float, default=None)
     parser.add_argument("--balance", type=float, default=100000.0)
+    parser.add_argument("--create-profile-from-analysis", action="store_true")
+    parser.add_argument("--analysis-pair", type=str, default=None)
+    parser.add_argument("--new-profile-name", type=str, default=None)
+    parser.add_argument("--run-after-create", action="store_true")
+    parser.add_argument("--activate-new-profile", action="store_true")
+    parser.add_argument("--activate-only-new", action="store_true")
+    parser.add_argument("--profile-timeframe-minutes", type=int, default=1)
+    parser.add_argument("--profile-strategy-mode", type=str, default="scalping")
+    parser.add_argument("--strict-per-coin", action="store_true")
+    parser.add_argument("--allow-global-fallback", action="store_true")
+    parser.add_argument("--allow-negative-edge-profile", action="store_true")
+    parser.add_argument("--backtest-optimized", action="store_true")
+    parser.add_argument("--min-liquidity-24h-idr", type=float, default=DEFAULT_MIN_LIQUIDITY_24H_IDR)
+    parser.add_argument("--min-price-idr", type=float, default=DEFAULT_MIN_PRICE_IDR)
+    parser.add_argument("--auto-select-top", type=int, default=0)
     args = parser.parse_args()
 
     cmd_parts = [args.command]
@@ -1828,13 +2353,49 @@ def main():
         cmd_parts.extend(["--target-daily-pnl", str(args.target_daily_pnl)])
     if args.balance != 100000.0:
         cmd_parts.extend(["--balance", str(args.balance)])
+    if args.create_profile_from_analysis:
+        cmd_parts.append("--create-profile-from-analysis")
+    if args.analysis_pair:
+        cmd_parts.extend(["--analysis-pair", args.analysis_pair])
+    if args.new_profile_name:
+        cmd_parts.extend(["--new-profile-name", args.new_profile_name])
+    if args.run_after_create:
+        cmd_parts.append("--run-after-create")
+    if args.activate_new_profile:
+        cmd_parts.append("--activate-new-profile")
+    if args.activate_only_new:
+        cmd_parts.append("--activate-only-new")
+    if args.profile_timeframe_minutes != 1:
+        cmd_parts.extend(["--profile-timeframe-minutes", str(args.profile_timeframe_minutes)])
+    if args.profile_strategy_mode != "scalping":
+        cmd_parts.extend(["--profile-strategy-mode", args.profile_strategy_mode])
+    if args.strict_per_coin:
+        cmd_parts.append("--strict-per-coin")
+    if args.allow_global_fallback:
+        cmd_parts.append("--allow-global-fallback")
+    if args.allow_negative_edge_profile:
+        cmd_parts.append("--allow-negative-edge-profile")
+    if args.backtest_optimized:
+        cmd_parts.append("--backtest-optimized")
+    if float(args.min_liquidity_24h_idr) != DEFAULT_MIN_LIQUIDITY_24H_IDR:
+        cmd_parts.extend(["--min-liquidity-24h-idr", str(args.min_liquidity_24h_idr)])
+    if float(args.min_price_idr) != DEFAULT_MIN_PRICE_IDR:
+        cmd_parts.extend(["--min-price-idr", str(args.min_price_idr)])
+    if int(args.auto_select_top) > 0:
+        cmd_parts.extend(["--auto-select-top", str(int(args.auto_select_top))])
     _ensure_container_runtime(" ".join(cmd_parts))
     _ensure_schema_upgraded()
 
     if args.command == "fetch":
         print("ℹ️ No standalone fetch step is required. Backtest reads from table ohlcv_1m.")
     elif args.command == "run":
-        run_backtest(args.days, args.pairs)
+        run_backtest(
+            args.days,
+            args.pairs,
+            strict_per_coin=(not args.allow_global_fallback),
+            min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
+            min_price_idr=float(args.min_price_idr),
+        )
     elif args.command == "report":
         profiles = _load_active_profiles()
         for p in profiles: _print_run_report(p['id'], p['profile_name'])
@@ -1857,18 +2418,193 @@ def main():
         _persist_results(data['results'], profiles, data['start'], data['now'])
         print("🏁 Restore complete.")
 
+    elif args.command == "sync-coin-analysis":
+        print("🔄 Menyinkronkan setup teknikal per-koin dari backtest_coin_analysis ke coin_analysis trading...")
+        from app.infrastructure.database import db as trading_db
+        sync_result = trading_db.sync_backtest_coin_analysis_to_trading(
+            pairs=args.pairs.split(",") if args.pairs else None,
+        )
+        if sync_result.get("ok"):
+            print(
+                "✅ Sync selesai: "
+                f"fetched={sync_result.get('fetched', 0)} | "
+                f"live={sync_result.get('live_written', 0)} | "
+                f"dryrun={sync_result.get('dryrun_written', 0)}"
+            )
+        else:
+            print(f"❌ Sync gagal: {sync_result.get('error', 'unknown error')}")
+
     elif args.command == "analyze":
-        analyze_ohlcv_target_setup(
+        analysis_result = analyze_ohlcv_target_setup(
             target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
             balance_idr=float(args.balance),
             days=int(args.days),
             pairs_filter=args.pairs,
+            min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
+            min_price_idr=float(args.min_price_idr),
         )
+
+        if args.create_profile_from_analysis:
+            if not analysis_result or not analysis_result.get("per_coin"):
+                print("❌ Tidak bisa membuat profile: hasil analisis kosong.")
+                return
+
+            if int(args.auto_select_top) > 0:
+                ranked_candidates = _sort_auto_selection_candidates(list(analysis_result["per_coin"]))
+                selected_rows = ranked_candidates[: int(args.auto_select_top)]
+                if not selected_rows:
+                    print("❌ Auto-selection kosong setelah ranking kandidat.")
+                    return
+                auto_batch_tag = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+                if args.activate_new_profile and args.activate_only_new:
+                    with transaction() as cur:
+                        cur.execute("UPDATE backtest_profiles SET is_active = false WHERE is_active = true")
+
+                created_profiles = []
+                skipped_negative = []
+                print(
+                    f"\n🤖 Auto-select aktif: membuat {len(selected_rows)} profile dari universe "
+                    f"{len(analysis_result['per_coin'])} pair hasil filter."
+                )
+
+                for idx, selected in enumerate(selected_rows, start=1):
+                    edge_raw_selected = float(selected.get("math", {}).get("edge_trade_raw", 0.0) or 0.0)
+                    if edge_raw_selected <= 0 and not args.allow_negative_edge_profile:
+                        skipped_negative.append(str(selected["pair"]))
+                        continue
+
+                    recommendation_for_profile = dict(selected["recommendation"])
+                    if args.backtest_optimized:
+                        recommendation_for_profile = _apply_backtest_optimized_overrides(
+                            recommendation_for_profile,
+                            balance_idr=float(args.balance),
+                            target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
+                        )
+
+                    auto_name = (
+                        args.new_profile_name
+                        if args.new_profile_name
+                        else f"bt_auto_{int(args.days)}d_{auto_batch_tag}_{idx:02d}_{str(selected['pair']).lower()}"
+                    )
+                    new_profile = _create_profile_from_analysis(
+                        pair=str(selected["pair"]),
+                        recommendation=recommendation_for_profile,
+                        target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
+                        profile_name=auto_name,
+                        timeframe_minutes=int(args.profile_timeframe_minutes),
+                        strategy_mode=str(args.profile_strategy_mode),
+                        backtest_optimized=bool(args.backtest_optimized),
+                        activate_new_profile=bool(args.activate_new_profile),
+                        activate_only_new=False,
+                    )
+                    created_profiles.append(new_profile)
+                    print(
+                        f"✅ [{len(created_profiles)}/{len(selected_rows)}] id={new_profile['id']} "
+                        f"name={new_profile['profile_name']} pair_ref={selected['pair']} "
+                        f"edge_raw={edge_raw_selected*100:.3f}%"
+                    )
+
+                if skipped_negative:
+                    preview = ", ".join(skipped_negative[:10])
+                    if len(skipped_negative) > 10:
+                        preview += f", ... (+{len(skipped_negative)-10} lainnya)"
+                    print(
+                        "ℹ️ Profile dilewati karena edge_raw <= 0 tanpa flag "
+                        f"--allow-negative-edge-profile: {preview}"
+                    )
+
+                if not created_profiles:
+                    print("❌ Tidak ada profile berhasil dibuat dari auto-selection.")
+                    return
+
+                if args.run_after_create:
+                    pairs_for_run = ",".join(sorted({str(p["pair"]).lower() for p in created_profiles if p.get("pair")}))
+                    print(
+                        f"\n🚀 Menjalankan backtest {len(created_profiles)} profile auto-select "
+                        f"({args.days} hari)..."
+                    )
+                    run_backtest(
+                        days=int(args.days),
+                        pairs_filter=pairs_for_run if pairs_for_run else None,
+                        profiles_override=created_profiles,
+                        strict_per_coin=(not args.allow_global_fallback),
+                        min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
+                        min_price_idr=float(args.min_price_idr),
+                    )
+                    for profile in created_profiles:
+                        _print_run_report(profile["id"], profile["profile_name"])
+                    _print_comparison_table()
+            else:
+                selected_pair = args.analysis_pair or analysis_result["top_pairs"][0]["pair"]
+                selected = None
+                for row in analysis_result["per_coin"]:
+                    if str(row["pair"]).lower() == str(selected_pair).lower():
+                        selected = row
+                        break
+
+                if not selected:
+                    print(f"❌ Pair {selected_pair} tidak ditemukan di hasil analisis.")
+                    return
+
+                edge_raw_selected = float(selected.get("math", {}).get("edge_trade_raw", 0.0) or 0.0)
+                if edge_raw_selected <= 0 and not args.allow_negative_edge_profile:
+                    print("❌ Profile creation dibatalkan: edge_trade_raw <= 0 (negative expectancy).")
+                    print(
+                        "   Gunakan pair lain / ubah horizon analisis / ubah asumsi fee-slippage, "
+                        "atau pakai --allow-negative-edge-profile jika tetap ingin memaksa."
+                    )
+                    return
+
+                recommendation_for_profile = dict(selected["recommendation"])
+                if args.backtest_optimized:
+                    recommendation_for_profile = _apply_backtest_optimized_overrides(
+                        recommendation_for_profile,
+                        balance_idr=float(args.balance),
+                        target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
+                    )
+
+                new_profile = _create_profile_from_analysis(
+                    pair=str(selected["pair"]),
+                    recommendation=recommendation_for_profile,
+                    target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
+                    profile_name=args.new_profile_name,
+                    timeframe_minutes=int(args.profile_timeframe_minutes),
+                    strategy_mode=str(args.profile_strategy_mode),
+                    backtest_optimized=bool(args.backtest_optimized),
+                    activate_new_profile=bool(args.activate_new_profile),
+                    activate_only_new=bool(args.activate_only_new),
+                )
+                print(
+                    f"\n✅ Created profile baru: id={new_profile['id']} "
+                    f"name={new_profile['profile_name']} pair_ref={selected['pair']}"
+                )
+
+                if args.run_after_create:
+                    print(
+                        f"\n🚀 Menjalankan backtest profile baru untuk pair {selected['pair']} "
+                        f"({args.days} hari)..."
+                    )
+                    run_backtest(
+                        days=int(args.days),
+                        pairs_filter=str(selected["pair"]),
+                        profiles_override=[new_profile],
+                        strict_per_coin=(not args.allow_global_fallback),
+                        min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
+                        min_price_idr=float(args.min_price_idr),
+                    )
+                    _print_run_report(new_profile["id"], new_profile["profile_name"])
 
     elif args.command == "optimize":
         for g in range(1, args.generations + 1):
             print(f"\n--- GENERATION {g} ---")
-            run_backtest(args.days, args.pairs)
+            run_backtest(
+                args.days,
+                args.pairs,
+                strict_per_coin=(not args.allow_global_fallback),
+                min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
+                min_price_idr=float(args.min_price_idr),
+            )
             active = _load_active_profiles()
             for p in active: _print_run_report(p['id'], p['profile_name'])
             _print_comparison_table()

@@ -97,7 +97,8 @@ def run_market_cycle(bot):
         try:
             h = list(bot.price_history.get(r['pair'], []))
             t = get_technical_summary(h)
-            s = derive_trade_signal(t)
+            pair_setup = db.get_coin_indicator_setup(r['pair'])
+            s = derive_trade_signal(t, adaptive_thresholds=(pair_setup or None))
             r_copy = dict(r)
             r_copy['tech_verdict'] = s['verdict']
             r_copy['tech_confidence'] = s['confidence']

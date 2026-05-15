@@ -271,9 +271,10 @@ services:
   # [Service] backtester
   # Download OHLCV 90-hari dari Indodax ke DB `algovibe`, lalu jalankan
   # backtest 1:1 terhadap bot logic untuk semua active backtest_profiles.
-  # Command: fetch | run | all
+  # Command: fetch | run | report | tune | optimize | restore | analyze | sync-coin-analysis
   # Default: idle (restart=no) — trigger manual via:
-  #   docker compose run --rm backtester all
+  #   docker compose run --rm backtester analyze
+  #   docker compose run --rm backtester sync-coin-analysis
   # ─────────────────────────────────────────────────────────────────────────────
   backtester:
     image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
@@ -299,7 +300,7 @@ services:
       - ./alembic_backtest.ini:/app/alembic_backtest.ini
     shm_size: 128mb
     entrypoint: ["python", "-m", "services.backtester.main"]
-    command: ["all"]
+    command: ["report"]
     logging:
       driver: "json-file"
       options:

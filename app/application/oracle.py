@@ -350,7 +350,8 @@ class Oracle:
             
             # 2. Technicals
             tech = get_technical_summary(prices)
-            sig = derive_trade_signal(tech)
+            pair_setup = db.get_coin_indicator_setup(pair)
+            sig = derive_trade_signal(tech, adaptive_thresholds=(pair_setup or None))
             tech['signal'] = sig['verdict']
             tech['reason'] = sig.get('reason', '')
             tech['verdict'] = sig['verdict'] # Fallback

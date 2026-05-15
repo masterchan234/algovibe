@@ -125,6 +125,69 @@ class Database:
             # 2. Database Live/Dryrun (algovibe_live / algovibe_dryrun)
             # Seeding data awal yang dibutuhkan bot untuk running pertama kali
             # (Tabel sudah dibuat oleh run_migrations di __init__)
+
+            # Tabel khusus trading untuk setup teknikal per-koin.
+            # Sumber data diisi lewat sync dari DB backtest, agar backtest dan trading terpisah.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS coin_analysis (
+                    pair TEXT PRIMARY KEY,
+                    analysis_ts TIMESTAMPTZ NOT NULL,
+                    window_start TIMESTAMPTZ,
+                    window_end TIMESTAMPTZ,
+                    source_target_daily_pnl DOUBLE PRECISION,
+                    source_balance_idr DOUBLE PRECISION,
+                    buy_score_threshold DOUBLE PRECISION,
+                    sell_score_threshold DOUBLE PRECISION,
+                    opposing_max DOUBLE PRECISION,
+                    sell_block_threshold DOUBLE PRECISION,
+                    target_tp_pct DOUBLE PRECISION,
+                    target_sl_pct DOUBLE PRECISION,
+                    cooldown_seconds INTEGER,
+                    max_hold_minutes INTEGER,
+                    ema_trend_filter_enabled BOOLEAN,
+                    atr_max_pct DOUBLE PRECISION,
+                    max_position_idr DOUBLE PRECISION,
+                    dca_enabled BOOLEAN,
+                    dca_max_tiers INTEGER,
+                    rsi_oversold DOUBLE PRECISION,
+                    rsi_overbought DOUBLE PRECISION,
+                    bb_extreme_low DOUBLE PRECISION,
+                    bb_low DOUBLE PRECISION,
+                    bb_high DOUBLE PRECISION,
+                    bb_extreme_high DOUBLE PRECISION,
+                    stoch_k_oversold DOUBLE PRECISION,
+                    stoch_d_oversold DOUBLE PRECISION,
+                    stoch_k_overbought DOUBLE PRECISION,
+                    stoch_d_overbought DOUBLE PRECISION,
+                    williams_deep_oversold DOUBLE PRECISION,
+                    williams_oversold DOUBLE PRECISION,
+                    williams_overbought DOUBLE PRECISION,
+                    williams_deep_overbought DOUBLE PRECISION,
+                    slope_strong_up DOUBLE PRECISION,
+                    slope_up DOUBLE PRECISION,
+                    slope_down DOUBLE PRECISION,
+                    slope_strong_down DOUBLE PRECISION,
+                    roc_oversold DOUBLE PRECISION,
+                    roc_mild_down DOUBLE PRECISION,
+                    roc_mild_up DOUBLE PRECISION,
+                    roc_overbought DOUBLE PRECISION,
+                    ob_strong_bid DOUBLE PRECISION,
+                    ob_bid_dom DOUBLE PRECISION,
+                    ob_ask_dom DOUBLE PRECISION,
+                    ob_strong_ask DOUBLE PRECISION,
+                    volume_spike DOUBLE PRECISION,
+                    volume_high DOUBLE PRECISION,
+                    volume_low DOUBLE PRECISION,
+                    volume_dry DOUBLE PRECISION,
+                    obv_accumulate DOUBLE PRECISION,
+                    obv_rising DOUBLE PRECISION,
+                    obv_falling DOUBLE PRECISION,
+                    obv_distribute DOUBLE PRECISION,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
             
             # Initialize dry_run state from config default if not exists
             from config import DRY_RUN as DEFAULT_DRY_RUN
@@ -142,6 +205,235 @@ class Database:
 
             
             # Committing is handled by the context manager automatically
+
+    def get_coin_indicator_setup(self, pair: str) -> dict:
+        """Ambil setup teknikal trading per-koin dari tabel coin_analysis."""
+        pair_lc = str(pair or "").lower().strip()
+        if not pair_lc:
+            return {}
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM coin_analysis
+                    WHERE pair = %s
+                    """,
+                    (pair_lc,),
+                ).fetchone()
+                if not row:
+                    return {}
+                return {
+                    "buy_score_threshold": float(row.get("buy_score_threshold") or 6.0),
+                    "sell_score_threshold": float(row.get("sell_score_threshold") or 6.0),
+                    "opposing_max": float(row.get("opposing_max") or 4.0),
+                    "sell_block_threshold": float(row.get("sell_block_threshold") or 5.0),
+                    "target_tp_pct": float(row.get("target_tp_pct") or 0.02),
+                    "target_sl_pct": float(row.get("target_sl_pct") or -0.02),
+                    "cooldown_seconds": int(row.get("cooldown_seconds") or 300),
+                    "max_hold_minutes": int(row.get("max_hold_minutes") or 1440),
+                    "ema_trend_filter_enabled": bool(row.get("ema_trend_filter_enabled")),
+                    "atr_max_pct": float(row.get("atr_max_pct") or 3.0),
+                    "max_position_idr": float(row.get("max_position_idr") or 100000.0),
+                    "dca_enabled": bool(row.get("dca_enabled")),
+                    "dca_max_tiers": int(row.get("dca_max_tiers") or 1),
+                    "rsi_oversold": float(row.get("rsi_oversold") or 35.0),
+                    "rsi_overbought": float(row.get("rsi_overbought") or 70.0),
+                    "bb_extreme_low": float(row.get("bb_extreme_low") or 0.10),
+                    "bb_low": float(row.get("bb_low") or 0.25),
+                    "bb_high": float(row.get("bb_high") or 0.75),
+                    "bb_extreme_high": float(row.get("bb_extreme_high") or 0.90),
+                    "stoch_k_oversold": float(row.get("stoch_k_oversold") or 20.0),
+                    "stoch_d_oversold": float(row.get("stoch_d_oversold") or 30.0),
+                    "stoch_k_overbought": float(row.get("stoch_k_overbought") or 80.0),
+                    "stoch_d_overbought": float(row.get("stoch_d_overbought") or 70.0),
+                    "williams_deep_oversold": float(row.get("williams_deep_oversold") or -85.0),
+                    "williams_oversold": float(row.get("williams_oversold") or -70.0),
+                    "williams_overbought": float(row.get("williams_overbought") or -30.0),
+                    "williams_deep_overbought": float(row.get("williams_deep_overbought") or -15.0),
+                    "slope_strong_up": float(row.get("slope_strong_up") or 0.005),
+                    "slope_up": float(row.get("slope_up") or 0.001),
+                    "slope_down": float(row.get("slope_down") or -0.001),
+                    "slope_strong_down": float(row.get("slope_strong_down") or -0.005),
+                    "roc_oversold": float(row.get("roc_oversold") or -3.0),
+                    "roc_mild_down": float(row.get("roc_mild_down") or -1.0),
+                    "roc_mild_up": float(row.get("roc_mild_up") or 1.0),
+                    "roc_overbought": float(row.get("roc_overbought") or 3.0),
+                    "ob_strong_bid": float(row.get("ob_strong_bid") or 65.0),
+                    "ob_bid_dom": float(row.get("ob_bid_dom") or 55.0),
+                    "ob_ask_dom": float(row.get("ob_ask_dom") or 45.0),
+                    "ob_strong_ask": float(row.get("ob_strong_ask") or 35.0),
+                    "volume_spike": float(row.get("volume_spike") or 2.0),
+                    "volume_high": float(row.get("volume_high") or 1.5),
+                    "volume_low": float(row.get("volume_low") or 0.6),
+                    "volume_dry": float(row.get("volume_dry") or 0.4),
+                    "obv_accumulate": float(row.get("obv_accumulate") or 5.0),
+                    "obv_rising": float(row.get("obv_rising") or 2.0),
+                    "obv_falling": float(row.get("obv_falling") or -2.0),
+                    "obv_distribute": float(row.get("obv_distribute") or -5.0),
+                    "analysis_ts": row.get("analysis_ts"),
+                }
+        except Exception as e:
+            logger.debug("[DB] get_coin_indicator_setup error for %s: %s", pair_lc, e)
+            return {}
+
+    def upsert_coin_analysis_rows(self, rows: list[dict]) -> int:
+        """Bulk upsert setup per-koin ke tabel coin_analysis (DB trading)."""
+        if not rows:
+            return 0
+        written = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            for r in rows:
+                cur.execute(
+                    """
+                    INSERT INTO coin_analysis (
+                        pair, analysis_ts, window_start, window_end,
+                        source_target_daily_pnl, source_balance_idr,
+                        buy_score_threshold, sell_score_threshold, opposing_max, sell_block_threshold,
+                        target_tp_pct, target_sl_pct, cooldown_seconds, max_hold_minutes,
+                        ema_trend_filter_enabled, atr_max_pct, max_position_idr, dca_enabled, dca_max_tiers,
+                        rsi_oversold, rsi_overbought,
+                        bb_extreme_low, bb_low, bb_high, bb_extreme_high,
+                        stoch_k_oversold, stoch_d_oversold, stoch_k_overbought, stoch_d_overbought,
+                        williams_deep_oversold, williams_oversold, williams_overbought, williams_deep_overbought,
+                        slope_strong_up, slope_up, slope_down, slope_strong_down,
+                        roc_oversold, roc_mild_down, roc_mild_up, roc_overbought,
+                        ob_strong_bid, ob_bid_dom, ob_ask_dom, ob_strong_ask,
+                        volume_spike, volume_high, volume_low, volume_dry,
+                        obv_accumulate, obv_rising, obv_falling, obv_distribute,
+                        updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        NOW()
+                    )
+                    ON CONFLICT (pair)
+                    DO UPDATE SET
+                        analysis_ts = EXCLUDED.analysis_ts,
+                        window_start = EXCLUDED.window_start,
+                        window_end = EXCLUDED.window_end,
+                        source_target_daily_pnl = EXCLUDED.source_target_daily_pnl,
+                        source_balance_idr = EXCLUDED.source_balance_idr,
+                        buy_score_threshold = EXCLUDED.buy_score_threshold,
+                        sell_score_threshold = EXCLUDED.sell_score_threshold,
+                        opposing_max = EXCLUDED.opposing_max,
+                        sell_block_threshold = EXCLUDED.sell_block_threshold,
+                        target_tp_pct = EXCLUDED.target_tp_pct,
+                        target_sl_pct = EXCLUDED.target_sl_pct,
+                        cooldown_seconds = EXCLUDED.cooldown_seconds,
+                        max_hold_minutes = EXCLUDED.max_hold_minutes,
+                        ema_trend_filter_enabled = EXCLUDED.ema_trend_filter_enabled,
+                        atr_max_pct = EXCLUDED.atr_max_pct,
+                        max_position_idr = EXCLUDED.max_position_idr,
+                        dca_enabled = EXCLUDED.dca_enabled,
+                        dca_max_tiers = EXCLUDED.dca_max_tiers,
+                        rsi_oversold = EXCLUDED.rsi_oversold,
+                        rsi_overbought = EXCLUDED.rsi_overbought,
+                        bb_extreme_low = EXCLUDED.bb_extreme_low,
+                        bb_low = EXCLUDED.bb_low,
+                        bb_high = EXCLUDED.bb_high,
+                        bb_extreme_high = EXCLUDED.bb_extreme_high,
+                        stoch_k_oversold = EXCLUDED.stoch_k_oversold,
+                        stoch_d_oversold = EXCLUDED.stoch_d_oversold,
+                        stoch_k_overbought = EXCLUDED.stoch_k_overbought,
+                        stoch_d_overbought = EXCLUDED.stoch_d_overbought,
+                        williams_deep_oversold = EXCLUDED.williams_deep_oversold,
+                        williams_oversold = EXCLUDED.williams_oversold,
+                        williams_overbought = EXCLUDED.williams_overbought,
+                        williams_deep_overbought = EXCLUDED.williams_deep_overbought,
+                        slope_strong_up = EXCLUDED.slope_strong_up,
+                        slope_up = EXCLUDED.slope_up,
+                        slope_down = EXCLUDED.slope_down,
+                        slope_strong_down = EXCLUDED.slope_strong_down,
+                        roc_oversold = EXCLUDED.roc_oversold,
+                        roc_mild_down = EXCLUDED.roc_mild_down,
+                        roc_mild_up = EXCLUDED.roc_mild_up,
+                        roc_overbought = EXCLUDED.roc_overbought,
+                        ob_strong_bid = EXCLUDED.ob_strong_bid,
+                        ob_bid_dom = EXCLUDED.ob_bid_dom,
+                        ob_ask_dom = EXCLUDED.ob_ask_dom,
+                        ob_strong_ask = EXCLUDED.ob_strong_ask,
+                        volume_spike = EXCLUDED.volume_spike,
+                        volume_high = EXCLUDED.volume_high,
+                        volume_low = EXCLUDED.volume_low,
+                        volume_dry = EXCLUDED.volume_dry,
+                        obv_accumulate = EXCLUDED.obv_accumulate,
+                        obv_rising = EXCLUDED.obv_rising,
+                        obv_falling = EXCLUDED.obv_falling,
+                        obv_distribute = EXCLUDED.obv_distribute,
+                        updated_at = NOW()
+                    """,
+                    (
+                        str(r.get("pair") or "").lower(),
+                        r.get("analysis_ts"),
+                        r.get("window_start"),
+                        r.get("window_end"),
+                        r.get("target_daily_pnl"),
+                        r.get("balance_idr"),
+                        r.get("buy_score_threshold"),
+                        r.get("sell_score_threshold"),
+                        r.get("opposing_max"),
+                        r.get("sell_block_threshold"),
+                        r.get("target_tp_pct"),
+                        r.get("target_sl_pct"),
+                        r.get("cooldown_seconds"),
+                        r.get("max_hold_minutes"),
+                        r.get("ema_trend_filter_enabled"),
+                        r.get("atr_max_pct"),
+                        r.get("max_position_idr"),
+                        r.get("dca_enabled"),
+                        r.get("dca_max_tiers"),
+                        r.get("rsi_oversold"),
+                        r.get("rsi_overbought"),
+                        r.get("bb_extreme_low"),
+                        r.get("bb_low"),
+                        r.get("bb_high"),
+                        r.get("bb_extreme_high"),
+                        r.get("stoch_k_oversold"),
+                        r.get("stoch_d_oversold"),
+                        r.get("stoch_k_overbought"),
+                        r.get("stoch_d_overbought"),
+                        r.get("williams_deep_oversold"),
+                        r.get("williams_oversold"),
+                        r.get("williams_overbought"),
+                        r.get("williams_deep_overbought"),
+                        r.get("slope_strong_up"),
+                        r.get("slope_up"),
+                        r.get("slope_down"),
+                        r.get("slope_strong_down"),
+                        r.get("roc_oversold"),
+                        r.get("roc_mild_down"),
+                        r.get("roc_mild_up"),
+                        r.get("roc_overbought"),
+                        r.get("ob_strong_bid"),
+                        r.get("ob_bid_dom"),
+                        r.get("ob_ask_dom"),
+                        r.get("ob_strong_ask"),
+                        r.get("volume_spike"),
+                        r.get("volume_high"),
+                        r.get("volume_low"),
+                        r.get("volume_dry"),
+                        r.get("obv_accumulate"),
+                        r.get("obv_rising"),
+                        r.get("obv_falling"),
+                        r.get("obv_distribute"),
+                    ),
+                )
+                written += 1
+        return written
             
         # ── Migrasi dijalankan secara eksplisit oleh DatabaseRouter ──
     # ── METODE UNTUK POSITIONS ──
@@ -1370,6 +1662,161 @@ class DatabaseRouter:
         else:
             db_obj = self._active()
         return db_obj.get_active_positions_count()
+
+    def sync_backtest_coin_analysis_to_trading(self, pairs: list[str] | None = None) -> dict:
+        """
+        Sinkronkan setup teknikal per-koin terbaru dari DB backtest
+        (`backtest_coin_analysis`) ke DB trading (`coin_analysis`) live+dryrun.
+        """
+        pair_filter = [str(p).lower().strip() for p in (pairs or []) if str(p).strip()]
+        try:
+            with db_backtest.get_connection() as conn:
+                cur = conn.cursor()
+                if pair_filter:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (lower(pair))
+                            lower(pair) AS pair,
+                            analysis_ts,
+                            window_start,
+                            window_end,
+                            target_daily_pnl,
+                            balance_idr,
+                            rec_buy_score_threshold AS buy_score_threshold,
+                            rec_sell_score_threshold AS sell_score_threshold,
+                            rec_opposing_max AS opposing_max,
+                            rec_sell_block_threshold AS sell_block_threshold,
+                            rec_target_tp_pct AS target_tp_pct,
+                            rec_target_sl_pct AS target_sl_pct,
+                            rec_cooldown_seconds AS cooldown_seconds,
+                            rec_max_hold_minutes AS max_hold_minutes,
+                            rec_ema_trend_filter_enabled AS ema_trend_filter_enabled,
+                            rec_atr_max_pct AS atr_max_pct,
+                            rec_max_position_idr AS max_position_idr,
+                            rec_dca_enabled AS dca_enabled,
+                            rec_dca_max_tiers AS dca_max_tiers,
+                            rec_rsi_oversold AS rsi_oversold,
+                            rec_rsi_overbought AS rsi_overbought,
+                            rec_bb_extreme_low AS bb_extreme_low,
+                            rec_bb_low AS bb_low,
+                            rec_bb_high AS bb_high,
+                            rec_bb_extreme_high AS bb_extreme_high,
+                            rec_stoch_k_oversold AS stoch_k_oversold,
+                            rec_stoch_d_oversold AS stoch_d_oversold,
+                            rec_stoch_k_overbought AS stoch_k_overbought,
+                            rec_stoch_d_overbought AS stoch_d_overbought,
+                            rec_williams_deep_oversold AS williams_deep_oversold,
+                            rec_williams_oversold AS williams_oversold,
+                            rec_williams_overbought AS williams_overbought,
+                            rec_williams_deep_overbought AS williams_deep_overbought,
+                            rec_slope_strong_up AS slope_strong_up,
+                            rec_slope_up AS slope_up,
+                            rec_slope_down AS slope_down,
+                            rec_slope_strong_down AS slope_strong_down,
+                            rec_roc_oversold AS roc_oversold,
+                            rec_roc_mild_down AS roc_mild_down,
+                            rec_roc_mild_up AS roc_mild_up,
+                            rec_roc_overbought AS roc_overbought,
+                            rec_ob_strong_bid AS ob_strong_bid,
+                            rec_ob_bid_dom AS ob_bid_dom,
+                            rec_ob_ask_dom AS ob_ask_dom,
+                            rec_ob_strong_ask AS ob_strong_ask,
+                            rec_volume_spike AS volume_spike,
+                            rec_volume_high AS volume_high,
+                            rec_volume_low AS volume_low,
+                            rec_volume_dry AS volume_dry,
+                            rec_obv_accumulate AS obv_accumulate,
+                            rec_obv_rising AS obv_rising,
+                            rec_obv_falling AS obv_falling,
+                            rec_obv_distribute AS obv_distribute
+                        FROM backtest_coin_analysis
+                        WHERE lower(pair) = ANY(%s)
+                        ORDER BY lower(pair), analysis_ts DESC
+                        """,
+                        (pair_filter,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (lower(pair))
+                            lower(pair) AS pair,
+                            analysis_ts,
+                            window_start,
+                            window_end,
+                            target_daily_pnl,
+                            balance_idr,
+                            rec_buy_score_threshold AS buy_score_threshold,
+                            rec_sell_score_threshold AS sell_score_threshold,
+                            rec_opposing_max AS opposing_max,
+                            rec_sell_block_threshold AS sell_block_threshold,
+                            rec_target_tp_pct AS target_tp_pct,
+                            rec_target_sl_pct AS target_sl_pct,
+                            rec_cooldown_seconds AS cooldown_seconds,
+                            rec_max_hold_minutes AS max_hold_minutes,
+                            rec_ema_trend_filter_enabled AS ema_trend_filter_enabled,
+                            rec_atr_max_pct AS atr_max_pct,
+                            rec_max_position_idr AS max_position_idr,
+                            rec_dca_enabled AS dca_enabled,
+                            rec_dca_max_tiers AS dca_max_tiers,
+                            rec_rsi_oversold AS rsi_oversold,
+                            rec_rsi_overbought AS rsi_overbought,
+                            rec_bb_extreme_low AS bb_extreme_low,
+                            rec_bb_low AS bb_low,
+                            rec_bb_high AS bb_high,
+                            rec_bb_extreme_high AS bb_extreme_high,
+                            rec_stoch_k_oversold AS stoch_k_oversold,
+                            rec_stoch_d_oversold AS stoch_d_oversold,
+                            rec_stoch_k_overbought AS stoch_k_overbought,
+                            rec_stoch_d_overbought AS stoch_d_overbought,
+                            rec_williams_deep_oversold AS williams_deep_oversold,
+                            rec_williams_oversold AS williams_oversold,
+                            rec_williams_overbought AS williams_overbought,
+                            rec_williams_deep_overbought AS williams_deep_overbought,
+                            rec_slope_strong_up AS slope_strong_up,
+                            rec_slope_up AS slope_up,
+                            rec_slope_down AS slope_down,
+                            rec_slope_strong_down AS slope_strong_down,
+                            rec_roc_oversold AS roc_oversold,
+                            rec_roc_mild_down AS roc_mild_down,
+                            rec_roc_mild_up AS roc_mild_up,
+                            rec_roc_overbought AS roc_overbought,
+                            rec_ob_strong_bid AS ob_strong_bid,
+                            rec_ob_bid_dom AS ob_bid_dom,
+                            rec_ob_ask_dom AS ob_ask_dom,
+                            rec_ob_strong_ask AS ob_strong_ask,
+                            rec_volume_spike AS volume_spike,
+                            rec_volume_high AS volume_high,
+                            rec_volume_low AS volume_low,
+                            rec_volume_dry AS volume_dry,
+                            rec_obv_accumulate AS obv_accumulate,
+                            rec_obv_rising AS obv_rising,
+                            rec_obv_falling AS obv_falling,
+                            rec_obv_distribute AS obv_distribute
+                        FROM backtest_coin_analysis
+                        ORDER BY lower(pair), analysis_ts DESC
+                        """
+                    )
+
+                rows = [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            logging.error("[DB] sync_backtest_coin_analysis_to_trading fetch error: %s", e)
+            return {"ok": False, "error": str(e), "fetched": 0, "live_written": 0, "dryrun_written": 0}
+
+        if not rows:
+            return {"ok": True, "fetched": 0, "live_written": 0, "dryrun_written": 0}
+
+        live_written = self._live.upsert_coin_analysis_rows(rows)
+        dry_written = self._dryrun.upsert_coin_analysis_rows(rows)
+        logging.info(
+            "[DB] Synced coin_analysis from backtest: fetched=%s live=%s dryrun=%s",
+            len(rows), live_written, dry_written,
+        )
+        return {
+            "ok": True,
+            "fetched": len(rows),
+            "live_written": int(live_written),
+            "dryrun_written": int(dry_written),
+        }
 
     def __getattr__(self, name: str):
         return getattr(self._active(), name)
