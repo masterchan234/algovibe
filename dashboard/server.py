@@ -3511,7 +3511,12 @@ def _build_trades_payload():
                 else:
                     current_sl_pct = stored_sl_pct
 
-                current_tp_pct = stored_tp_pct
+                # Dynamic TP: Hitung dari harga tertinggi yang pernah dicapai (Trailing TP)
+                highest_price = float(p.get('highest_price') or 0)
+                if highest_price > 0 and entry_price > 0:
+                    current_tp_pct = (highest_price - entry_price) / entry_price
+                else:
+                    current_tp_pct = stored_tp_pct
 
                 _amount_idr = float(p.get('amount_idr') or 0)
 

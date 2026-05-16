@@ -2078,6 +2078,9 @@ class ExitManager:
 
                 active_sl_price = initial_sl_price
 
+                # DEBUG: Log key values for SL verification
+                log_message(f"[DEBUG-SL] {pair}: Entry={entry_price:.2f} | Curr={current_price:.2f} | ActiveSL={active_sl_price:.2f} | PnL={pnl_pct:.2f}%")
+
                 # [DUST MONITOR]
                 if status == 'DUST':
                     from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
@@ -2286,20 +2289,23 @@ class ExitManager:
                 if tp_eval_price > current_highest:
                     current_highest = tp_eval_price
                     data['highest_price'] = current_highest
-                    # Trailing delta: 1.0% dari peak (sedikit longgar agar tidak kena noise)
-                    data['trailing_sl_price'] = current_highest * (1 - 0.01)
+                    # Trailing delta: 0.7% dari peak (lebih ketat untuk momentum scalping)
+                    data['trailing_sl_price'] = current_highest * (1 - 0.007)
                     db.upsert_position(pair, data)
 
-                tp_activation_price = entry_price * (1 + dynamic_tp_pct)
+                # Aktivasi TTP lebih awal untuk scalping: jika profit sudah > 1.0% (atau setengah dari TP), langsung aktif!
+                activation_pct = min(0.01, float(dynamic_tp_pct or 0.04) * 0.5)
+                tp_activation_price = entry_price * (1 + activation_pct)
                 trailing_stop_price = float(data.get('trailing_sl_price', 0) or 0)
                 
-                # Sinyal Exit TTP: Sudah pernah lewat TP, dan sekarang turun di bawah trailing stop
+                # Sinyal Exit TTP: Sudah pernah lewat aktivasi (1%), dan sekarang turun di bawah trailing stop
                 is_ttp_exit = (current_highest >= tp_activation_price) and (tp_eval_price <= trailing_stop_price)
 
                 log_message(
                     f"[EXIT-STATUS] [{pair}] PnL:{current_profit_pct*100:.2f}% | "
                     f"Peak:{((current_highest/entry_price)-1)*100:.2f}% | "
-                    f"TTP-Stop:{((trailing_stop_price/entry_price)-1)*100:.2f}%"
+                    f"TTP-Stop:{((trailing_stop_price/entry_price)-1)*100:.2f}% | "
+                    f"TTP-Active:{'YES' if current_highest >= tp_activation_price else 'NO'}"
                 )
 
                 if is_ttp_exit:

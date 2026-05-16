@@ -15,6 +15,19 @@ from .migrations import run_migrations
 import subprocess
 import re
 
+# Register numpy adapters for psycopg2 to prevent "schema np does not exist" errors
+try:
+    import numpy as np
+    from psycopg2.extensions import register_adapter, AsIs
+    def add_numpy_adapters():
+        register_adapter(np.float64, lambda x: AsIs(str(x)))
+        register_adapter(np.float32, lambda x: AsIs(str(x)))
+        register_adapter(np.int64, lambda x: AsIs(str(x)))
+        register_adapter(np.int32, lambda x: AsIs(str(x)))
+    add_numpy_adapters()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 #  DB Backup Configuration 

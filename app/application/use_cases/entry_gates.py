@@ -185,17 +185,16 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         except Exception:
             pass
 
-    #  4c. EMA-50 Trend Filter (with Mean Reversion / Explosion Exception) 
-    # [PROFESSIONAL] Di bawah EMA-50 biasanya downtrend, tapi ledakan harga (Oversold Bounce) 
-    # dari bawah seringkali sangat menguntungkan. Kita buat pengecualian jika kondisi ekstrim.
+    #  4c. EMA-50 Trend Filter (with Momentum / Explosion Exception) 
+    # [PROFESSIONAL] Di bawah EMA-50 biasanya downtrend, tapi momentum kencang 
+    # seringkali memotong EMA-50 dari bawah. Kita buat pengecualian jika velocity kuat.
     is_explosion_setup = False
     if len(history) >= 14:
         # Pengecualian: RSI sangat rendah + Buy Pressure kuat + Volume meledak
-        # Ini menandakan akumulasi agresif di harga bawah (Bottoming Out).
+        # ATAU Velocity kencang (percepatan harga nyata)
         is_explosion_setup = (
-            tech.get('rsi', 50.0) < 26.0  # Sangat jenuh jual
-            and tech.get('buy_pressure', 50.0) >= 66.0  # Order Book menunjukkan dominasi pembeli
-            and tech.get('volume_ratio', 1.0) >= 2.1  # Volume beli meledak > 2x rata-rata
+            (tech.get('rsi', 50.0) < 26.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
+            or tech.get('velocity', 0.0) > 0.2  # Momentum percepatan harga (lowered from 0.4)
         )
 
     if not config.DRY_RUN_LOOSE_GATES and not is_explosion_setup and len(history) >= 50:
@@ -212,17 +211,22 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     if is_explosion_setup:
         log_message(
-            f"[GATE] {pair} [SPECIAL]: Bottom-Explosion detected (RSI={tech.get('rsi'):.1f}, "
-            f"BP={tech.get('buy_pressure'):.1f}%, VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50."
+            f"[GATE] {pair} [SPECIAL]: Momentum/Explosion detected (Vel={tech.get('velocity'):.2f}%, "
+            f"VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50."
         )
 
     #  4d. Vertical Spike / RSI Ceiling Filter 
     _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
     _rsi_now = tech.get('rsi', 50.0)
+    _velocity = tech.get('velocity', 0.0)
+    _vol_ratio = tech.get('volume_ratio', 1.0)
     _ema9 = tech.get('ema9', 0.0)
     _last = float(p.get('last', 0.0))
     
-    if _rsi_now > _rsi_ceiling:
+    # Bypass Ceiling jika momentum murni (Velocity + Volume) sangat kuat
+    _is_pump_momentum = _velocity > 0.3 and _vol_ratio > 1.6
+    
+    if _rsi_now > _rsi_ceiling and not _is_pump_momentum:
         msg = f"[GATE] {pair} REJECTED: RSI Ceiling {_rsi_now:.1f} > {_rsi_ceiling:.1f}"
         log_message(msg)
         save_gate_state(msg)
@@ -242,8 +246,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         _recent_high = max(history)
         _threshold_high = _recent_high * 0.993
         _stoch_k = tech.get('stoch_k', 50.0)
+        _velocity = tech.get('velocity', 0.0)
         
-        if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout:
+        # Izinkan menembus High jika velocity kencang (Breakout momentum)
+        if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout and _velocity < 0.2:
             msg = f"[GATE] {pair} REJECTED: Resistance-Guard Price {_last:.0f} near High {_recent_high:.0f}"
             log_message(msg)
             save_gate_state(msg)
@@ -273,9 +279,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     #  6. Trend / breakout requirement 
     if not breakout and trend != "UP":
+        _velocity = tech.get('velocity', 0.0)
+        _vol_ratio = tech.get('volume_ratio', 1.0)
+        
+        # Izinkan SIDEWAYS jika ada tanda-tanda awal ledakan (Velocity + Volume)
         sideway_relaxed_ok = (
-            is_loose
-            and trend == "SIDEWAYS"
+            (is_loose or (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3))
             and tq_prob >= max(tech_gate_threshold, 0.45)
             and imbalance_ratio >= 1.05
         )

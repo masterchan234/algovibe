@@ -438,145 +438,76 @@ def get_technical_summary(prices, volumes=None):
         "obv_slope":    round(obv_slope, 4),
     }
 
-
 def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h=None):
     """
-    Multi-Confluence Technical Signal Engine (v2.0)
-    Keputusan BUY/SELL/HOLD berdasarkan SKOR BOBOT dari semua indikator.
-    """
-    _SECTOR_WEIGHTS = {
-        'MEME': {
-            'rsi': 0.7, 'macd': 1.4, 'bb': 1.3, 'stoch': 1.5,
-            'ema': 0.6, 'wr': 1.2, 'slope': 1.0, 'roc': 1.0,
-            'ob': 1.0, 'vol': 1.3, 'obv': 0.5,
-        },
-        'AI': {
-            'rsi': 1.0, 'macd': 1.2, 'bb': 1.0, 'stoch': 1.2,
-            'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0,
-            'ob': 1.0, 'vol': 1.0, 'obv': 0.8,
-        },
-        'L1': { 'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0, 'ob': 1.0, 'vol': 1.0, 'obv': 1.0 },
-        'L2': { 'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0, 'ob': 1.0, 'vol': 1.0, 'obv': 1.0 },
-        'DEFI': { 'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0, 'ob': 1.0, 'vol': 1.0, 'obv': 1.2 },
-    }
-    _DEFAULT_W = {'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'ema': 1.0, 'wr': 1.0, 'slope': 1.0, 'roc': 1.0, 'ob': 1.0, 'vol': 1.0, 'obv': 1.0}
-    sw = _SECTOR_WEIGHTS.get(str(sector or '').upper(), _DEFAULT_W)
-
-    _VOL_RELIABILITY_THRESHOLD = 200_000_000  # 200M IDR
-    vol_mult = 1.0
-    if vol_idr_24h is not None and float(vol_idr_24h or 0) < _VOL_RELIABILITY_THRESHOLD:
-        vol_mult = 0.3
-
-    _at = adaptive_thresholds or {}
-    RSI_OVERSOLD   = float(_at.get('rsi_oversold',  35.0))
-    RSI_OVERBOUGHT = float(_at.get('rsi_overbought', 70.0))
-    BB_LOW          = float(_at.get('bb_low', 0.25))
-    BB_HIGH         = float(_at.get('bb_high', 0.75))
-    STOCH_K_OVERSOLD   = float(_at.get('stoch_k_oversold', 20.0))
-    STOCH_D_OVERSOLD   = float(_at.get('stoch_d_oversold', 30.0))
-    STOCH_K_OVERBOUGHT = float(_at.get('stoch_k_overbought', 80.0))
-    STOCH_D_OVERBOUGHT = float(_at.get('stoch_d_overbought', 70.0))
-    WR_OVERSOLD        = float(_at.get('williams_oversold', -70.0))
-    WR_OVERBOUGHT      = float(_at.get('williams_overbought', -30.0))
-    ROC_OVERSOLD  = float(_at.get('roc_oversold', -3.0))
-    ROC_OVERBOUGHT = float(_at.get('roc_overbought', 3.0))
-    OB_BID_DOM    = float(_at.get('ob_bid_dom', 55.0))
-    OB_ASK_DOM    = float(_at.get('ob_ask_dom', 45.0))
-    VOL_SPIKE = float(_at.get('volume_spike', 2.0))
+    Simplified Momentum Signal Engine (v3.0)
+    Fokus hanya pada 3 Indikator Utama:
+    1. Velocity (Price Action Speed) - w=3.5
+    2. Volume Ratio (Breakout fuel) - w=3.5
+    3. Order Book Pressure (Market Intent) - w=3.0
     
-    BUY_THRESHOLD  = float(_at.get('buy_score_threshold', 5.0))
-    SELL_THRESHOLD = float(_at.get('sell_score_threshold', 6.0))
-    OPPOSING_MAX   = float(_at.get('opposing_max', 4.0))
-
-    rsi      = float(tech.get('rsi', 50))
-    slope    = float(tech.get('slope', 0))
-    bp       = float(tech.get('buy_pressure', 50))
-    mh       = float(tech.get('macd_hist', 0))
-    bb       = float(tech.get('bb_pct', 0.5))
-    sk       = float(tech.get('stoch_k', 50))
-    sd       = float(tech.get('stoch_d', 50))
-    ema_cr   = str(tech.get('ema_cross', 'NEUTRAL'))
-    wr       = float(tech.get('williams_r', -50))
-    roc      = float(tech.get('roc', 0))
-    vr       = float(tech.get('volume_ratio', 1.0))
-    obv_sl   = float(tech.get('obv_slope', 0.0))
+    Total Max Score: 10.0
+    Threshold BUY: 6.5 (Minimal 2 sinyal kuat agree)
+    """
+    _at = adaptive_thresholds or {}
+    BUY_THRESHOLD  = float(_at.get('buy_score_threshold', 6.5))
+    SELL_THRESHOLD = float(_at.get('sell_score_threshold', 7.0))
+    
+    # Extract core metrics
     velocity = float(tech.get('velocity', 0.0))
-    last_price = max(1.0, float(tech.get('last_price', 1.0)))
-    ema9       = float(tech.get('ema9', last_price))
-
+    vr       = float(tech.get('volume_ratio', 1.0))
+    bp       = float(tech.get('buy_pressure', 50))
+    
     buy_score  = 0.0
     sell_score = 0.0
     signals    = []
 
-    # 1. RSI (3.0)
-    if rsi < RSI_OVERSOLD:
-        buy_score += 3.0 * sw['rsi']
-        signals.append(f"RSI oversold({rsi:.0f})")
-    elif rsi > RSI_OVERBOUGHT:
-        sell_score += 3.0 * sw['rsi']
-        signals.append(f"RSI overbought({rsi:.0f})")
+    # 1. Price Velocity (3.5)
+    if velocity > 0.4:
+        buy_score += 3.5
+        signals.append(f"Velocity Spike({velocity:+.2f}%)")
+    elif velocity > 0.15:
+        buy_score += 1.5
+        signals.append(f"Velocity Mild({velocity:+.2f}%)")
+    elif velocity < -0.4:
+        sell_score += 3.5
+        signals.append(f"Velocity Drop({velocity:+.2f}%)")
 
-    # 2. MACD (2.5)
-    if mh > 0:
-        buy_score += 2.5 * sw['macd']
-        signals.append(f"MACD bullish")
-    elif mh < 0:
-        sell_score += 2.5 * sw['macd']
-        signals.append(f"MACD bearish")
+    # 2. Volume Ratio (3.5)
+    if vr >= 2.0:
+        buy_score += 3.5
+        signals.append(f"Vol Spike({vr:.1f}x)")
+    elif vr >= 1.4:
+        buy_score += 1.5
+        signals.append(f"Vol High({vr:.1f}x)")
+    elif vr <= 0.4:
+        sell_score += 2.0
+        signals.append(f"Vol Dry({vr:.1f}x)")
 
-    # 3. BB (2.0)
-    if bb < BB_LOW:
-        buy_score += 2.0 * sw['bb']
-        signals.append(f"BB low")
-    elif bb > BB_HIGH:
-        sell_score += 2.0 * sw['bb']
-        signals.append(f"BB high")
-
-    # 9. OB Pressure (3.0) - High Weight
-    if bp >= OB_BID_DOM:
-        buy_score += 3.0 * sw['ob']
-        signals.append(f"OB bid-dom({bp:.0f}%)")
-    elif bp <= OB_ASK_DOM:
-        sell_score += 3.0 * sw['ob']
-        signals.append(f"OB ask-dom({100-bp:.0f}%)")
-
-    # 10. Volume Ratio (3.0) - High Weight
-    if vr >= VOL_SPIKE:
-        buy_score += 3.0 * sw['vol'] * vol_mult
-        signals.append(f"Vol spike({vr:.1f}x)")
-    elif vr <= 0.5:
-        sell_score += 1.0 * sw['vol'] * vol_mult
-        signals.append(f"Vol dry")
-
-    # 12. Velocity (2.5) - NEW
-    if velocity > 0.3:
-        buy_score += 2.5
-        signals.append(f"Velocity positive({velocity:.2f}%)")
-    elif velocity < -0.3:
-        sell_score += 2.5
-        signals.append(f"Velocity negative({velocity:.2f}%)")
-
-    # 13. EMA-9 Extension Guard
-    _ema_dist_pct = (last_price - ema9) / ema9 * 100.0 if ema9 > 0 else 0
-    if _ema_dist_pct > 2.5:
-        penalty = 2.0 if velocity < 0.5 else 0.5
-        buy_score -= penalty
-        signals.append(f"Vertical spike [PENALTY={penalty}]")
+    # 3. Order Book Pressure (3.0)
+    if bp >= 65:
+        buy_score += 3.0
+        signals.append(f"OB Strong-Bid({bp:.0f}%)")
+    elif bp >= 55:
+        buy_score += 1.5
+        signals.append(f"OB Bid-Dom({bp:.0f}%)")
+    elif bp <= 35:
+        sell_score += 3.0
+        signals.append(f"OB Strong-Ask({100-bp:.0f}%)")
 
     verdict = 'HOLD'
-    if buy_score >= BUY_THRESHOLD and sell_score < OPPOSING_MAX:
+    if buy_score >= BUY_THRESHOLD:
         verdict = 'BUY'
-    elif sell_score >= SELL_THRESHOLD and buy_score < OPPOSING_MAX:
+    elif sell_score >= SELL_THRESHOLD:
         verdict = 'SELL'
 
     return {
         'verdict': verdict,
-        'confidence': 75 if verdict != 'HOLD' else 50,
-        'reason': f"Scoring: B={buy_score:.1f} S={sell_score:.1f} | Signals: {', '.join(signals[:3])}",
+        'confidence': int(min(95, 50 + (buy_score if verdict == 'BUY' else sell_score) * 4.5)),
+        'reason': f"Momentum: {', '.join(signals)} | Score: {buy_score:.1f}/{sell_score:.1f}",
         'buy_score': round(buy_score, 2),
         'sell_score': round(sell_score, 2),
         'signals': signals
     }
-
 def compute_adaptive_thresholds(price_history, n_candles=50):
     return {'rsi_oversold': 35.0, 'rsi_overbought': 70.0}

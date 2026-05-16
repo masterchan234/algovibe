@@ -72,7 +72,7 @@ HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 # --- [Scalping Targets] ---
 TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fee = 2.87% viable profit)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
-AUTO_SL_ENABLED = False         # [MANUAL FOCUS] Disable auto SL entirely as requested by user
+AUTO_SL_ENABLED = True          # [MOMENTUM FOCUS] Enable auto SL to protect capital during fast momentum moves
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 # Dynamic tiered profit thresholds for exit_manager
@@ -288,7 +288,7 @@ TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 TECH_MIN_HISTORY_POINTS   = 30   
 
 # --- [Senior Strategy: Averaging Down] ---
-DCA_ENABLED = True
+DCA_ENABLED = False
 DCA_MAX_TIERS = 1              # Maksimal 1x tambah muatan (dari 2) — batasi exposure
 DCA_STEP_PCT = -0.015          # Tambah muatan setiap turun 1.5% (dari 2.5%) — trigger lebih cepat sebelum SL
 DCA_MULTIPLIER = 1.0           # Jumlah muatan sama dengan sebelumnya (1:1)

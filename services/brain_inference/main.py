@@ -271,7 +271,7 @@ class BrainInferenceService:
                 self.oracle.request_periodic_analysis(ranked)
                 
                 # Detect fake pumps
-                for r in ranked[:10]:
+                for r in ranked[:30]:
                     pair = r['pair']
                     change = r['change']
                     self.oracle.detect_fake_pump(pair, change)
@@ -439,6 +439,23 @@ class BrainInferenceService:
         passed = False
         detail = "insufficient_data"
         try:
+            # Get velocity from latest tickers if available
+            ticker = self._tickers.get(pair, {})
+            last_price = float(ticker.get('last', 0))
+            
+            # Use technicals to get velocity for bypass
+            hist = list(self._history.get(pair, []))
+            velocity = 0.0
+            if len(hist) >= 5:
+                # Simple velocity calculation: (now - prev) / prev * 100
+                prev = float(hist[-2])
+                velocity = (last_price - prev) / prev * 100.0 if prev > 0 else 0.0
+
+            # Momentum Bypass: If price is accelerating fast, skip strict trend checks
+            if velocity > 0.25:
+                self._trend15_cache[pair] = (now, True, f"momentum_bypass(vel={velocity:.2f}%)")
+                return True, f"momentum_bypass(vel={velocity:.2f}%)"
+
             candles = self._adapter.fetch_ohlc(pair, tf=config.TREND_FILTER_TF_MIN, limit=60)
             closes = [c["close"] for c in candles if float(c.get("close") or 0) > 0]
 
@@ -449,9 +466,9 @@ class BrainInferenceService:
                 last = float(closes[-1])
                 ch_15m = ((last - float(closes[-2])) / float(closes[-2]) * 100.0) if len(closes) >= 2 and closes[-2] > 0 else 0.0
 
-                is_above_ema = last >= ema50_now
-                is_ema_rising = ema50_now >= ema50_prev
-                is_change_ok = ch_15m >= config.TREND_FILTER_MIN_CHANGE_PCT
+                is_above_ema = last >= (ema50_now * 0.998) # 0.2% tolerance
+                is_ema_rising = ema50_now >= (ema50_prev * 0.999) # Allow flat EMA
+                is_change_ok = ch_15m >= (config.TREND_FILTER_MIN_CHANGE_PCT - 0.1)
 
                 passed = bool(is_above_ema and is_ema_rising and is_change_ok)
                 detail = (
@@ -600,22 +617,7 @@ class BrainInferenceService:
                         logger.info("[BRAIN] TREND15 FILTER: %s blocked (%s)", pair, trend_detail)
                         continue
 
-                    #  Trade Flow Guard 
-                    # Cek tape (50 transaksi publik terakhir) sebelum commit signal.
-                    # Jika seller mendominasi (net_pressure=SELL, flow_ratio <0.4),
-                    # tunda signal — hindari beli di tengah gelombang jual.
-                    try:
-                        flow = self._adapter.fetch_trade_flow(pair, limit=50)
-                        if flow.get("net_pressure") == "SELL" and flow.get("flow_ratio", 0.5) < 0.4:
-                            logger.info(
-                                "[BRAIN] FLOW GUARD: %s - tape seller-dominated "
-                                "(flow_ratio=%.2f), signal delayed.",
-                                pair, flow["flow_ratio"]
-                            )
-                            continue
-                    except Exception:
-                        pass  # Jika API gagal, biarkan signal lanjut
-                    # 
+                    # FLOW GUARD (REMOVED) - Max momentum responsiveness
 
                     logger.info(
                         f"[BRAIN] SIGNAL DETECTED: {pair} "
