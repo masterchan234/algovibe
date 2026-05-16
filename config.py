@@ -1,4 +1,3 @@
-from pickle import FALSE
 import os
 from dotenv import load_dotenv
 
@@ -73,7 +72,7 @@ HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 # --- [Scalping Targets] ---
 TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fee = 2.87% viable profit)
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
-AUTO_SL_ENABLED = FALSE          # [MOMENTUM FOCUS] Enable auto SL to protect capital during fast momentum moves
+AUTO_SL_ENABLED = False          # [MOMENTUM FOCUS] Enable auto SL to protect capital during fast momentum moves
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
 
 # Dynamic tiered profit thresholds for exit_manager
@@ -85,8 +84,8 @@ TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of M
 # --- [Micro Profit Exit] ---
 # Auto-enable micro TP behavior when effective balance drops below threshold.
 MICRO_PROFIT_EXIT_AUTO = os.getenv("MICRO_PROFIT_EXIT_AUTO", "true").lower() in ("1", "true", "yes", "on")
-MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 200000))
-MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.012))
+MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 100000))
+MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.008))
 # Net floor for micro mode (after-fee estimate). Keep > 0 to avoid pseudo-profit exits.
 MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
 
