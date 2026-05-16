@@ -152,8 +152,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         if total_depth > 0:
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
     _sector_eg = config.SECTOR_MAP.get(pair.lower())
-    _adaptive_db = db.get_coin_indicator_setup(pair)
-    _adaptive_eg = _adaptive_db or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
+    _adaptive_eg = db.get_coin_indicator_setup(pair) or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
     tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg)
 
@@ -186,8 +185,20 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         except Exception:
             pass
 
-    #  4c. EMA-50 Trend Filter 
-    if not config.DRY_RUN_LOOSE_GATES and len(history) >= 50:
+    #  4c. EMA-50 Trend Filter (with Mean Reversion / Explosion Exception) 
+    # [PROFESSIONAL] Di bawah EMA-50 biasanya downtrend, tapi ledakan harga (Oversold Bounce) 
+    # dari bawah seringkali sangat menguntungkan. Kita buat pengecualian jika kondisi ekstrim.
+    is_explosion_setup = False
+    if len(history) >= 14:
+        # Pengecualian: RSI sangat rendah + Buy Pressure kuat + Volume meledak
+        # Ini menandakan akumulasi agresif di harga bawah (Bottoming Out).
+        is_explosion_setup = (
+            tech.get('rsi', 50.0) < 26.0  # Sangat jenuh jual
+            and tech.get('buy_pressure', 50.0) >= 66.0  # Order Book menunjukkan dominasi pembeli
+            and tech.get('volume_ratio', 1.0) >= 2.1  # Volume beli meledak > 2x rata-rata
+        )
+
+    if not config.DRY_RUN_LOOSE_GATES and not is_explosion_setup and len(history) >= 50:
         try:
             _ema50 = calculate_ema(history, 50)
             _last_price = float(p.get('last', 0.0))
@@ -198,6 +209,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
                 return None
         except Exception:
             pass
+
+    if is_explosion_setup:
+        log_message(
+            f"[GATE] {pair} [SPECIAL]: Bottom-Explosion detected (RSI={tech.get('rsi'):.1f}, "
+            f"BP={tech.get('buy_pressure'):.1f}%, VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50."
+        )
 
     #  4d. Vertical Spike / RSI Ceiling Filter 
     _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
@@ -301,6 +318,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         msg = f"  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
+        return None
 
     #  11. K-NN pattern scoring 
     rsi_val = calculate_rsi(history)

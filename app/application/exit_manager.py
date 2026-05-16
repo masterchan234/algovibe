@@ -3449,9 +3449,9 @@ class ExitManager:
                 #      harganya naik bisa keluar dari status DUST secara otomatis.
                 #   2. Threshold minimum PER PAIR dari exchange API, bukan konstanta global —
                 #      setiap pair punya minimum order berbeda di Indodax.
-                # CATATAN: tidak ada guard "0 <" — posisi dengan value 0 (harga tidak ada di
-                # ticker, atau amount = 0) juga harus masuk DUST, bukan dibiarkan OPEN.
-                if position_idr_value < pair_min_idr:
+                # CATATAN: DUST hanya boleh diklasifikasikan jika saldo > 0.
+                # Jika saldo = 0 (Ghost), lewati blok ini agar masuk ke Desync check di bawah.
+                if amount_on_exchange > 0 and position_idr_value < pair_min_idr:
                     if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
                         pos['status'] = 'DUST'
                         pos['amount_crypto'] = amount_on_exchange
@@ -3466,24 +3466,57 @@ class ExitManager:
                 if pos.get('status') == 'DUST' and position_idr_value > pair_min_idr and amount_on_exchange > 0:
                     pos['status'] = 'OPEN'
                     pos['amount_crypto'] = amount_on_exchange
-                    # amount_idr: update ke current mark-to-market saat dipromosikan dari DUST,
-                    # karena cost basis Rp 10 (dust adoption) akan membuat P&L % tidak valid.
-                    pos['amount_idr'] = position_idr_value
+                    # amount_idr: update hanya jika cost basis sebelumnya sangat kecil (hasil adoption)
+                    # atau jika tidak ada cost basis sama sekali.
+                    old_cost = float(pos.get('amount_idr', 0))
+                    if old_cost < 100:
+                        pos['amount_idr'] = position_idr_value
                     db.upsert_position(pair, pos)
                     log_message(
                         f" Reality Sync: {pair} promoted from DUST to OPEN "
                         f"({amount_on_exchange:.12f} {coin} | current value Rp {position_idr_value:,.0f} > exchange min Rp {pair_min_idr:,.0f})."
                     )
+                # [Fix] Selalu sync amount dengan bursa jika ada perbedaan (fee/rounding/manual trade)
+                if abs(amount_on_exchange - pos['amount_crypto']) > 1e-12 and amount_on_exchange > 0:
+                    old_crypto = pos['amount_crypto']
+                    old_idr = pos.get('amount_idr', 0)
+                    entry_price = pos.get('entry_price', 0)
+                    
+                    # Update crypto amount
+                    pos['amount_crypto'] = amount_on_exchange
+                    
+                    # [Senior Fix] Update amount_idr (Cost Basis) proportionally or via entry_price
+                    # Ini mencegah 'modal halusinasi' saat saldo di bursa berubah tapi modal di DB tetap.
+                    if old_crypto > 0 and old_idr > 0:
+                        # Proporsional: jika koin naik 2x, modal dianggap naik 2x (cost basis adjustment)
+                        new_idr = old_idr * (amount_on_exchange / old_crypto)
+                    elif entry_price > 0:
+                        # Fallback: hitung dari entry_price jika modal lama nol/tidak valid
+                        new_idr = amount_on_exchange * entry_price
+                    else:
+                        new_idr = old_idr # No way to calculate, keep as is
+                    
+                    # Sanity check: modal tidak boleh jauh dari (koin * harga_beli)
+                    if entry_price > 0:
+                        expected_idr = amount_on_exchange * entry_price
+                        # Jika selisih modal > 15% dari expected, koreksi ke expected
+                        if abs(new_idr - expected_idr) > (expected_idr * 0.15):
+                            new_idr = expected_idr
+                            
+                    pos['amount_idr'] = new_idr
+                    db.upsert_position(pair, pos)
+                    log_message(
+                        f" [RECONCILE] {pair} amount synced: {old_crypto:.6f} -> {amount_on_exchange:.6f} | "
+                        f"Cost Basis updated: Rp {old_idr:,.0f} -> Rp {new_idr:,.0f}"
+                    )
 
-                # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
-                if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:
-                    if 0.8 < (amount_on_exchange / pos['amount_crypto']) < 1.2:
-                        # log_message(f" Amount Sync: {pair} amount adjusted {pos['amount_crypto']} -> {amount_on_exchange}")
-                        pos['amount_crypto'] = amount_on_exchange
-                        db.upsert_position(pair, pos)
-                # Gunakan amount_crypto yang konsisten dengan schema DB
                 target_amount = pos.get('amount_crypto') or pos.get('amount', 0)
-                if amount_on_exchange < (target_amount * 0.8): # Toleransi lebih longgar 20%
+                
+                # Desync check: Jika di bursa 0 tapi di DB masih ada (dan bukan PENDING_BUY)
+                is_ghost = (amount_on_exchange <= 1e-12 and target_amount >= 0)
+                is_desync = amount_on_exchange < (target_amount * 0.8)
+                
+                if is_ghost or is_desync:
                     log_message(f"[CRITICAL] Reality Desync Detected! {pair} not found on exchange. Checking history v2...")
                     
                     # Cek apakah ini sebenarnya sudah laku (terjual saat bot offline)

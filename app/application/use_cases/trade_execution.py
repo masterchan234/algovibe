@@ -339,9 +339,12 @@ def execute_trade(
         history = list(bot.price_history[pair])
         prices = np.array(history, dtype=float)
 
-        if taker:
+        if taker or len(prices) < 2:
             buy_price = price
-            log_message(f"[EXECUTION] [Taker Execute] Market Buy at Rp {buy_price:,.2f}")
+            if taker:
+                log_message(f"[EXECUTION] [Taker Execute] Market Buy at Rp {buy_price:,.2f}")
+            else:
+                log_message(f" [Maker Entry] Insufficient history for EMA-9, using current price: Rp {buy_price:,.2f}")
         else:
             alpha = 2 / (9 + 1)
             ema_9 = prices[0]
@@ -424,6 +427,16 @@ def execute_trade(
             order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, market_buy_price, params)
             # Update buy_price dengan harga eksekusi asli jika tersedia
             buy_price = float(order.get('price') or price)
+            
+            # [Audit Fix] Log actual IDR used for live trades
+            actual_idr = float(order.get('cost') or (buy_price * amount_crypto))
+            log_message(
+                f" [LIVE-AUDIT] {pair} order executed. Intended IDR: Rp {amount_idr:,.0f} | "
+                f"Actual Cost: Rp {actual_idr:,.0f} | Qty: {amount_crypto:.8f}"
+            )
+            # Use actual cost if available from exchange
+            if actual_idr > 0:
+                amount_idr = actual_idr
 
         _rsi_dna = None
         _ema_dist_dna = None
@@ -582,4 +595,3 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
         f"[BASKET] [LIVE BASKET EXIT] Complete — filled: {len(filled)}, failed: {len(failed)}"
     )
     return {"filled": filled, "failed": failed}
-

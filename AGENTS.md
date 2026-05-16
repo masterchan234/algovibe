@@ -5,7 +5,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 ## 1) Project Purpose
 - Crypto scalping bot for Indodax with WebSocket-driven market/private streams and microservice architecture.
 - Primary runtime uses Docker Compose services (`market-pipe`, `brain-inference`, `litert-lm-decision`, `executive-core`, `dashboard-api`).
-- Persistence runtime utama menggunakan PostgreSQL/TimescaleDB (container `algovibe-timescaledb`) dengan state sinkron lintas service.
+- Persistence runtime utama menggunakan PostgreSQL/TimescaleDB (container `algovibe-timescaledb`) dengan state sync lintas service.
 - **TECHNICAL_ONLY_MODE = true** (default dan sudah di-set di DB `bot_state`). LLM (`litert-lm-decision`) hanya digunakan untuk article writing; semua keputusan trading 100% dari indikator teknikal.
 
 ## 2) Setup and Run
@@ -48,6 +48,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 ## 5) Code Conventions in This Repo
 - Keep edits modular; prefer changing one engine at a time.
 - Preserve current style: Python with clear helper methods and practical inline comments.
+- **LOG STANDARDIZATION**: No emojis/icons in backend logs. Use categorical tags like `[SIGNAL]`, `[OK]`, `[WARN]`, `[ERROR]`, `[EXECUTIVE]`.
 - Many comments/log messages are Indonesian; keep language consistent in nearby code.
 - Reuse existing utilities (`db`, `log_message`, telegram helpers) instead of introducing parallel patterns.
 - `calculate_score` dipanggil dengan 4 arg: `((pair, data), adaptive_cfg, regime, price_history)` — selalu sertakan `price_history` agar tidak fallback ke DB.
@@ -55,6 +56,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 
 ## 6) Trading Safety Rules
 - Treat any order-placement path as high risk (`execution`, `main`, `exit_manager`).
+- **EMA-9 Safety Guard**: Jika histori harga < 2 candle (cold start), eksekusi wajib fallback ke harga pasar saat ini untuk menghindari `index out of bounds`.
 - Keep default-safe behavior intact unless asked:
   - `DRY_RUN` behavior must remain predictable.
   - Risk caps and thresholds in `config.py` should not be altered incidentally.
@@ -88,7 +90,8 @@ Total 11 indikator, max score ~19.5 (BUY atau SELL). Threshold BUY/SELL: score >
 3. Radar recommendation + tracking log
 4. Multi-confluence technical gate (SELL block jika sell_score >= 5.0)
 4b. **ATR Volatility Filter** — reject jika ATR > 3% harga (4.5% di loose gates)
-4c. **EMA-50 Trend Filter** — reject jika harga < EMA-50 dan data >= 50 candle (dilewati di loose gates)
+4c. **EMA-50 Trend Filter** — reject jika harga < EMA-50.
+    - **EXCEPTION (Bottom-Explosion)**: Bypass filter ini jika deteksi Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.
 5. Technical probability + imbalance threshold
 6. Trend / breakout requirement
 7. Radar recommendation guard

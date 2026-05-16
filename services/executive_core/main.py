@@ -420,7 +420,6 @@ class ExecutiveCoreService:
                             tq_prob=tq_prob,
                             dynamic_tp=final_tp,
                             dynamic_sl=final_sl,
-                            source="ORACLE"
                         )
                     )
                 elif sig.action == 2:  # SELL
@@ -505,8 +504,8 @@ class ExecutiveCoreService:
                             entry_price,
                             trend="LLM_SIGNAL",
                             tq_prob=tq_prob,
-                            dynamic_tp=dyn_tp,
-                            dynamic_sl=dyn_sl,
+                            dynamic_tp=final_tp,
+                            dynamic_sl=final_sl,
                             taker=True,
                         )
                     )
