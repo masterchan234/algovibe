@@ -65,7 +65,8 @@
 
     <footer class="ld-footer">
       <div class="footer-stats hide-mobile">
-        <span class="stat-item">LATENCY: <span class="v">{{ store.latency || 0 }}ms</span></span>
+        <span class="stat-item">BROWSER: <span class="v">{{ store.latency || 0 }}ms</span></span>
+        <span class="stat-item">EXCHANGE: <span class="v">{{ store.exchange_latency ? store.exchange_latency.toFixed(0) : 0 }}ms</span></span>
         <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
       </div>
       <div class="footer-right">

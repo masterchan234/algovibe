@@ -42,6 +42,7 @@ export const useTradeStore = defineStore('trade', () => {
   const lastSocketStatsAt = ref(0)
   const statsSource = ref('none')
   const latency = ref(0)
+  const exchange_latency = ref(0)
 
   // Force-logout flag: set to true when the server invalidates this session
   const forceLogout = ref(false)
@@ -389,6 +390,7 @@ export const useTradeStore = defineStore('trade', () => {
         stats.regime = data.regime
         if (data.market_sentiment_index !== undefined) stats.market_sentiment_index = data.market_sentiment_index
         if (data.regime_leader !== undefined) stats.regime_leader = data.regime_leader
+        if (data.exchange_latency !== undefined) exchange_latency.value = data.exchange_latency
       }
     })
 
@@ -532,6 +534,7 @@ export const useTradeStore = defineStore('trade', () => {
     socket,
     forceLogout,
     latency,
+    exchange_latency,
     lastSocketStatsAt,
   }
 })

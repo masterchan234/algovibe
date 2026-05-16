@@ -627,6 +627,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     vr      = float(tech.get('volume_ratio', 1.0))  # Volume Ratio (vol / MA-20)
     obv_sl  = float(tech.get('obv_slope', 0.0))     # OBV Slope (% per 5 candle)
     last_price = max(1.0, float(tech.get('last_price', 1.0)))  # harga terakhir untuk normalisasi MACD
+    ema9       = float(tech.get('ema9', last_price))
 
     buy_score  = 0.0
     sell_score = 0.0
@@ -645,12 +646,15 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         signals.append(f"RSI mild-oversold({rsi:.0f})")
     elif rsi > RSI_EXTREME_OB:
         sell_score += _w_rsi
-        signals.append(f"RSI extreme-overbought({rsi:.0f})")
+        buy_score  -= _w_rsi * 1.5  # Heavy penalty for buying at extreme peak
+        signals.append(f"RSI extreme-overbought({rsi:.0f}) [PENALTY]")
     elif rsi > RSI_OVERBOUGHT:
         sell_score += _w_rsi * (2.5 / 3.0)
-        signals.append(f"RSI overbought({rsi:.0f})")
+        buy_score  -= _w_rsi * 0.8  # Prevent buying when already overbought
+        signals.append(f"RSI overbought({rsi:.0f}) [PENALTY]")
     elif rsi > RSI_MILD_OB:
         sell_score += _w_rsi * (1.0 / 3.0)
+        buy_score  -= _w_rsi * 0.3
         signals.append(f"RSI high({rsi:.0f})")
 
     # ── 2. MACD Histogram (Bobot 2.5 × sector_weight) ────────────────────────
@@ -692,9 +696,11 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         signals.append(f"StochRSI mild-oversold(K={sk:.0f})")
     elif sk > STOCH_K_OVERBOUGHT and sd > STOCH_D_OVERBOUGHT:
         sell_score += 2.0 * _w_stoch
-        signals.append(f"StochRSI overbought(K={sk:.0f},D={sd:.0f})")
+        buy_score  -= 1.5 * _w_stoch  # Penalty for peak entry
+        signals.append(f"StochRSI overbought(K={sk:.0f},D={sd:.0f}) [PENALTY]")
     elif sk > STOCH_K_MILD_OVERBOUGHT:
         sell_score += 1.0 * _w_stoch
+        buy_score  -= 0.5 * _w_stoch
         signals.append(f"StochRSI mild-overbought(K={sk:.0f})")
 
     # Stoch crossover (K memotong D dari bawah = bullish signal)
@@ -828,13 +834,33 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
             sell_score += 0.8 * _w_obv
             signals.append(f"OBV falling({obv_sl:+.1f}%)")
 
+    # ── 12. EMA-9 Extension Guard (Bobot -2.0 fixed penalty) ───────────────
+    # Jika harga melambung terlalu jauh di atas EMA-9 tanpa pullback,
+    # risiko koreksi (mean-reversion) sangat tinggi.
+    _ema_dist_pct = (last_price - ema9) / ema9 * 100.0 if ema9 > 0 else 0
+    if _ema_dist_pct > 2.5:  # Harga > 2.5% di atas EMA-9
+        buy_score -= 2.0
+        signals.append(f"Vertical spike({_ema_dist_pct:.1f}% > EMA9) [PENALTY]")
+    elif _ema_dist_pct < -2.5:
+        sell_score -= 2.0
+        signals.append(f"Vertical crash({_ema_dist_pct:.1f}% < EMA9) [PENALTY]")
+
     # ── KEPUTUSAN AKHIR (Multi-Confluence Gate) ───────────────────────────────
     verdict    = 'HOLD'
     confidence = 50
     _sector_tag = f"[sector={sector}] " if sector else ""
     reason     = f'{_sector_tag}Sinyal campuran, tidak ada confluence yang cukup kuat.'
 
-    if buy_score >= BUY_THRESHOLD and sell_score < OPPOSING_MAX:
+    # Dynamic opposing max: makin tinggi RSI, makin rendah toleransi counter-signal untuk BUY
+    _effective_opposing_max = OPPOSING_MAX
+    if rsi > RSI_EXTREME_OB:
+        _effective_opposing_max = 1.0
+    elif rsi > RSI_OVERBOUGHT:
+        _effective_opposing_max = 2.0
+    elif rsi > RSI_MILD_OB:
+        _effective_opposing_max = 3.0
+
+    if buy_score >= BUY_THRESHOLD and sell_score < _effective_opposing_max:
         verdict    = 'BUY'
         # Confidence: skala 50-95, berbanding lurus dengan selisih skor
         net_score  = buy_score - sell_score

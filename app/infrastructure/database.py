@@ -1348,6 +1348,48 @@ class Database:
             logging.error(f"[DB] Failed to prune old data: {e}")
             return 0
 
+    def reset_dryrun_data(self):
+        """
+        [Destructive] Clear all trading-related data in the current database.
+        Intended for dry_run database to allow a fresh start.
+        """
+        tables = [
+            'positions',
+            'trade_history',
+            'trade_analytics',
+            'account_balances',
+            'ticker_history',
+            'order_logs',
+            'system_events',
+            'sector_history',
+            'shadow_orders',
+            'order_book',
+            'market_depth'
+        ]
+        
+        counts = {}
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for table in tables:
+                    cursor.execute(f"DELETE FROM {table}")
+                    counts[table] = cursor.rowcount
+                
+                # Reset specific bot_state keys
+                cursor.execute(
+                    "UPDATE bot_state SET value = '0' WHERE key IN ('consecutive_losses', 'daily_target_hit')"
+                )
+                cursor.execute(
+                    "UPDATE bot_state SET value = 'NORMAL' WHERE key = 'session_mode'"
+                )
+                counts['bot_state_reset'] = cursor.rowcount
+                
+            logging.warning(f"[DB] 🔥 Data reset completed. Rows cleared: {counts}")
+            return counts
+        except Exception as e:
+            logging.error(f"[DB] ❌ Reset failed: {e}")
+            raise e
+
     # ── METODE AUTENTIKASI ──
 
     def create_user(self, username, password, api_key='', api_secret=''):

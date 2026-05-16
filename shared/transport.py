@@ -117,9 +117,10 @@ class ZMQPublisher:
 
     # ── Send ──────────────────────────────────────────────────────────────────
 
-    def send(self, proto_bytes: bytes, topic: str = "") -> None:
+    def send(self, proto_bytes: bytes, topic: str = "", latency_ms: float = 0) -> None:
         """
-        Publish a single Protobuf-serialised message, optionally with a topic.
+        Publish a single Protobuf-serialised message, optionally with a topic
+        and exchange latency metadata.
 
         Parameters
         ----------
@@ -128,13 +129,25 @@ class ZMQPublisher:
         topic:
             Optional topic string (e.g., "tick", "trade"). If provided, the
             message is sent as a multipart message [topic, data].
+        latency_ms:
+            Optional exchange latency in milliseconds. If > 0, it is sent as
+            an additional frame "latency:<ms>".
         """
         if not self._started:
             raise RuntimeError("ZMQPublisher.send() has not been called.")
         with self._lock:
             try:
+                frames = []
                 if topic:
-                    self._socket.send_multipart([topic.encode(), proto_bytes], flags=zmq.NOBLOCK)
+                    frames.append(topic.encode())
+                
+                frames.append(proto_bytes)
+
+                if latency_ms > 0:
+                    frames.append(f"latency:{latency_ms:.2f}".encode())
+
+                if len(frames) > 1:
+                    self._socket.send_multipart(frames, flags=zmq.NOBLOCK)
                 else:
                     self._socket.send(proto_bytes, flags=zmq.NOBLOCK)
             except zmq.Again:

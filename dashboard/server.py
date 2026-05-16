@@ -621,6 +621,8 @@ def _get_trade_history_summary():
 _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari push_data_loop
 _last_market_brief_llm_ts = 0.0
 _last_market_brief_payload_hash = ""
+_latest_exchange_latency = 0.0  # Measured in market-pipe from Indodax epoch
+
 
 
 def _extract_json_brief_text(raw_text: str) -> str | None:
@@ -1298,7 +1300,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
     import config as cfg
 
     amount = float(amount or 0)
-    entry_price = float(entry_price or 0)
+    entry
     amount_idr = float(amount_idr or 0)
     if amount <= 0 or entry_price <= 0:
         return {
@@ -2113,6 +2115,37 @@ def select_mode():
         "logged_out": logged_out
     })
 
+@app.route('/api/dryrun/reset', methods=['POST'])
+@login_required
+def reset_dryrun_data_api():
+    """
+    Destructive reset of ALL dry-run data.
+    Only permitted in DRY_RUN mode safety-wise (though the endpoint is explicitly 'dryrun').
+    """
+    try:
+        # Perform reset via DatabaseRouter's dryrun instance
+        # This ensures we clear the correct database regardless of current global mode
+        counts = db.dryrun.reset_dryrun_data()
+        
+        # Broadcast STATE_UPDATE to sync memory caches of other services
+        broadcast_command("STATE_UPDATE", {"key": "data_reset", "value": str(time.time())})
+        
+        # Push empty stats/trades to frontend immediately
+        try:
+            socketio.emit('stats_update', _build_stats_payload())
+            socketio.emit('trades_update', _build_trades_update_packet())
+        except:
+            pass
+            
+        return jsonify({
+            "status": "ok",
+            "message": "Data simulasi berhasil dikosongkan.",
+            "details": counts
+        })
+    except Exception as e:
+        logging.error(f"[Dashboard] Reset API failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/bot/toggle-loose-gates', methods=['POST'])
 @login_required
 def toggle_loose_gates():
@@ -2676,7 +2709,6 @@ def handle_watch_pair(data):
         return
     CURRENT_WATCH_PAIR = pair
     db.save_state('current_watch_pair', pair)
-    db.save_state('trigger_analysis_pair', pair)
     
     # [Fix] Aktifkan subscibe trades & OB untuk pair yang sedang dipantau
     try:
@@ -3960,12 +3992,14 @@ def push_data_loop():
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
+                    "exchange_latency": _latest_exchange_latency
                 }, to='public')
                 # Also emit to authenticated room for dashboard users
                 socketio.emit('regime_update', {
                     "regime": _regime_now,
                     "market_sentiment_index": _sentiment_now,
                     "regime_leader": _regime_leader_now,
+                    "exchange_latency": _latest_exchange_latency
                 }, to='authenticated')
             except Exception as _re:
                 logging.warning(f"[push_data_loop] regime_update error: {_re}")
@@ -4281,6 +4315,16 @@ def _zmq_market_bridge():
                 
                 topic = parts[0].decode()
                 raw = parts[1]
+
+                # Check for extra latency frame
+                if len(parts) >= 3:
+                    try:
+                        lat_str = parts[2].decode()
+                        if lat_str.startswith("latency:"):
+                            global _latest_exchange_latency
+                            _latest_exchange_latency = float(lat_str.split(":")[1])
+                    except Exception: pass
+
                 _err_delay = 0.1
                 
                 if topic == "tick":

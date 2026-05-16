@@ -34,8 +34,8 @@ INITIAL_CAPITAL        = 100000000
 DAILY_LOSS_LIMIT_PCT   = 0.03
 MAX_CONSECUTIVE_LOSSES = 3
 MAX_TRACKED_PAIRS      = 200
-MIN_VOLUME_FILTER      = 10000000  # IDR per 24h (Global Minimum)
-LIQUIDITY_MULTIPLIER   = 8.0   # [Agresif] Memungkinkan trading di koin dengan volume sedang 15x besar modal per trade
+MIN_VOLUME_FILTER      = 500000000  # IDR per 24h (Global Minimum: 500 Juta)
+LIQUIDITY_MULTIPLIER   = 25.0   # [Konservatif] Volume 24h harus minimal 25x besar modal per trade
 
 # --- [Timeframe Policy] ---
 # Default reverted to 1m for fast scalp execution.
@@ -95,7 +95,7 @@ MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
 DUST_RECOVERY_ENABLED = os.getenv("DUST_RECOVERY_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 DUST_RECOVERY_MIN_CONFIDENCE = float(os.getenv("DUST_RECOVERY_MIN_CONFIDENCE", 0.70))
 DUST_RECOVERY_COOLDOWN_SEC = int(os.getenv("DUST_RECOVERY_COOLDOWN_SEC", 600))
-DUST_RECOVERY_MIN_VOL_IDR = float(os.getenv("DUST_RECOVERY_MIN_VOL_IDR", 10000000))
+DUST_RECOVERY_MIN_VOL_IDR = float(os.getenv("DUST_RECOVERY_MIN_VOL_IDR", 100000000)) # 100 Juta
 DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE = int(os.getenv("DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE", 2))
 DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE = float(os.getenv("DUST_RECOVERY_MAX_BUDGET_IDR_PER_CYCLE", 20000))
 
@@ -136,9 +136,9 @@ def get_dynamic_min_net_profit(current_balance: float = None) -> int:
 def get_dynamic_tp_pct(current_balance: float = None) -> float:
     """Calculate TP_PCT dynamically based on current account balance.
     
-        Small accounts optimized for 1%+ net profit after 0.6322% round-trip fee:
-        - Balance ≤ 100k: 2.0% TP (net 1.37% after fee) ✅
-        - Balance 100k-250k: 2.2% TP (net 1.59% after fee) ✅
+    Small accounts optimized for 1%+ net profit after 0.6322% round-trip fee:
+    - Balance ≤ 100k: 2.0% TP (net 1.37% after fee) ✅
+    - Balance 100k-250k: 2.2% TP (net 1.59% after fee) ✅
     - Balance 250k-1M: 2.5% TP
     - Balance > 1M: 3.5% TP (original aggressive scalp)
     
@@ -156,13 +156,20 @@ def get_dynamic_tp_pct(current_balance: float = None) -> float:
     current_balance = max(current_balance, INITIAL_CAPITAL)
     
     if current_balance <= 100_000:
-            return 0.020  # 2.0% untuk small account (net 1.37% after 0.6322% fee)
+        return 0.020  # 2.0% untuk small account
     elif current_balance <= 250_000:
-            return 0.022  # 2.2% untuk medium-small account (net 1.59% after fee)
+        return 0.022  # 2.2% untuk medium-small account
     elif current_balance <= 1_000_000:
         return 0.025  # 2.5% untuk medium account
     else:
-        return 0.035  # 3.5% untuk large account (original)
+        return 0.035  # 3.5% untuk large account
+
+def get_dynamic_sl_pct(current_balance: float = None) -> float:
+    """Calculate SL_PCT dynamically. Matching TP tightening to maintain R:R.
+    - Balance ≤ 250k: -3.5% (DCA target at -1.5%)
+    - Balance > 250k: -3.5%
+    """
+    return -0.035  # Tetap -3.5% sesuai kebijakan DCA Sync, tapi disiapkan fungsinya agar konsisten.
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,

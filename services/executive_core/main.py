@@ -377,7 +377,23 @@ class ExecutiveCoreService:
                 sig.ParseFromString(raw)
                 
                 if sig.action == 1: # BUY
-                    logger.info(f"[executive-core] 🚀 Received BUY signal for {sig.symbol} (conf: {sig.confidence:.1f}%)")
+                    # --- [DYNAMIC TARGETING UNPACK] ---
+                    raw_symbol = sig.symbol
+                    pair = raw_symbol
+                    final_tp = cfg.get_dynamic_tp_pct(self.cached_balance)
+                    final_sl = cfg.get_dynamic_sl_pct(self.cached_balance)
+
+                    if "|" in raw_symbol:
+                        parts = raw_symbol.split("|")
+                        pair = parts[0]
+                        if len(parts) >= 3:
+                            try:
+                                final_tp = float(parts[1])
+                                final_sl = float(parts[2])
+                                logger.info(f"[executive-core] 🧠 Using INTELLIGENT targets for {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
+                            except Exception: pass
+
+                    logger.info(f"[executive-core] 🚀 Received BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
                     # Enqueue a buy order. 
                     # Use the domain execute_trade logic
                     from app.application.use_cases.trade_execution import execute_trade
@@ -386,10 +402,10 @@ class ExecutiveCoreService:
                     if tq_prob > 1.0:
                         tq_prob /= 100.0
                     tq_prob = max(0.0, min(1.0, tq_prob))
-                    tick_obj = self._ticks.get(sig.symbol)
+                    tick_obj = self._ticks.get(pair)
                     entry_price = float(tick_obj.price) if tick_obj and float(tick_obj.price) > 0 else 0.0
                     if entry_price <= 0:
-                        logger.warning(f"[executive-core] BUY signal ignored for {sig.symbol}: no valid tick price yet")
+                        logger.warning(f"[executive-core] BUY signal ignored for {pair}: no valid tick price yet")
                         continue
                     
                     # We run this in a thread because it might do blocking DB/API calls
@@ -398,11 +414,13 @@ class ExecutiveCoreService:
                         None,
                         lambda: execute_trade(
                             self,
-                            sig.symbol,
+                            pair,
                             entry_price,
                             trend="ORACLE_SIGNAL",
                             tq_prob=tq_prob,
-                            taker=True # Signals are high-priority
+                            dynamic_tp=final_tp,
+                            dynamic_sl=final_sl,
+                            source="ORACLE"
                         )
                     )
                 elif sig.action == 2:  # SELL
@@ -451,26 +469,45 @@ class ExecutiveCoreService:
                     continue
 
                 if sig.action == 1:  # BUY
-                    logger.info(f"[executive-core] 🤖 Received LLM BUY signal for {sig.symbol} (conf: {sig.confidence:.1f}%)")
+                    # --- [DYNAMIC TARGETING UNPACK] ---
+                    raw_symbol = sig.symbol
+                    pair = raw_symbol
+                    final_tp = cfg.get_dynamic_tp_pct(self.cached_balance)
+                    final_sl = cfg.get_dynamic_sl_pct(self.cached_balance)
+
+                    if "|" in raw_symbol:
+                        parts = raw_symbol.split("|")
+                        pair = parts[0]
+                        if len(parts) >= 3:
+                            try:
+                                final_tp = float(parts[1])
+                                final_sl = float(parts[2])
+                                logger.info(f"[executive-core] 🧠 Using INTELLIGENT targets for LLM {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
+                            except Exception: pass
+
+                    logger.info(f"[executive-core] 🤖 Received LLM BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
                     from app.application.use_cases.trade_execution import execute_trade
                     tq_prob = float(sig.confidence or 0.0)
                     if tq_prob > 1.0:
                         tq_prob /= 100.0
                     tq_prob = max(0.0, min(1.0, tq_prob))
-                    tick_obj = self._ticks.get(sig.symbol)
+                    tick_obj = self._ticks.get(pair)
                     entry_price = float(tick_obj.price) if tick_obj and float(tick_obj.price) > 0 else 0.0
                     if entry_price <= 0:
-                        logger.warning(f"[executive-core] LLM BUY signal ignored for {sig.symbol}: no valid tick price yet")
+                        logger.warning(f"[executive-core] LLM BUY signal ignored for {pair}: no valid tick price yet")
                         continue
+
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(
                         None,
                         lambda: execute_trade(
                             self,
-                            sig.symbol,
+                            pair,
                             entry_price,
                             trend="LLM_SIGNAL",
                             tq_prob=tq_prob,
+                            dynamic_tp=dyn_tp,
+                            dynamic_sl=dyn_sl,
                             taker=True,
                         )
                     )

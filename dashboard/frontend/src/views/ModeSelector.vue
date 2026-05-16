@@ -47,6 +47,9 @@
           <span class="ms-footer-db">DB: algotrade_dryrun.db</span>
           <button class="ms-enter-btn ms-enter-dry">ENTER LAB →</button>
         </div>
+        <button class="ms-reset-btn" @click.stop="handleReset" :disabled="resetting">
+          {{ resetting ? 'RESETTING...' : '🔄 RESET DATA' }}
+        </button>
       </div>
 
       <!-- Separator -->
@@ -106,10 +109,18 @@ import { useMode } from '../composables/useMode'
 
 const router = useRouter()
 const route = useRoute()
-const { userInfo, logout } = useAuth()
+const { userInfo, logout, getAuthHeaders } = useAuth()
 const { selectMode } = useMode()
 
 const hoveredMode = ref('')
+const resetting = ref(false)
+
+function _getCookie(name) {
+  const value = `; ${document.cookie}`
+  const parts = value.split(`; ${name}=`)
+  if (parts.length === 2) return parts.pop().split(';').shift()
+  return ''
+}
 
 function getSafeRedirectPath(value) {
   if (!value || typeof value !== 'string') return null
@@ -146,6 +157,41 @@ const backendUrl = import.meta.env.DEV
 async function handleLogout() {
   await logout(backendUrl)
   router.push('/')
+}
+
+async function handleReset() {
+  if (!confirm('Reset ALL dry-run data? Positions, trades, analytics, and balance history will be cleared. This cannot be undone.')) return
+  resetting.value = true
+  try {
+    const res = await fetch(`${backendUrl}/api/dryrun/reset`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-CSRFToken': _getCookie('csrf_token'),
+        ...getAuthHeaders()
+      },
+      credentials: 'include'
+    })
+    
+    // Check if the response is actually JSON (to handle potential 404/500 HTML fallbacks)
+    const contentType = res.headers.get("content-type")
+    if (!contentType || !contentType.includes("application/json")) {
+        const text = await res.text()
+        console.error("Non-JSON response:", text.substring(0, 200))
+        throw new Error(`Server returned non-JSON response (${res.status}).`)
+    }
+
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Reset failed')
+    
+    const clearedRows = data.details ? Object.values(data.details).reduce((a, b) => (typeof b === 'number' ? a + b : a), 0) : 0
+    alert(`Reset complete!\n\nCleared approximate ${clearedRows} data points across all dry-run tables.`)
+  } catch (err) {
+    console.error('Reset Error:', err)
+    alert(err.message || 'Reset failed. Make sure you are in DRY_RUN mode.')
+  } finally {
+    resetting.value = false
+  }
 }
 </script>
 

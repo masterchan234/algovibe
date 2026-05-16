@@ -93,7 +93,7 @@ class MarketProvider(abc.ABC):
 
     # ── Helpers for subclasses ────────────────────────────────────────────────
 
-    def _emit(self, tick_bytes: bytes, topic: str = "tick") -> None:
+    def _emit(self, tick_bytes: bytes, topic: str = "tick", latency_ms: float = 0) -> None:
         """
         Store the latest tick and invoke the on_tick callback (if set).
         Subclasses call this after serialising a new Tick message.
@@ -101,8 +101,8 @@ class MarketProvider(abc.ABC):
         self._latest_tick_bytes = tick_bytes
         if self._on_tick is not None:
             try:
-                # If the callback is the publisher.send, it will use the topic
-                self._on_tick(tick_bytes, topic=topic)
+                # If the callback is the publisher.send, it will use the topic and latency_ms
+                self._on_tick(tick_bytes, topic=topic, latency_ms=latency_ms)
             except Exception as exc:  # noqa: BLE001
                 # Never let a faulty callback crash the provider thread
                 import logging

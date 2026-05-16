@@ -9,6 +9,8 @@ The provider polls the MarketDataWS snapshot at a configurable interval
 (default 100 ms) so that the ZMQ publisher receives updates at sub-second
 granularity without blocking the WS thread.
 
+Latency is calculated by comparing the Indodax epoch with local time.
+
 Future extension:
   Replace the polling loop with a direct callback hook inside MarketDataWS
   once the WS layer exposes an on_update(pair, data) hook.
@@ -167,7 +169,19 @@ class IndodaxProvider(MarketProvider):
             tick.low_24h     = _safe_float(data.get("low"))
             tick.vol_idr     = _safe_float(data.get("vol_idr"))
 
-            self._emit(tick.SerializeToString())
+            # --- [LATENCY CALCULATION] ---
+            # Indodax summary message IDX_EPOCH is at index 1 of the inner data row.
+            # We use it to measure the gap from Indodax server to our bot.
+            latency_ms = 0.0
+            try:
+                # The data dict passed here from ws_market.py has already been partially parsed.
+                # If IDX_EPOCH (epoch) is present, use it.
+                epoch = data.get("epoch")
+                if epoch:
+                    latency_ms = (time.time() - float(epoch)) * 1000.0
+            except Exception: pass
+
+            self._emit(tick.SerializeToString(), latency_ms=latency_ms)
             
             if not self._ready_event.is_set():
                 self._ready_event.set()

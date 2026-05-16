@@ -245,6 +245,49 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         except Exception:
             pass  # Jika EMA50 gagal dihitung, biarkan lewat
 
+    # ── 4d. Vertical Spike / RSI Ceiling Filter ───────────────────────────
+    # Mencegah entry di "pucuk" (top of a parabolic move).
+    # Rejeksi jika RSI > 75 (82 di loose gates) atau harga > 2.5% di atas EMA-9.
+    _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
+    _rsi_now = tech.get('rsi', 50.0)
+    _ema9 = tech.get('ema9', 0.0)
+    _last = float(p.get('last', 0.0))
+    
+    if _rsi_now > _rsi_ceiling:
+        msg = f"⛔ PUCUK-GUARD: RSI {_rsi_now:.1f} > ceiling {_rsi_ceiling:.1f} (Over-extended)."
+        print(f"[DEBUG-GATE] {pair} REJECTED: RSI Ceiling ({_rsi_now:.1f})", flush=True)
+        log_message(f"{msg} [{pair}]")
+        save_gate_state(msg)
+        return None
+
+    if _ema9 > 0:
+        _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
+        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0 # Diperketat dari 2.5 ke 2.0
+        if _dist_ema9 > _dist_limit:
+            msg = f"⛔ VERTICAL-SPIKE: Harga {_dist_ema9:.2f}% di atas EMA-9 (Batas {_dist_limit:.1f}%). Tunggu pullback."
+            print(f"[DEBUG-GATE] {pair} REJECTED: Vertical Spike ({_dist_ema9:.2f}% > EMA-9)", flush=True)
+            log_message(f"{msg} [{pair}]")
+            save_gate_state(msg)
+            return None
+
+    # ── 4e. Resistance-Guard (Double-Top Prevention) ──────────────────────
+    # Mencegah beli tepat di area "Tembok" (High sebelumnya) tanpa breakout valid.
+    if len(history) >= 20:
+        _recent_high = max(history)
+        _threshold_high = _recent_high * 0.993 # 0.7% di bawah High
+        _stoch_k = tech.get('stoch_k', 50.0)
+        
+        # Jika harga sudah di area High DAN sudah agak panas (RSI > 60 atau Stoch > 70)
+        if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout:
+            msg = (
+                f"⛔ RESISTANCE-GUARD: Harga {_last:.0f} mendekati High {_recent_high:.0f} "
+                f"dengan RSI/Stoch panas ({_rsi_now:.1f}/{_stoch_k:.1f}). Potensi Double Top."
+            )
+            print(f"[DEBUG-GATE] {pair} REJECTED: Resistance-Guard (Price {_last:.0f} near High {_recent_high:.0f})", flush=True)
+            log_message(f"{msg} [{pair}]")
+            save_gate_state(msg)
+            return None
+
     # ── 5. Technical probability + imbalance threshold ────────────────────────
     if tq_prob < 0:
         msg = "WARMUP: belum cukup data untuk prediksi teknikal."

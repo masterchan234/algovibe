@@ -624,9 +624,28 @@ class BrainInferenceService:
                         f"(gate={gate_conf:.1f}%, tq_prob={tq_prob * 100:.1f}%)"
                     )
                     
+                    # --- [DYNAMIC TARGETING] ---
+                    # Calculate market-aware TP/SL targets based on ATR and conviction
+                    final_dyn_tp = 0.0
+                    final_dyn_sl = 0.0
+                    try:
+                        from app.application.use_cases.entry_targeting import calculate_entry_target
+                        target_result = calculate_entry_target(self, r, enriched, gate, adaptive_cfg)
+                        if target_result:
+                            final_dyn_tp = target_result.get("final_dyn_tp", 0.0)
+                            final_dyn_sl = target_result.get("final_dyn_sl", 0.0)
+                    except Exception as e:
+                        logger.warning(f"[brain] Targeting error for {pair}: {e}")
+
                     # Emit Signal via ZMQ
                     sig = Signal()
-                    sig.symbol = pair
+                    # Pack dynamic targets into symbol: pair|tp|sl
+                    # If tp/sl are 0, executive-core will fallback to defaults.
+                    if final_dyn_tp > 0:
+                        sig.symbol = f"{pair}|{final_dyn_tp:.4f}|{final_dyn_sl:.4f}"
+                    else:
+                        sig.symbol = pair
+                    
                     sig.action = SignalAction.Value("ACTION_BUY")
                     # Monolith parity: execute_trade consumes technical probability (0..1).
                     sig.confidence = tq_prob
