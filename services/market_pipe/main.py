@@ -66,9 +66,9 @@ def main() -> None:
         publisher.stop()
         sys.exit(1)
 
-    logger.info("[market-pipe] ✅ Live — publishing ticks to %s", IPC_MARKET)
+    logger.info("[MARKET-PIPE] Live - publishing ticks to %s", IPC_MARKET)
 
-    # ── Graceful shutdown on SIGTERM / SIGINT ──────────────────────────────────
+    #  Graceful shutdown on SIGTERM / SIGINT 
     _shutdown = False
 
     def _handle_signal(signum, _frame):
@@ -79,7 +79,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    # ── Keep-alive loop ────────────────────────────────────────────────────────
+    #  Keep-alive loop 
     try:
         while not _shutdown:
             time.sleep(1)

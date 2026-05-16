@@ -2,7 +2,7 @@
 Resilience — Error Handling & Resilience system for the Algovibe Middleware Bridge.
 
 Components
-──────────
+
 1. retry_with_backoff    — Exponential-backoff retry decorator for API calls.
 2. CircuitBreaker        — Tracks consecutive exchange errors and latches the
                            system when the exchange is unreachable for > 60 s.
@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+#  Constants 
 
 RETRY_MAX_RETRIES         = 3
 RETRY_BASE_DELAY_SEC      = 1.0
@@ -52,7 +52,7 @@ _CB_ERROR_SUBSTRINGS = (
 _INSUF_BALANCE_KEYWORDS = ("insufficient", "not enough", "balance", "kurang")
 
 
-# ── Retry with Backoff ────────────────────────────────────────────────────────
+#  Retry with Backoff 
 
 def retry_with_backoff(
     retries: int = RETRY_MAX_RETRIES,
@@ -108,13 +108,13 @@ def retry_with_backoff(
     return decorator
 
 
-# ── Circuit Breaker ───────────────────────────────────────────────────────────
+#  Circuit Breaker 
 
 class CircuitBreaker:
     """Three-state circuit breaker (CLOSED → OPEN → HALF_OPEN → CLOSED).
 
     State transitions
-    ─────────────────
+    
     CLOSED    → OPEN      : consecutive failures persist for > CB_ERROR_WINDOW_SEC.
     OPEN      → HALF_OPEN : CB_RESET_TIMEOUT_SEC has elapsed since tripping.
     HALF_OPEN → CLOSED    : next successful call resets the breaker.
@@ -144,7 +144,7 @@ class CircuitBreaker:
         """Inject an EmergencyNotifier so the breaker can fire alerts on trip."""
         self._notifier = notifier
 
-    # ── Public interface ─────────────────────────────────────────────────────
+    #  Public interface 
 
     @property
     def state(self) -> str:
@@ -198,7 +198,7 @@ class CircuitBreaker:
                 "reset_timeout_sec": self._reset_timeout,
             }
 
-    # ── Private helpers ──────────────────────────────────────────────────────
+    #  Private helpers 
 
     def _maybe_transition_half_open(self) -> None:
         """If OPEN and reset timeout has elapsed, move to HALF_OPEN (lock already held)."""
@@ -256,7 +256,7 @@ class CircuitBreaker:
             logger.warning("[CircuitBreaker] Could not persist state to DB: %s", exc)
 
 
-# ── Rate Limiter 429 ──────────────────────────────────────────────────────────
+#  Rate Limiter 429 
 
 class RateLimiter429:
     """Tracks 429 responses and enforces exponential cooldown.
@@ -311,7 +311,7 @@ class RateLimiter429:
             return False
 
 
-# ── Execution Safety ──────────────────────────────────────────────────────────
+#  Execution Safety 
 
 class ExecutionSafety:
     """Guards for order placement safety checks."""
@@ -337,7 +337,7 @@ class ExecutionSafety:
         return volume * (1.0 - cls.INSUFFICIENT_DECREMENT)
 
 
-# ── Shadow Sync ───────────────────────────────────────────────────────────────
+#  Shadow Sync 
 
 class ShadowSync:
     """Periodic reconciliation between exchange balances and the DB positions table.
@@ -345,7 +345,7 @@ class ShadowSync:
     Runs as a daemon thread every SHADOW_SYNC_INTERVAL_SEC (5 minutes).
 
     Reconciliation logic
-    ────────────────────
+    
     • If a coin is held on the exchange but NOT tracked in ``active_positions``,
       log a CRITICAL warning and fire an emergency alert.
     • If a position is tracked in DB but the coin is NOT on the exchange,
@@ -403,7 +403,7 @@ class ShadowSync:
         """Perform a single reconciliation pass and return a summary dict."""
         return self._reconcile()
 
-    # ── Private ──────────────────────────────────────────────────────────────
+    #  Private 
 
     def _loop(self) -> None:
         # Initial delay so the bot has time to fully initialise
@@ -567,13 +567,13 @@ class ShadowSync:
         return summary
 
 
-# ── Emergency Notifier ────────────────────────────────────────────────────────
+#  Emergency Notifier 
 
 class EmergencyNotifier:
     """Dispatches CRITICAL / CIRCUIT_BREAKER alerts to all configured channels.
 
     Channels
-    ────────
+    
     1. Python logger (CRITICAL level)
     2. SQLite ``system_events`` table (for dashboard polling)
     3. Telegram bot
@@ -629,7 +629,7 @@ class EmergencyNotifier:
         # 3. Telegram (non-blocking)
         try:
             from app.interfaces.telegram_bot import send_telegram_message
-            send_telegram_message(f"🚨 *{event_type}*\n{message}")
+            send_telegram_message(f"[CRITICAL] *{event_type}*\n{message}")
         except Exception as exc:
             logger.warning("[EmergencyNotifier] Telegram send failed: %s", exc)
 
@@ -646,13 +646,13 @@ class EmergencyNotifier:
                 logger.warning("[EmergencyNotifier] SocketIO emit failed: %s", exc)
 
 
-# ── Shared singleton instances ────────────────────────────────────────────────
+#  Shared singleton instances 
 
 #: Shared EmergencyNotifier — used by CircuitBreaker, ShadowSync, and the bridge.
 emergency_notifier = EmergencyNotifier()
 
 
-# ── Auto-Resume Heartbeat ─────────────────────────────────────────────────────
+#  Auto-Resume Heartbeat 
 
 # How often to ping the exchange while SYSTEM_PAUSE is active (seconds).
 AUTO_RESUME_PING_INTERVAL_SEC = 300      # 5 minutes
@@ -664,7 +664,7 @@ class AutoResumeHeartbeat:
     """Background task that pings the exchange every 5 minutes during SYSTEM_PAUSE.
 
     Recovery Protocol
-    ─────────────────
+    
     • When session_mode is SYSTEM_PAUSE, begin pinging the exchange health endpoint.
     • After AUTO_RESUME_SUCCESS_THRESHOLD consecutive successful pings, automatically:
         1. Reset session_mode → ACTIVE / NORMAL.
@@ -672,7 +672,7 @@ class AutoResumeHeartbeat:
         3. Fire a Telegram alert and an EmergencyNotifier SUCCESS event.
 
     Usage
-    ─────
+    
     ::
         heartbeat = AutoResumeHeartbeat(ping_fn=trading_bridge.get_balances)
         heartbeat.start()
@@ -724,7 +724,7 @@ class AutoResumeHeartbeat:
         """Signal the heartbeat thread to stop."""
         self._running = False
 
-    # ── Private ──────────────────────────────────────────────────────────────
+    #  Private 
 
     def _loop(self) -> None:
         while self._running:
@@ -773,7 +773,7 @@ class AutoResumeHeartbeat:
             return
 
         msg = (
-            f"✅ *AUTO-RESUME SUCCESS* ✅\n"
+            f"[OK] *AUTO-RESUME SUCCESS* [OK]\n"
             f"{self._threshold} consecutive successful API pings.\n"
             f"Session restored to NORMAL mode. Trading resumed."
         )

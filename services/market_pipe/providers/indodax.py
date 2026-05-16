@@ -60,13 +60,13 @@ class IndodaxProvider(MarketProvider):
         self._running = False
         self._ready_event = threading.Event()
 
-    # ── Identity ──────────────────────────────────────────────────────────────
+    #  Identity 
 
     @property
     def exchange_id(self) -> str:
         return "indodax"
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     def start(self) -> None:
         self._start_time = time.monotonic()
@@ -148,7 +148,7 @@ class IndodaxProvider(MarketProvider):
     def is_connected(self) -> bool:
         return self._mws.is_connected()
 
-    # ── Internal Handlers ─────────────────────────────────────────────────────
+    #  Internal Handlers 
 
     def _handle_tick_update(self, pair: str, data: dict) -> None:
         """Callback from MarketDataWS when a ticker updates."""

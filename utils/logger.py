@@ -62,7 +62,7 @@ def run_performance_report(log_fn=None):
     from app.infrastructure.database import db
     stats = db.get_daily_stats()
     report = (
-        f"📊 *DAILY PERFORMANCE REPORT* 📊\n"
+        f"DAILY PERFORMANCE REPORT\n"
         f"Trades: {stats['total_trades']}\n"
         f"Win/Loss: {stats['win_count']}/{stats['loss_count']}\n"
         f"Total PnL: Rp {stats['total_pnl_idr']:,.2f}\n"

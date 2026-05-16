@@ -74,7 +74,7 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             final_dyn_sl = -final_sl_val
 
             log_message(
-                f"🧠 [INTELLIGENT TARGET] {pair}: TP {final_dyn_tp * 100:.2f}%, "
+                f"[BRAIN] [INTELLIGENT TARGET] {pair}: TP {final_dyn_tp * 100:.2f}%, "
                 f"SL {final_dyn_sl * 100:.2f}% | Conviction: {conviction_factor:.2f} "
                 f"(TQ={tq_prob:.2f}, KNN={knn_conf_norm:.2f}), RSI: {rsi_val:.1f}"
             )
@@ -83,14 +83,14 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             final_dyn_sl = knn_decision['target_sl']
     except Exception as e:
         if "does not have market symbol" not in str(e):
-            log_message(f"⚠️ ATR Calculation fallback: {e}")
+            log_message(f"[WARN] ATR Calculation fallback: {e}")
         final_dyn_tp = knn_decision['target_tp']
         final_dyn_sl = knn_decision['target_sl']
 
     # [Scalp Optimization] Selalu gunakan TAKER (Market Order) untuk kecepatan eksekusi
     use_taker = True
-    mode_str = "🚀 TAKER (INSTANT MARKET BUY)"
-    log_message(f"⚡ [Execution Mode] {pair}: {mode_str}")
+    mode_str = "[START] TAKER (INSTANT MARKET BUY)"
+    log_message(f"[FAST] [Execution Mode] {pair}: {mode_str}")
 
     return {
         "final_dyn_tp": final_dyn_tp,

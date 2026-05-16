@@ -27,7 +27,7 @@ from config import (
     SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
 
-# ── Per-pair minimum trade IDR cache (dari fetch_pairs() API) ─────────────────
+#  Per-pair minimum trade IDR cache (dari fetch_pairs() API) 
 # Di-refresh setiap jam, sehingga jarang hit API dan tidak memblokir eksekusi.
 _PAIR_MIN_IDR_CACHE: dict = {}   # {pair: min_idr_float}
 _PAIR_MIN_LAST_FETCH: float = 0.0
@@ -120,7 +120,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
         return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth Rp {bid_depth_idr:,.0f})", bid_depth_idr
         
     except Exception as e:
-        log_message(f"⚠️ Liquidity check error for {pair}: {e}")
+        log_message(f"[WARN] Liquidity check error for {pair}: {e}")
         return False, f"Liquidity check failed: {str(e)[:60]}", 0.0
 
 
@@ -179,13 +179,13 @@ def execute_trade(
 
         if is_high_opportunity_fast:
             if active_count >= effective_max_pos:
-                log_message(f"⚠️ SKIP {pair}: Max active positions ({effective_max_pos}) reached.")
+                log_message(f"[WARN] SKIP {pair}: Max active positions ({effective_max_pos}) reached.")
                 _mark_gate(f"Max active positions reached ({effective_max_pos})")
                 return False
         else:
             if active_count >= standard_slot_limit:
                 log_message(
-                    f"⚠️ SKIP {pair}: Standard slot limit reached ({standard_slot_limit}/{effective_max_pos}). "
+                    f"[WARN] SKIP {pair}: Standard slot limit reached ({standard_slot_limit}/{effective_max_pos}). "
                     f"{reserve_slots} slot reserved for fast high-opportunity setups."
                 )
                 _mark_gate(f"Standard slot limit reached ({standard_slot_limit}); reserve slots active")
@@ -198,7 +198,7 @@ def execute_trade(
         
         # 1. Global Minimum check
         if vol_24h < MIN_VOLUME_FILTER:
-            log_message(f"⚠️ SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
+            log_message(f"[WARN] SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
             _mark_gate(f"24h volume below minimum filter: {vol_24h:,.0f}")
             return False
 
@@ -274,7 +274,7 @@ def execute_trade(
                         clamp_target = MIN_TRADE_IDR * max(1.0, SMALL_ACCOUNT_CLAMP_TIER3_PCT)
 
                     log_message(
-                        f"🧠 [Intelligent Sizing] Tiered clamp {pair}: "
+                        f"[EXECUTIVE] [Intelligent Sizing] Tiered clamp {pair}: "
                         f"Rp {target_amount:,.0f} -> Rp {clamp_target:,.0f}"
                     )
                     target_amount = clamp_target
@@ -296,7 +296,7 @@ def execute_trade(
         if recovery_factor < 1.0:
             amount_idr *= recovery_factor
             log_message(
-                f"🔻 [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
+                f"[SELL] [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
                 f"Rp {amount_idr:,.0f} ({recovery_factor*100:.0f}% dari normal)"
             )
 
@@ -304,7 +304,7 @@ def execute_trade(
         # Kita tidak ingin trade kita > 1/Multiplier (e.g. 1/50 = 2%) dari volume harian
         required_vol = amount_idr * LIQUIDITY_MULTIPLIER
         if vol_24h < required_vol:
-            log_message(f"⚠️ SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
+            log_message(f"[WARN] SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
             _mark_gate(f"Insufficient liquidity: need {required_vol:,.0f}, got {vol_24h:,.0f}")
             return False
 
@@ -329,7 +329,7 @@ def execute_trade(
         _min_viable_net = amount_idr * 0.005  # 0.5% dari trade size, proporsional
         if _max_net_profit < _min_viable_net:
             log_message(
-                f"⚠️ SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
+                f"[WARN] SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
                 f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
                 f"Perlu trade lebih besar atau TP lebih tinggi."
             )
@@ -341,7 +341,7 @@ def execute_trade(
 
         if taker:
             buy_price = price
-            log_message(f"🚀 [Taker Execute] Mengejar momentum di harga Market: Rp {buy_price:,.2f}")
+            log_message(f"[EXECUTION] [Taker Execute] Market Buy at Rp {buy_price:,.2f}")
         else:
             alpha = 2 / (9 + 1)
             ema_9 = prices[0]
@@ -349,7 +349,7 @@ def execute_trade(
                 ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
 
             buy_price = ema_9
-            log_message(f"🎣 [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
+            log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
 
         symbol = pair.upper().replace("IDR", "/IDR")
         amount_crypto = amount_idr / buy_price
@@ -374,12 +374,12 @@ def execute_trade(
             }
             predator_msg = ""
             if whale_boost > 1.0:
-                predator_msg += "\n🐳 *Whale Backed*: Tembok raksasa terdeteksi menjaga harga."
+                predator_msg += "\nWhale Backed: Massive wall detected."
             if sector_boost > 1.0:
-                predator_msg += "\n🔥 *Sector Driven*: Koin ini mengikuti momentum sektor yang sedang 'hot'."
+                predator_msg += "\nSector Driven: Hot sector momentum."
 
             msg = (
-                f"🟢 *DRY RUN BUY* 🟢\n"
+                f"[RECOVERY] *DRY RUN BUY* [RECOVERY]\n"
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
                 f"Rationale: _{bot.oracle.get_rationale(pair, 'BUY')}_{predator_msg}\n"
@@ -392,7 +392,7 @@ def execute_trade(
             send_telegram_message(msg)
         else:
             msg = (
-                f"🟢 *LIVE BUY* 🟢\n"
+                f"[RECOVERY] *LIVE BUY* [RECOVERY]\n"
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
                 f"Price: Rp {buy_price:,.2f}\n"
@@ -410,11 +410,11 @@ def execute_trade(
             )
             
             if not is_liquid:
-                log_message(f"🚫 [SKIP ENTRY] {pair}: Liquidity check failed — {liq_reason}")
+                log_message(f"[BLOCK] [SKIP ENTRY] {pair}: Liquidity check failed — {liq_reason}")
                 _mark_gate(f"Live liquidity check failed: {liq_reason}")
                 return False
             
-            log_message(f"✅ [LIQUIDITY OK] {pair}: {liq_reason}")
+            log_message(f"[OK] [LIQUIDITY OK] {pair}: {liq_reason}")
 
             params = {
                 'pair': pair.replace("idr", "_idr"),
@@ -452,7 +452,7 @@ def execute_trade(
                     'INFO'
                 )
             except Exception as ex:
-                log_message(f"⚠️ Async Logging Error: {ex}")
+                log_message(f"[WARN] Async Logging Error: {ex}")
 
         dna_data = {
             "amount_crypto": amount_crypto,
@@ -561,12 +561,12 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
 
             pnl = (fill_price - entry_price) * amount_crypto
             log_message(
-                f"⚡ [LIVE BASKET EXIT] {pair}: SOLD {amount_crypto:.6f} @ Rp {fill_price:,.0f} "
+                f"[FAST] [LIVE BASKET EXIT] {pair}: SOLD {amount_crypto:.6f} @ Rp {fill_price:,.0f} "
                 f"| PnL ≈ Rp {pnl:,.0f}"
             )
             return {"pair": pair, "ok": True, "order_id": order_id, "price": fill_price}
         except Exception as exc:
-            log_message(f"❌ [LIVE BASKET EXIT] {pair} sell failed: {exc}")
+            log_message(f" [LIVE BASKET EXIT] {pair} sell failed: {exc}")
             return {"pair": pair, "ok": False, "error": str(exc)}
 
     with ThreadPoolExecutor(max_workers=min(8, len(positions))) as pool:
@@ -579,7 +579,7 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
                 failed.append(result)
 
     log_message(
-        f"🧺 [LIVE BASKET EXIT] Complete — filled: {len(filled)}, failed: {len(failed)}"
+        f"[BASKET] [LIVE BASKET EXIT] Complete — filled: {len(filled)}, failed: {len(failed)}"
     )
     return {"filled": filled, "failed": failed}
 

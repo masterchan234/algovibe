@@ -27,7 +27,7 @@ import websocket   # websocket-client
 
 logger = logging.getLogger(__name__)
 
-# ─── Konstanta ────────────────────────────────────────────────────────────────
+#  Konstanta 
 PWS_URL         = "wss://pws.indodax.com/ws/?cf_ws_frame_ping_pong=true"
 TOKEN_ENDPOINT  = "https://indodax.com/api/private_ws/v1/generate_token"
 TOKEN_TTL       = 23 * 3600   # refresh token setiap 23 jam (lifetime 24 jam)
@@ -65,7 +65,7 @@ class PrivateWS:
         self._req_id        = 0
         self._subscribed    = threading.Event()
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    #  Public API 
 
     def start(self):
         """Mulai koneksi WS di background thread."""
@@ -85,7 +85,7 @@ class PrivateWS:
         """Blok hingga berhasil subscribe ke private channel."""
         return self._subscribed.wait(timeout=timeout)
 
-    # ── Internal ─────────────────────────────────────────────────────────────
+    #  Internal 
 
     def _next_id(self) -> int:
         self._req_id += 1
@@ -179,7 +179,7 @@ class PrivateWS:
         except json.JSONDecodeError:
             return
 
-        # ── Auth/connect response ──────────────────────────────────────────
+        #  Auth/connect response 
         if "connect" in msg and "client" in msg.get("connect", {}):
             logger.info(f"[PrivateWS] Auth OK — client: {msg['connect']['client']}")
             # Step 4: Subscribe ke private channel
@@ -190,7 +190,7 @@ class PrivateWS:
             ws.send(json.dumps(sub_msg))
             return
 
-        # ── Token expired saat connect ─────────────────────────────────────
+        #  Token expired saat connect 
         if "error" in msg and msg.get("id") == 1:
             code = msg["error"].get("code")
             if code == 109:
@@ -201,7 +201,7 @@ class PrivateWS:
                 logger.error(f"[PrivateWS] Connect error: {msg['error']}")
             return
 
-        # ── Subscribe ACK ──────────────────────────────────────────────────
+        #  Subscribe ACK 
         if "id" in msg and "subscribe" in msg:
             if "error" in msg:
                 logger.error(f"[PrivateWS] Subscribe failed: {msg['error']}")
@@ -210,12 +210,12 @@ class PrivateWS:
                 self._subscribed.set()
             return
 
-        # ── Subscribe failed (legacy format) ──────────────────────────────
+        #  Subscribe failed (legacy format) 
         if "id" in msg and msg.get("id") == 2 and "error" in msg:
             logger.error(f"[PrivateWS] Subscribe error: {msg['error']}")
             return
 
-        # ── Push / order update events ─────────────────────────────────────
+        #  Push / order update events 
         push = msg.get("push", {})
         if push.get("channel") == self._channel:
             pub_data = push.get("pub", {}).get("data", [])

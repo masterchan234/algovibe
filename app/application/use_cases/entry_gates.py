@@ -47,11 +47,11 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
     tech_threshold = float(adaptive_cfg.get('tech_threshold', 0.6) or 0.6)
 
-    # ── 1. Sell Block ──
+    #  1. Sell Block 
     if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
         return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
 
-    # ── 2. BUY Filter (Sync with check_entry_gates) ──
+    #  2. BUY Filter (Sync with check_entry_gates) 
     # Radar hanya boleh bilang BUY jika kriteria trend dan probabilitas terpenuhi
     is_loose = bool(config.DRY_RUN_LOOSE_GATES)
     is_trend_ok = breakout or trend == "UP" or (is_loose and trend == "SIDEWAYS")
@@ -78,7 +78,7 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
             f"vol={current_vol:.2f}%"
         )
 
-    # ── 3. Fallback to HOLD ──
+    #  3. Fallback to HOLD 
     reason = "HOLD"
     if not is_trend_ok:
         reason = f"Trend {trend} (no breakout)"
@@ -113,11 +113,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     sector_boost = enriched['sector_boost']
     imbalance_ratio = enriched['imbalance_ratio']
 
-    # ── 1. Skip pairs already held or blacklisted ─────────────────────────
+    #  1. Skip pairs already held or blacklisted 
     if pair in open_positions or pair in bot.blacklist:
         return None
 
-    # ── 2. Cooldown guard ─────────────────────────────────────────────────
+    #  2. Cooldown guard 
     cooldown_until_raw = db.get_state(f"pair_cooldown_until_{pair}", "0")
     try:
         cooldown_until = float(cooldown_until_raw or 0)
@@ -125,13 +125,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         cooldown_until = 0.0
     now_ts = time.time()
     if cooldown_until > now_ts:
-        remaining_min = int(max(1, (cooldown_until - now_ts) / 60))
-        print(f"[DEBUG-GATE] {pair} REJECTED: Cooldown aktif ({remaining_min}m)", flush=True)
-        log_message(f"SKIP [{pair}]: pair cooldown aktif ({remaining_min}m lagi).")
+        log_message(f"[GATE] {pair} REJECTED: Cooldown active until {cooldown_until}")
         return None
 
-    # ── 3. Radar recommendation + tracking log ────────────────────────────
-    # Score berdasarkan ranking teknikal murni — tidak ada learning adjustment AI.
+    #  3. Radar recommendation + tracking log 
     final_score = p['score']
 
     radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
@@ -139,24 +136,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     db.save_state(f"radar_reco_reason_{pair}", radar_reason)
 
     prob_display = f"{tq_prob * 100:.0f}%" if tq_prob >= 0 else "WARMUP"
-    boost_str = ""
-    if whale_boost > 1.0:
-        boost_str += " 🐳"
-    if sector_boost > 1.0:
-        boost_str += " 🔥"
-
-    # [DIAGNOSTIC] Log every tracked pair to stdout
-    print(f"[DEBUG-GATE] Evaluating {pair} | Trend: {trend} | Breakout: {breakout} | Prob: {prob_display}", flush=True)
-
+    
     log_message(
-        f"Track: {pair:10} | Regime: {regime:8} | Trend: {trend:9} | "
-        f"PB: {str(breakout):5} | TQ_Prob: {prob_display}{boost_str}"
+        f"[GATE] [TRACKING] {pair}: recommendation={radar_rec} | reason={radar_reason}"
     )
 
-    # ── 4. Multi-Confluence Technical Gate ────────────────────────────────
-    # Kita tidak hanya cek RSI — harus ada konfirmasi multi-indikator.
-    # Sertakan volume per-candle dari OHLC backfill jika tersedia via BotMock,
-    # sehingga OBV Slope (w=1.5) dan Volume Ratio (w=1.5) dapat berfungsi aktif.
+    #  4. Multi-Confluence Technical Gate 
     _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
     tech = get_technical_summary(history, _candle_vols if len(_candle_vols) == len(history) else None)
     depth_data = db.get_market_depth(pair)
@@ -172,36 +157,18 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
     tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg)
 
-    # Block jika sinyal SELL dengan skor cukup (multi-confluence, bukan hanya RSI).
-    # Threshold diturunkan dari 8.0 → 5.0: skor 5/16.5 sudah cukup membuktikan tekanan jual.
-    # Sebelumnya sell_score 7.9 hanya memicu warning dan bot tetap masuk; ini sudah diperbaiki.
-    # [LATENCY-OPTIMIZATION] Short-circuit if SELL verdict and NOT in loose gates mode
     if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
         msg = (
-            f"⛔ SELL BLOCK: score={tech_sig.get('sell_score',0):.1f} "
-            f"— {tech_sig['reason'][:80]}"
+            f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})"
         )
-        print(f"[DEBUG-GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})", flush=True)
-        log_message(f"{msg} [{pair}]")
+        log_message(msg)
         save_gate_state(msg)
         return None
-    elif tech_sig['verdict'] == 'SELL':
-        print(f"[DEBUG-GATE] {pair} WARNING: SELL-WARN but continuing (Loose Gates={config.DRY_RUN_LOOSE_GATES})", flush=True)
-        log_message(
-            f"⚠️  SELL-WARN [{pair}]: sell_score={tech_sig.get('sell_score',0):.1f} "
-            f"buy_score={tech_sig.get('buy_score',0):.1f} — masih evaluasi lanjut."
-        )
 
-    # ── 4b. ATR Volatility Filter ─────────────────────────────────────────
-    # Skip entry jika ATR > 3% harga — volatilitas terlalu tinggi, spread lebar,
-    # slippage besar, TP/SL sering kena sebelum waktunya.
-    # Loose gates: batas dinaikkan ke 4.5% agar tetap bisa trading di kondisi moderat.
-    # Jika bot memiliki data OHLC H/L nyata (dari backfill), gunakan True ATR.
-    # Fallback ke close-only approximation jika H/L tidak tersedia.
+    #  4b. ATR Volatility Filter 
     if len(history) >= 15:
         try:
             _prices_arr = history[-15:]
-            # Ambil H/L nyata dari backfill jika tersedia via BotMock
             _raw_highs = list(getattr(bot, 'ohlc_highs', {}).get(pair, []))
             _raw_lows  = list(getattr(bot, 'ohlc_lows',  {}).get(pair, []))
             if len(_raw_highs) >= 15 and len(_raw_lows) >= 15:
@@ -212,86 +179,63 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             _atr_pct = (_atr / _last) * 100.0
             _atr_limit = 4.5 if config.DRY_RUN_LOOSE_GATES else 3.0
             if _atr_pct > _atr_limit:
-                msg = (
-                    f"⛔ ATR-FILTER: ATR {_atr_pct:.2f}% > batas {_atr_limit:.1f}% "
-                    f"— volatilitas terlalu tinggi, risiko slippage."
-                )
-                print(f"[DEBUG-GATE] {pair} REJECTED: ATR {_atr_pct:.2f}% > {_atr_limit:.1f}%", flush=True)
-                log_message(f"{msg} [{pair}]")
+                msg = f"[GATE] {pair} REJECTED: ATR Volatility {_atr_pct:.2f}% > {_atr_limit:.1f}% limit"
+                log_message(msg)
                 save_gate_state(msg)
                 return None
         except Exception:
-            pass  # Jika ATR gagal dihitung, biarkan lewat
+            pass
 
-    # ── 4c. EMA-50 Trend Filter ───────────────────────────────────────────
-    # Hanya masuk jika harga penutupan terakhir > EMA-50 (trend makro naik).
-    # Ini mencegah entry di pertengahan downtrend besar hanya karena EMA-9 > EMA-21 sesaat.
-    # Jika data < 50 candle: filter dilewati (tidak cukup histori untuk konfirmasi).
-    # Loose gates: filter dilewati agar lebih banyak opportunity.
+    #  4c. EMA-50 Trend Filter 
     if not config.DRY_RUN_LOOSE_GATES and len(history) >= 50:
         try:
             _ema50 = calculate_ema(history, 50)
             _last_price = float(p.get('last', 0.0))
             if _last_price > 0 and _last_price < _ema50:
-                _gap_pct = (_ema50 - _last_price) / _ema50 * 100.0
-                msg = (
-                    f"⛔ EMA50-FILTER: harga {_last_price:.4f} < EMA50 {_ema50:.4f} "
-                    f"(gap -{_gap_pct:.2f}%) — trend makro masih turun."
-                )
-                print(f"[DEBUG-GATE] {pair} REJECTED: EMA50 filter (price {_last_price:.4f} < EMA50 {_ema50:.4f})", flush=True)
-                log_message(f"{msg} [{pair}]")
+                msg = f"[GATE] {pair} REJECTED: Price {_last_price:.4f} < EMA-50 {_ema50:.4f}"
+                log_message(msg)
                 save_gate_state(msg)
                 return None
         except Exception:
-            pass  # Jika EMA50 gagal dihitung, biarkan lewat
+            pass
 
-    # ── 4d. Vertical Spike / RSI Ceiling Filter ───────────────────────────
-    # Mencegah entry di "pucuk" (top of a parabolic move).
-    # Rejeksi jika RSI > 75 (82 di loose gates) atau harga > 2.5% di atas EMA-9.
+    #  4d. Vertical Spike / RSI Ceiling Filter 
     _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
     _rsi_now = tech.get('rsi', 50.0)
     _ema9 = tech.get('ema9', 0.0)
     _last = float(p.get('last', 0.0))
     
     if _rsi_now > _rsi_ceiling:
-        msg = f"⛔ PUCUK-GUARD: RSI {_rsi_now:.1f} > ceiling {_rsi_ceiling:.1f} (Over-extended)."
-        print(f"[DEBUG-GATE] {pair} REJECTED: RSI Ceiling ({_rsi_now:.1f})", flush=True)
-        log_message(f"{msg} [{pair}]")
+        msg = f"[GATE] {pair} REJECTED: RSI Ceiling {_rsi_now:.1f} > {_rsi_ceiling:.1f}"
+        log_message(msg)
         save_gate_state(msg)
         return None
 
     if _ema9 > 0:
         _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
-        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0 # Diperketat dari 2.5 ke 2.0
+        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0
         if _dist_ema9 > _dist_limit:
-            msg = f"⛔ VERTICAL-SPIKE: Harga {_dist_ema9:.2f}% di atas EMA-9 (Batas {_dist_limit:.1f}%). Tunggu pullback."
-            print(f"[DEBUG-GATE] {pair} REJECTED: Vertical Spike ({_dist_ema9:.2f}% > EMA-9)", flush=True)
-            log_message(f"{msg} [{pair}]")
+            msg = f"[GATE] {pair} REJECTED: Vertical Spike {_dist_ema9:.2f}% > EMA-9 limit"
+            log_message(msg)
             save_gate_state(msg)
             return None
 
-    # ── 4e. Resistance-Guard (Double-Top Prevention) ──────────────────────
-    # Mencegah beli tepat di area "Tembok" (High sebelumnya) tanpa breakout valid.
+    #  4e. Resistance-Guard (Double-Top Prevention) 
     if len(history) >= 20:
         _recent_high = max(history)
-        _threshold_high = _recent_high * 0.993 # 0.7% di bawah High
+        _threshold_high = _recent_high * 0.993
         _stoch_k = tech.get('stoch_k', 50.0)
         
-        # Jika harga sudah di area High DAN sudah agak panas (RSI > 60 atau Stoch > 70)
         if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout:
-            msg = (
-                f"⛔ RESISTANCE-GUARD: Harga {_last:.0f} mendekati High {_recent_high:.0f} "
-                f"dengan RSI/Stoch panas ({_rsi_now:.1f}/{_stoch_k:.1f}). Potensi Double Top."
-            )
-            print(f"[DEBUG-GATE] {pair} REJECTED: Resistance-Guard (Price {_last:.0f} near High {_recent_high:.0f})", flush=True)
-            log_message(f"{msg} [{pair}]")
+            msg = f"[GATE] {pair} REJECTED: Resistance-Guard Price {_last:.0f} near High {_recent_high:.0f}"
+            log_message(msg)
             save_gate_state(msg)
             return None
 
-    # ── 5. Technical probability + imbalance threshold ────────────────────────
+    #  5. Technical probability + imbalance threshold 
     if tq_prob < 0:
-        msg = "WARMUP: belum cukup data untuk prediksi teknikal."
-        log_message(f"{msg} [{pair}]")
+        msg = "[GATE] WARMUP: Insufficient data for TQ_Prob"
+        log_message(msg)
         save_gate_state(msg)
         return None
 
@@ -305,18 +249,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     tech_ready = tq_prob >= tech_gate_threshold
     has_strong_imb = imbalance_ratio >= imb_gate_threshold
     if not tech_ready and not has_strong_imb:
-        msg = (
-            f"SKIP: Tech prob {tq_prob * 100:.0f}% < threshold "
-            f"{tech_gate_threshold * 100:.0f}% "
-            f"& imbalance {imbalance_ratio:.2f}x < {imb_gate_threshold:.2f}x"
-        )
-        log_message(f"{msg} [{pair}]")
+        msg = f"[GATE] {pair} REJECTED: Tech prob {tq_prob * 100:.0f}% < {tech_gate_threshold * 100:.0f}%"
+        log_message(msg)
         save_gate_state(msg)
         return None
 
-    # ── 6. Trend / breakout requirement ───────────────────────────────────
+    #  6. Trend / breakout requirement 
     if not breakout and trend != "UP":
-        # Loose mode: boleh SIDEWAYS jika probabilitas + orderbook masih kuat.
         sideway_relaxed_ok = (
             is_loose
             and trend == "SIDEWAYS"
@@ -324,21 +263,20 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             and imbalance_ratio >= 1.05
         )
         if not sideway_relaxed_ok:
-            msg = f"SKIP: Tidak ada pullback & trend bukan UP (trend={trend})"
-            print(f"[DEBUG-GATE] {pair} REJECTED: Trend {trend} (no breakout)", flush=True)
-            log_message(f"{msg} [{pair}]")
+            msg = f"[GATE] {pair} REJECTED: No trend/breakout support (trend={trend})"
+            log_message(msg)
             save_gate_state(msg)
             return None
 
-    # ── 7. Radar recommendation guard (sinkron dashboard <-> eksekusi bot) ──
+    #  7. Radar recommendation guard 
     if radar_rec == "SELL":
-        msg = f"🚫 RADAR BLOCK: rekomendasi SELL ({radar_reason})"
+        msg = f"[BLOCK] RADAR BLOCK: rekomendasi SELL ({radar_reason})"
         print(f"[DEBUG-GATE] {pair} REJECTED: RADAR SELL ({radar_reason})", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None
 
-    # ── 9. Dynamic threshold based on volatility + trend ──────────────────
+    #  9. Dynamic threshold based on volatility + trend 
     current_vol = p['volatility']
     is_loose = bool(config.DRY_RUN_LOOSE_GATES)
 
@@ -356,15 +294,15 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
 
-    # ── 10. Consecutive-loss halt / Shadow Recovery ─────────────────────────
+    #  10. Consecutive-loss halt / Shadow Recovery 
     bot.consecutive_losses = int(db.get_state("consecutive_losses", 0))
     is_shadow_mode = bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES
     if is_shadow_mode:
-        msg = f"🛰️  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
+        msg = f"  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
 
-    # ── 11. K-NN pattern scoring ──────────────────────────────────────────
+    #  11. K-NN pattern scoring 
     rsi_val = calculate_rsi(history)
 
     if len(history) >= 20:
@@ -395,7 +333,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         scalper_boost = 8.0
 
     if knn_decision.get('verdict') == "AVOID":
-        msg = "🚫 [K-NN Avoid]: pola historis buruk, skip."
+        msg = "[BLOCK] [K-NN Avoid]: pola historis buruk, skip."
         print(f"[DEBUG-GATE] {pair} REJECTED: K-NN AVOID", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
@@ -414,7 +352,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         save_gate_state(msg)
         return None
 
-    # ── 13. Final Confidence threshold ────────────────────────────────────
+    #  13. Final Confidence threshold 
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit
 

@@ -137,8 +137,8 @@ def get_dynamic_tp_pct(current_balance: float = None) -> float:
     """Calculate TP_PCT dynamically based on current account balance.
     
     Small accounts optimized for 1%+ net profit after 0.6322% round-trip fee:
-    - Balance ≤ 100k: 2.0% TP (net 1.37% after fee) ✅
-    - Balance 100k-250k: 2.2% TP (net 1.59% after fee) ✅
+    - Balance ≤ 100k: 2.0% TP (net 1.37% after fee) [OK]
+    - Balance 100k-250k: 2.2% TP (net 1.59% after fee) [OK]
     - Balance 250k-1M: 2.5% TP
     - Balance > 1M: 3.5% TP (original aggressive scalp)
     

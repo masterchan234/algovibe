@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration (env overrides) ─────────────────────────────────────────────
+#  Configuration (env overrides) 
 PROFIT_LOCK_THRESHOLD_IDR = float(
     os.getenv("PROFIT_LOCK_THRESHOLD_IDR", "1000000")
 )  # Rp 1 jt
@@ -47,7 +47,7 @@ class ProfitLock:
         self._fired: bool = False          # one-shot per session
         self._activated_at: float = 0.0    # timestamp when lock first activated
 
-    # ── Public ────────────────────────────────────────────────────────────────
+    #  Public 
 
     @property
     def is_active(self) -> bool:
@@ -133,7 +133,7 @@ class ProfitLock:
         self._activated_at = 0.0
         logger.info("[ProfitLock] Session reset.")
 
-    # ── Diagnostics ───────────────────────────────────────────────────────────
+    #  Diagnostics 
 
     def status(self) -> dict:
         return {

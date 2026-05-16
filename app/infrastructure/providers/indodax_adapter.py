@@ -36,7 +36,7 @@ from app.infrastructure.resilience import (
 
 logger = logging.getLogger(__name__)
 
-# ── Indodax Trade API constants ───────────────────────────────────────────────
+#  Indodax Trade API constants 
 TAPI_URL = "https://indodax.com/tapi"
 PUBLIC_API_BASE = "https://indodax.com/api"
 OHLC_URL = "https://indodax.com/tradingview/history_v2"
@@ -67,17 +67,17 @@ class IndodaxAdapter(BaseExchangeAdapter):
         self._api_key = api_key
         self._api_secret = api_secret.encode("utf-8")
 
-        # ── Rate-limit state ──────────────────────────────────────────────────
+        #  Rate-limit state 
         self._rate_lock = threading.Lock()
         self._last_call_ts: float = 0.0   # Unix timestamp of the last TAPI call
         self._nonce_counter: int = int(time.time() * 1000)  # monotonic nonce
 
-        # ── Resilience components ─────────────────────────────────────────────
+        #  Resilience components 
         self._circuit_breaker = CircuitBreaker(name="indodax")
         self._circuit_breaker.attach_notifier(emergency_notifier)
         self._rate_limiter = RateLimiter429()
 
-    # ── Identity ──────────────────────────────────────────────────────────────
+    #  Identity 
 
     @property
     def exchange_id(self) -> str:
@@ -386,7 +386,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
             "momentum_7d": sorted(movers, key=lambda x: x["change_7d"], reverse=True)[:top_n],
         }
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
+    #  Internal helpers 
 
     def _next_nonce(self) -> str:
         """Return a strictly-increasing millisecond nonce."""
@@ -414,7 +414,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
         """Send a signed POST request to the Indodax Trade API.
 
         Resilience features applied
-        ───────────────────────────
+        
         • Circuit breaker: rejects calls immediately when OPEN.
         • 429 dynamic cooldown: on rate-limit response, sleeps and retries.
         • Exponential backoff: up to RETRY_MAX_RETRIES retries on 5xx / Timeout,
@@ -480,7 +480,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
                     TAPI_URL, headers=headers, data=payload_str, timeout=15
                 )
 
-                # ── 429 Too Many Requests ──────────────────────────────────
+                #  429 Too Many Requests 
                 if resp.status_code == 429:
                     _429_count += 1
                     if _429_count > RETRY_MAX_RETRIES:
@@ -492,7 +492,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
                     # Do not count 429 toward CB failures; retry transparently
                     continue
 
-                # ── 5xx Server Errors ──────────────────────────────────────
+                #  5xx Server Errors 
                 if resp.status_code in _CB_HTTP_CODES:
                     err = RuntimeError(
                         f"IndodaxAdapter HTTP {resp.status_code} in '{method}'"
@@ -545,7 +545,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
                     continue
                 raise err from exc
 
-            # ── API-level error (success != 1) ─────────────────────────────
+            #  API-level error (success != 1) 
             if data.get("success") != 1:
                 err_msg  = data.get("error", "unknown error")
                 err_code = data.get("error_code", "")
@@ -554,7 +554,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
                 )
                 raise RuntimeError(f"Indodax API error [{err_code}]: {err_msg}")
 
-            # ── Success path ───────────────────────────────────────────────
+            #  Success path 
             self._circuit_breaker.record_success()
             self._rate_limiter.on_success()
             return data.get("return", {})
@@ -571,7 +571,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
         """Normalise symbol to lowercase Indodax format, e.g. 'btcidr'."""
         return symbol.lower().replace("/", "").replace("_", "").replace("-", "")
 
-    # ── Account ───────────────────────────────────────────────────────────────
+    #  Account 
 
     def get_balance(self) -> dict:
         """Return IDR balance in the unified format."""
@@ -610,7 +610,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
                 })
         return result
 
-    # ── Market data ───────────────────────────────────────────────────────────
+    #  Market data 
 
     def get_ticker(self, symbol: str) -> dict:
         """Fetch the public ticker for *symbol* and return the unified format."""
@@ -637,7 +637,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
             "timestamp": int(float(raw.get("server_time", time.time())) * 1000),
         }
 
-    # ── Order management ─────────────────────────────────────────────────────
+    #  Order management 
 
     def place_order(
         self,
@@ -729,7 +729,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
             logger.warning("[IndodaxAdapter] cancel_order failed: %s", exc)
             return {"success": False, "order_id": order_id}
 
-    # ── Connectivity ──────────────────────────────────────────────────────────
+    #  Connectivity 
 
     def test_connection(self) -> bool:
         """Verify credentials by calling getInfo."""
@@ -744,7 +744,7 @@ class IndodaxAdapter(BaseExchangeAdapter):
         """Return current circuit breaker status for this adapter."""
         return self._circuit_breaker.get_status()
 
-    # ── Private helpers ───────────────────────────────────────────────────────
+    #  Private helpers 
 
     @staticmethod
     def _map_order(raw: dict) -> dict:

@@ -81,7 +81,7 @@ def _parse_engine_response(response):
                 return full_text
 
     except Exception as e:
-        logger.error(f"Error parsing LLM response: {e}")
+        logger.error(f"[SYSTEM] Error parsing LLM response: {e}")
 
     return str(response)
 
@@ -98,11 +98,11 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
         from utils.logger import log_message
         from litert_lm import Engine
         
-        log_message(f"🧠 LLM Worker: Initializing engine with {model_path}")
+        log_message(f"[LLM-WORKER] Initializing engine with {model_path}")
         engine = Engine(model_path, cache_dir=cache_dir)
         
         _consciousness_messages = []
-        log_message("🧠 LLM Worker: Engine initialized.")
+        log_message("[LLM-WORKER] Engine initialized.")
 
         _TASK_TIMEOUT_SEC = 90  # Per-task hard timeout to prevent hanging
 
@@ -131,7 +131,7 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                     try:
                         conv_messages = list(_consciousness_messages) if _consciousness_messages else []
                         with engine.create_conversation(messages=conv_messages) as conv:
-                            log_message(f"🧠 LLM Worker: Starting {mode} inference for {task_id} (attempt {attempt_num}/2)")
+                            log_message(f"[LLM-WORKER] Starting {mode} inference for {task_id} (attempt {attempt_num}/2)")
                             response = conv.send_message(prompt)
                             _inference_result[0] = _parse_engine_response(response)
                     except Exception as _ie:
@@ -148,13 +148,13 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                         # inference thread will remain alive until the worker process is restarted.
                         # The outer LLMWorker.check_results() watchdog handles process-level restart
                         # when needed, bounding the total lifecycle of any leaked thread.
-                        log_message(f"🧠 LLM Worker: Task {task_id} timed out after {_TASK_TIMEOUT_SEC}s. Aborting.")
+                        log_message(f"[LLM-WORKER] Task {task_id} timed out after {_TASK_TIMEOUT_SEC}s. Aborting.")
                         last_error = TimeoutError(f"Inference timed out after {_TASK_TIMEOUT_SEC}s")
                         break
                     if _inference_error[0] is not None:
                         last_error = _inference_error[0]
                         if _is_session_conflict(_inference_error[0]) and attempt == 0:
-                            log_message("🧠 LLM Worker: Session conflict detected, retrying task once...")
+                            log_message("[LLM-WORKER] Session conflict detected, retrying task once...")
                             continue
                         break
                     result = _inference_result[0]
@@ -163,15 +163,15 @@ def _llm_process_loop(req_queue, res_queue, model_path, cache_dir):
                 if result is None and last_error is not None:
                     raise last_error
 
-                log_message(f"🧠 LLM Worker: Task {task_id} completed.")
+                log_message(f"[LLM-WORKER] Task {task_id} completed.")
                 res_queue.put((task_id, task_type, result))
             except Exception as e:
                 friendly_err = _humanize_inference_error(e)
-                log_message(f"🧠 LLM Worker: Inference error - {friendly_err}")
+                log_message(f"[LLM-WORKER] Inference error - {friendly_err}")
                 if task_id:
                     res_queue.put((task_id, task_type, friendly_err))
     except Exception as e:
-        print(f"CRITICAL LLM ERROR: {e}")
+        print(f"[CRITICAL] LLM ERROR: {e}")
 
 class LLMWorker:
     _instance = None
@@ -234,7 +234,7 @@ class LLMWorker:
         
         if self.worker_process and self.worker_process.is_alive() and self._current_task_id:
             if (datetime.now() - self._current_task_ts).total_seconds() > 60:
-                logger.error(f"🧠 [LLMWorker] Task {self._current_task_id} HANGING. Restarting...")
+                logger.error(f"[LLM-WORKER] Task {self._current_task_id} HANGING. Restarting...")
                 self.worker_process.terminate()
                 self.worker_process.join(timeout=3)
                 if self.worker_process.is_alive():

@@ -61,7 +61,7 @@ logger = logging.getLogger("executive-core")
 # Install uvloop before any asyncio usage
 install_uvloop()
 
-# ── Velocity calculation window ────────────────────────────────────────────────
+#  Velocity calculation window 
 _VELOCITY_WINDOW = 5  # keep last N samples for smoothing
 
 
@@ -184,7 +184,7 @@ class ExecutiveCoreService:
         else:
             logger.warning("[executive-core] PrivateWS disabled: missing API credentials")
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     async def start(self) -> None:
         self._running = True
@@ -207,7 +207,7 @@ class ExecutiveCoreService:
         except Exception as exc:
             logger.warning(f"[executive-core] Market snapshot warmup skipped: {exc}")
 
-        logger.info("[executive-core] ✅ Started — subscribing to ZMQ streams.")
+        logger.info("[executive-core] [OK] Started — subscribing to ZMQ streams.")
 
         # Keep legacy reconciliation behavior at startup.
         try:
@@ -365,7 +365,7 @@ class ExecutiveCoreService:
 
         logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} IDR pairs")
 
-    # ── Signal consumer ───────────────────────────────────────────────────────
+    #  Signal consumer 
 
     async def _consume_signals(self) -> None:
         """Consume Signal messages from brain-inference and execute trades."""
@@ -390,10 +390,10 @@ class ExecutiveCoreService:
                             try:
                                 final_tp = float(parts[1])
                                 final_sl = float(parts[2])
-                                logger.info(f"[executive-core] 🧠 Using INTELLIGENT targets for {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
+                                logger.info(f"[EXECUTIVE] Using INTELLIGENT targets for {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
                             except Exception: pass
 
-                    logger.info(f"[executive-core] 🚀 Received BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    logger.info(f"[EXECUTIVE] Received BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
                     # Enqueue a buy order. 
                     # Use the domain execute_trade logic
                     from app.application.use_cases.trade_execution import execute_trade
@@ -425,7 +425,7 @@ class ExecutiveCoreService:
                     )
                 elif sig.action == 2:  # SELL
                     pair = str(sig.symbol or "").lower()
-                    logger.info(f"[executive-core] 🔻 Received SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    logger.info(f"[EXECUTIVE] Received SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
                     pos = db.get_position(pair)
                     if pos and pos.get("status") == "OPEN":
                         tick = self._ticks.get(pair)
@@ -444,7 +444,7 @@ class ExecutiveCoreService:
                                 ),
                             )
             except Exception as exc:
-                logger.error(f"[executive-core] Failed to parse signal: {exc}")
+                logger.error(f"[EXECUTIVE] Failed to parse signal: {exc}")
 
     async def _consume_llm_signals(self) -> None:
         """Consume Signal messages from litert-lm-decision (LLM signals).
@@ -463,8 +463,7 @@ class ExecutiveCoreService:
                 # [TECHNICAL_ONLY_MODE] Abaikan semua signal LLM jika mode teknikal aktif.
                 if cfg.TECHNICAL_ONLY_MODE:
                     logger.debug(
-                        f"[executive-core] 🚫 LLM signal untuk {sig.symbol} diabaikan "
-                        f"(TECHNICAL_ONLY_MODE aktif)"
+                        f"[EXECUTIVE] LLM signal for {sig.symbol} ignored (TECHNICAL_ONLY_MODE active)"
                     )
                     continue
 
@@ -482,10 +481,10 @@ class ExecutiveCoreService:
                             try:
                                 final_tp = float(parts[1])
                                 final_sl = float(parts[2])
-                                logger.info(f"[executive-core] 🧠 Using INTELLIGENT targets for LLM {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
+                                logger.info(f"[EXECUTIVE] Using INTELLIGENT targets for LLM {pair}: TP {final_tp*100:.2f}%, SL {final_sl*100:.2f}%")
                             except Exception: pass
 
-                    logger.info(f"[executive-core] 🤖 Received LLM BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    logger.info(f"[EXECUTIVE] Received LLM BUY signal for {pair} (conf: {sig.confidence:.1f}%)")
                     from app.application.use_cases.trade_execution import execute_trade
                     tq_prob = float(sig.confidence or 0.0)
                     if tq_prob > 1.0:
@@ -494,7 +493,7 @@ class ExecutiveCoreService:
                     tick_obj = self._ticks.get(pair)
                     entry_price = float(tick_obj.price) if tick_obj and float(tick_obj.price) > 0 else 0.0
                     if entry_price <= 0:
-                        logger.warning(f"[executive-core] LLM BUY signal ignored for {pair}: no valid tick price yet")
+                        logger.warning(f"[EXECUTIVE] LLM BUY signal ignored for {pair}: no valid tick price yet")
                         continue
 
                     loop = asyncio.get_event_loop()
@@ -513,7 +512,7 @@ class ExecutiveCoreService:
                     )
                 elif sig.action == 2:  # SELL
                     pair = str(sig.symbol or "").lower()
-                    logger.info(f"[executive-core] 🤖🔻 Received LLM SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
+                    logger.info(f"[EXECUTIVE] Received LLM SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
                     pos = db.get_position(pair)
                     if pos and pos.get("status") == "OPEN":
                         tick = self._ticks.get(pair)
@@ -532,9 +531,9 @@ class ExecutiveCoreService:
                                 ),
                             )
             except Exception as exc:
-                logger.error(f"[executive-core] Failed to parse LLM signal: {exc}")
+                logger.error(f"[EXECUTIVE] Failed to parse LLM signal: {exc}")
 
-    # ── Command consumer ───────────────────────────────────────────────────────
+    #  Command consumer 
 
     async def _consume_commands(self) -> None:
         """Consume command messages from dashboard (e.g., mode changes)."""
@@ -549,7 +548,7 @@ class ExecutiveCoreService:
                 
                 if action == "MODE_CHANGE":
                     new_dry_run = payload.get("dry_run")
-                    logger.info(f"[executive-core] 🔄 Mode Change Received: {'DRY RUN' if new_dry_run else 'LIVE'}")
+                    logger.info(f"[EXECUTIVE] Mode Change Received: {'DRY RUN' if new_dry_run else 'LIVE'}")
                     # Force reload of DB mode cache and config cache
                     import config as cfg
                     cfg.clear_dry_run_cache()
@@ -560,9 +559,9 @@ class ExecutiveCoreService:
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(None, self.exit_manager.reconcile_with_exchange)
             except Exception as exc:
-                logger.error(f"[executive-core] Failed to process command: {exc}")
+                logger.error(f"[EXECUTIVE] Failed to process command: {exc}")
 
-    # ── Tick consumer ─────────────────────────────────────────────────────────
+    #  Tick consumer 
 
     async def _consume_ticks(self) -> None:
         """Consume Tick messages from market-pipe and update P&L."""
@@ -574,7 +573,7 @@ class ExecutiveCoreService:
                 tick.ParseFromString(raw)
             except Exception as exc:
                 logger.error(
-                    f"[executive-core] Failed to parse tick message: {exc}"
+                    f"[EXECUTIVE] Failed to parse tick message: {exc}"
                 )
                 continue
             try:
@@ -602,7 +601,7 @@ class ExecutiveCoreService:
                         self._price_history[tick.symbol].pop(0)
 
             except Exception as exc:
-                logger.error(f"[executive-core] Tick processing error: {exc}")
+                logger.error(f"[EXECUTIVE] Tick processing error: {exc}")
 
     def _flush_ticker_history(self) -> None:
         """Flushes the buffered price history to DB for dashboard radar."""
@@ -614,9 +613,9 @@ class ExecutiveCoreService:
             if updates:
                 db.save_ticker_history_batch(updates)
         except Exception as e:
-            logger.error(f"[executive-core] Failed to flush ticker_history: {e}")
+            logger.error(f"[EXECUTIVE] Failed to flush ticker_history: {e}")
 
-    # ── P&L calculation ───────────────────────────────────────────────────────
+    #  P&L calculation 
 
     async def _update_unrealized_pnl(self) -> None:
         """
@@ -626,7 +625,7 @@ class ExecutiveCoreService:
         try:
             open_positions = db.get_open_positions()
         except Exception as exc:
-            logger.error(f"[executive-core] DB error fetching positions: {exc}")
+            logger.error(f"[EXECUTIVE] DB error fetching positions: {exc}")
             return
 
         if isinstance(open_positions, dict):
@@ -656,7 +655,7 @@ class ExecutiveCoreService:
 
         self._unrealized_pnl = total_unrealized
 
-        # ── Update Balance & Stats ────────────────────────────────────────────
+        #  Update Balance & Stats 
         try:
             # Update balance every 10 seconds to avoid rate limits
             if int(time.time()) % 10 == 0:
@@ -667,7 +666,7 @@ class ExecutiveCoreService:
             stats = db.get_all_time_stats()
             self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
         except Exception as e:
-            logger.debug(f"[executive-core] Balance/Stats fetch skip: {e}")
+            logger.debug(f"[EXECUTIVE] Balance/Stats fetch skip: {e}")
             pass
 
         net_pnl = self._realized_pnl + self._unrealized_pnl
@@ -677,7 +676,7 @@ class ExecutiveCoreService:
         if net_pnl > self._peak_equity:
             self._peak_equity = net_pnl
 
-        # ── Run guards ────────────────────────────────────────────────────────
+        #  Run guards 
         # In legacy-parity mode, ExitManager handles advanced exit orchestration.
         if not self._legacy_exit_enabled:
             self._net_zero.evaluate(net_pnl, self._velocity)
@@ -696,7 +695,7 @@ class ExecutiveCoreService:
             if dt > 0:
                 self._velocity = (net_pnl - oldest_pnl) / dt
 
-    # ── Equity broadcast ──────────────────────────────────────────────────────
+    #  Equity broadcast 
 
     async def _equity_broadcast_loop(self) -> None:
         """Publish EquityUpdate every second to ipc:///tmp/equity_stream.ipc."""
@@ -733,17 +732,17 @@ class ExecutiveCoreService:
                     _heartbeat_counter = 0
                     net_pnl = self._realized_pnl + self._unrealized_pnl
                     logger.info(
-                        f"[executive-core] ❤️  Heartbeat — Net PnL: {net_pnl:,.0f} IDR "
+                        f"[EXECUTIVE] Heartbeat — Net PnL: {net_pnl:,.0f} IDR "
                         f"(realized={self._realized_pnl:,.0f}, "
                         f"unrealized={self._unrealized_pnl:,.0f})"
                     )
 
             except Exception as exc:
-                logger.error(f"[executive-core] Equity broadcast error: {exc}")
+                logger.error(f"[EXECUTIVE] Equity broadcast error: {exc}")
 
             await asyncio.sleep(1.0)
 
-    # ── Order execution ───────────────────────────────────────────────────────
+    #  Order execution 
 
     async def _order_processor(self) -> None:
         """
@@ -822,14 +821,14 @@ class ExecutiveCoreService:
             )
         except Exception as exc:
             logger.error(f"[executive-core] Order execution failed: {exc}")
-            send_telegram_message(f"⚠️ Order error: {exc}")
+            send_telegram_message(f"[WARN] Order error: {exc}")
 
-    # ── Guard callbacks ───────────────────────────────────────────────────────
+    #  Guard callbacks 
 
     def _on_basket_exit(self, reason: str) -> None:
         """Triggered by NetZeroGuard — queue sell orders for all open positions."""
         logger.warning(f"[executive-core] BASKET_EXIT triggered: {reason}")
-        send_telegram_message(f"🚨 BASKET EXIT ({reason}) — closing all positions")
+        send_telegram_message(f"[CRITICAL] BASKET EXIT ({reason}) — closing all positions")
         self._queue_close_all(reason)
 
     def _on_profit_lock_exit(self, reason: str, floor: float) -> None:
@@ -838,7 +837,7 @@ class ExecutiveCoreService:
             f"[executive-core] PROFIT LOCK EXIT: {reason} | floor={floor:,.0f} IDR"
         )
         send_telegram_message(
-            f"🔒 PROFIT LOCK EXIT ({reason}) — floor={floor:,.0f} IDR"
+            f" PROFIT LOCK EXIT ({reason}) — floor={floor:,.0f} IDR"
         )
         self._queue_close_all(reason)
 
@@ -866,7 +865,7 @@ class ExecutiveCoreService:
             logger.error(f"[executive-core] _queue_close_all error: {exc}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+#  Entry point 
 
 def main() -> None:
     logger.info("=" * 60)

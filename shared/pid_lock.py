@@ -34,7 +34,7 @@ class PidLock:
         self._pid_file = pid_file
         self._acquired = False
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    #  Public API 
 
     def acquire(self) -> None:
         """
@@ -73,7 +73,7 @@ class PidLock:
             self._acquired = False
             logger.info(f"[PidLock] Released → {self._pid_file}")
 
-    # ── Context manager ───────────────────────────────────────────────────────
+    #  Context manager 
 
     def __enter__(self):
         self.acquire()
@@ -82,7 +82,7 @@ class PidLock:
     def __exit__(self, *_):
         self.release()
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    #  Helpers 
 
     def _read_pid(self) -> "int | None":
         try:

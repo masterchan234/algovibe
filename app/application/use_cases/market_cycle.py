@@ -40,7 +40,7 @@ def run_market_cycle(bot):
 
     if db.get_state("trigger_sync_all") == "1":
         db.save_state("trigger_sync_all", "0")
-        log_message("📡 MANUAL SYNC: Starting background Mass Account Sync...")
+        log_message("[ZMQ] MANUAL SYNC: Starting background Mass Account Sync...")
         threading.Thread(target=bot.exit_manager.sync_all_history, daemon=True).start()
 
     bot.oracle.update_consciousness(regime=regime)
@@ -56,9 +56,9 @@ def run_market_cycle(bot):
             try:
                 with open(LOG_FILE, 'w') as f:
                     f.write(f"--- Log rotated at {datetime.now()} ---\n")
-                log_message("📜 LOGS: File log telah dirotasi otomatis (Daily Reset).")
+                log_message(" LOGS: File log telah dirotasi otomatis (Daily Reset).")
             except Exception as e:
-                log_message(f"⚠️ LOGS: Gagal merotasi log: {e}")
+                log_message(f"[WARN] LOGS: Gagal merotasi log: {e}")
 
         db.prune_old_data(hours=24)
 
@@ -113,7 +113,7 @@ def run_market_cycle(bot):
             bal_data = bot.exchange.fetch_balance()
             bot.cached_balance = bal_data['free'].get('IDR', 0)
         except Exception as e:
-            log_message(f"⚠️ Balance Fetch Error: {e}")
+            log_message(f"[WARN] Balance Fetch Error: {e}")
             if "toomanyrequests" in str(e).lower():
                 time.sleep(10)
 

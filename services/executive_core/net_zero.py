@@ -69,7 +69,7 @@ class NetZeroGuard:
         # One-shot audit log flag.
         self._pretarget_logged: bool = False
 
-    # ── Public ────────────────────────────────────────────────────────────────
+    #  Public 
 
     def evaluate(
         self,
@@ -102,7 +102,7 @@ class NetZeroGuard:
 
         ts = now_ts or time.time()
 
-        # ── Guard is disarmed until target profit has been reached ────────────
+        #  Guard is disarmed until target profit has been reached 
         # Before target_reached, individual per-position SL/DCA handles losses.
         if not target_reached:
             if self._trigger_ts != 0.0:
@@ -115,7 +115,7 @@ class NetZeroGuard:
                 )
             return False
 
-        # ── Auto-recovery check ───────────────────────────────────────────────
+        #  Auto-recovery check 
         if self._fired and NET_ZERO_AUTO_RESET_SEC > 0:
             if self._fired_at > 0 and (ts - self._fired_at) >= NET_ZERO_AUTO_RESET_SEC:
                 if net_pnl > NET_ZERO_PNL_FLOOR_IDR:
@@ -139,7 +139,7 @@ class NetZeroGuard:
             if self._velocity_readings else 0.0
         )
 
-        # ── Immediate bypass — uses raw last velocity for fastest crash detection ──
+        #  Immediate bypass — uses raw last velocity for fastest crash detection 
         if (net_pnl <= NET_ZERO_PNL_FLOOR_IDR
                 and velocity < NET_ZERO_IMMEDIATE_VELOCITY):
             logger.warning(
@@ -149,7 +149,7 @@ class NetZeroGuard:
             self._fire("NET_ZERO_IMMEDIATE")
             return True
 
-        # ── Hysteresis condition — uses AVERAGE velocity (noise-filtered) ────────
+        #  Hysteresis condition — uses AVERAGE velocity (noise-filtered) 
         condition = (
             net_pnl <= NET_ZERO_PNL_FLOOR_IDR
             and avg_velocity < NET_ZERO_MOMENTUM_THRESHOLD
@@ -188,7 +188,7 @@ class NetZeroGuard:
         self._pretarget_logged = False
         logger.info("[NetZeroGuard] Session reset.")
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    #  Internal 
 
     def _fire(self, reason: str) -> None:
         self._fired = True

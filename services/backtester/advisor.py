@@ -31,7 +31,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
         cur.execute("SELECT * FROM backtest_results WHERE profile_id = %s ORDER BY created_at DESC LIMIT 1", (profile_id,))
         res = cur.fetchone()
         if not res:
-            print(f"   ⚠️ [NO DATA] {p['profile_name']} has no backtest_result row yet; skip tuning.")
+            print(f"   [WARN] [NO DATA] {p['profile_name']} has no backtest_result row yet; skip tuning.")
             return "no_data"
 
         total_pnl = res["total_pnl_idr"]
@@ -54,10 +54,10 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
 
         if reached_pnl or reached_roi:
             status = f"Rp {avg_daily_pnl:,.0f}/hari" if reached_pnl else f"{avg_daily_roi:.2f}%/hari"
-            print(f"   🏆 [DAILY TARGET REACHED] {p['profile_name']} ({status})")
+            print(f"   [WIN] [DAILY TARGET REACHED] {p['profile_name']} ({status})")
             return "target_reached"
 
-        logger.info("[tune] 🧠 Analyzing: Avg Rp {0:,.0f}/day (Target: {1:,.0f})".format(avg_daily_pnl, target_pnl_daily))
+        logger.info("[ADVISOR] Analyzing: Avg Rp {0:,.0f}/day (Target: {1:,.0f})".format(avg_daily_pnl, target_pnl_daily))
 
         new_p = dict(p)
         for k in ["id", "created_at", "updated_at"]:
@@ -122,10 +122,10 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
                 _set_if_changed("buy_threshold", round(max(4.0, float(new_p["buy_threshold"]) - 0.1), 2), "Undertrading guard: mildly increase signal frequency")
 
         if not changes:
-            print(f"   ℹ️ [NO CHANGE] {p['profile_name']} produced no parameter updates this generation.")
+            print(f"   ℹ [NO CHANGE] {p['profile_name']} produced no parameter updates this generation.")
             return "no_change"
 
-        print(f"   🧬 [MUTATION] {p['profile_name']} -> {new_p['profile_name']}")
+        print(f"    [MUTATION] {p['profile_name']} -> {new_p['profile_name']}")
         for key, old_val, new_val, reason in param_diffs:
             print(f"      - {key}: {old_val} -> {new_val} ({reason})")
 
@@ -608,7 +608,7 @@ def analyze_ohlcv_target_setup(
 ) -> dict:
     end = _get_latest_ohlcv_ts()
     if end is None:
-        print("❌ Tidak ada data ohlcv_1m untuk dianalisis.")
+        print(" Tidak ada data ohlcv_1m untuk dianalisis.")
         return {}
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
@@ -742,7 +742,7 @@ def analyze_ohlcv_target_setup(
         conn.close()
 
     if not rows:
-        print("❌ Tidak ada data ohlcv_1m pada window analisis.")
+        print(" Tidak ada data ohlcv_1m pada window analisis.")
         return {}
 
     universe = []
@@ -792,7 +792,7 @@ def analyze_ohlcv_target_setup(
         )
 
     if not universe:
-        print("❌ Pair hasil filter kosong. Cek --pairs terhadap symbol di DB.")
+        print(" Pair hasil filter kosong. Cek --pairs terhadap symbol di DB.")
         return {}
 
     ranked = sorted(universe, key=lambda x: (x["momentum_quality"], x["sharpe_day_like"], x["up_ratio"]), reverse=True)
@@ -871,7 +871,7 @@ def analyze_ohlcv_target_setup(
     best = top_k[0]
     recommendation = best["recommendation"]
 
-    print("\n📊 OHLCV_1M QUANT ANALYSIS (DATA-DRIVEN)")
+    print("\n[ANALYSIS] OHLCV_1M QUANT ANALYSIS (DATA-DRIVEN)")
     print(
         f"Window: {days} hari | Pair dianalisis: {len(universe)} | "
         f"Target: Rp {target_daily_pnl:,.0f}/hari | Balance: Rp {balance_idr:,.0f} | "
@@ -894,15 +894,15 @@ def analyze_ohlcv_target_setup(
     print(f" trades_needed_full_cap≈{best['math']['trades_needed_full_cap']:.2f}/hari")
 
     if best["math"]["edge_trade_raw"] <= 0:
-        print(" ℹ️ edge_effective memakai fallback floor 0.35% karena edge_raw <= 0.")
+        print(" ℹ edge_effective memakai fallback floor 0.35% karena edge_raw <= 0.")
 
     print("\nRecommended backtest_profiles setup:")
     for k, v in recommendation.items():
         print(f" - {k}: {v}")
 
     if best["math"]["trades_needed_full_cap"] > 6:
-        print("\n⚠️ Feasibility warning: target 5000/hari kemungkinan sangat agresif untuk balance ini pada edge historis saat ini.")
+        print("\n[WARN] Feasibility warning: target 5000/hari kemungkinan sangat agresif untuk balance ini pada edge historis saat ini.")
 
     _upsert_coin_analysis(window_start=start, window_end=end, target_daily_pnl=float(target_daily_pnl), balance_idr=float(balance_idr), rows=per_coin)
-    print(f"\n💾 Saved {len(per_coin)} row(s) to backtest_coin_analysis.")
+    print(f"\n Saved {len(per_coin)} row(s) to backtest_coin_analysis.")
     return {"top_pairs": top_k, "recommendation": recommendation, "math": best["math"], "per_coin": per_coin}

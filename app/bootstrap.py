@@ -105,5 +105,5 @@ def run_bot() -> None:
         bot = build_bot()
         bot.run()
     except Exception as e:
-        logger.critical(f"❌ FATAL: Bot crashed at startup: {e}\n{traceback.format_exc()}")
+        logger.critical(f" FATAL: Bot crashed at startup: {e}\n{traceback.format_exc()}")
         raise

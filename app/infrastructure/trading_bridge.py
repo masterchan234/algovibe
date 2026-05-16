@@ -3,7 +3,7 @@ TradingBridge — Exchange-agnostic middleware between the execution engine
                 and exchange adapters.
 
 Responsibilities
-────────────────
+
 1. Routing      — Instantiates the correct adapter for the configured
                   EXCHANGE value (env var or DB setting).
 2. Algorithm    — Net PnL, Momentum state, Break-even checks, and fee
@@ -18,7 +18,7 @@ Responsibilities
                   kept in sync for the Live Dashboard.
 
 Usage
-─────
+
     bridge = TradingBridge()                         # reads EXCHANGE from config/DB
     balance = bridge.get_balance()
     order   = bridge.place_order("btcidr", "buy", "limit", 0.001, 1_500_000_000)
@@ -38,7 +38,7 @@ from app.infrastructure.resilience import ExecutionSafety, ShadowSync, emergency
 
 logger = logging.getLogger(__name__)
 
-# ── Supported exchanges ───────────────────────────────────────────────────────
+#  Supported exchanges 
 _REGISTRY: dict[str, type] = {}
 
 def _register(exchange_id: str):
@@ -57,7 +57,7 @@ def _load_adapters():
     _REGISTRY.setdefault("indodax", IndodaxAdapter)
 
 
-# ── TradingBridge ─────────────────────────────────────────────────────────────
+#  TradingBridge 
 
 class TradingBridge:
     """Exchange-agnostic middleware hub.
@@ -115,7 +115,7 @@ class TradingBridge:
         self._adapter = adapter_cls(key, secret)
         self._exchange_id = resolved_id
 
-        # ── Resilience: Shadow Sync ───────────────────────────────────────────
+        #  Resilience: Shadow Sync 
         self._shadow_sync = ShadowSync(
             get_balances_fn=self.get_all_balances,
             notifier=emergency_notifier,
@@ -123,7 +123,7 @@ class TradingBridge:
 
         logger.info("[TradingBridge] Initialised with exchange='%s'.", resolved_id)
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
+    #  Internal helpers 
 
     @staticmethod
     def _read_exchange_id_from_db() -> str | None:
@@ -139,7 +139,7 @@ class TradingBridge:
         """Direct access to the underlying exchange adapter (use sparingly)."""
         return self._adapter
 
-    # ── Fee helpers ──────────────────────────────────────────────────────────
+    #  Fee helpers 
 
     def get_exchange_fees(self) -> dict:
         """Return the fee structure for the active exchange.
@@ -159,7 +159,7 @@ class TradingBridge:
             return fees["round_trip_taker"]
         return fees["maker_buy"] + fees["maker_sell"]
 
-    # ── PnL & Momentum calculations ──────────────────────────────────────────
+    #  PnL & Momentum calculations 
 
     def calculate_net_pnl(
         self,
@@ -255,7 +255,7 @@ class TradingBridge:
 
         return {"state": state, "velocity": round(avg_velocity, 4)}
 
-    # ── Bridge actions — each one calls the adapter + persists to DB ─────────
+    #  Bridge actions — each one calls the adapter + persists to DB 
 
     def get_balance(self) -> dict:
         """Fetch balance and persist to account_balances table."""
@@ -285,7 +285,7 @@ class TradingBridge:
         """Place an order via the adapter and persist the result to order_book.
 
         Resilience features
-        ───────────────────
+        
         • Min-trade volume guard: rejects orders below MIN_TRADE_IDR.
         • Insufficient-balance retry: on a BUY 'insufficient balance' error,
           decrements volume by 1.5 % and retries once.
@@ -298,7 +298,7 @@ class TradingBridge:
         """
         from config import MIN_TRADE_IDR
 
-        # ── Resolve execution price for pre-flight checks ─────────────────────
+        #  Resolve execution price for pre-flight checks 
         exec_price = price or 0.0
         if exec_price <= 0:
             try:
@@ -318,10 +318,10 @@ class TradingBridge:
                     f"is below MIN_TRADE_IDR={MIN_TRADE_IDR}."
                 )
 
-        # ── Min-trade volume guard ────────────────────────────────────────────
+        #  Min-trade volume guard 
         _check_min_trade(volume)
 
-        # ── Place order with insufficient-balance retry (BUY only) ───────────
+        #  Place order with insufficient-balance retry (BUY only) 
         actual_volume = volume
         try:
             order = self._adapter.place_order(symbol, side, order_type, actual_volume, price)
@@ -459,7 +459,7 @@ class TradingBridge:
             "shadow_sync_running": self._shadow_sync.is_running(),
         }
 
-    # ── DB persistence helpers ────────────────────────────────────────────────
+    #  DB persistence helpers 
 
     @staticmethod
     def _get_db():

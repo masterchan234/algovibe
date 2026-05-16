@@ -14,9 +14,9 @@ import numpy as np
 _MACD_NORM_FACTOR = 1000
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# 
 # INDICATOR CALCULATIONS
-# ──────────────────────────────────────────────────────────────────────────────
+# 
 
 def calculate_rsi(prices, periods=14):
     """
@@ -362,9 +362,9 @@ def calculate_obv(prices, volumes):
     return obv_now, obv_slope_pct
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# 
 # MULTI-INDICATOR CONFLUENCE ENGINE
-# ──────────────────────────────────────────────────────────────────────────────
+# 
 
 def get_technical_summary(prices, volumes=None):
     """
@@ -473,7 +473,7 @@ def get_technical_summary(prices, volumes=None):
 def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h=None):
     """
     Multi-Confluence Technical Signal Engine (v2.0)
-    ────────────────────────────────────────────────
+    
     Keputusan BUY/SELL/HOLD berdasarkan SKOR BOBOT dari semua indikator.
     Tidak ada bias AI. Setiap indikator memberikan vote dengan bobot berbeda.
 
@@ -511,7 +511,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     Syarat SELL: sell_score >= 6.0 DAN buy_score < 4.0
     Else       : HOLD
     """
-    # ── Sector-based weight modifiers ────────────────────────────────────────
+    #  Sector-based weight modifiers 
     # Setiap sektor punya karakteristik berbeda — weight disesuaikan agar
     # indikator yang paling relevan mendapat bobot lebih besar.
     # Default = 1.0 (perilaku identik dengan sebelumnya untuk unknown sector).
@@ -552,14 +552,14 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
                   'ob': 1.0, 'vol': 1.0, 'obv': 1.0}
     sw = _SECTOR_WEIGHTS.get(str(sector or '').upper(), _DEFAULT_W)
 
-    # ── Volume Reliability Guard ──────────────────────────────────────────────
+    #  Volume Reliability Guard 
     # Coin dengan volume harian sangat tipis: OBV & Volume Ratio tidak reliable.
     _VOL_RELIABILITY_THRESHOLD = 200_000_000  # 200M IDR
     vol_mult = 1.0
     if vol_idr_24h is not None and float(vol_idr_24h or 0) < _VOL_RELIABILITY_THRESHOLD:
         vol_mult = 0.3  # downgrade bobot volume-based indicators
 
-    # ── Adaptive thresholds (per-coin overrides) ─────────────────────────────
+    #  Adaptive thresholds (per-coin overrides) 
     _at = adaptive_thresholds or {}
     RSI_OVERSOLD   = float(_at.get('rsi_oversold',  35.0))
     RSI_OVERBOUGHT = float(_at.get('rsi_overbought', 70.0))
@@ -633,7 +633,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     sell_score = 0.0
     signals    = []   # List alasan untuk logging
 
-    # ── 1. RSI (Bobot 3.0 × sector_weight) ───────────────────────────────────
+    #  1. RSI (Bobot 3.0 × sector_weight) 
     _w_rsi = 3.0 * sw['rsi']
     if rsi < RSI_DEEP_OVERSOLD:
         buy_score += _w_rsi
@@ -657,7 +657,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         buy_score  -= _w_rsi * 0.3
         signals.append(f"RSI high({rsi:.0f})")
 
-    # ── 2. MACD Histogram (Bobot 2.5 × sector_weight) ────────────────────────
+    #  2. MACD Histogram (Bobot 2.5 × sector_weight) 
     # Normalisasi price-relative: hindari scale bias antar koin IDR.
     # Menggunakan (|hist| / harga) * _MACD_NORM_FACTOR agar sinyal konsisten.
     _w_macd = sw['macd']
@@ -670,7 +670,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += min(2.5, 1.0 + strength * 1.5) * _w_macd
         signals.append(f"MACD bearish({mh:+.4f})")
 
-    # ── 3. Bollinger %B (Bobot 2.0 × sector_weight) ──────────────────────────
+    #  3. Bollinger %B (Bobot 2.0 × sector_weight) 
     _w_bb = sw['bb']
     if bb < BB_EXTREME_LOW:
         buy_score += 2.0 * _w_bb
@@ -685,7 +685,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 1.2 * _w_bb
         signals.append(f"BB high({bb:.2f})")
 
-    # ── 4. Stochastic RSI (Bobot 2.0 × sector_weight) ────────────────────────
+    #  4. Stochastic RSI (Bobot 2.0 × sector_weight) 
     # K dan D harus bergerak bersama (konfirmasi)
     _w_stoch = sw['stoch']
     if sk < STOCH_K_OVERSOLD and sd < STOCH_D_OVERSOLD:
@@ -711,7 +711,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 0.5 * _w_stoch
         signals.append("StochRSI K<D bearish-cross")
 
-    # ── 5. EMA Crossover (Bobot 1.5 × sector_weight) ─────────────────────────
+    #  5. EMA Crossover (Bobot 1.5 × sector_weight) 
     _w_ema = sw['ema']
     if ema_cr == "BULLISH":
         buy_score += 1.5 * _w_ema
@@ -720,7 +720,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 1.5 * _w_ema
         signals.append("EMA9<EMA21 bearish")
 
-    # ── 6. Williams %R (Bobot 1.5 × sector_weight) ───────────────────────────
+    #  6. Williams %R (Bobot 1.5 × sector_weight) 
     # Konfirmator oversold/overbought yang independen dari RSI — range -100 s/d 0.
     # Oversold (<=-80) memperkuat sinyal BUY; overbought (>=-20) memperkuat SELL.
     _w_wr = sw['wr']
@@ -737,7 +737,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 1.0 * _w_wr
         signals.append(f"W%R overbought({wr:.0f})")
 
-    # ── 7. Slope/Momentum (Bobot 1.0 × sector_weight) ────────────────────────
+    #  7. Slope/Momentum (Bobot 1.0 × sector_weight) 
     _w_slope = sw['slope']
     if slope > SLOPE_STRONG_UP:
         buy_score += 1.0 * _w_slope
@@ -752,7 +752,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 0.5 * _w_slope
         signals.append(f"slope down({slope:.4f})")
 
-    # ── 8. Rate of Change / ROC-10 (Bobot 1.0 × sector_weight) ──────────────
+    #  8. Rate of Change / ROC-10 (Bobot 1.0 × sector_weight) 
     # Interpretasi mean-reversion: harga turun tajam = potensi bounce (BUY),
     # harga naik tajam = potensi koreksi (SELL).
     _w_roc = sw['roc']
@@ -769,7 +769,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score += 0.5 * _w_roc
         signals.append(f"ROC mild-up({roc:.2f}%)")
 
-    # ── 9. Order Book Buy Pressure (Bobot 2.0 × sector_weight) ───────────────
+    #  9. Order Book Buy Pressure (Bobot 2.0 × sector_weight) 
     # Jika data OB tersedia (bp != 50.0 default), gunakan langsung.
     # Jika OB tidak ada, fallback: volume spike → proxy demand, volume kering → proxy supply.
     _w_ob = sw['ob']
@@ -796,7 +796,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
             sell_score += 1.0 * _w_ob
             signals.append(f"OB-fallback: Vol dry({vr:.1f}x) supply proxy")
 
-    # ── 10. Volume Ratio (Bobot 1.5 × sector_weight × vol_reliability) ───────
+    #  10. Volume Ratio (Bobot 1.5 × sector_weight × vol_reliability) 
     # Hanya aktif jika data volume tersedia (vr != 1.0 default berarti ada data nyata).
     # Spike volume (>1.5x) mengkonfirmasi breakout valid.
     # Volume sepi (<0.5x) memperlemah sinyal arah apapun.
@@ -815,7 +815,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
             sell_score += 0.5 * _w_vol
             signals.append(f"Vol low({vr:.1f}x)")
 
-    # ── 11. OBV Slope (Bobot 1.5 × sector_weight × vol_reliability) ──────────
+    #  11. OBV Slope (Bobot 1.5 × sector_weight × vol_reliability) 
     # OBV naik = akumulasi (smart money beli diam-diam) → BUY bias.
     # OBV turun = distribusi (smart money jual diam-diam) → SELL bias.
     # Divergence: harga naik tapi OBV turun adalah sinyal jual kuat.
@@ -834,7 +834,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
             sell_score += 0.8 * _w_obv
             signals.append(f"OBV falling({obv_sl:+.1f}%)")
 
-    # ── 12. EMA-9 Extension Guard (Bobot -2.0 fixed penalty) ───────────────
+    #  12. EMA-9 Extension Guard (Bobot -2.0 fixed penalty) 
     # Jika harga melambung terlalu jauh di atas EMA-9 tanpa pullback,
     # risiko koreksi (mean-reversion) sangat tinggi.
     _ema_dist_pct = (last_price - ema9) / ema9 * 100.0 if ema9 > 0 else 0
@@ -845,7 +845,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         sell_score -= 2.0
         signals.append(f"Vertical crash({_ema_dist_pct:.1f}% < EMA9) [PENALTY]")
 
-    # ── KEPUTUSAN AKHIR (Multi-Confluence Gate) ───────────────────────────────
+    #  KEPUTUSAN AKHIR (Multi-Confluence Gate) 
     verdict    = 'HOLD'
     confidence = 50
     _sector_tag = f"[sector={sector}] " if sector else ""

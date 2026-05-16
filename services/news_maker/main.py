@@ -109,7 +109,7 @@ class NewsMaker:
             from litert_lm import Engine
             os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
             self._engine = Engine(MODEL_PATH, cache_dir=MODEL_CACHE_DIR)
-            logger.info("[news-maker] ✅ News Engine Ready.")
+            logger.info("[NEWS-MAKER] News Engine Ready.")
             return True
         except Exception as exc:
             if remote_ready:
@@ -122,7 +122,7 @@ class NewsMaker:
         self._running = True
         self._market_sub.start()
         self._signal_sub.start()
-        logger.info("[news-maker] ✅ Service Started.")
+        logger.info("[NEWS-MAKER] Service Started.")
         await asyncio.gather(
             self._scheduler_loop(),
             self._realtime_monitor_loop(),
@@ -817,7 +817,7 @@ class NewsMaker:
         if not self._engine_enabled:
             return
         
-        direction = "📈 Naik" if move_data['pct_change'] >= 0 else "📉 Turun"
+        direction = "Naik" if move_data['pct_change'] >= 0 else "Turun"
         pct_source = str(move_data.get("pct_source") or "auto")
         logger.info(
             "[news-maker] Generating Headline: %s %s (%.1f%% | src=%s)",
@@ -1269,7 +1269,7 @@ class NewsMaker:
             article["content"] = content
             return article
 
-        # ── Build data-driven extension dari context yang sudah terstruktur ──
+        #  Build data-driven extension dari context yang sudah terstruktur 
         extension = self._build_content_extension(content, context)
 
         _ext_count = 0
@@ -1291,7 +1291,7 @@ class NewsMaker:
         existing_lower = str(existing_content or "").lower()
         parts = []
 
-        # ── Parse context untuk data konkret ──
+        #  Parse context untuk data konkret 
         ctx_str = str(context or "")
         movers = self._parse_context_movers(ctx_str)
         regime = "NEUTRAL"
@@ -1303,7 +1303,7 @@ class NewsMaker:
         if sentiment_m:
             sentiment = sentiment_m.group(1)
 
-        # ── Section: Level & Strategi (skip jika sudah ada) ──
+        #  Section: Level & Strategi (skip jika sudah ada) 
         if "level" not in existing_lower or "strategi" not in existing_lower:
             strat = "## Level & Strategi\n\n"
             if regime == "BULL":
@@ -1339,7 +1339,7 @@ class NewsMaker:
                 )
             parts.append(strat)
 
-        # ── Section: Risiko & Skenario (skip jika sudah ada) ──
+        #  Section: Risiko & Skenario (skip jika sudah ada) 
         if "risiko" not in existing_lower:
             risk = (
                 "## Risiko & Manajemen\n\n"
@@ -1350,7 +1350,7 @@ class NewsMaker:
             )
             parts.append(risk)
 
-        # ── Section: Snapshot Pasar (data movers dari context, bukan raw dump) ──
+        #  Section: Snapshot Pasar (data movers dari context, bukan raw dump) 
         if movers and "snapshot" not in existing_lower:
             snap = "## Snapshot Pasar Terkini\n\n"
             snap += f"Regime pasar: **{regime}** | Sentimen: **{sentiment}%**\n\n"
@@ -1368,7 +1368,7 @@ class NewsMaker:
                 snap += "\n"
             parts.append(snap)
 
-        # ── Section: Validasi Pre-Entry (checklist konkret) ──
+        #  Section: Validasi Pre-Entry (checklist konkret) 
         if "validasi" not in existing_lower and "checklist" not in existing_lower:
             check = (
                 "## Validasi Teknikal Pre-Entry\n\n"
@@ -1381,7 +1381,7 @@ class NewsMaker:
             )
             parts.append(check)
 
-        # ── Section: Kesimpulan (skip jika sudah ada) ──
+        #  Section: Kesimpulan (skip jika sudah ada) 
         if "kesimpulan" not in existing_lower:
             regime_narr = {
                 "BULL": "Kondisi pasar bullish mendukung posisi long dengan manajemen risiko ketat.",
@@ -1819,7 +1819,7 @@ class NewsMaker:
 
         relaxed = self._parse_json_relaxed(text)
         if relaxed:
-            logger.info("[news-maker] ✅ Relaxed JSON parse success")
+            logger.info("[news-maker] [OK] Relaxed JSON parse success")
             return relaxed
 
         # 1) Direct strict JSON object
@@ -1827,7 +1827,7 @@ class NewsMaker:
             direct = json.loads(text)
             normalized = self._normalize_article(direct)
             if normalized:
-                logger.info("[news-maker] ✅ Direct JSON parse success")
+                logger.info("[news-maker] [OK] Direct JSON parse success")
                 return normalized
         except Exception as e:
             logger.info("[news-maker] Direct parse fail: %s", str(e)[:80])
@@ -1838,7 +1838,7 @@ class NewsMaker:
                 direct = json.loads(repaired_direct)
                 normalized = self._normalize_article(direct)
                 if normalized:
-                    logger.info("[news-maker] ✅ Repaired direct JSON parse success")
+                    logger.info("[news-maker] [OK] Repaired direct JSON parse success")
                     return normalized
             except Exception:
                 pass
@@ -1850,7 +1850,7 @@ class NewsMaker:
                 block_obj = json.loads(block_match.group(1))
                 normalized = self._normalize_article(block_obj)
                 if normalized:
-                    logger.info("[news-maker] ✅ Codeblock JSON parse success")
+                    logger.info("[news-maker] [OK] Codeblock JSON parse success")
                     return normalized
             except Exception as e:
                 logger.info("[news-maker] Codeblock parse fail: %s", str(e)[:80])
@@ -1878,7 +1878,7 @@ class NewsMaker:
             if parsed is not None:
                 normalized = self._normalize_article(parsed)
                 if normalized:
-                    logger.info("[news-maker] ✅ Candidate %d normalized ok", i)
+                    logger.info("[news-maker] [OK] Candidate %d normalized ok", i)
                     return normalized
                 logger.info("[news-maker] Candidate %d failed normalize", i)
             elif parse_error is not None:
@@ -1887,7 +1887,7 @@ class NewsMaker:
         # 4) Loose extraction fallback for malformed but key-complete objects.
         loose = self._parse_loose_article_object(text)
         if loose:
-            logger.info("[news-maker] ✅ Loose JSON-like parse success")
+            logger.info("[news-maker] [OK] Loose JSON-like parse success")
             return loose
 
         return None

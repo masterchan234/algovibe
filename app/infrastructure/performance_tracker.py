@@ -8,7 +8,7 @@ Struktur Biaya per Transaksi (Buy atau Sell):
   - Maker Fee    : 0.10% dari nilai transaksi
   - PPh Pasal 22 : 0.10% dari nilai transaksi (pajak penghasilan kripto)
   - PPN          : 0.11% dari nilai transaksi (Pajak Pertambahan Nilai)
-  ──────────────────────────────────────────────────────────────
+  
   Total per sisi : 0.31% per transaksi
   Total roundtrip: 0.62% (Buy + Sell)
 
@@ -46,17 +46,17 @@ def calculate_24h_performance(reference_ts: float | None = None) -> dict:
         "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode":             "DRY RUN" if config.DRY_RUN else "LIVE",
 
-        # ── Ringkasan Utama ──────────────────────────────────────────────────
+        #  Ringkasan Utama 
         "total_trades":     total_trades,
         "win_count":        winning_trades,
         "loss_count":       losing_trades,
         "win_rate_pct":     round(win_rate,        2),
         "avg_net_pnl_idr":  round(avg_net_pnl,     2),
 
-        # ── P&L ─────────────────────────────────────────────────────────────
+        #  P&L 
         "total_net_pnl":    round(total_net_pnl,   2),
 
-        # ── Fee Breakdown ────────────────────────────────────────────────────
+        #  Fee Breakdown 
         "fee_breakdown": {
             "maker_fee_pct":  f"{MAKER_FEE*100:.2f}%",
             "pph_pct":        f"{PPH_RATE*100:.2f}%",
@@ -79,14 +79,14 @@ def print_daily_summary(report: dict) -> None:
 
     lines = [
         sep,
-        f"  📊 LAPORAN PERFORMA 24 JAM ({report['mode']}) — {report['generated_at']}",
+        f"  [STATS] LAPORAN PERFORMA 24 JAM ({report['mode']}) — {report['generated_at']}",
         sep,
         f"  Total Trade    : {report['total_trades']}  "
             f"(Win: {report['win_count']} | Loss: {report['loss_count']})",
         f"  Win Rate       : {report['win_rate_pct']:.1f}%",
         f"  Avg Net/Trade  : Rp {report['avg_net_pnl_idr']:,.0f}",
         sep2,
-        f"  ── Net PnL ──►  Rp {report['total_net_pnl']:>12,.2f}",
+        f"   Net PnL   Rp {report['total_net_pnl']:>12,.2f}",
         sep2,
     ]
 

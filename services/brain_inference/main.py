@@ -143,7 +143,7 @@ class BrainInferenceService:
         self._backfill_thread = threading.Thread(target=self._backfill_historical_data, daemon=True)
         self._backfill_thread.start()
 
-        logger.info("[brain-inference] ✅ Started — subscribing to ticks.")
+        logger.info("[brain-inference] [OK] Started — subscribing to ticks.")
         
         # Start the analysis loop in a separate thread to not block tick consumption
         self._analysis_thread = threading.Thread(target=self._analysis_loop, daemon=True)
@@ -296,7 +296,7 @@ class BrainInferenceService:
 
     def _backfill_historical_data(self):
         """Restore 1h price history for all IDR pairs via Indodax public OHLC API."""
-        logger.info("[brain-inference] ⏳ Starting Smart Backfill (native OHLC API)...")
+        logger.info("[brain-inference]  Starting Smart Backfill (native OHLC API)...")
         db.save_state("backfill_status", "SYNCING")
 
         try:
@@ -308,11 +308,11 @@ class BrainInferenceService:
 
             total_pairs = len(idr_pairs)
             if not idr_pairs:
-                logger.info("[brain-inference] ✅ All pairs already warm. Skipping backfill.")
+                logger.info("[brain-inference] [OK] All pairs already warm. Skipping backfill.")
                 db.save_state("backfill_status", "COMPLETED")
                 return
 
-            logger.info("[brain-inference] 📦 Syncing %d pairs via OHLC API...", total_pairs)
+            logger.info("[brain-inference]  Syncing %d pairs via OHLC API...", total_pairs)
 
             def fetch_one(pair_id):
                 try:
@@ -365,11 +365,11 @@ class BrainInferenceService:
             if all_updates:
                 db.save_ticker_history_batch(all_updates)
 
-            logger.info("[brain-inference] ✅ Backfill completed for %d pairs.", len(all_updates))
+            logger.info("[brain-inference] [OK] Backfill completed for %d pairs.", len(all_updates))
             db.save_state("backfill_status", "COMPLETED")
 
         except Exception as e:
-            logger.error("[brain-inference] ⚠️ Backfill failed: %s", e)
+            logger.error("[brain-inference] [WARN] Backfill failed: %s", e)
             db.save_state("backfill_status", "FAILED")
 
     def _refresh_market_movers(self):
@@ -412,14 +412,12 @@ class BrainInferenceService:
                     # Update change_24h dengan nilai akurat dari summaries
                     self._tickers[pair_norm]["change_24h"] = m["change_24h"]
 
-            gainers_preview  = [(g["pair"], f"+{g['change_24h']:.1f}%") for g in movers.get("gainers", [])[:5]]
-            trending_preview = [(t["pair"], f"{t['vol_idr']/1e9:.2f}B") for t in movers.get("trending", [])[:5]]
-            logger.info("[brain] 📈 Top Gainers 24h: %s", gainers_preview)
-            logger.info("[brain] 🔥 Trending (vol):  %s", trending_preview)
+            logger.info("[BRAIN] Top Gainers 24h: %s", movers.get('gainers_brief'))
+            logger.info("[BRAIN] Trending (vol): %s", movers.get('trending_brief'))
             if seeded > 0:
-                logger.info("[brain] 🌱 Seeded %d mover pair ke scan universe.", seeded)
+                logger.info("[BRAIN] Seeded %d mover pair ke scan universe.", seeded)
         except Exception as e:
-            logger.warning("[brain] fetch_market_movers gagal: %s", e)
+            logger.warning("[BRAIN] fetch_market_movers gagal: %s", e)
 
     @staticmethod
     def _ema(values, period):
@@ -474,7 +472,7 @@ class BrainInferenceService:
         if detail.startswith("error="):
             stats["errors"] += 1
             if stats["errors"] <= 3:
-                logger.warning("[brain] ⚠️ TREND15 ERROR: %s (%s)", pair, detail)
+                logger.warning("[brain] [WARN] TREND15 ERROR: %s (%s)", pair, detail)
 
         if passed:
             stats["passed"] += 1
@@ -488,7 +486,7 @@ class BrainInferenceService:
             pass_rate = (stats["passed"] / checked) * 100.0
             block_rate = (stats["blocked"] / checked) * 100.0
             logger.info(
-                "[brain] 📊 TREND15 STATS %ds | checked=%d pass=%d (%.1f%%) block=%d (%.1f%%) error=%d",
+                "[BRAIN] TREND15 STATS %ds | checked=%d pass=%d (%.1f%%) block=%d (%.1f%%) error=%d",
                 int(elapsed),
                 stats["checked"],
                 stats["passed"], pass_rate,
@@ -599,10 +597,10 @@ class BrainInferenceService:
                     trend_passed, trend_detail = self._passes_15m_trend_filter(pair)
                     self._record_trend15_stat(pair, trend_passed, trend_detail)
                     if not trend_passed:
-                        logger.info("[brain] ⏸ TREND15 FILTER: %s blocked (%s)", pair, trend_detail)
+                        logger.info("[BRAIN] TREND15 FILTER: %s blocked (%s)", pair, trend_detail)
                         continue
 
-                    # ── Trade Flow Guard ──────────────────────────────────────
+                    #  Trade Flow Guard 
                     # Cek tape (50 transaksi publik terakhir) sebelum commit signal.
                     # Jika seller mendominasi (net_pressure=SELL, flow_ratio <0.4),
                     # tunda signal — hindari beli di tengah gelombang jual.
@@ -610,17 +608,17 @@ class BrainInferenceService:
                         flow = self._adapter.fetch_trade_flow(pair, limit=50)
                         if flow.get("net_pressure") == "SELL" and flow.get("flow_ratio", 0.5) < 0.4:
                             logger.info(
-                                "[brain] ⏸ FLOW GUARD: %s — tape seller-dominated "
-                                "(flow_ratio=%.2f), signal ditunda.",
+                                "[BRAIN] FLOW GUARD: %s - tape seller-dominated "
+                                "(flow_ratio=%.2f), signal delayed.",
                                 pair, flow["flow_ratio"]
                             )
                             continue
                     except Exception:
                         pass  # Jika API gagal, biarkan signal lanjut
-                    # ─────────────────────────────────────────────────────────
+                    # 
 
                     logger.info(
-                        f"[brain-inference] 🔥 SIGNAL DETECTED: {pair} "
+                        f"[BRAIN] SIGNAL DETECTED: {pair} "
                         f"(gate={gate_conf:.1f}%, tq_prob={tq_prob * 100:.1f}%)"
                     )
                     

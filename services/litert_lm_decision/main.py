@@ -115,7 +115,7 @@ class LiteRTLmDecisionService:
 
             os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
             self._engine = Engine(MODEL_PATH, cache_dir=MODEL_CACHE_DIR)
-            logger.info("[litert-lm-decision] ✅ LiteRT-LM ready.")
+            logger.info("[litert-lm-decision] [OK] LiteRT-LM ready.")
             return True
         except Exception as exc:
             logger.error("[litert-lm-decision] Failed to init LiteRT-LM: %s", exc)
@@ -128,7 +128,7 @@ class LiteRTLmDecisionService:
         self._signal_pub.start()
         self._stop_event = asyncio.Event()
 
-        logger.info("[litert-lm-decision] ✅ Started.")
+        logger.info("[litert-lm-decision] [OK] Started.")
         await asyncio.gather(
             self._consume_ticks(),
             self._decision_loop(),
@@ -277,7 +277,7 @@ class LiteRTLmDecisionService:
                 continue
             self._publish_buy_signal(pair, result["confidence"])
             logger.info(
-                "[litert-lm-decision] 🟢 BUY %s (%.0f%%) | %s",
+                "[litert-lm-decision] [RECOVERY] BUY %s (%.0f%%) | %s",
                 pair,
                 result["confidence"],
                 result["reason"],
@@ -342,7 +342,7 @@ class LiteRTLmDecisionService:
             self._publish_sell_signal(pair, result["confidence"])
             self._last_emitted[pair] = now
             logger.info(
-                "[litert-lm-decision] 🔻 SELL %s (%.0f%%) | %s",
+                "[litert-lm-decision] [SELL] SELL %s (%.0f%%) | %s",
                 pair,
                 result["confidence"],
                 result["reason"],
@@ -366,7 +366,7 @@ class LiteRTLmDecisionService:
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - t0) * 1000
             logger.warning(
-                "[litert-lm-decision] ⏱ Timeout %s setelah %.0f ms (limit %.0f s) — HOLD",
+                "[litert-lm-decision]  Timeout %s setelah %.0f ms (limit %.0f s) — HOLD",
                 pair, elapsed_ms, self._timeout_sec,
             )
             db.log_system_event(
@@ -379,7 +379,7 @@ class LiteRTLmDecisionService:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[litert-lm-decision] %s inferensi %.0f ms", pair, elapsed_ms)
         if elapsed_ms > 5000:
-            logger.warning("[litert-lm-decision] ⚠ Inferensi lambat %s: %.0f ms", pair, elapsed_ms)
+            logger.warning("[litert-lm-decision]  Inferensi lambat %s: %.0f ms", pair, elapsed_ms)
         return self._validate_decision(ctx, decision)
 
     def _build_pair_context(self, pair: str, pos: dict) -> dict | None:
@@ -516,7 +516,7 @@ class LiteRTLmDecisionService:
             with self._engine_lock:
                 lock_wait = (time.perf_counter() - t_lock) * 1000
                 if lock_wait > 500:
-                    logger.warning("[litert-lm-decision] ⏳ Lock wait for %s: %.0f ms", ctx.get('pair'), lock_wait)
+                    logger.warning("[litert-lm-decision]  Lock wait for %s: %.0f ms", ctx.get('pair'), lock_wait)
                 with self._engine.create_conversation() as conv:
                     raw = conv.send_message(prompt)
             text = self._extract_text(raw)
@@ -537,14 +537,14 @@ class LiteRTLmDecisionService:
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - t0) * 1000
             logger.warning(
-                "[litert-lm-decision] ⏱ Scan timeout %s setelah %.0f ms — HOLD",
+                "[litert-lm-decision]  Scan timeout %s setelah %.0f ms — HOLD",
                 pair, elapsed_ms,
             )
             return {"action": "HOLD", "confidence": 0.0, "reason": "llm_timeout"}
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[litert-lm-decision] scan %s inferensi %.0f ms", pair, elapsed_ms)
         if elapsed_ms > 5000:
-            logger.warning("[litert-lm-decision] ⚠ Scan inferensi lambat %s: %.0f ms", pair, elapsed_ms)
+            logger.warning("[litert-lm-decision]  Scan inferensi lambat %s: %.0f ms", pair, elapsed_ms)
         return self._validate_entry_decision(ctx, decision)
 
     def _prompt_entry(self, ctx: dict) -> str:
@@ -574,7 +574,7 @@ class LiteRTLmDecisionService:
             with self._engine_lock:
                 lock_wait = (time.perf_counter() - t_lock) * 1000
                 if lock_wait > 500:
-                    logger.warning("[litert-lm-decision] ⏳ Lock wait scan %s: %.0f ms", ctx.get('pair'), lock_wait)
+                    logger.warning("[litert-lm-decision]  Lock wait scan %s: %.0f ms", ctx.get('pair'), lock_wait)
                 with self._engine.create_conversation() as conv:
                     raw = conv.send_message(prompt)
             text = self._extract_text(raw)

@@ -38,9 +38,9 @@ def dispatch_entry(bot, p, enriched, gate, target):
         err_msg = str(e).lower()
         if "toomanyrequests" in err_msg:
             log_message(
-                "🛑 [Rate Limit] Terlalu banyak permintaan! Hibernasi 60 detik agar IP kembali bersih..."
+                " [Rate Limit] Terlalu banyak permintaan! Hibernasi 60 detik agar IP kembali bersih..."
             )
             time.sleep(60)
         else:
-            log_message(f"⚠️ Trade Error [{pair}]: {e}")
+            log_message(f"[WARN] Trade Error [{pair}]: {e}")
         return False

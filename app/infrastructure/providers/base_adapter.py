@@ -7,7 +7,7 @@ execution engine only ever calls these standard methods, never exchange-
 specific APIs directly.
 
 Unified response contracts
-──────────────────────────
+
 get_balance()
     {"asset": str, "free": float, "used": float, "total": float}
 
@@ -50,7 +50,7 @@ from typing import Any
 class BaseExchangeAdapter(ABC):
     """Abstract base class — blueprint every exchange adapter must satisfy."""
 
-    # ── Identity ──────────────────────────────────────────────────────────────
+    #  Identity 
 
     @property
     @abstractmethod
@@ -73,7 +73,7 @@ class BaseExchangeAdapter(ABC):
             }
         """
 
-    # ── Account ───────────────────────────────────────────────────────────────
+    #  Account 
 
     @abstractmethod
     def get_balance(self) -> dict:
@@ -95,7 +95,7 @@ class BaseExchangeAdapter(ABC):
             Each element: {"asset": str, "free": float, "used": float, "total": float}
         """
 
-    # ── Market data ───────────────────────────────────────────────────────────
+    #  Market data 
 
     @abstractmethod
     def get_ticker(self, symbol: str) -> dict:
@@ -151,7 +151,7 @@ class BaseExchangeAdapter(ABC):
         """Return top gainers/losers/trending/7d momentum. Optional; returns {} if unsupported."""
         return {}
 
-    # ── Order management ─────────────────────────────────────────────────────
+    #  Order management 
 
     @abstractmethod
     def place_order(
@@ -198,7 +198,7 @@ class BaseExchangeAdapter(ABC):
             {"success": bool, "order_id": str}
         """
 
-    # ── Connectivity ──────────────────────────────────────────────────────────
+    #  Connectivity 
 
     @abstractmethod
     def test_connection(self) -> bool:

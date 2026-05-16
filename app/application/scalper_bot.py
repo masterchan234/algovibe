@@ -47,11 +47,11 @@ class ScalperBot:
                 try:
                     last_ts = datetime.fromisoformat(last_trades[0]['created_at'])
                     if (datetime.now() - last_ts).total_seconds() > 14400: # 4 jam
-                        log_message(f"♻️  RECOVERY: Resetting stale consecutive_losses ({self.consecutive_losses} -> 0)")
+                        log_message(f"[RECOVERY]  RECOVERY: Resetting stale consecutive_losses ({self.consecutive_losses} -> 0)")
                         self.consecutive_losses = 0
                         db.save_state("consecutive_losses", 0)
                 except Exception as e:
-                    log_message(f"⚠️ Recovery Error: {e}")
+                    log_message(f"[WARN] Recovery Error: {e}")
 
         self.price_history = defaultdict(lambda: deque(maxlen=100))
         
@@ -76,23 +76,23 @@ class ScalperBot:
         self.daily_report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
         self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
 
-        # ── Auto-Resume Heartbeat ────────────────────────────────────────────
+        #  Auto-Resume Heartbeat 
         # Uses a lightweight balance fetch to confirm exchange reachability.
         self.auto_resume_heartbeat = AutoResumeHeartbeat(
             ping_fn=self.exchange.fetch_balance,
             notifier=emergency_notifier,
         )
 
-        # ── UTC Reset Persistence: check on startup ──────────────────────────
+        #  UTC Reset Persistence: check on startup 
         # If the bot/server restarts on a new UTC day, trigger reset before trade logic.
         today_utc = datetime.now(timezone.utc).date().isoformat()
         last_reset = db.get_state("last_reset_date")
         if not last_reset:
             # First run — initialize LAST_RESET_DATE without resetting anything
             db.save_state("last_reset_date", today_utc)
-            log_message(f"📅 [SYSTEM] LAST_RESET_DATE initialized: {today_utc}")
+            log_message(f" [SYSTEM] LAST_RESET_DATE initialized: {today_utc}")
         elif today_utc > last_reset:
-            log_message(f"📅 [STARTUP] New UTC day detected ({last_reset} → {today_utc}). Triggering session reset...")
+            log_message(f" [STARTUP] New UTC day detected ({last_reset} → {today_utc}). Triggering session reset...")
             self._perform_utc_day_reset()
 
         self.private_ws = PrivateWS(
@@ -122,7 +122,7 @@ class ScalperBot:
                 self.cached_balance = float(bal.get('free', {}).get('IDR', 0))
                 db.save_state("cached_idr_balance", str(self.cached_balance))
             except Exception as e:
-                log_message(f"⚠️ Initial Balance Fetch Failed: {e}")
+                log_message(f"[WARN] Initial Balance Fetch Failed: {e}")
 
             # Crash Recovery: resume management of any existing live positions
             self._resume_live_positions()
@@ -135,11 +135,11 @@ class ScalperBot:
         initial_target = self.oracle.refresh_daily_profit_target(balance=self.cached_balance)
 
         init_msg = (
-            f"🚀 *ALGOVIBE SCALPER v3.0* 🚀\n"
+            f"ALGOVIBE SCALPER v3.0\n"
             f"Mode: {'DRY RUN' if config.DRY_RUN else 'LIVE'}\n"
             f"Oracle: ONLINE | Backfill: SYNCING\n"
             f"Target Profit Hari Ini: Rp {initial_target:,.0f}\n"
-            f"⚙️ Manual Control Mode: Auto-SL Disabled"
+            f" Manual Control Mode: Auto-SL Disabled"
         )
         log_message(init_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(init_msg)
@@ -156,12 +156,12 @@ class ScalperBot:
                 return
             for pair in live_positions:
                 self.market_ws.subscribe_market_trades(pair)
-                log_message(f"♻️ [RESUME] Re-subscribed market stream for live position: {pair}")
+                log_message(f"[RECOVERY] [RESUME] Re-subscribed market stream for live position: {pair}")
             log_message(
-                f"✅ [CRASH RECOVERY] Resumed management of {len(live_positions)} live positions."
+                f"[OK] [CRASH RECOVERY] Resumed management of {len(live_positions)} live positions."
             )
         except Exception as e:
-            log_message(f"⚠️ [RESUME] Failed to resume live positions: {e}")
+            log_message(f"[WARN] [RESUME] Failed to resume live positions: {e}")
 
     def _reconcile_open_orders(self):
         """Reconcile order_book table with actual open orders on Indodax.
@@ -186,13 +186,13 @@ class ScalperBot:
                     raw_response=order,
                 )
             log_message(
-                f"✅ [ORDER RECONCILE] Synced {len(open_orders)} open orders into order_book."
+                f"[OK] [ORDER RECONCILE] Synced {len(open_orders)} open orders into order_book."
             )
         except Exception as e:
-            log_message(f"⚠️ [ORDER RECONCILE] Failed: {e}")
+            log_message(f"[WARN] [ORDER RECONCILE] Failed: {e}")
 
     def _backfill_historical_data(self):
-        log_message("⏳ Starting FULL Historical Backfill (1h window)...")
+        log_message(" Starting FULL Historical Backfill (1h window)...")
         db.save_state("backfill_status", "SYNCING")
 
         markets = []
@@ -203,15 +203,15 @@ class ScalperBot:
             except ccxt.RateLimitExceeded:
                 retry_count += 1
                 log_message(
-                    f"⚠️ [Rate Limit] Terkena blokir Indodax (429). Menunggu 60 detik... (Percobaan {retry_count}/5)"
+                    f"[WARN] [Rate Limit] Terkena blokir Indodax (429). Menunggu 60 detik... (Percobaan {retry_count}/5)"
                 )
                 time.sleep(60)
             except Exception as e:
-                log_message(f"❌ Error fetching markets: {e}")
+                log_message(f" Error fetching markets: {e}")
                 break
 
         if not markets:
-            log_message("❌ Gagal mengambil data market setelah beberapa percobaan. Melanjutkan dengan data lokal.")
+            log_message(" Gagal mengambil data market setelah beberapa percobaan. Melanjutkan dengan data lokal.")
             return
 
         try:
@@ -231,13 +231,13 @@ class ScalperBot:
             btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == 'btcidr'), None)
             if btc_symbol and btc_symbol not in idr_pairs:
                 idr_pairs.insert(0, btc_symbol)
-                log_message("📌 [BTC Fix] Forcing BTC/IDR into backfill for Oracle regime filter.")
+                log_message(" [BTC Fix] Forcing BTC/IDR into backfill for Oracle regime filter.")
 
             total_pairs = len(idr_pairs)
-            log_message(f"📦 Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")
+            log_message(f" Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")
 
             if not idr_pairs:
-                log_message("✅ All market data is already warm. Skipping full backfill.")
+                log_message("[OK] All market data is already warm. Skipping full backfill.")
                 db.save_state("backfill_status", "COMPLETED")
                 self.deadman.set_pairs(full_idr_list)
                 return
@@ -261,7 +261,7 @@ class ScalperBot:
 
             for i in range(0, total_pairs, batch_size):
                 batch = idr_pairs[i:i + batch_size]
-                log_message(f"🔄 Syncing batch {i//batch_size + 1}... ({min(i+batch_size, total_pairs)}/{total_pairs})")
+                log_message(f" Syncing batch {i//batch_size + 1}... ({min(i+batch_size, total_pairs)}/{total_pairs})")
 
                 results = self.pool.map(fetch_one, batch)
 
@@ -285,14 +285,14 @@ class ScalperBot:
                         count += 1
                 time.sleep(0.5) # Reduced from 2.5s due to faster DB I/O
 
-            # ── [Senior Fix] Batch DB Commit ────────────────────────────────
+            #  [Senior Fix] Batch DB Commit 
             if all_updates:
                 db.save_ticker_history_batch(all_updates)
                 
-            log_message(f"✅ FULL Backfill completed for {count} pairs (Optimized Batch Commit).")
+            log_message(f"[OK] FULL Backfill completed for {count} pairs (Optimized Batch Commit).")
             db.save_state("backfill_status", "COMPLETED")
         except Exception as e:
-            log_message(f"⚠️ Backfill failed: {e}")
+            log_message(f"[WARN] Backfill failed: {e}")
             db.save_state("backfill_status", "FAILED")
 
     def _sync_balances_to_db(self):
@@ -306,9 +306,9 @@ class ScalperBot:
                 self.cached_balance = float(bal['IDR'].get('free', 0))
                 # Cache saldo IDR ke bot_state agar Oracle bisa membacanya untuk target harian
                 db.save_state("cached_idr_balance", str(self.cached_balance))
-                log_message(f"💰 [BALANCE SYNC] IDR Free: {self.cached_balance:,.0f} → DB Updated")
+                log_message(f" [BALANCE SYNC] IDR Free: {self.cached_balance:,.0f} → DB Updated")
         except Exception as e:
-            log_message(f"⚠️ Balance Sync Failed: {e}")
+            log_message(f"[WARN] Balance Sync Failed: {e}")
 
     def get_tickers(self):
         tickers = self.market_ws.get_tickers()
@@ -372,7 +372,7 @@ class ScalperBot:
             if shadow_count >= 2:
                 return
 
-            log_message(f"🔍 [SHADOW PROBE] Entering virtual trade for {pair} at Rp {price:,.2f}...")
+            log_message(f"[SHADOW-PROBE] Entering virtual trade for {pair} at Rp {price:,.2f}...")
             
             # Kita gunakan format yang mirip dengan jaring/position agar monitor_and_execute bisa handle
             data = {
@@ -391,7 +391,7 @@ class ScalperBot:
             db.save_state(f"shadow_meta_{pair}", json.dumps(data))
             
         except Exception as e:
-            log_message(f"⚠️ Shadow Execution Error: {e}")
+            log_message(f"[WARN] Shadow Execution Error: {e}")
 
     def _exit_monitor_loop(self):
         """
@@ -421,7 +421,7 @@ class ScalperBot:
             try:
                 if config.TECHNICAL_ONLY_MODE:
                     if not getattr(self, "_technical_only_logged", False):
-                        log_message("🧩 [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
+                        log_message(" [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
                         self._technical_only_logged = True
                     time.sleep(5)
                     continue
@@ -456,7 +456,7 @@ class ScalperBot:
         db.save_state("last_reset_date", today_utc)
         # Clear any pending strategic break so a stale popup doesn't reappear
         db.save_state("strategic_break_payload", "")
-        msg = "📅 [SYSTEM] New UTC Day Detected. Session Reset Successful. Returning to NORMAL mode."
+        msg = " [SYSTEM] New UTC Day Detected. Session Reset Successful. Returning to NORMAL mode."
         log_message(msg)
         send_telegram_message(msg)
 
@@ -470,10 +470,10 @@ class ScalperBot:
                 today_utc = datetime.now(timezone.utc).date().isoformat()
                 last_reset = db.get_state("last_reset_date")
                 if last_reset and today_utc > last_reset:
-                    log_message(f"📅 [UTC MONITOR] New UTC day detected ({last_reset} → {today_utc}). Triggering reset...")
+                    log_message(f" [UTC MONITOR] New UTC day detected ({last_reset} → {today_utc}). Triggering reset...")
                     self._perform_utc_day_reset()
             except Exception as e:
-                log_message(f"⚠️ UTC Reset Monitor Error: {e}")
+                log_message(f"[WARN] UTC Reset Monitor Error: {e}")
             time.sleep(60)
 
     def _daily_report_loop(self):
@@ -494,7 +494,7 @@ class ScalperBot:
                         self._send_daily_report()
                         db.save_state("last_daily_report_date", today_wib)
             except Exception as e:
-                log_message(f"⚠️ Daily Report Loop Error: {e}")
+                log_message(f"[WARN] Daily Report Loop Error: {e}")
             time.sleep(60)
 
     def _send_daily_report(self):
@@ -509,7 +509,7 @@ class ScalperBot:
             win_rate = (wins / total * 100) if total > 0 else 0.0
             net_pnl  = stats.get('total_pnl_idr', 0.0)
             msg = (
-                f"📊 *DAILY PERFORMANCE SUMMARY* 📊\n"
+                f"DAILY PERFORMANCE SUMMARY\n"
                 f"Tanggal: {now_wib.strftime('%d %b %Y')} WIB\n"
                 f"Total Trades: {total} | Win: {wins} | Loss: {losses}\n"
                 f"Win Rate: {win_rate:.1f}%\n"
@@ -518,7 +518,7 @@ class ScalperBot:
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
         except Exception as e:
-            log_message(f"⚠️ Daily Report Send Error: {e}")
+            log_message(f"[WARN] Daily Report Send Error: {e}")
 
     def _cleanup_loop(self):
         """Background daemon: periodic cleanup of zombie data and Docker build cache.
@@ -531,7 +531,7 @@ class ScalperBot:
             try:
                 self._run_cleanup()
             except Exception as e:
-                log_message(f"⚠️ Cleanup Loop Error: {e}")
+                log_message(f"[WARN] Cleanup Loop Error: {e}")
             time.sleep(86400)  # 24 hours
 
     def _run_cleanup(self):
@@ -540,19 +540,19 @@ class ScalperBot:
         2. Remove Docker build cache to prevent the observed 33GB accumulation.
            Set DOCKER_CLEANUP_ENABLED=false in .env to disable.
         """
-        log_message("🧹 [CLEANUP] Starting scheduled disk hygiene...")
+        log_message(" [CLEANUP] Starting scheduled disk hygiene...")
         # 1. Prune stale DB records
         try:
             db.prune_old_data(hours=48)
             db.purge_old_data(days=7)
-            log_message("🧹 [CLEANUP] DB prune completed.")
+            log_message(" [CLEANUP] DB prune completed.")
         except Exception as e:
-            log_message(f"⚠️ [CLEANUP] DB prune error: {e}")
+            log_message(f"[WARN] [CLEANUP] DB prune error: {e}")
 
         # 2. Docker build cache cleanup — controlled by DOCKER_CLEANUP_ENABLED env var.
         docker_cleanup_enabled = os.getenv("DOCKER_CLEANUP_ENABLED", "true").lower() == "true"
         if not docker_cleanup_enabled:
-            log_message("ℹ️ [CLEANUP] Docker cleanup disabled via DOCKER_CLEANUP_ENABLED=false.")
+            log_message("ℹ [CLEANUP] Docker cleanup disabled via DOCKER_CLEANUP_ENABLED=false.")
             return
         try:
             result = subprocess.run(
@@ -562,14 +562,14 @@ class ScalperBot:
             if result.returncode == 0:
                 lines = result.stdout.strip().splitlines()
                 freed = lines[-1] if lines else "unknown"
-                log_message(f"🧹 [CLEANUP] Docker build cache cleared. {freed}")
-                send_telegram_message(f"🧹 *CLEANUP* Docker build cache cleared. {freed}")
+                log_message(f" [CLEANUP] Docker build cache cleared. {freed}")
+                send_telegram_message(f" *CLEANUP* Docker build cache cleared. {freed}")
             else:
-                log_message(f"⚠️ [CLEANUP] Docker prune exited {result.returncode}: {result.stderr[:200]}")
+                log_message(f"[WARN] [CLEANUP] Docker prune exited {result.returncode}: {result.stderr[:200]}")
         except FileNotFoundError:
-            log_message("ℹ️ [CLEANUP] Docker not available — skipping build cache prune.")
+            log_message("ℹ [CLEANUP] Docker not available — skipping build cache prune.")
         except Exception as e:
-            log_message(f"⚠️ [CLEANUP] Docker prune error: {e}")
+            log_message(f"[WARN] [CLEANUP] Docker prune error: {e}")
 
     def run(self):
         log_message("Starting Market Data WebSocket…")
@@ -578,7 +578,7 @@ class ScalperBot:
         if not self.market_ws.wait_ready(timeout=30):
             log_message("WARNING: Market WS not ready after 30s, will retry in loop.")
         
-        # ── Subscribe to orderbook for all open positions ──
+        #  Subscribe to orderbook for all open positions 
         # Ensures exit monitor gets fresh tickers immediately (doesn't wait for summary-24h broadcast)
         self.market_ws.subscribe_open_positions()
 

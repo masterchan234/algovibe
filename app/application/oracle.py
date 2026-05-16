@@ -39,7 +39,7 @@ class Oracle:
         self.last_buy_signal_queue = datetime.now() - timedelta(minutes=2)
         self.last_trade_verdict_request = {}  # {pair: datetime} throttling explicit trade-verdict requests
 
-        # ── Consciousness & Self-Learning ──────────────────────────────────
+        #  Consciousness & Self-Learning 
         # lessons: rolling list of lessons dari POST_MORTEM, max 20 entri
         self._lessons: list = []
         self.last_consciousness_update = datetime.now() - timedelta(minutes=31)  # force first update
@@ -72,7 +72,7 @@ class Oracle:
             import random
             from datetime import datetime, timedelta
             
-            logger.info("[Oracle] 🧠 Running K-NN Pattern Database Cold-Start Bootstrap...")
+            logger.info("[ORACLE] Running K-NN Pattern Database Cold-Start Bootstrap...")
             adapter = create_exchange_provider()
             data = adapter.fetch_summaries()
             if not data:
@@ -128,11 +128,11 @@ class Oracle:
                          "Simulated cold start pattern matching context", True, pnl_idr, "CLOSED")
                     )
                     inserted += 1
-            logger.info(f"[Oracle] 🧠 Successfully seeded {inserted} historical K-NN pattern records into backtest_analytics from summaries API!")
+            logger.info(f"[ORACLE] Successfully seeded {inserted} historical K-NN pattern records into backtest_analytics from summaries API!")
         except Exception as e:
             logger.error(f"[Oracle] Cold-start pattern database bootstrap failed: {e}")
 
-    # ── Rich Market Context Builder ────────────────────────────────────────────
+    #  Rich Market Context Builder 
 
     def _build_rich_market_context(self, pair: str, prices: list, tech: dict, conn) -> dict:
         """
@@ -147,7 +147,7 @@ class Oracle:
             ws_trades_raw = self.market_ws.get_trades(pair) or []
             ws_ticker = self.market_ws.get_tickers().get(pair, {})
 
-            # ── Tier 1a: VWAP ──────────────────────────────────────────────
+            #  Tier 1a: VWAP 
             vwap = 0.0
             if len(ws_trades_raw) >= 3:
                 try:
@@ -167,7 +167,7 @@ class Oracle:
                     vwap_signal = f"AT VWAP {diff_pct:+.2f}% (neutral)"
             ctx['vwap_signal'] = vwap_signal
 
-            # ── Tier 1b: Trade Flow Imbalance (50 trades) + Whale Prints ───
+            #  Tier 1b: Trade Flow Imbalance (50 trades) + Whale Prints 
             buy_count = sell_count = 0
             large_trades = []
             for t in ws_trades_raw[:50]:
@@ -188,7 +188,7 @@ class Oracle:
             ctx['trade_flow'] = f"{flow_pct}% buy ({buy_count}/{total_flow} trades) — {flow_label}"
             ctx['whale_prints'] = ", ".join(large_trades[-3:]) if large_trades else "None detected"
 
-            # ── Tier 1c: Price Position in 24h Range ───────────────────────
+            #  Tier 1c: Price Position in 24h Range 
             high_24h = float(ws_ticker.get('high', 0) or 0)
             low_24h  = float(ws_ticker.get('low',  0) or 0)
             if high_24h > low_24h and last_price > 0:
@@ -203,7 +203,7 @@ class Oracle:
             else:
                 ctx['range_position'] = "N/A"
 
-            # ── Tier 2a: Per-Pair Win/Loss History ─────────────────────────
+            #  Tier 2a: Per-Pair Win/Loss History 
             try:
                 recent_pair_trades = conn.execute(
                     "SELECT pnl_idr FROM trade_history WHERE pair = %s "
@@ -221,7 +221,7 @@ class Oracle:
             except Exception:
                 ctx['pair_history'] = "N/A"
 
-            # ── Tier 2b: Volume Anomaly Score ──────────────────────────────
+            #  Tier 2b: Volume Anomaly Score 
             trade_count = len(ws_trades_raw)
             activity_ratio = trade_count / 20.0  # 20 trades/min = baseline normal
             if activity_ratio > 3:
@@ -234,7 +234,7 @@ class Oracle:
                 vol_anomaly = f"Normal activity ({trade_count} recent trades)"
             ctx['volume_anomaly'] = vol_anomaly
 
-            # ── Tier 2c: Price Momentum (5m, 15m, 1h) ──────────────────────
+            #  Tier 2c: Price Momentum (5m, 15m, 1h) 
             try:
                 ticker_row = conn.execute(
                     "SELECT ch_5m, ch_15m, ch_1h FROM ticker_history WHERE pair = %s",
@@ -251,7 +251,7 @@ class Oracle:
             except Exception:
                 ctx['momentum'] = "N/A"
 
-            # ── Tier 2d: Sector + Market Regime ────────────────────────────
+            #  Tier 2d: Sector + Market Regime 
             try:
                 from config import SECTOR_MAP
                 sector = SECTOR_MAP.get(pair, "Unknown")
@@ -264,7 +264,7 @@ class Oracle:
             fear_greed = db.get_state("market_sentiment_index") or "50"
             ctx['market_regime'] = f"{regime} | Fear/Greed: {fear_greed}/100"
 
-            # ── Tier 3a: Time of Day Session ───────────────────────────────
+            #  Tier 3a: Time of Day Session 
             hour = datetime.now().hour
             if 1 <= hour < 8:
                 session = "Asia Session (Indodax peak liquidity)"
@@ -276,7 +276,7 @@ class Oracle:
                 session = "Off-Hours (thin liquidity, wider spreads)"
             ctx['session'] = f"{hour:02d}:xx — {session}"
 
-            # ── Tier 3b: LLM Lessons Memory (max 3 terbaru) ────────────────
+            #  Tier 3b: LLM Lessons Memory (max 3 terbaru) 
             if self._lessons:
                 ctx['lessons'] = " | ".join(self._lessons[-3:])
             else:
@@ -404,10 +404,10 @@ class Oracle:
             err = str(e).lower()
             if "malformed" in err or "database disk image is malformed" in err:
                 log_message(
-                    f"⚠️ [Oracle] DB error detected. Rich prompt fallback aktif untuk {pair}."
+                    f"[WARN] [Oracle] DB error detected. Rich prompt fallback aktif untuk {pair}."
                 )
             else:
-                log_message(f"⚠️ [Oracle] SQLite error in rich prompt for {pair}: {e}")
+                log_message(f"[WARN] [Oracle] SQLite error in rich prompt for {pair}: {e}")
 
             ws_ticker = self.market_ws.get_tickers().get(pair, {}) if self.market_ws else {}
             ws_last = float(ws_ticker.get('last', 0) or 0)
@@ -557,7 +557,7 @@ class Oracle:
             t_res = task["result"]
             
             if t_type == "FAKE_PUMP_ANALYSIS":
-                log_message(f"🤖 [LiteRT Insight] Fake Pump: {t_res}")
+                log_message(f"[ORACLE] [LiteRT-Insight] Fake Pump: {t_res}")
                 db.save_state("latest_llm_insight", f"FAKE_PUMP|{t_res}")
                 hero_msg = f"**Market Alert**: {t_res}"
                 db.save_state("hero_ai_insight", hero_msg)
@@ -565,7 +565,7 @@ class Oracle:
                 # [Fix BUG #4] TIDAK apply sentiment ke pair manapun — konteks global, bukan pair spesifik
                 self.llm_worker.results.pop(task_id)
             elif t_type == "REGIME_ANALYSIS":
-                log_message(f"🤖 [LiteRT Insight] Regime Shift: {t_res}")
+                log_message(f"[ORACLE] [LiteRT-Insight] Regime Shift: {t_res}")
                 db.save_state("latest_llm_insight", f"REGIME|{t_res}")
                 hero_msg = f"**Regime Intelligence**: {t_res}"
                 db.save_state("hero_ai_insight", hero_msg)
@@ -582,20 +582,20 @@ class Oracle:
 
                 pair_name = t_type.split(":")[1].lower()
 
-                # ── Parse structured vs text result ──────────────────────
+                #  Parse structured vs text result 
                 is_json = isinstance(t_res, str) and t_res.strip().startswith('{')
                 structured = LLMWorker.parse_structured_result(t_res) if is_json else None
                 is_structured = structured is not None and (structured.get("confidence", 0) > 0 or structured.get("verdict") in ("BUY","AVOID","HOLD"))
                 
                 if is_structured:
                     log_message(
-                        f"🤖 [LiteRT Insight] {label} {pair_name}: "
+                        f"[ORACLE] [LiteRT-Insight] {label} {pair_name}: "
                         f"{structured['verdict']} ({structured['confidence']}%) — {structured['reason']}"
                     )
                     # Narratif untuk Hero Section
                     hero_msg = f"**{pair_name.upper()} Insight**: {structured['reason']}. **{structured['verdict']}**."
                 else:
-                    log_message(f"🤖 [LiteRT Insight] {label} {pair_name}: {t_res}")
+                    log_message(f"[AI] [LiteRT Insight] {label} {pair_name}: {t_res}")
                     hero_msg = f"**{pair_name.upper()} Analysis**: {t_res}"
                 
                 db.save_state("latest_llm_insight", f"{label}:{pair_name}|{t_res}")
@@ -603,7 +603,7 @@ class Oracle:
                 db.log_system_event(pair_name, "AI_INSIGHT", hero_msg, "INFO")
                 db.save_state(f"llm_reasoning_{pair_name}", t_res)
 
-                # ── [Senior Sync] Update Trade DNA Table ──────────────────
+                #  [Senior Sync] Update Trade DNA Table 
                 if is_structured:
                     db.update_llm_reasoning(
                         pair_name, 
@@ -619,7 +619,7 @@ class Oracle:
                         'SUCCESS'
                     )
 
-                # ── Veto Cache: simpan untuk check_llm_veto() ─────────────
+                #  Veto Cache: simpan untuk check_llm_veto() 
                 if is_structured and label in ("ANALYSIS", "PUMP_ALERT"):
                     self._veto_cache[pair_name] = {
                         **structured,
@@ -629,10 +629,10 @@ class Oracle:
                     # [Fix Bug#5] Simpan timestamp agar DB veto bisa expire
                     db.save_state(f"llm_veto_ts_{pair_name}", datetime.now().isoformat())
 
-                # ── Sentiment (hanya pair spesifik, Fix BUG #4) ──────────
+                #  Sentiment (hanya pair spesifik, Fix BUG #4) 
                 self._update_llm_sentiment(t_res, pair_name)
                 
-                # ── Update ETA with Math Calibration ───────────────────
+                #  Update ETA with Math Calibration 
                 if is_structured:
                     # Ambil harga terakhir dari DB untuk kalibrasi math ETA
                     try:
@@ -663,9 +663,9 @@ class Oracle:
 
                 self.llm_worker.results.pop(task_id)
             elif t_type == "POST_MORTEM":
-                log_message(f"🤖 [LiteRT Insight] Post-Mortem: {t_res}")
+                log_message(f"[ORACLE] [LiteRT-Insight] Post-Mortem: {t_res}")
                 db.save_state("latest_llm_insight", f"POST_MORTEM|{t_res}")
-                # ── Self-Learning: masukkan lesson ke consciousness ──
+                #  Self-Learning: masukkan lesson ke consciousness 
                 self._accumulate_lesson(t_res)
                 # Force consciousness refresh agar lesson langsung terpakai
                 self.last_consciousness_update = datetime.now() - timedelta(minutes=31)
@@ -699,7 +699,7 @@ class Oracle:
         self.pair_boosts[pair.lower()] = {"boost": boost, "expiry": expiry}
         logger.debug(f"[Oracle] Sentiment boost for {pair}: {boost:+.2f} (pos={positive_hits}, neg={negative_hits})")
 
-    # ── LLM Veto Power ────────────────────────────────────────────────────────
+    #  LLM Veto Power 
 
     def check_llm_veto(self, pair: str) -> tuple:
         """
@@ -871,7 +871,7 @@ class Oracle:
             
         return "HOLD", 0, "Queue Failed"
 
-    # ── Daily Profit Target Engine ────────────────────────────────────────────
+    #  Daily Profit Target Engine 
 
     def calculate_daily_profit_target(self, balance: float = 0.0) -> float:
         """
@@ -969,7 +969,7 @@ class Oracle:
             target = self.calculate_daily_profit_target(balance=balance)
             db.save_state("daily_profit_target", str(target))
             db.save_state("daily_profit_target_ts", datetime.now().isoformat())
-            log_message(f"🎯 [TARGET] Profit harian diperbarui: Rp {target:,.0f}")
+            log_message(f"[TARGET] [TARGET] Profit harian diperbarui: Rp {target:,.0f}")
             return target
         except Exception as e:
             logger.error(f"[Oracle] refresh_daily_profit_target error: {e}")
@@ -997,7 +997,7 @@ class Oracle:
             stats = db.get_daily_stats(dry_run=config.DRY_RUN)
             realized_pnl = float(stats.get('total_pnl_idr', 0))
 
-            # ── Unrealized PnL from open positions ───────────────────────────
+            #  Unrealized PnL from open positions 
             # Compute unrealized PnL using current market prices so HARVEST_ONLY
             # is triggered only when Net PnL (realized + unrealized) >= target.
             from config import FEE_BUY_TAKER, FEE_SELL_TAKER
@@ -1026,7 +1026,7 @@ class Oracle:
             # Net PnL = Realized + Unrealized
             current_pnl = realized_pnl + unrealized_pnl
 
-            # ── Peak PnL Tracking ────────────────────────────────────────────
+            #  Peak PnL Tracking 
             # Track peak using Net PnL so drawdown logic also uses the true net value.
             peak_raw = db.get_state("peak_pnl_today")
             peak_pnl_today = float(peak_raw) if peak_raw else 0.0
@@ -1118,7 +1118,7 @@ class Oracle:
             time_remaining  = target_status.get("time_remaining_pct", 50.0)
             session_mode    = target_status.get("session_mode", "NORMAL")
 
-            # ── LATCH: if already HARVEST_ONLY, stay locked unconditionally ──
+            #  LATCH: if already HARVEST_ONLY, stay locked unconditionally 
             # v3.4: market volatility causing Net PnL to dip below target does NOT
             # release the latch.  Only CONTINUE / RESET user actions or the UTC
             # midnight reset can return the session to NORMAL.
@@ -1142,7 +1142,7 @@ class Oracle:
                     "message": "",
                 }
 
-            # ── Target reached: decide TRAILING or HARVEST_ONLY ──────────────
+            #  Target reached: decide TRAILING or HARVEST_ONLY 
             if time_remaining > _TIME_THRESHOLD_PCT:
                 regime = self.get_market_regime()
                 try:
@@ -1159,7 +1159,7 @@ class Oracle:
                     db.save_state("session_mode", "TRAILING")
                     db.save_state("session_buy_enabled", "true")
                     msg = (
-                        f"📈 [SMART TRAILING] Target extended: "
+                        f"[ORACLE] [SMART-TRAILING] Target extended: "
                         f"Rp {target_idr:,.0f} → Rp {new_target:,.0f} "
                         f"(+{_TRAILING_EXTRA_PCT*100:.0f}% of current PnL). "
                         f"Regime={regime}, Sentiment={sentiment}/100, "
@@ -1174,11 +1174,11 @@ class Oracle:
                 else:
                     # Conditions degraded while target was exceeded — stop buying
                     log_message(
-                        f"⛔ [STOP BUY] Regime={regime}, Sentiment={sentiment}/100 — "
+                        f"[ORACLE] [STOP-BUY] Regime={regime}, Sentiment={sentiment}/100 - "
                         f"no longer bullish. Triggering HARVEST_ONLY."
                     )
 
-            # ── Trigger STOP BUY / HARVEST_ONLY (LATCH) ─────────────────────
+            #  Trigger STOP BUY / HARVEST_ONLY (LATCH) 
             db.save_state("session_mode", "HARVEST_ONLY")
             db.save_state("session_buy_enabled", "false")
             db.save_state("session_latched", "true")   # latch: persists until manual action or midnight reset
@@ -1187,17 +1187,17 @@ class Oracle:
                 f"(Realized: Rp {realized_pnl:,.0f}, Unrealized: Rp {unrealized_pnl:,.0f}) | "
                 f"Target: Rp {target_idr:,.0f} | Status: HARVEST_ONLY [LATCHED]"
             )
-            log_message(f"🛑 [HARVEST ONLY LATCHED] {msg}")
+            log_message(f" [HARVEST ONLY LATCHED] {msg}")
             send_telegram_message(
-                f"🛑 *SESSION MODE: HARVEST ONLY (LATCHED)*\n"
+                f" *SESSION MODE: HARVEST ONLY (LATCHED)*\n"
                 f"Target Rp {target_idr:,.0f} tercapai.\n"
                 f"Net PnL: Rp {current_pnl:,.0f} "
                 f"(Realized: Rp {realized_pnl:,.0f} | Unrealized: Rp {unrealized_pnl:,.0f})\n"
                 f"Sisa Hari: {time_remaining:.0f}%\n"
-                f"🔒 Latch aktif — tidak ada pembelian baru hingga CONTINUE/RESET."
+                f" Latch aktif — tidak ada pembelian baru hingga CONTINUE/RESET."
             )
 
-            # ── Strategic Break: compile session analytics and notify dashboard ──
+            #  Strategic Break: compile session analytics and notify dashboard 
             self._emit_strategic_break(
                 target_idr=target_idr,
                 current_pnl=current_pnl,
@@ -1275,7 +1275,7 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] _emit_strategic_break error: {e}")
 
-    # ── Consciousness & Self-Learning ─────────────────────────────────────────
+    #  Consciousness & Self-Learning 
 
     def update_consciousness(self, regime: str = None, recent_stats: dict = None):
         """
@@ -1517,7 +1517,7 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
 
-        # ── Dynamic profile from UI toggle (dry_run_loose_gates) ─────────────────
+        #  Dynamic profile from UI toggle (dry_run_loose_gates) 
         if config.DRY_RUN_LOOSE_GATES:
             # Loose profile: turunkan gate untuk eksplorasi sinyal lebih luas.
             overrides["tech_threshold"] -= 0.10
@@ -1603,8 +1603,8 @@ class Oracle:
         # Batasi agar tetap rasional (Safety Guard)
         final_multiplier = max(0.15, min(2.5, final_multiplier))
         
-        # logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
-        logging.info(f"🧠 Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        # logging.info(f"[BRAIN] Sizing [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
+        logging.info(f"[ORACLE-SIZING] [{pair}]: Regime={regime}, Vel={velocity_score:.2f}, Conf={confidence:.2f} -> Mult={final_multiplier:.2f}x")
         return final_multiplier
 
     def get_rationale(self, pair: str, decision: str) -> str:
@@ -1827,7 +1827,7 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] Sector Update Error: {e}")
 
-    # ── Self-Learning Engine (Project Evolution) ───────────────────────
+    #  Self-Learning Engine (Project Evolution) 
 
     def learn_from_trade(self, pair, pnl_idr):
         """
@@ -2042,7 +2042,7 @@ class Oracle:
         }
 
         # Log to Dashboard
-        msg = f"🧠 AI Rank: {heuristic_resp['confidence']:.1f}% | {heuristic_resp['reason']}"
+        msg = f"[ORACLE] AI Rank: {heuristic_resp['confidence']:.1f}% | {heuristic_resp['reason']}"
         db.log_system_event(pair, 'AI_ORACLE', msg, 'INFO')
 
         return heuristic_resp

@@ -19,16 +19,16 @@ def handle_restore_command() -> None:
     import pickle
 
     if not os.path.exists(cache_file):
-        print(f"❌ Error: No cache file found at {cache_file}")
+        print(f" Error: No cache file found at {cache_file}")
         return
 
-    print(f"📥 Restoring results from {cache_file}...")
+    print(f" Restoring results from {cache_file}...")
     with open(cache_file, "rb") as f:
         data = pickle.load(f)
 
     profiles = _load_active_profiles()
     _persist_results(data["results"], profiles, data["start"], data["now"])
-    print("🏁 Restore complete.")
+    print(" Restore complete.")
 
 
 def handle_analyze_command(args) -> None:
@@ -44,7 +44,7 @@ def handle_analyze_command(args) -> None:
     if not args.create_profile_from_analysis:
         return
     if not analysis_result or not analysis_result.get("per_coin"):
-        print("❌ Tidak bisa membuat profile: hasil analisis kosong.")
+        print(" Tidak bisa membuat profile: hasil analisis kosong.")
         return
 
     target_daily_pnl = float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR)
@@ -52,7 +52,7 @@ def handle_analyze_command(args) -> None:
         ranked_candidates = _sort_auto_selection_candidates(list(analysis_result["per_coin"]))
         selected_rows = ranked_candidates[: int(args.auto_select_top)]
         if not selected_rows:
-            print("❌ Auto-selection kosong setelah ranking kandidat.")
+            print(" Auto-selection kosong setelah ranking kandidat.")
             return
 
         auto_batch_tag = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -64,7 +64,7 @@ def handle_analyze_command(args) -> None:
         created_pairs = []
         skipped_negative = []
         print(
-            f"\n🤖 Auto-select aktif: membuat {len(selected_rows)} profile dari universe "
+            f"\n[AI] Auto-select aktif: membuat {len(selected_rows)} profile dari universe "
             f"{len(analysis_result['per_coin'])} pair hasil filter."
         )
 
@@ -97,7 +97,7 @@ def handle_analyze_command(args) -> None:
             created_profiles.append(new_profile)
             created_pairs.append(str(selected["pair"]).lower())
             print(
-                f"✅ [{len(created_profiles)}/{len(selected_rows)}] id={new_profile['id']} "
+                f"[OK] [{len(created_profiles)}/{len(selected_rows)}] id={new_profile['id']} "
                 f"name={new_profile['profile_name']} pair_ref={selected['pair']} "
                 f"edge_raw={edge_raw_selected*100:.3f}%"
             )
@@ -106,15 +106,15 @@ def handle_analyze_command(args) -> None:
             preview = ", ".join(skipped_negative[:10])
             if len(skipped_negative) > 10:
                 preview += f", ... (+{len(skipped_negative)-10} lainnya)"
-            print(f"ℹ️ Profile dilewati karena edge_raw <= 0 tanpa flag --allow-negative-edge-profile: {preview}")
+            print(f"ℹ Profile dilewati karena edge_raw <= 0 tanpa flag --allow-negative-edge-profile: {preview}")
 
         if not created_profiles:
-            print("❌ Tidak ada profile berhasil dibuat dari auto-selection.")
+            print(" Tidak ada profile berhasil dibuat dari auto-selection.")
             return
 
         if args.run_after_create:
             pairs_for_run = ",".join(sorted(set(created_pairs)))
-            print(f"\n🚀 Menjalankan backtest {len(created_profiles)} profile auto-select ({args.days} hari)...")
+            print(f"\n[BACKTEST] Running {len(created_profiles)} profiles auto-select ({args.days} days)...")
             run_backtest(
                 days=int(args.days),
                 pairs_filter=pairs_for_run if pairs_for_run else None,
@@ -131,12 +131,12 @@ def handle_analyze_command(args) -> None:
     selected_pair = args.analysis_pair or analysis_result["top_pairs"][0]["pair"]
     selected = next((row for row in analysis_result["per_coin"] if str(row["pair"]).lower() == str(selected_pair).lower()), None)
     if not selected:
-        print(f"❌ Pair {selected_pair} tidak ditemukan di hasil analisis.")
+        print(f" Pair {selected_pair} tidak ditemukan di hasil analisis.")
         return
 
     edge_raw_selected = float(selected.get("math", {}).get("edge_trade_raw", 0.0) or 0.0)
     if edge_raw_selected <= 0 and not args.allow_negative_edge_profile:
-        print("❌ Profile creation dibatalkan: edge_trade_raw <= 0 (negative expectancy).")
+        print(" Profile creation dibatalkan: edge_trade_raw <= 0 (negative expectancy).")
         print(
             "   Gunakan pair lain / ubah horizon analisis / ubah asumsi fee-slippage, "
             "atau pakai --allow-negative-edge-profile jika tetap ingin memaksa."
@@ -162,10 +162,10 @@ def handle_analyze_command(args) -> None:
         activate_new_profile=bool(args.activate_new_profile),
         activate_only_new=bool(args.activate_only_new),
     )
-    print(f"\n✅ Created profile baru: id={new_profile['id']} name={new_profile['profile_name']} pair_ref={selected['pair']}")
+    print(f"\nCreated profile baru: id={new_profile['id']} name={new_profile['profile_name']} pair_ref={selected['pair']}")
 
     if args.run_after_create:
-        print(f"\n🚀 Menjalankan backtest profile baru untuk pair {selected['pair']} ({args.days} hari)...")
+        print(f"\n[BACKTEST] Running new profile for {selected['pair']} ({args.days} days)...")
         run_backtest(
             days=int(args.days),
             pairs_filter=str(selected["pair"]),
@@ -196,11 +196,11 @@ def handle_optimize_command(args) -> None:
         if any(s == "mutated" for s in statuses):
             continue
         if any(s == "target_reached" for s in statuses):
-            print("🏁 Stopping early: Daily target reached.")
+            print("Stopping early: Daily target reached.")
             break
         if any(s == "no_data" for s in statuses):
-            print("⚠️ Stopping early: No backtest result rows were generated; check pair filter/window/data availability.")
+            print("Stopping early: No backtest result rows were generated; check pair filter/window/data availability.")
             break
         if any(s == "no_change" for s in statuses):
-            print("🏁 Stopping early: No further parameter changes proposed (local optimum).")
+            print("Stopping early: No further parameter changes proposed (local optimum).")
             break

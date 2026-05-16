@@ -65,7 +65,7 @@ class ExitManager:
         # Prevents concurrent execution from the background exit-monitor thread and
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
         self._monitor_lock = threading.Lock()
-        # ─── Momentum Equity Protection ────────────────────────────────────────────
+        #  Momentum Equity Protection 
         # Last PnL sample for velocity calculation: (unix_timestamp, pnl_idr).
         self._last_pnl_sample: tuple = (0.0, 0.0)
         # Rolling buffer of the last 5 velocity readings (IDR / second).
@@ -79,7 +79,7 @@ class ExitManager:
         self._peak_net_pnl_session: float = 0.0
         # Guard set: ensures "Target Reached" log + Telegram fires only once per session.
         self._target_fired_session: set = set()
-        # ─── Net-Zero Survival Guard ───────────────────────────────────────────────
+        #  Net-Zero Survival Guard 
         # Timestamp when the Net-Zero condition (net_pnl ≤ 0 + dropping velocity) was
         # first detected.  Reset to 0 whenever the condition clears.
         self._net_zero_trigger_ts: float = 0.0
@@ -351,7 +351,7 @@ class ExitManager:
 
     def _format_tp_hold_log(self, label, pair, guard):
         """Build a consistent log line for TP holds and emergency exit deferrals."""
-        return f"⏳ [{label}] {pair}: {guard.get('message')}."
+        return f" [{label}] {pair}: {guard.get('message')}."
 
     def _get_effective_idr_balance(self) -> float:
         """Best-effort balance source for runtime policy toggles.
@@ -646,7 +646,7 @@ class ExitManager:
                 )
                 cancelled = True
             except Exception as err:
-                log_message(f"⚠️ EXIT cancel by id failed {pair} ({exit_order_id}): {err}")
+                log_message(f"[WARN] EXIT cancel by id failed {pair} ({exit_order_id}): {err}")
 
         # Best-effort sweep: cancel any remaining open sell orders for this pair.
         try:
@@ -665,11 +665,11 @@ class ExitManager:
                         params={'pair': pair_param, 'type': 'sell'}
                     )
                     cancelled = True
-                    log_message(f"🧹 [EXIT CANCEL SWEEP] Cancelled lingering sell order {oid} for {pair}")
+                    log_message(f" [EXIT CANCEL SWEEP] Cancelled lingering sell order {oid} for {pair}")
                 except Exception as sweep_err:
-                    log_message(f"⚠️ [EXIT CANCEL SWEEP] {pair} order {oid} cancel failed: {sweep_err}")
+                    log_message(f"[WARN] [EXIT CANCEL SWEEP] {pair} order {oid} cancel failed: {sweep_err}")
         except Exception as fetch_err:
-            log_message(f"⚠️ [EXIT CANCEL SWEEP] fetch_open_orders failed for {pair}: {fetch_err}")
+            log_message(f"[WARN] [EXIT CANCEL SWEEP] fetch_open_orders failed for {pair}: {fetch_err}")
 
         return cancelled
 
@@ -694,9 +694,9 @@ class ExitManager:
         try:
             cooldown_until = time.time() + (minutes * 60)
             db.save_state(f"pair_cooldown_until_{pair}", str(cooldown_until))
-            log_message(f"⏸️ [PAIR COOLDOWN] {pair}: {minutes}m ({reason})")
+            log_message(f"[PAIR-COOLDOWN] {pair}: {minutes}m ({reason})")
         except Exception as e:
-            log_message(f"⚠️ Failed set cooldown {pair}: {e}")
+            log_message(f"[WARN] Failed set cooldown {pair}: {e}")
 
     def _update_pnl_velocity(self, current_pnl: float, now_ts: float) -> None:
         """Sample Net PnL velocity every MOMENTUM_VELOCITY_INTERVAL_SEC seconds.
@@ -738,7 +738,7 @@ class ExitManager:
 
         if new_state != self._momentum_state:
             log_message(
-                f"📊 [MOMENTUM] State changed: {self._momentum_state} → {new_state} "
+                f"[MOMENTUM] State changed: {self._momentum_state} → {new_state} "
                 f"(velocity avg: {avg_velocity:+.1f} IDR/s)"
             )
         self._momentum_state = new_state
@@ -777,12 +777,12 @@ class ExitManager:
         """
         n = len(open_pairs_for_basket)
         log_message(
-            f"🛡️ [NET-ZERO SURVIVAL] ACTIVATED — Executing emergency BASKET_EXIT "
+            f"[NET-ZERO-SURVIVAL] ACTIVATED — Executing emergency BASKET_EXIT "
             f"for {n} position(s). Net PnL: Rp {net_total_pnl:+,.0f} | "
             f"Velocity: {latest_velocity:+.1f} IDR/s"
         )
 
-        # ── Persist event ─────────────────────────────────────────────────────
+        #  Persist event 
         event_msg = (
             f"NET_ZERO_SURVIVAL ACTIVATED | "
             f"Realized: Rp {realized_pnl:+,.0f} | "
@@ -804,7 +804,7 @@ class ExitManager:
         except Exception:
             pass
 
-        # ── SYSTEM_PAUSE: latch HARVEST_ONLY to block all new buys ─────────────
+        #  SYSTEM_PAUSE: latch HARVEST_ONLY to block all new buys 
         try:
             db.save_state("session_buy_enabled", "false")
             db.save_state("session_mode", "HARVEST_ONLY")
@@ -812,20 +812,20 @@ class ExitManager:
         except Exception:
             pass
 
-        # ── Telegram emergency notification ───────────────────────────────────
+        #  Telegram emergency notification 
         telegram_msg = (
-            f"🛡️ *NET-ZERO SURVIVAL ACTIVATED*\n"
-            f"⚠️ Emergency Basket Exit executed to protect principal.\n"
+            f"[NET-ZERO-SURVIVAL-ACTIVATED]\n"
+            f"[WARN] Emergency Basket Exit executed to protect principal.\n"
             f"Realized: Rp {realized_pnl:+,.0f}\n"
             f"Unrealized: Rp {unrealized_pnl:+,.0f}\n"
             f"Net PnL: Rp {net_total_pnl:+,.0f}\n"
             f"Momentum: {latest_velocity:+.1f} IDR/s\n"
-            f"⏸️ System Paused. Manual review required."
+            f"System Paused. Manual review required."
         )
         log_message(telegram_msg.replace('*', '').replace('\n', ' | '))
         send_telegram_message(telegram_msg)
 
-        # ── Reset HWM and execute BASKET_EXIT ────────────────────────────────
+        #  Reset HWM and execute BASKET_EXIT 
         self._portfolio_hwm = 0.0
         self._was_above_safety_zone = False
         self._target_fired_session.discard("TARGET_REACHED")
@@ -836,7 +836,7 @@ class ExitManager:
 
         for pair, data, current_price, amount in open_pairs_for_basket:
             reason = "NET_ZERO_SURVIVAL"
-            log_msg = f"🛡️ [NET-ZERO SURVIVAL] {pair}: Emergency exit at Rp {current_price:,.0f}."
+            log_msg = f"[NET-ZERO-SURVIVAL] {pair}: Emergency exit at Rp {current_price:,.0f}."
             log_message(log_msg)
             try:
                 db.log_system_event(pair, "NET_ZERO_SURVIVAL", log_msg, "CRITICAL")
@@ -900,7 +900,7 @@ class ExitManager:
         positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
         
         if positions:
-            log_message(f"🔍 [EXIT-MONITOR] Evaluating {len(positions)} position(s): {list(positions.keys())[:5]}")
+            log_message(f"[EXIT-MONITOR] Evaluating {len(positions)} position(s): {list(positions.keys())[:5]}")
         
         
         modified_pairs = set()
@@ -935,7 +935,7 @@ class ExitManager:
                         if price > 0 and value_idr < 10000:
                             continue
                             
-                        log_message(f"🔍 [DISCOVERY] Adopting asset: {coin} ({amount}) - Value IDR: Rp {value_idr:,.0f}")
+                        log_message(f"[DISCOVERY] Adopting asset: {coin} ({amount}) - Value IDR: Rp {value_idr:,.0f}")
                         recovery_data = {
                             "pair": pair,
                             "entry_price": price if price > 0 else 0,
@@ -955,7 +955,7 @@ class ExitManager:
                 # Update positions list after discovery
                 positions = {p: d for p, d in all_positions.items() if int(d.get('dry_run', 0)) == current_dr_val}
             except Exception as e:
-                log_message(f"⚠️ Discovery Error: {e}")
+                log_message(f"[ERROR] Discovery Error: {e}")
 
         if not positions:
             return
@@ -982,7 +982,7 @@ class ExitManager:
                     # DUST: hanya hapus jika crypto benar-benar nol di exchange (bukan karena nilai IDR kecil)
                     if is_dust_status:
                         if amount_on_exchange < 1e-8:
-                            log_message(f"👻 [AUTO-RECONCILE] Removing ghost DUST {pair} (balance nol di exchange)")
+                            log_message(f"[AUTO-RECONCILE] Removing ghost DUST {pair} (balance nol di exchange)")
                             db.delete_position(pair)
                             positions.pop(pair, None)
                             ghosts_removed.append(pair)
@@ -990,17 +990,17 @@ class ExitManager:
 
                     # OPEN: hapus jika saldo sangat kecil/nol atau nilai di bawah Rp 5.000
                     if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000):
-                        log_message(f"👻 [AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value IDR: Rp {value_idr:,.0f})")
+                        log_message(f"[AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value IDR: Rp {value_idr:,.0f})")
                         db.delete_position(pair)
                         positions.pop(pair, None)
                         ghosts_removed.append(pair)
                 
                 if ghosts_removed:
-                    log_message(f"✅ Auto-reconcile complete. Cleaned: {ghosts_removed}")
+                    log_message(f"[AUTO-RECONCILE] Auto-reconcile complete. Cleaned: {ghosts_removed}")
                 
                 self.last_balance_sync = time.time()
             except Exception as e:
-                log_message(f"⚠️ Auto-reconcile failed: {e}")
+                log_message(f"[ERROR] Auto-reconcile failed: {e}")
 
         def mark_exit_requested(target_pair, order_id):
             """Sinkronkan state exit untuk DRY RUN vs LIVE agar tidak ada posisi ghost."""
@@ -1025,7 +1025,7 @@ class ExitManager:
         if manual_exit_pair:
             db.save_state("trigger_exit_pair", "") # Reset immediately
             if manual_exit_pair in positions and positions[manual_exit_pair].get('status') == "OPEN":
-                log_message(f"🚨 [MANUAL EXIT] Triggered from dashboard for {manual_exit_pair}")
+                log_message(f"[MANUAL-EXIT] Triggered from dashboard for {manual_exit_pair}")
                 data = positions[manual_exit_pair]
                 # Ambil harga terakhir dari ticker terbaru
                 price = float(current_tickers[manual_exit_pair].get('last') or current_tickers[manual_exit_pair].get('buy') or 0)
@@ -1049,7 +1049,7 @@ class ExitManager:
         #   • Manual EXIT button handles cut-loss scenarios instead.
         STAGNANT_RESCUE_MINUTES = 20  # Ambang waktu mandek untuk trigger rescue basket
 
-        # ── BTC Price Tracking (for 5-minute crash detection) ────────────────────────────
+        #  BTC Price Tracking (for 5-minute crash detection) 
         btc_ticker_data = current_tickers.get('btcidr') or {}
         _btc_raw = btc_ticker_data.get('last') or btc_ticker_data.get('buy')
         btc_current = float(_btc_raw) if _btc_raw not in (None, '', 0, '0') else 0.0
@@ -1159,7 +1159,7 @@ class ExitManager:
                             self._cancel_open_sell_orders_for_pair(pair, old_exit_order_id)
 
                         log_message(
-                            f"⚠️ [EXIT TIMEOUT OVERRIDE] {pair}: market-only mode, "
+                            f"[EXIT-TIMEOUT-OVERRIDE] {pair}: market-only mode, "
                             f"tetap lanjut emergency market sell."
                         )
 
@@ -1175,7 +1175,7 @@ class ExitManager:
                         if new_order_id:
                             mark_exit_requested(pair, new_order_id)
                     except Exception as e:
-                        log_message(f"⚠️ EXITING timeout check error for {pair}: {e}")
+                        log_message(f"[ERROR] EXITING timeout check error for {pair}: {e}")
 
                     continue
 
@@ -1238,7 +1238,7 @@ class ExitManager:
                 if pair in current_tickers and current_price > 0:
                     open_pairs_for_basket.append((pair, data, current_price, amount))
 
-            # ── High-water-mark tracking ─────────────────────────────────────────────────
+            #  High-water-mark tracking 
             # Update HWM jika profit gabungan saat ini lebih tinggi dari sebelumnya.
             # Reset ke 0 ketika tidak ada posisi terbuka agar sesi berikutnya mulai bersih.
             if open_pairs_for_basket:
@@ -1248,7 +1248,7 @@ class ExitManager:
                 self._portfolio_hwm = 0.0
                 self._was_above_safety_zone = False  # Reset when basket is empty.
 
-            # ── PnL Velocity (open positions only) ──────────────────────────────────────
+            #  PnL Velocity (open positions only) 
             if open_position_count > 0:
                 self._update_pnl_velocity(total_net_pnl, _now_ts)
             else:
@@ -1263,7 +1263,7 @@ class ExitManager:
                 except Exception:
                     pass
 
-            # ── Snapshot unrealised PnL to bot_state for dashboard (throttled) ─────────
+            #  Snapshot unrealised PnL to bot_state for dashboard (throttled) 
             if _now_ts - self._last_pnl_snapshot_ts >= 5.0:
                 try:
                     db.save_state("net_pnl_unrealized", str(round(total_net_pnl, 2)))
@@ -1277,7 +1277,7 @@ class ExitManager:
                 fees_pct      = (total_fees_idr    / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
                 net_pnl_pct   = (total_net_pnl     / total_amount_idr * 100) if total_amount_idr > 0 else 0.0
 
-                # ── Net-Zero Survival Guard (v3) ──────────────────────────────────────────
+                #  Net-Zero Survival Guard (v3) 
                 # Fires BASKET_EXIT when the combined Net PnL (realized + unrealized)
                 # breaches its active floor with negative momentum.
                 #
@@ -1327,7 +1327,7 @@ class ExitManager:
                                 except Exception:
                                     pass
                                 log_message(
-                                    f"🎯 [NET-ZERO TARGET RATCHET] Floor naik ke Rp {active_target_floor:,.0f} "
+                                    f"[NET-ZERO-TARGET-RATCHET] Floor naik ke Rp {active_target_floor:,.0f} "
                                     f"(Net PnL: Rp {net_total_pnl:,.0f})"
                                 )
 
@@ -1345,11 +1345,11 @@ class ExitManager:
                                 except Exception:
                                     pass
                                 log_message(
-                                    f"🌾 [NET-ZERO PROFIT LOCK] HARVEST_ONLY aktif | "
+                                    f"[NET-ZERO-PROFIT-LOCK] HARVEST_ONLY aktif | "
                                     f"Buy blocked | Floor: Rp {active_target_floor:,.0f}"
                                 )
                                 send_telegram_message(
-                                    f"🌾 *NET-ZERO Profit Lock*\n"
+                                    f"[NET-ZERO-PROFIT-LOCK]\n"
                                     f"Mode: HARVEST_ONLY (sell-only)\n"
                                     f"Target Floor: Rp {active_target_floor:,.0f}\n"
                                     f"Buy baru diblok untuk menjaga profit."
@@ -1357,7 +1357,7 @@ class ExitManager:
 
                         net_zero_floor = active_target_floor if target_reached_once else float(NET_ZERO_PNL_FLOOR_IDR)
 
-                        # ── Auto-recovery check ───────────────────────────────────────────
+                        #  Auto-recovery check 
                         # After the guard fires, give the session NET_ZERO_AUTO_RESET_SEC to
                         # recover.  If PnL is back above the floor when the timer expires,
                         # auto-re-enable buys so profitable sessions aren't permanently halted.
@@ -1381,13 +1381,13 @@ class ExitManager:
                                     except Exception:
                                         pass
                                     _recovery_msg = (
-                                        f"🟢 [NET-ZERO GUARD] Auto-recovery: PnL Rp {net_total_pnl:+,.0f} "
+                                        f"[NET-ZERO-GUARD] Auto-recovery: PnL Rp {net_total_pnl:+,.0f} "
                                         f"above floor Rp {fired_floor:,.0f} after {NET_ZERO_AUTO_RESET_SEC}s cooldown. "
                                         f"Mode: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
                                     )
                                     log_message(_recovery_msg)
                                     send_telegram_message(
-                                        f"🟢 *NET-ZERO Auto-Recovery*\n"
+                                        f"[NET-ZERO-AUTO-RECOVERY]\n"
                                         f"Net PnL: Rp {net_total_pnl:+,.0f} — kondisi pulih.\n"
                                         f"Mode aktif: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
                                     )
@@ -1430,7 +1430,7 @@ class ExitManager:
                                 if not self._net_zero_pretarget_logged:
                                     self._net_zero_pretarget_logged = True
                                     log_message(
-                                        f"🔕 [NET-ZERO GUARD] PRE-TARGET: guard disarmed. "
+                                        f"[NET-ZERO-GUARD] PRE-TARGET: guard disarmed. "
                                         f"Aktif setelah target harian tercapai. "
                                         f"Floor (post-target): Rp {daily_target_idr:,.0f}"
                                     )
@@ -1440,7 +1440,7 @@ class ExitManager:
                                 if self._net_zero_trigger_ts == 0.0:
                                     self._net_zero_trigger_ts = _now_ts
                                     log_message(
-                                        f"⚠️ [NET-ZERO GUARD] Condition detected — hysteresis timer started. "
+                                        f"[NET-ZERO-GUARD] Condition detected — hysteresis timer started. "
                                         f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
                                         f"Floor: Rp {net_zero_floor:,.0f} | "
                                         f"Avg velocity: {avg_velocity:+.1f} IDR/s | "
@@ -1450,7 +1450,7 @@ class ExitManager:
                                 if nz_immediate or _now_ts - self._net_zero_trigger_ts >= NET_ZERO_HYSTERESIS_SEC:
                                     if nz_immediate:
                                         log_message(
-                                            f"🚨 [NET-ZERO GUARD] IMMEDIATE exit — extreme crash velocity "
+                                            f"[NET-ZERO-GUARD] IMMEDIATE exit — extreme crash velocity "
                                             f"{latest_velocity:+.1f} IDR/s bypasses hysteresis."
                                         )
                                     self._net_zero_fired = True
@@ -1476,7 +1476,7 @@ class ExitManager:
                                 if self._net_zero_trigger_ts != 0.0:
                                     self._net_zero_trigger_ts = 0.0
                     except Exception as _nz_err:
-                        log_message(f"⚠️ [NET-ZERO GUARD] Check error: {_nz_err}")
+                        log_message(f"[ERROR] [NET-ZERO-GUARD] Check error: {_nz_err}")
 
 
                 # Count positions moving in the same negative direction.  If the majority
@@ -1488,7 +1488,7 @@ class ExitManager:
                 )
                 _high_corr_risk = n > 0 and _neg_count > n / 2
 
-                # ── Momentum Safety Zone Setup ────────────────────────────────────────────
+                #  Momentum Safety Zone Setup 
                 _momentum_enabled = MOMENTUM_TARGET_PNL_IDR > 0
                 _safety_buffer = MOMENTUM_SAFETY_BUFFER_IDR
                 if _high_corr_risk:
@@ -1509,12 +1509,12 @@ class ExitManager:
                     if "TARGET_REACHED" not in self._target_fired_session:
                         self._target_fired_session.add("TARGET_REACHED")
                         _tr_msg = (
-                            f"🎯 *TARGET REACHED* 🎯\n"
+                            f"[TARGET-REACHED]\n"
                             f"Net PnL: Rp {total_net_pnl:,.0f} ≥ "
                             f"Safety Zone Rp {_safety_zone_upper:,.0f}\n"
                             f"Floor Protection: ACTIVE"
                         )
-                        log_message(_tr_msg.replace('*', '').replace('\n', ' | '))
+                        log_message(_tr_msg.replace('\n', ' | '))
                         send_telegram_message(_tr_msg)
                         try:
                             db.save_state("target_protection_active", "true")
@@ -1542,12 +1542,12 @@ class ExitManager:
                 if _in_safety_zone and self._momentum_state == "IMPROVING":
                     _effective_hwm_pullback_pct = MOMENTUM_TIGHT_TRAILING_PCT
 
-                # ── HARVEST_ONLY status log (throttled) ───────────────────────────────────
+                #  HARVEST_ONLY status log (throttled) 
                 if harvest_only:
                     if _now_ts - self._last_basket_bypass_log_ts >= 60:
                         _strategy = "Tightening TP positions" if total_net_pnl > 0 else "Waiting for recovery to harvest"
                         log_message(
-                            f"🌾 [HARVEST_ONLY] Status: HARVEST_ONLY | BUY: Blocked | "
+                            f"[HARVEST-ONLY] Status: HARVEST_ONLY | BUY: Blocked | "
                             f"Strategy: {_strategy} | "
                             f"Net Unrealized: Rp {total_net_pnl:,.0f} | "
                             f"Target Floor: {SMART_BREAK_EVEN_PCT*100:.2f}% (Gross/BE)"
@@ -1560,32 +1560,32 @@ class ExitManager:
                 _BYPASS_LOG_INTERVAL = 60  # seconds between repeated bypass log messages
                 # [LOG] Basket Exit Trigger State
                 log_message(
-                    f"[BASKET_EXIT CHECK] NetPnL: Rp {total_net_pnl:,.0f} | GrossPnL: Rp {total_gross_pnl:,.0f} | Fees: Rp {total_fees_idr:,.0f} | Mode: {'EMERGENCY' if btc_crash_kill else 'NORMAL'} | Trigger: {trigger_label} | n={n} | has_losers={has_losers} | has_stagnant={has_stagnant} | harvest_only={harvest_only}"
+                    f"[EXIT-MONITOR-CHECK] NetPnL: Rp {total_net_pnl:,.0f} | GrossPnL: Rp {total_gross_pnl:,.0f} | Fees: Rp {total_fees_idr:,.0f} | Mode: {'EMERGENCY' if btc_crash_kill else 'NORMAL'} | Trigger: {trigger_label} | n={n} | has_losers={has_losers} | has_stagnant={has_stagnant} | harvest_only={harvest_only}"
                 )
 
-                # ── Exception: BTC Crash Kill Switch ─────────────────────────────────────
+                #  Exception: BTC Crash Kill Switch 
                 if btc_crash_kill:
                     should_execute = True
                     trigger_label  = f"BTC CRASH KILL SWITCH ({btc_drop_5min_pct*100:.2f}%)"
                     action_label   = "EMERGENCY KILL SWITCH"
 
-                # ── HARVEST_ONLY: Instant Exit if Profitable ─────────────────────────────
+                #  HARVEST_ONLY: Instant Exit if Profitable 
                 elif harvest_only and total_net_pnl >= get_dynamic_min_net_profit() * 0.5:
                     should_execute = True
                     trigger_label  = "MANUAL HARVEST (Profit Secured)"
                     action_label   = "HARVEST EXIT"
 
-                # ── Net Profit Gate: disable automatic exits when portfolio is net negative ──
+                #  Net Profit Gate: disable automatic exits when portfolio is net negative 
                 elif total_net_pnl <= 0:
                     if _now_ts - self._last_basket_bypass_log_ts >= _BYPASS_LOG_INTERVAL:
                         log_message(
-                            f"🔒 BASKET_EXIT Bypassed: Total Net PnL "
+                            f"[EXIT-GATE] BASKET_EXIT Bypassed: Total Net PnL "
                             f"({net_pnl_pct:+.4f}%) is not yet profitable."
                         )
                         self._last_basket_bypass_log_ts = _now_ts
 
                 else:
-                    # ── Triggers (all gated by total_net_pnl > 0) ────────────────────────
+                    #  Triggers (all gated by total_net_pnl > 0) 
                     _harvest_min_pct = AUTO_BASKET_HARVEST_MIN * 100  # precomputed once
                     dynamic_basket_min = get_dynamic_min_net_profit()
                     # (a) profit gabungan melampaui minimum DAN ada posisi rugi
@@ -1629,7 +1629,7 @@ class ExitManager:
                     # (g) EMERGENCY FLOOR — absolute hard-stop once the target has been achieved
                     trigger_emergency_floor = _at_floor
 
-                    # ── Priority cascade for trigger selection ────────────────────────────
+                    #  Priority cascade for trigger selection 
                     if trigger_emergency_floor:
                         should_execute = True
                         trigger_label  = (
@@ -1661,7 +1661,7 @@ class ExitManager:
                             if _now_ts - self._last_basket_bypass_log_ts >= _BYPASS_LOG_INTERVAL:
                                 _latest_vel = self._velocity_readings[-1] if self._velocity_readings else 0.0
                                 log_message(
-                                    f"🎯 [TIGHT TRAILING STOP] Safety Zone + Recovery detected. "
+                                    f"[TIGHT-TRAILING-STOP] Safety Zone + Recovery detected. "
                                     f"Net PnL: Rp {total_net_pnl:,.0f} | "
                                     f"Velocity: {_latest_vel:+.1f} IDR/s | "
                                     f"HWM Floor: Rp {self._portfolio_hwm * (1 - _effective_hwm_pullback_pct):,.0f}"
@@ -1692,16 +1692,16 @@ class ExitManager:
                         f"Fees -{fees_pct:.4f}% | Net {net_pnl_pct:+.4f}% | "
                         f"Action: {action_label}"
                     )
-                    log_message(f"🧺 {analysis}")
+                    log_message(f"[EXIT-BASKET] {analysis}")
                     msg = (
-                        f"🧺 *PORTFOLIO BASKET EXIT [{trigger_label}]* 🧺\n"
+                        f"[PORTFOLIO-BASKET-EXIT] [{trigger_label}]\n"
                         f"Menutup {n} posisi serentak!\n"
                         f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
                     )
-                    print(msg.replace('*', '').replace('\n', ' | '))
+                    print(msg.replace('\n', ' | '))
                     send_telegram_message(msg)
 
-                    # ── Supreme Commander Approval Gate ─────────────────────────────────
+                    #  Supreme Commander Approval Gate 
                     # BTC crash kill switch is an emergency — bypass the gate entirely.
                     # For all other basket exits:
                     #   • Profitable (net_pnl > 0): auto-execute without popup (profit path).
@@ -1710,7 +1710,7 @@ class ExitManager:
                         if total_net_pnl > 0:
                             # AUTO-HARVEST: bypass approval gate for profitable basket exits.
                             log_message(
-                                f"🚀 [AUTO-HARVEST] Profitable Basket Exit executed without confirmation. "
+                                f"[AUTO-HARVEST] Profitable Basket Exit executed without confirmation. "
                                 f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
                             )
                             # Queue a silent toast notification for the dashboard.
@@ -1725,7 +1725,7 @@ class ExitManager:
                             # Preserve original timeout defaults: harvest-type → auto-reject;
                             # safety/rescue exits → auto-approve (consistent with prior behaviour).
                             log_message(
-                                f"⚠️ [SAFETY-GATE] Protection active for neutral/loss exit. "
+                                f"[GATE] Protection active for neutral/loss exit. "
                                 f"Awaiting user approval."
                             )
                             _is_harvest = (
@@ -1748,7 +1748,7 @@ class ExitManager:
                             )
                             if not _approved:
                                 log_message(
-                                    f"🚫 [APPROVAL GATE] BASKET_EXIT [{trigger_label}] REJECTED — skipping execution"
+                                    f"[GATE] BASKET_EXIT [{trigger_label}] REJECTED — skipping execution"
                                 )
                                 return
 
@@ -1763,7 +1763,7 @@ class ExitManager:
 
                     for pair, data, current_price, amount in open_pairs_for_basket:
                         reason  = "BASKET_EXIT"
-                        log_msg = f"⚡ [BASKET_EXIT] {pair}: Liquidated as part of portfolio rescue."
+                        log_msg = f"[BASKET-EXIT] {pair}: Liquidated as part of portfolio rescue."
                         log_message(log_msg)
                         db.log_system_event(pair, reason, log_msg, 'SUCCESS')
 
@@ -1782,7 +1782,7 @@ class ExitManager:
                     self.save_positions(positions, modified_pairs)
                     return  # Langsung exit frame evaluasi ini karena semua posisi sedang ditutup
         except Exception as e:
-            log_message(f"🚨 Error in Portfolio Basket Evaluation: {e}")
+            log_message(f"[ERROR] Error in Portfolio Basket Evaluation: {e}")
 
         # --- [Shadow Recovery Monitoring] ---
         try:
@@ -1804,30 +1804,30 @@ class ExitManager:
                 if current_price >= target_tp:
                     # Shadow WIN
                     self.consecutive_shadow_wins += 1
-                    log_message(f"🏆 [SHADOW WIN] {pair} hit TP! Streak: {self.consecutive_shadow_wins}/2")
+                    log_message(f"[SHADOW-WIN] {pair} hit TP! Streak: {self.consecutive_shadow_wins}/2")
                     db.delete_shadow_order(pair)
                     db.save_state(f"shadow_meta_{pair}", "")
                     
                     if self.consecutive_shadow_wins >= 2:
-                        log_message("🔓 [SHADOW RECOVERY] 2 Consecutive Wins! Unlocking Global Pause.")
+                        log_message("[SHADOW-RECOVERY] 2 Consecutive Wins! Unlocking Global Pause.")
                         db.save_state("consecutive_losses", 0)
                         self.consecutive_shadow_wins = 0
-                        send_telegram_message("🔓 *GLOBAL PAUSE UNLOCKED*\nPasar terdeteksi membaik via Shadow Probing (2x Win). Bot kembali beroperasi normal.")
+                        send_telegram_message("[GLOBAL-PAUSE-UNLOCKED]\nPasar terdeteksi membaik via Shadow Probing (2x Win). Bot kembali beroperasi normal.")
                 
                 elif current_price <= target_sl:
                     # Shadow LOSS
-                    log_message(f"💀 [SHADOW LOSS] {pair} hit SL. Streak reset.")
+                    log_message(f"[SHADOW-LOSS] {pair} hit SL. Streak reset.")
                     self.consecutive_shadow_wins = 0
                     db.delete_shadow_order(pair)
                     db.save_state(f"shadow_meta_{pair}", "")
         except Exception as e:
-            log_message(f"⚠️ Shadow Monitoring Error: {e}")
+            log_message(f"[ERROR] Shadow Monitoring Error: {e}")
 
         for pair, data in list(positions.items()):
             try:
                 # Ambil harga terakhir dari ticker terbaru
                 if pair not in current_tickers:
-                    # ── FALLBACK: Fetch from REST API if WebSocket ticker is missing ──
+                    #  FALLBACK: Fetch from REST API if WebSocket ticker is missing 
                     # (Happens when summary-24h broadcast hasn't included this pair yet)
                     try:
                         ticker = self.exchange.fetch_ticker(pair.upper() + "/IDR")
@@ -1836,10 +1836,7 @@ class ExitManager:
                             'buy': ticker.get('bid', ticker.get('last', 0)),
                             'sell': ticker.get('ask', ticker.get('last', 0)),
                         }
-                        # log_message(f"✅ [FALLBACK] Fetched {pair} via REST API")
                     except Exception as _ex:
-                        # REST API also failed; skip this position for now
-                        # log_message(f"⏭️ {pair}: No ticker data (WS + REST failed)")
                         continue
 
                 # Jika posisi sedang EXITING, cek timeout agar profit tidak balik arah.
@@ -1906,12 +1903,12 @@ class ExitManager:
                         )
                         if not tp_guard.get('ok'):
                             log_message(
-                                f"⚠️ [EXIT TIMEOUT OVERRIDE] {pair}: market-only mode, "
+                                f"[EXIT-TIMEOUT-OVERRIDE] {pair}: market-only mode, "
                                 f"tetap lanjut emergency market sell."
                             )
 
                         log_message(
-                            f"⚠️ [EXIT TIMEOUT FALLBACK] {pair}: {int(exiting_age_sec)}s, "
+                            f"[EXIT-TIMEOUT-FALLBACK] {pair}: {int(exiting_age_sec)}s, "
                             f"Sig={momentum_signal}, TechConf={technical_confidence:.2f}. Switching to emergency exit."
                         )
 
@@ -1927,7 +1924,7 @@ class ExitManager:
                         if new_order_id:
                             mark_exit_requested(pair, new_order_id)
                     except Exception as e:
-                        log_message(f"⚠️ EXITING timeout check error for {pair}: {e}")
+                        log_message(f"[ERROR] EXITING timeout check error for {pair}: {e}")
 
                     continue
                     
@@ -1968,17 +1965,12 @@ class ExitManager:
                         momentum_conf = int(tech_sig.get('confidence', 50) or 50)
                         current_rsi = float(tech.get('rsi', 50) or 50)
                     except Exception as e:
-                        log_message(f"⚠️ Momentum eval error for {pair}: {e}")
+                        log_message(f"[ERROR] Momentum eval error for {pair}: {e}")
                     technical_confidence = max(0.0, min(1.0, momentum_conf / 100.0))
-                
-                # Diagnostic: Log status for open positions
-                # log_message(f"Monitoring {pair}: Price={current_price:,.2f}, Entry={entry_price:,.2f}, Status={data.get('status')}")
             
             # --- AUTO-CANCEL LOGIC UNTUK PENDING_BUY ---
                 if data.get('status') == "PENDING_BUY":
                     if self.dry_run:
-                        # Di mode simulasi, anggap selalu filled seketika (sudah dihandle OPEN di main.py, 
-                        # fallback hapus aja kalau somehow nyangkut)
                         continue
     
                     order_id = data.get('entry_order_id')
@@ -2003,33 +1995,26 @@ class ExitManager:
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
                             
-                            msg = f"⚠️ *AUTO-CANCEL BUY* ⚠️\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
-                            print(msg.replace('*', '').replace('\n', ' | '))
+                            msg = f"[AUTO-CANCEL-BUY]\nPair: `{pair}`\nAlasan: {reason}\nHarga Antri: Rp {entry_price:,.2f}"
+                            print(msg.replace('\n', ' | '))
                             send_telegram_message(msg)
                         except Exception as e:
                             error_msg = str(e).lower()
-                            print(f"Failed to auto-cancel {pair}: {e}")
+                            print(f"[ERROR] Failed to auto-cancel {pair}: {e}")
                             if "order not found" in error_msg or "not found" in error_msg:
-                                # Jika order tidak ada di bursa (sudah dicancel manual / filled saat WS mati), 
-                                # hapus dari DB agar tidak stuck selamanya.
-                                print(f"⚠️ {pair} order {order_id} not found on exchange. Cleaning up DB...")
+                                print(f"[WARN] {pair} order {order_id} not found on exchange. Cleaning up DB...")
                                 db.delete_position(pair)
-                        
-                        # Jangan teruskan eksekusi TP/SL untuk pesanan yang masih pending
                     continue
                 # --- END AUTO-CANCEL ---
 
                 status = str(data.get('status') or '').upper()
                 if status == 'DUST':
-                    # Dust tetap tracked, tapi hanya ditop-up saat sinyal BUY muncul.
-                    # Setelah posisi cukup besar, status akan dipromosikan ke OPEN oleh DCA/top-up ini.
                     pass
     
                 # Base TP calculation from percentage
                 dynamic_tp_pct = data.get('target_tp_pct') if data.get('target_tp_pct') is not None else get_dynamic_tp_pct()
 
                 # Auto MICRO_PROFIT_EXIT: tighten TP for low-balance accounts.
-                # Keep safety model intact (evaluation still uses bid price below).
                 micro_mode_active = self._is_micro_profit_mode_active()
                 if micro_mode_active:
                     dynamic_tp_pct = min(float(dynamic_tp_pct or TP_PCT), float(MICRO_PROFIT_TP_PCT))
@@ -2041,14 +2026,13 @@ class ExitManager:
                     self._last_micro_mode_state = micro_mode_active
                     self._last_micro_mode_log_ts = time.time()
                     log_message(
-                        f"[MICRO_PROFIT_EXIT] mode={'ON' if micro_mode_active else 'OFF'} | "
+                        f"[MICRO-PROFIT-EXIT] mode={'ON' if micro_mode_active else 'OFF'} | "
                         f"balance={self._get_effective_idr_balance():,.0f} | "
                         f"threshold={MICRO_PROFIT_BALANCE_THRESHOLD:,.0f} | "
                         f"tp_pct={dynamic_tp_pct*100:.2f}%"
                     )
 
                 # HARVEST_ONLY: tighten TP gradually toward SMART_BREAK_EVEN_PCT (0.85%)
-                # over a 30-minute transition window from the moment the mode was activated.
                 if harvest_only:
                     _now_ts_sec = time.time()
                     _elapsed_sec = max(0, _now_ts_sec - harvest_start_ts)
@@ -2066,12 +2050,9 @@ class ExitManager:
                 base_tp_price = entry_price * (1 + dynamic_tp_pct)
 
                 # Rumus TP: (Target_IDR + Entry_Value * (1 + Buy_Fee)) / (Amount * (1 - Sell_Fee - Slippage))
-                # [Fee Fix] TP exits menggunakan taker → gunakan FEE_BUY_TAKER + FEE_SELL_TAKER
                 from config import FEE_SLIPPAGE_BUFFER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
                 denom_tp = amount * max(0.01, (1 - FEE_SELL_TAKER - tp_slippage))
-                # [SMART_BREAK_EVEN] Minimum net profit agar trade masuk zona REAL_PROFIT (> 0.85% gross).
-                # 0.85% = 0.6322% round-trip taker fee + 0.21% slippage buffer.
                 amount_idr_pos = float(data.get('amount_idr', 0))
                 dynamic_min_profit = get_dynamic_min_net_profit()
                 dynamic_min_net = min(dynamic_min_profit, amount_idr_pos * SMART_BREAK_EVEN_PCT)
@@ -2097,18 +2078,12 @@ class ExitManager:
 
                 active_sl_price = initial_sl_price
 
-                # [DUST MONITOR] Evaluasi sinyal terbaru setiap siklus untuk DUST position.
-                # Pakai sinyal khusus DUST yang lebih ketat (multiple indicator confirmation).
-                # Prioritas:
-                #   1. Profit + nilai >= MIN_TRADE_IDR → smart-promote ke OPEN → TP exit
-                #   2. DUST signal BUY_CONFIRMED + confidence OK → recovery top-up agar bisa dijual
-                #   3. Semua kondisi lain → tunggu, log saja
+                # [DUST MONITOR]
                 if status == 'DUST':
                     from config import MIN_TRADE_IDR as _MIN_TRADE_IDR
                     current_dust_value_idr = float(amount or 0) * float(current_price or 0)
 
-                    # Fallback: jika price_history dari WS terlalu pendek (pair jarang aktif),
-                    # fetch OHLC langsung dari exchange agar evaluasi tidak selalu UNCERTAIN.
+                    # Fallback
                     if len(hist) < 35:
                         try:
                             from app.infrastructure.providers.indodax_adapter import IndodaxAdapter as _Adapter
@@ -2119,26 +2094,24 @@ class ExitManager:
                                     hist = _closes[-180:]
                                     log_message(f"[DUST] {pair}: OHLC fallback {len(hist)} candles (WS history kosong)")
                         except Exception as _fe:
-                            log_message(f"[DUST] {pair}: OHLC fallback gagal: {_fe}")
+                            log_message(f"[ERROR] [DUST] {pair}: OHLC fallback gagal: {_fe}")
 
-                    # Evaluasi sinyal DUST khusus dengan multiple indicator confirmation
                     dust_signal, dust_signal_conf = self._evaluate_dust_signal(
                         pair, hist, current_rsi
                     )
 
-                    # Log status DUST setiap siklus agar mudah di-monitor
                     log_message(
-                        f"🌫️ [DUST] {pair}: "
+                        f"[DUST] {pair}: "
                         f"nilai=Rp {current_dust_value_idr:,.0f} | "
                         f"profit={pnl_pct:.2f}% | "
                         f"dust_sig={dust_signal} ({dust_signal_conf:.0%}) | "
                         f"rsi={current_rsi:.0f}"
                     )
 
-                    # [1] SMART-PROMOTE: profit dan nilai sudah cukup untuk dijual
+                    # [1] SMART-PROMOTE
                     if current_profit_pct > 0 and current_dust_value_idr >= _MIN_TRADE_IDR:
                         log_message(
-                            f"📈 [DUST SMART-PROMOTE] {pair}: nilai Rp {current_dust_value_idr:,.0f} "
+                            f"[DUST-SMART-PROMOTE] {pair}: nilai Rp {current_dust_value_idr:,.0f} "
                             f">= Rp {_MIN_TRADE_IDR:,} & profit {pnl_pct:.2f}%. "
                             f"Promoting ke OPEN untuk exit TP."
                         )
@@ -2146,25 +2119,23 @@ class ExitManager:
                         data['status'] = 'OPEN'
                         status = 'OPEN'
                         modified_pairs.add(pair)
-                        # Fall through ke logika TP/SL di bawah
 
-                    # [2] RECOVERY TOP-UP: DUST signal BUY_CONFIRMED, coba tambah modal agar posisi bisa dijual
+                    # [2] RECOVERY TOP-UP
                     else:
-                        # Hanya consider top-up jika dust_signal konfirm (2+ indicators)
                         dust_buy_confirmed = (dust_signal == 'BUY_CONFIRMED' and dust_signal_conf >= 0.70)
                         
                         can_recover, dust_reason, topup_idr = self._evaluate_dust_recovery(
                             pair,
                             data,
                             current_tickers,
-                            'BUY' if dust_buy_confirmed else 'HOLD',  # Override momentum untuk dust-only logic
+                            'BUY' if dust_buy_confirmed else 'HOLD',
                             dust_signal_conf,
                             dust_topups_this_cycle,
                             dust_budget_used_idr,
                         )
                         if can_recover:
                             log_message(
-                                f"♻️ [DUST RECOVERY BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
+                                f"[DUST-RECOVERY-BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
                                 f"dust_sig_conf={dust_signal_conf:.0%} | cycle={dust_topups_this_cycle + 1}/"
                                 f"{DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE}"
                             )
@@ -2181,41 +2152,27 @@ class ExitManager:
                                 positions[pair]['status'] = 'OPEN'
                                 modified_pairs.add(pair)
                         elif dust_reason == 'already_tradeable':
-                            # amount_idr sudah >= target_notional tanpa top-up — langsung promosi ke OPEN
                             log_message(
-                                f"✅ [DUST PROMOTE] {pair}: amount_idr sudah >= target "
+                                f"[DUST-PROMOTE] {pair}: amount_idr sudah >= target "
                                 f"(dust_sig={dust_signal} {dust_signal_conf:.0%}). Promoting to OPEN."
                             )
                             positions[pair]['status'] = 'OPEN'
                             modified_pairs.add(pair)
                         elif dust_reason not in ('signal_not_buy', 'low_confidence', 'cooldown_active'):
-                            # Log kondisi yang butuh perhatian (budget/limit habis), bukan sekadar tunggu sinyal
                             log_message(
-                                f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
+                                f"[DUST-RECOVERY-SKIP] {pair}: {dust_reason} "
                                 f"(dust_sig={dust_signal} {dust_signal_conf:.0%}, budget_used={dust_budget_used_idr:,.0f})"
                             )
-                        # [4] Jika status masih DUST setelah semua evaluasi, lanjut iterasi berikutnya
                         if str(positions[pair].get('status') or '').upper() == 'DUST':
                             continue
     
-                # --- [Aggressive] Rapid Take Profit (Scalp Focus) ---
-                # Menggunakan kalkulasi Net PnL IDR yang sudah memotong semua fee (Taker Exit)
+                # --- [Aggressive] Rapid Take Profit ---
                 try:
                     sell_value_est = amount * current_price
                     fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_TAKER
-                    # [Senior Scaling Fix] Karena kita sekarang menggunakan Market Order (Taker) untuk TP,
-                    # estimasi fee harus menggunakan Taker Rate (0.72%) agar profit tetap aman.
                     fee_sell_est = sell_value_est * FEE_SELL_TAKER
                     net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
-                    # [Senior Global Strategy] Multi-Tiered Take Profit berbasis teknikal murni.
-                    # Tier 1: Small Profit (Ride the Trend)
-                    # Tier 2: Good Profit (Fast Exit on any weakness — dikonfirmasi multi-indicator)
-                    # Tier 3: High Profit (FORCE EXIT NOW - Lock it in!)
-
-
-                    # Dynamic thresholds for tiered profit exits
-                    # Use a percentage of dynamic balance-based minimum or amount_idr for IDR-based triggers
                     amount_idr_pos = float(data.get('amount_idr', 0))
                     dynamic_min_profit = get_dynamic_min_net_profit()
                     tier2_idr_threshold = max(dynamic_min_profit, amount_idr_pos * TIER2_PROFIT_IDR_PCT)
@@ -2223,17 +2180,16 @@ class ExitManager:
                     is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
                     is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
-                    # Logika Tier 3: FORCE EXIT (Profit sangat bagus, amankan)
+                    # Tier 3: FORCE EXIT
                     if is_tier3_high_profit:
                         reason_tp = "FORCE_PROFIT_HIGH_TIER"
-                        log_message(f"💎 [GOD-MODE EXIT] {pair}: High Profit {current_profit_pct*100:.2f}% secured instantly!")
+                        log_message(f"[GOD-MODE-EXIT] {pair}: High Profit {current_profit_pct*100:.2f}% secured instantly!")
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
-                    # Logika Tier 2: FAST EXIT — hanya jika ada konfirmasi SELL signal (2+ indikator teknikal melemah).
-                    # Multi-indicator dengan fee protection — tidak keluar jika net profit < 0.
+                    # Tier 2: FAST EXIT
                     exit_signal, exit_signal_conf, net_pnl_after_fee, fee_pct_roundtrip = self._evaluate_exit_signal(
                         pair,
                         hist,
@@ -2245,15 +2201,12 @@ class ExitManager:
                     )
 
                     if is_tier2_good_profit and exit_signal in ('SELL_CONFIRMED', 'CONSIDER'):
-                        # [Senior Strategy] Profit Floor Guard: Block TIER2 exit if net profit < 1.2%
-                        # Ensures every exit meets minimum 1% net profit target after fees.
-                        # Fee: 0.6322% round-trip → 1.2% net = 1.8322% gross minimum.
                         MIN_NET_PROFIT_FLOOR_PCT = 0.012  # 1.2% net minimum
                         current_net_pct = net_pnl_idr / amount_idr_pos if amount_idr_pos > 0 else 0.0
                         
                         if current_net_pct < MIN_NET_PROFIT_FLOOR_PCT:
                             log_message(
-                                f"🛡️ [PROFIT FLOOR] {pair}: TIER2 exit blocked | "
+                                f"[PROFIT-FLOOR] {pair}: TIER2 exit blocked | "
                                 f"net {current_net_pct*100:.2f}% < floor {MIN_NET_PROFIT_FLOOR_PCT*100:.1f}% | "
                                 f"Hold until 1.2%+ net (current: {net_pnl_idr:,.0f} IDR)"
                             )
@@ -2261,22 +2214,20 @@ class ExitManager:
                         
                         reason_tp = "RAPID_TP_GOOD_PROFIT"
                         log_message(
-                            f"⚡ [GOOD-PROFIT EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
+                            f"[GOOD-PROFIT-EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
                             f"| exit_sig={exit_signal} ({exit_signal_conf:.0%}) "
-                            f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%) | Timing bagus untuk exit!"
+                            f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%)"
                         )
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
                                                    entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
-                    # Logika Tier 1: NORMAL SCALP (Ikuti Trailing Stop / TP target standar)
                 except Exception as e:
-                    log_message(f"⚠️ Error in Global Tiered TP for {pair}: {e}")
+                    log_message(f"[ERROR] Error in Global Tiered TP for {pair}: {e}")
                     continue
 
-                # [DUST RECOVERY] Jika masih dust tapi sinyal BUY kuat, lakukan top-up market buy
-                # supaya posisi bisa kembali menjadi trade yang layak dan nantinya dijual 100%.
+                # [DUST RECOVERY]
                 if status == 'DUST':
                     can_recover, dust_reason, topup_idr = self._evaluate_dust_recovery(
                         pair,
@@ -2289,7 +2240,7 @@ class ExitManager:
                     )
                     if can_recover:
                         log_message(
-                            f"♻️ [DUST RECOVERY BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
+                            f"[DUST-RECOVERY-BUY] {pair}: top-up Rp {topup_idr:,.0f} | "
                             f"conf={technical_confidence:.2f} | cycle={dust_topups_this_cycle + 1}/"
                             f"{DUST_RECOVERY_MAX_TOPUPS_PER_CYCLE}"
                         )
@@ -2306,16 +2257,15 @@ class ExitManager:
                             positions[pair]['status'] = 'OPEN'
                             modified_pairs.add(pair)
                     elif dust_reason == 'already_tradeable':
-                        # amount_idr sudah >= target_notional tanpa top-up — langsung promosi ke OPEN
                         log_message(
-                            f"✅ [DUST PROMOTE] {pair}: amount_idr sudah >= target "
+                            f"[DUST-PROMOTE] {pair}: amount_idr sudah >= target "
                             f"(conf={technical_confidence:.2f}). Promoting to OPEN."
                         )
                         positions[pair]['status'] = 'OPEN'
                         modified_pairs.add(pair)
                     elif dust_reason in ('cycle_topup_limit', 'insufficient_cycle_budget'):
                         log_message(
-                            f"⏭️ [DUST RECOVERY SKIP] {pair}: {dust_reason} "
+                            f" [DUST RECOVERY SKIP] {pair}: {dust_reason} "
                             f"(conf={technical_confidence:.2f}, budget_used={dust_budget_used_idr:,.0f})"
                         )
                         continue
@@ -2333,7 +2283,7 @@ class ExitManager:
                 _tp_bid = float(_tp_ticker.get('buy') or 0)
                 tp_eval_price = _tp_bid if _tp_bid > 0 else current_price
                 log_message(
-                    f"📊 [{pair}] TP-Status: tp_eval_price={tp_eval_price:.0f} (bid) vs tp_price={tp_price:.0f} | "
+                    f"[EXIT-STATUS] [{pair}] TP-Status: tp_eval_price={tp_eval_price:.0f} (bid) vs tp_price={tp_price:.0f} | "
                     f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
                 )
 
@@ -2349,7 +2299,7 @@ class ExitManager:
                         est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
                         if (not tp_guard.get('ok')) or est_net <= 0:
                             log_message(
-                                f"⛔ [MICRO_PROFIT_EXIT] {pair}: TP ditahan, net belum positif "
+                                f"[REJECT] [MICRO_PROFIT_EXIT] {pair}: TP ditahan, net belum positif "
                                 f"(est_net={est_net:,.0f}, reason={tp_guard.get('reason')})."
                             )
                             continue
@@ -2358,7 +2308,7 @@ class ExitManager:
                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id:
                         msg = (
-                            f"🎯 *TAKE PROFIT* 🎯\n"
+                            f"[TARGET] *TAKE PROFIT* [TARGET]\n"
                             f"Pair: `{pair}`\n"
                             f"Entry: Rp {entry_price:,.2f}\n"
                             f"Exit: Rp {current_price:,.2f}\n"
@@ -2385,7 +2335,7 @@ class ExitManager:
                 if can_dca:
                     reason_dca = f"STRATEGIC_DCA_TIER_{current_tier+1}"
                     log_msg = (
-                        f"⚓ [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
+                        f" [AVERAGING DOWN] {pair}: Menambah muatan di {current_profit_pct*100:.2f}% "
                         f"(Tier {current_tier+1}/{DCA_MAX_TIERS}, TechConf: {technical_confidence:.2f})"
                     )
                     log_message(log_msg)
@@ -2402,12 +2352,12 @@ class ExitManager:
                     # [Senior Strategy] Execute automatic Stop Loss to protect capital.
                     # Bypass if AUTO_SL_ENABLED is False or HARVEST_ONLY is active.
                     if not AUTO_SL_ENABLED or harvest_only:
-                        # log_message(f"⏳ [SL SUPPRESSED] {pair} hit SL but bypassing per config/mode.")
+                        # log_message(f" [SL SUPPRESSED] {pair} hit SL but bypassing per config/mode.")
                         continue
 
                     reason_sl = "STOP_LOSS"
                     log_message(
-                        f"💀 [AUTO-SL TRIGGERED] {pair}: Price {current_price:,.2f} hit SL {active_sl_price:,.2f} "
+                        f"[LOSS] [AUTO-SL TRIGGERED] {pair}: Price {current_price:,.2f} hit SL {active_sl_price:,.2f} "
                         f"({pnl_pct:+.2f}%). Protecting capital."
                     )
                     order_id = self.execute_exit(pair, amount, current_price, reason_sl,
@@ -2415,7 +2365,7 @@ class ExitManager:
                     if order_id: mark_exit_requested(pair, order_id)
                     continue
             except Exception as e:
-                log_message(f"🚨 Error in monitor loop: {e}")
+                log_message(f"[CRITICAL] Error in monitor loop: {e}")
                 import traceback
                 log_message(traceback.format_exc())
 
@@ -2437,7 +2387,7 @@ class ExitManager:
             return  # No real exchange in dry-run mode
 
         try:
-            # ── 1. Cancel open BUY limit orders ──────────────────────────────────
+            #  1. Cancel open BUY limit orders 
             try:
                 open_orders = self.exchange.fetch_open_orders()
                 for order in open_orders or []:
@@ -2451,14 +2401,14 @@ class ExitManager:
                                 params={'pair': pair[:-3] + '_idr', 'side': 'buy'},
                             )
                             log_message(
-                                f"🛡️ [DEFENSIVE_CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
+                                f"[DEFENSIVE-CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
                             )
                         except Exception as _ce:
-                            log_message(f"⚠️ [DEFENSIVE_CLOSE] Cancel order error: {_ce}")
+                            log_message(f"[WARN] [DEFENSIVE_CLOSE] Cancel order error: {_ce}")
             except Exception as _oe:
-                log_message(f"⚠️ [DEFENSIVE_CLOSE] fetch_open_orders error: {_oe}")
+                log_message(f"[WARN] [DEFENSIVE_CLOSE] fetch_open_orders error: {_oe}")
 
-            # ── 2. Sell orphan coin balances ─────────────────────────────────────
+            #  2. Sell orphan coin balances 
             try:
                 bal = self.exchange.fetch_balance()
                 total_bal = bal.get('total', {})
@@ -2495,15 +2445,15 @@ class ExitManager:
                             {'pair': pair[:-3] + '_idr'}
                         )
                         log_message(
-                            f"🛡️ [DEFENSIVE_CLOSE] Sold orphan {coin} ({amount}) "
+                            f"[DEFENSIVE-CLOSE] Sold orphan {coin} ({amount}) "
                             f"≈ Rp {idr_value:,.0f} via {reason}"
                         )
                     except Exception as _se:
-                        log_message(f"⚠️ [DEFENSIVE_CLOSE] Sell orphan {coin} error: {_se}")
+                        log_message(f"[WARN] [DEFENSIVE_CLOSE] Sell orphan {coin} error: {_se}")
             except Exception as _be:
-                log_message(f"⚠️ [DEFENSIVE_CLOSE] fetch_balance error: {_be}")
+                log_message(f"[WARN] [DEFENSIVE_CLOSE] fetch_balance error: {_be}")
         except Exception as _e:
-            log_message(f"⚠️ [DEFENSIVE_CLOSE] Unexpected error: {_e}")
+            log_message(f"[WARN] [DEFENSIVE_CLOSE] Unexpected error: {_e}")
 
     def _request_approval(self, action_type, description, reason_text, impact_idr, default_approve=True):
         """Supreme Commander Approval Gate — blocks up to 30 s waiting for user response.
@@ -2532,7 +2482,7 @@ class ExitManager:
         db.save_state("pending_approval", json.dumps(payload))
 
         log_msg = (
-            f"⏸️ [APPROVAL GATE] User Approval Requested for {action_type} | "
+            f"[APPROVAL-GATE] User Approval Requested for {action_type} | "
             f"Waiting max 10s... (default: {'APPROVE' if default_approve else 'REJECT'})"
         )
         log_message(log_msg)
@@ -2553,7 +2503,7 @@ class ExitManager:
             status = current.get("status", "PENDING")
             if status == "APPROVED":
                 log_msg = (
-                    f"✅ [APPROVAL GATE] User Approval Requested for {action_type} | Response: Approved"
+                    f"[OK] [APPROVAL GATE] User Approval Requested for {action_type} | Response: Approved"
                 )
                 log_message(log_msg)
                 db.log_system_event(description, "APPROVAL_APPROVED", log_msg, 'SUCCESS')
@@ -2561,7 +2511,7 @@ class ExitManager:
                 return True
             elif status == "REJECTED":
                 log_msg = (
-                    f"🚫 [APPROVAL GATE] User Approval Requested for {action_type} | Response: Rejected"
+                    f"[BLOCK] [APPROVAL GATE] User Approval Requested for {action_type} | Response: Rejected"
                 )
                 log_message(log_msg)
                 db.log_system_event(description, "APPROVAL_REJECTED", log_msg, 'WARNING')
@@ -2571,7 +2521,7 @@ class ExitManager:
         # Timeout — apply the configured default
         action_taken = "AUTO-APPROVED" if default_approve else "AUTO-REJECTED"
         log_msg = (
-            f"⏰ [APPROVAL GATE] User Approval Requested for {action_type} | "
+            f" [APPROVAL GATE] User Approval Requested for {action_type} | "
             f"Response: Timeout → {action_taken}"
         )
         log_message(log_msg)
@@ -2606,7 +2556,7 @@ class ExitManager:
                     est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
                     if (not tp_guard.get('ok')) or est_net <= 0:
                         log_message(
-                            f"⛔ [MICRO_PROFIT_EXIT] {pair}: cancel TAKE_PROFIT, net belum positif "
+                            f"[REJECT] [MICRO_PROFIT_EXIT] {pair}: cancel TAKE_PROFIT, net belum positif "
                             f"(est_net={est_net:,.0f}, reason={tp_guard.get('reason')})."
                         )
                         return None
@@ -2615,11 +2565,11 @@ class ExitManager:
                     guard_reason = str(tp_guard.get('reason') or '')
                     if reason == "FORCE_PROFIT_HIGH_TIER" and guard_reason == 'below_profit_floor':
                         log_message(
-                            f"⚠️ [GOD-MODE OVERRIDE] {pair}: bypass TP guard ({guard_reason}) untuk eksekusi cepat."
+                            f"[WARN] [GOD-MODE OVERRIDE] {pair}: bypass TP guard ({guard_reason}) untuk eksekusi cepat."
                         )
                     else:
                         log_message(
-                            f"⚠️ [TP GUARD OVERRIDE] {pair}: {guard_reason}. "
+                            f"[WARN] [TP GUARD OVERRIDE] {pair}: {guard_reason}. "
                             f"Tetap market sell sesuai mode market-only."
                         )
 
@@ -2660,7 +2610,7 @@ class ExitManager:
 
                     if amount <= 0:
                         log_message(
-                            f"⚠️ [EXIT SKIP] {pair}: saldo free {coin} tidak cukup untuk jual "
+                            f"[WARN] [EXIT SKIP] {pair}: saldo free {coin} tidak cukup untuk jual "
                             f"(free={real_balance:.12f})."
                         )
                         return None
@@ -2703,7 +2653,7 @@ class ExitManager:
                         retry_amount_int = int(math.floor(float(amount or 0)))
                         if retry_amount_int > 0 and retry_amount_int < float(amount or 0):
                             log_message(
-                                f"⚠️ [EXIT RETRY INTEGER] {pair}: exchange menolak decimal qty, "
+                                f"[WARN] [EXIT RETRY INTEGER] {pair}: exchange menolak decimal qty, "
                                 f"retry dengan amount integer {retry_amount_int} (prev {float(amount or 0):.12f})."
                             )
                             amount = retry_amount_int
@@ -2715,7 +2665,7 @@ class ExitManager:
                                 err_text = str(retry_decimal_err).lower()
                         else:
                             log_message(
-                                f"⚠️ [EXIT SKIP] {pair}: exchange menolak decimal qty dan amount integer tidak valid "
+                                f"[WARN] [EXIT SKIP] {pair}: exchange menolak decimal qty dan amount integer tidak valid "
                                 f"(amount={float(amount or 0):.12f})."
                             )
                             return None
@@ -2756,20 +2706,20 @@ class ExitManager:
 
                             if retry_amount > 0:
                                 log_message(
-                                    f"⚠️ [EXIT RETRY] {pair}: insufficient balance, retry amount {retry_amount:.12f} {coin} "
+                                    f"[WARN] [EXIT RETRY] {pair}: insufficient balance, retry amount {retry_amount:.12f} {coin} "
                                     f"(prev {float(amount or 0):.12f})."
                                 )
                                 amount = retry_amount
                                 order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
                             else:
                                 log_message(
-                                    f"⚠️ [EXIT SKIP] {pair}: insufficient balance setelah refresh "
+                                    f"[WARN] [EXIT SKIP] {pair}: insufficient balance setelah refresh "
                                     f"(free={real_balance_retry:.12f} {coin})."
                                 )
                                 return None
                         except Exception as retry_err:
                             if 'insufficient balance' in str(retry_err).lower():
-                                log_message(f"⚠️ [EXIT SKIP] {pair}: insufficient balance on retry.")
+                                log_message(f"[WARN] [EXIT SKIP] {pair}: insufficient balance on retry.")
                                 return None
                             raise retry_err
                     else:
@@ -2842,7 +2792,7 @@ class ExitManager:
                         db.save_state("consecutive_losses", current_cl + 1)
                         self._set_pair_cooldown(pair, minutes=20, reason=reason)
 
-                    # ── Project Evolution: Learning Loop ─────────────────────────────
+                    #  Project Evolution: Learning Loop 
                     db.update_trade_outcome(pair, pnl_idr)
                     if self.oracle:
                         self.oracle.learn_from_trade(pair, pnl_idr)
@@ -2874,7 +2824,7 @@ class ExitManager:
                                   "minimum amount" in err_lower or 
                                   "insufficient balance" in err_lower)
             if is_dust_or_invalid or reason == "MANUAL_DASHBOARD_EXIT":
-                log_message(f"🧹 [EXIT CLEANUP] {pair}: Menghapus posisi zombie dari database karena ditolak exchange / di bawah batas minimum: {e}")
+                log_message(f" [EXIT CLEANUP] {pair}: Menghapus posisi zombie dari database karena ditolak exchange / di bawah batas minimum: {e}")
                 db.delete_position(pair)
                 
             return None
@@ -2901,7 +2851,7 @@ class ExitManager:
             # [Senior Fix] Guard: Pastikan nominal DCA memenuhi minimum order exchange
             if add_amount_idr < MIN_TRADE_IDR:
                 log_message(
-                    f"⚠️ [DCA SKIP] {pair}: Nominal DCA Rp {add_amount_idr:,.0f} "
+                    f"[WARN] [DCA SKIP] {pair}: Nominal DCA Rp {add_amount_idr:,.0f} "
                     f"di bawah minimum Rp {MIN_TRADE_IDR:,.0f}. Batalkan DCA."
                 )
                 return False
@@ -2916,7 +2866,7 @@ class ExitManager:
             if self.dry_run:
                 # Simulasi penambahan muatan
                 log_message(
-                    f"🧪 [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR "
+                    f" [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR "
                     f"= {add_amount_crypto:.8f} koin at Rp {current_price:,.2f}"
                 )
             else:
@@ -2959,18 +2909,18 @@ class ExitManager:
             )
             
             msg = (
-                f"⚓ *DCA SUCCESS* ⚓\n"
+                f" *DCA SUCCESS* \n"
                 f"Pair: `{pair}` (Tier {new_tier})\n"
                 f"Old Entry: Rp {old_entry_price:,.2f}\n"
                 f"DCA Price: Rp {current_price:,.2f}\n"
-                f"New Average: Rp {new_avg_entry_price:,.2f} 🔥\n"
+                f"New Average: Rp {new_avg_entry_price:,.2f} [SIGNAL]\n"
                 f"Total Load: Rp {new_total_amount_idr:,.0f} ({new_total_amount_crypto:.8f} koin)"
             )
             send_telegram_message(msg)
             return True
             
         except Exception as e:
-            log_message(f"🚨 Critical error in execute_averaging_down for {pair}: {e}")
+            log_message(f"[CRITICAL] Critical error in execute_averaging_down for {pair}: {e}")
             return False
 
     def handle_order_update(self, order):
@@ -3018,7 +2968,7 @@ class ExitManager:
             
             # [Senior Reactive Sync] Trigger balance update on any significant order change
             if not self.dry_run and self.bot and (status in done_statuses or status in fill_statuses or status in cancel_statuses):
-                # log_message(f"🔄 Re-syncing balance due to order event: {status}")
+                # log_message(f" Re-syncing balance due to order event: {status}")
                 self.bot._sync_balances_to_db()
 
             # Event NEW tidak mengubah state lokal.
@@ -3028,7 +2978,7 @@ class ExitManager:
             # 1. Cek apakah ini Jaring yang terisi
             for p, jaring in list(self.jaring_orders.items()):
                 if self._order_id_match(jaring.get('id'), order_id):
-                    log_message(f"🎯 JARING FILLED! {p} bought at Rp {jaring['price']:,.2f} via Liquidity Grab.")
+                    log_message(f"[TARGET] JARING FILLED! {p} bought at Rp {jaring['price']:,.2f} via Liquidity Grab.")
                     
                     # Pindahkan dari Shadow ke Positions
                     data = {
@@ -3047,7 +2997,7 @@ class ExitManager:
                     db.delete_shadow_order(p)
                     if p in self.jaring_orders: del self.jaring_orders[p]
                     
-                    send_telegram_message(f"🎯 *JARING FILLED* 🎯\nPair: `{p}`\nPrice: Rp {jaring['price']:,.2f}")
+                    send_telegram_message(f"[TARGET] *JARING FILLED* [TARGET]\nPair: `{p}`\nPrice: Rp {jaring['price']:,.2f}")
                     return
 
             # 2. Cek apakah ini Buy Order reguler yang baru terisi
@@ -3055,7 +3005,7 @@ class ExitManager:
             for p_pair, p_data in positions.items():
                 if self._order_id_match(p_data.get('entry_order_id'), order_id) and p_data.get('status') == "PENDING_BUY":
                     if status in cancel_statuses:
-                        log_message(f"🧹 BUY {status.upper()} {p_pair} ({order_id}). Deleting stale PENDING_BUY.")
+                        log_message(f" BUY {status.upper()} {p_pair} ({order_id}). Deleting stale PENDING_BUY.")
                         db.delete_position(p_pair)
                         return
 
@@ -3064,13 +3014,13 @@ class ExitManager:
                     fill_amount = executed_qty if executed_qty > 0 else float(p_data.get('amount_crypto', 0))
 
                     if is_terminal_fill:
-                        log_message(f"✅ BUY FILLED! {p_pair} order {order_id} is now OPEN.")
+                        log_message(f"[OK] BUY FILLED! {p_pair} order {order_id} is now OPEN.")
                         p_data['status'] = "OPEN"
                         p_data['entry_price'] = fill_price
                         p_data['amount_crypto'] = fill_amount
                         p_data['amount_idr'] = fill_price * fill_amount
                         db.upsert_position(p_pair, p_data)
-                        send_telegram_message(f"✅ *BUY FILLED* ✅\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
+                        send_telegram_message(f"[OK] *BUY FILLED* [OK]\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
                     else:
                         # Partial buy fill: pertahankan PENDING_BUY sampai benar-benar selesai.
                         p_data['entry_price'] = fill_price
@@ -3078,7 +3028,7 @@ class ExitManager:
                         p_data['amount_idr'] = fill_price * p_data['amount_crypto']
                         db.upsert_position(p_pair, p_data)
                         log_message(
-                            f"⏳ BUY PARTIAL {p_pair} ({order_id}): exec={fill_amount:.8f}, unfilled={unfilled_qty:.8f}"
+                            f" BUY PARTIAL {p_pair} ({order_id}): exec={fill_amount:.8f}, unfilled={unfilled_qty:.8f}"
                         )
                     return
 
@@ -3090,17 +3040,17 @@ class ExitManager:
                         p_data['status'] = 'OPEN'
                         p_data['exit_order_id'] = None
                         db.upsert_position(p_pair, p_data)
-                        log_message(f"↩️ EXIT {status.upper()} {p_pair} ({order_id}). Reverting position to OPEN.")
+                        log_message(f"↩ EXIT {status.upper()} {p_pair} ({order_id}). Reverting position to OPEN.")
                         return
 
                     if not is_terminal_fill:
                         # Partial sell fill: simpan status EXITING, tunggu event DONE agar histori tidak double.
                         log_message(
-                            f"⏳ SELL PARTIAL {p_pair} ({order_id}): exec={executed_qty:.8f}, unfilled={unfilled_qty:.8f}. Waiting DONE."
+                            f" SELL PARTIAL {p_pair} ({order_id}): exec={executed_qty:.8f}, unfilled={unfilled_qty:.8f}. Waiting DONE."
                         )
                         return
 
-                    log_message(f"💰 SELL FILLED! {p_pair} order {order_id} is now CLOSED.")
+                    log_message(f" SELL FILLED! {p_pair} order {order_id} is now CLOSED.")
                     
                     try:
                         exit_price = float(order.get('price', 0))
@@ -3165,7 +3115,7 @@ class ExitManager:
                         if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_idr)
                         
                         db.delete_position(p_pair)
-                        send_telegram_message(f"💰 *EXIT FILLED* 💰\nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_idr:,.2f}")
+                        send_telegram_message(f" *EXIT FILLED* \nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_idr:,.2f}")
 
                         # [Manual Exit Post-Processing] Re-evaluate session status with post-exit PnL
                         if reason == "MANUAL_DASHBOARD_EXIT" and self.oracle:
@@ -3173,7 +3123,7 @@ class ExitManager:
                                 updated_status = self.oracle.get_daily_target_status()
                                 session_info = self.oracle.evaluate_and_update_session_mode(updated_status)
                                 log_message(
-                                    f"🔄 [Manual Exit] Post-exit session re-eval: "
+                                    f" [Manual Exit] Post-exit session re-eval: "
                                     f"mode={session_info.get('session_mode', 'NORMAL')} | "
                                     f"PnL Rp {updated_status.get('current_pnl', 0):,.0f} | "
                                     f"Peak Rp {updated_status.get('peak_pnl_today', 0):,.0f}"
@@ -3186,9 +3136,9 @@ class ExitManager:
                                 }
                                 if not remaining:
                                     db.save_state("session_reset_available", "true")
-                                    log_message("📭 [Manual Exit] All positions cleared. Session reset available.")
+                                    log_message(" [Manual Exit] All positions cleared. Session reset available.")
                             except Exception as ex:
-                                log_message(f"⚠️ [Manual Exit] Post-exit session re-eval error: {ex}")
+                                log_message(f"[WARN] [Manual Exit] Post-exit session re-eval error: {ex}")
                     except Exception as ex:
                         log_message(f"Error calculating final PnL for {p_pair}: {ex}")
                     return
@@ -3237,7 +3187,7 @@ class ExitManager:
             
             if resp.status_code != 200:
                 if resp.status_code == 403:
-                    logger.error(f"⚠️ 403 Forbidden for {pair}: Possible API Key restriction or IP block.")
+                    logger.error(f"[WARN] 403 Forbidden for {pair}: Possible API Key restriction or IP block.")
                     # log first 500 chars to see if there's a specific message
                     logger.error(f"Response snippet: {resp.text[:500]}")
                 return []
@@ -3309,7 +3259,7 @@ class ExitManager:
         Iterates through all pairs and performs windowed history fetching (7-day chunks)
         to overcome Indodax API limitations.
         """
-        log_message("🔄 Starting Deep Account Sync (30-Day History)...")
+        log_message(" Starting Deep Account Sync (30-Day History)...")
         try:
             markets = self.exchange.fetch_markets()
             idr_pairs = [m['id'] for m in markets if m['quoteId'] == 'idr' and m['active']]
@@ -3321,14 +3271,14 @@ class ExitManager:
             START_TARGET_MS = int(start_dt.timestamp() * 1000)
             NOW_MS = int(time.time() * 1000)
             
-            log_message(f"🔄 Range: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} to Now")
+            log_message(f" Range: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} to Now")
             
             for idx, pair_id in enumerate(idr_pairs):
                 # Rate limit protection
                 time.sleep(0.2)
                 
                 if idx % 10 == 0:
-                    log_message(f"🔄 Sync Progress: {idx}/{total_pairs} pairs scanned...")
+                    log_message(f" Sync Progress: {idx}/{total_pairs} pairs scanned...")
                 
                 # Hanya satu request karena rentang < 7 hari
                 trades = self._fetch_v2_trades(pair_id, startTime=START_TARGET_MS, endTime=NOW_MS)
@@ -3391,17 +3341,17 @@ class ExitManager:
                         )
                         total_new_trades += 1
                         if total_new_trades % 5 == 0:
-                            log_message(f"✅ Found {total_new_trades} trades so far...")
+                            log_message(f"[OK] Found {total_new_trades} trades so far...")
                     except Exception as e:
                         logger.error(f"Error inserting sync trade: {e}")
                         continue
 
-            log_message(f"✅ Deep Sync Complete! Added {total_new_trades} historical trades since 26/04.")
+            log_message(f"[OK] Deep Sync Complete! Added {total_new_trades} historical trades since 26/04.")
             db.save_state("trigger_sync_all", "0")
             return True
 
         except Exception as e:
-            log_message(f"❌ Deep Sync Failed: {e}")
+            log_message(f" Deep Sync Failed: {e}")
             db.save_state("trigger_sync_all", "0")
             return False
 
@@ -3451,7 +3401,7 @@ class ExitManager:
                 # [Fix] Promosikan PENDING_BUY ke OPEN jika saldo sudah ada di bursa
                 if pos.get('status') == "PENDING_BUY":
                     if amount_on_exchange >= (pos['amount_crypto'] * 0.9):
-                        log_message(f"🔄 Reality Sync: {pair} was PENDING_BUY but balance exists. Promoting to OPEN and syncing amount.")
+                        log_message(f" Reality Sync: {pair} was PENDING_BUY but balance exists. Promoting to OPEN and syncing amount.")
                         pos['status'] = "OPEN"
                         pos['amount_crypto'] = amount_on_exchange
                         db.upsert_position(pair, pos)
@@ -3486,11 +3436,11 @@ class ExitManager:
                             pos['exit_order_id'] = None
                             db.upsert_position(pair, pos)
                             log_message(
-                                f"↩️ Reality Sync: {pair} EXITING without active SELL order "
+                                f"↩ Reality Sync: {pair} EXITING without active SELL order "
                                 f"(wallet {amount_on_exchange:.8f} {coin}). Reverted to OPEN."
                             )
                     except Exception as _exit_sync_err:
-                        log_message(f"⚠️ Reality Sync EXITING check failed for {pair}: {_exit_sync_err}")
+                        log_message(f"[WARN] Reality Sync EXITING check failed for {pair}: {_exit_sync_err}")
                     continue  # jangan lakukan DUST classification pada posisi EXITING
 
                 # Dust kecil tetap tracked, tapi jangan diperlakukan sebagai posisi aktif normal.
@@ -3508,7 +3458,7 @@ class ExitManager:
                         # amount_idr adalah cost basis asli pembelian — JANGAN dioverwrite.
                         db.upsert_position(pair, pos)
                         log_message(
-                            f"🧹 Reality Sync: {pair} converted to DUST "
+                            f" Reality Sync: {pair} converted to DUST "
                             f"({amount_on_exchange:.12f} {coin} | current value Rp {position_idr_value:,.0f} < exchange min Rp {pair_min_idr:,.0f})."
                         )
                     continue
@@ -3521,20 +3471,20 @@ class ExitManager:
                     pos['amount_idr'] = position_idr_value
                     db.upsert_position(pair, pos)
                     log_message(
-                        f"🔓 Reality Sync: {pair} promoted from DUST to OPEN "
+                        f" Reality Sync: {pair} promoted from DUST to OPEN "
                         f"({amount_on_exchange:.12f} {coin} | current value Rp {position_idr_value:,.0f} > exchange min Rp {pair_min_idr:,.0f})."
                     )
 
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan tipis (fee/rounding)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 0 and amount_on_exchange > 0:
                     if 0.8 < (amount_on_exchange / pos['amount_crypto']) < 1.2:
-                        # log_message(f"⚖️ Amount Sync: {pair} amount adjusted {pos['amount_crypto']} -> {amount_on_exchange}")
+                        # log_message(f" Amount Sync: {pair} amount adjusted {pos['amount_crypto']} -> {amount_on_exchange}")
                         pos['amount_crypto'] = amount_on_exchange
                         db.upsert_position(pair, pos)
                 # Gunakan amount_crypto yang konsisten dengan schema DB
                 target_amount = pos.get('amount_crypto') or pos.get('amount', 0)
                 if amount_on_exchange < (target_amount * 0.8): # Toleransi lebih longgar 20%
-                    log_message(f"🚨 Reality Desync Detected! {pair} not found on exchange. Checking history v2...")
+                    log_message(f"[CRITICAL] Reality Desync Detected! {pair} not found on exchange. Checking history v2...")
                     
                     # Cek apakah ini sebenarnya sudah laku (terjual saat bot offline)
                     trades_v2 = self._fetch_v2_trades(pair)
@@ -3557,7 +3507,7 @@ class ExitManager:
                         exiting_sell_match = (pos.get('status') == 'EXITING' and trade_is_sell and trade_after_entry)
 
                         if order_id_match or exiting_sell_match:
-                            log_message(f"✅ Recovered missing trade for {pair} from v2 history! Recording PnL...")
+                            log_message(f"[OK] Recovered missing trade for {pair} from v2 history! Recording PnL...")
                             
                             # Rekonstruksi data trade untuk DB
                             exit_price = float(t.get('price', 0))
@@ -3599,7 +3549,7 @@ class ExitManager:
                             break
                     
                     if not found_fill:
-                        log_message(f"⚠️ Could not find fill for {pair} in v2 history. Attempting CCXT order fetch...")
+                        log_message(f"[WARN] Could not find fill for {pair} in v2 history. Attempting CCXT order fetch...")
                         # Coba ambil fill price aktual dari CCXT sebagai last resort
                         _exit_oid = pos.get('exit_order_id')
                         _entry_price = float(pos.get('entry_price', 0))
@@ -3615,7 +3565,7 @@ class ExitManager:
                                 if ccxt_order and ccxt_order.get('status') in ['closed', 'filled', 'done']:
                                     _reconcile_exit_price = float(ccxt_order.get('price') or ccxt_order.get('average') or 0)
                                     _reconcile_exec_type = "TAKER" if not ccxt_order.get('postOnly') else "MAKER"
-                                    log_message(f"✅ Got fill price from CCXT for {pair}: {_reconcile_exit_price}")
+                                    log_message(f"[OK] Got fill price from CCXT for {pair}: {_reconcile_exit_price}")
                             except Exception as ccxt_err:
                                 log_message(f"CCXT fetch_order failed for {pair}: {ccxt_err}")
                         if not _reconcile_exit_price or _reconcile_exit_price <= 0:
@@ -3625,7 +3575,7 @@ class ExitManager:
                                 _reconcile_exit_price = float(ticker.get('last', _entry_price))
                             except Exception:
                                 _reconcile_exit_price = _entry_price
-                            log_message(f"⚠️ Using estimated exit price for {pair}: {_reconcile_exit_price}")
+                            log_message(f"[WARN] Using estimated exit price for {pair}: {_reconcile_exit_price}")
                         _fee_rate = FEE_SELL_TAKER if _reconcile_exec_type == "TAKER" else FEE_SELL_MAKER
                         _gross = (_reconcile_exit_price - _entry_price) * _amount_crypto
                         _net = _gross - (_amount_idr * FEE_BUY_MAKER) - (_amount_crypto * _reconcile_exit_price * _fee_rate)
@@ -3640,7 +3590,7 @@ class ExitManager:
                             dry_run=False,
                             exit_order_id=_exit_oid if _exit_oid and not _exit_oid.startswith('ADOPT-') else None
                         )
-                        log_message(f"📝 Recorded best-effort trade for {pair} (RECONCILE_GHOST) pnl={_net:+,.0f} IDR")
+                        log_message(f" Recorded best-effort trade for {pair} (RECONCILE_GHOST) pnl={_net:+,.0f} IDR")
                     
                     db.delete_position(pair)
                     open_positions.pop(pair, None)  # Keep in-memory dict in sync so orphan adoption below can re-adopt this coin
@@ -3648,7 +3598,7 @@ class ExitManager:
                         del self.jaring_orders[pair]
                         db.delete_shadow_order(pair)
             
-            # ── [Auto-Adoption] Sync orphans from wallet to DB ──
+            #  [Auto-Adoption] Sync orphans from wallet to DB 
             _blacklist = set(db.get_blacklist())
             for coin, coin_amount in balance['total'].items():
                 if coin == 'IDR' or coin_amount <= 0:
@@ -3670,7 +3620,7 @@ class ExitManager:
                         if value_idr > 0 or coin_amount > 0:
                             is_dust = value_idr < pair_min_idr_adopt
                             adopt_status = "DUST" if is_dust else "OPEN"
-                            log_message(f"👼 Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting as {adopt_status}!")
+                            log_message(f" Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting as {adopt_status}!")
 
                             adopt_data = {
                                 "entry_price": current_price,
@@ -3688,11 +3638,11 @@ class ExitManager:
                             }
                             db.upsert_position(pair, adopt_data)
                             if not is_dust:
-                                send_telegram_message(f"👼 *ORPHAN ADOPTED* 👼\nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
+                                send_telegram_message(f" *ORPHAN ADOPTED* \nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
                     except Exception as e:
                         log_message(f"Failed to adopt orphan {pair}: {e}")
             
-            # ── [Active Order Sync] Sync manual Open Orders to DB ──
+            #  [Active Order Sync] Sync manual Open Orders to DB 
             try:
                 open_orders_res = self.exchange.privatePostOpenOrders()
                 if open_orders_res and str(open_orders_res.get('success')) == '1':
@@ -3713,7 +3663,7 @@ class ExitManager:
                                 pos_ts = self._parse_iso_date(pos.get('timestamp'))
                                 age_sec = (datetime.now() - pos_ts).total_seconds()
                                 if age_sec > 300: # 5 minutes
-                                    log_message(f"⚠️ [Stuck Exit] {p} order {oid} is stuck for {age_sec:.0f}s. Cancelling and performing Emergency Exit...")
+                                    log_message(f"[WARN] [Stuck Exit] {p} order {oid} is stuck for {age_sec:.0f}s. Cancelling and performing Emergency Exit...")
                                     try:
                                         # Format Indodax: aih_idr, Format CCXT: AIH/IDR
                                         ccxt_symbol = p.upper().replace("IDR", "/IDR")
@@ -3735,9 +3685,9 @@ class ExitManager:
                                         pos['status'] = 'OPEN'
                                         pos['exit_order_id'] = None
                                         db.upsert_position(p, pos)
-                                        log_message(f"↩️ Reality Sync: {p} exit order {oid} {final_status}. Position reverted to OPEN.")
+                                        log_message(f"↩ Reality Sync: {p} exit order {oid} {final_status}. Position reverted to OPEN.")
                                     elif final_status == 'FILLED':
-                                        log_message(f"✅ Reality Sync: {p} exit order {oid} already FILLED. Waiting trade reconcile.")
+                                        log_message(f"[OK] Reality Sync: {p} exit order {oid} already FILLED. Waiting trade reconcile.")
                                 else:
                                     # Anti-stuck fallback: order tidak ditemukan di open-orders maupun recent history.
                                     # Jika posisi sudah lama EXITING, kembalikan ke OPEN agar loop exit bisa retry.
@@ -3748,7 +3698,7 @@ class ExitManager:
                                         pos['exit_order_id'] = None
                                         db.upsert_position(p, pos)
                                         log_message(
-                                            f"↩️ Reality Sync: {p} exit order {oid} tidak ditemukan di open/history "
+                                            f"↩ Reality Sync: {p} exit order {oid} tidak ditemukan di open/history "
                                             f"(age {age_sec:.0f}s). Position reverted to OPEN for safe retry."
                                         )
 
@@ -3767,7 +3717,7 @@ class ExitManager:
                                         remain_idr = float(order.get('remain_idr', 0))
                                         amount_crypto_est = remain_idr / o_price if o_price > 0 else 0
                                         
-                                        log_message(f"🔄 Active Order Sync: Found untracked BUY order for {pair}. Adopting as PENDING_BUY.")
+                                        log_message(f" Active Order Sync: Found untracked BUY order for {pair}. Adopting as PENDING_BUY.")
                                         adopt_data = {
                                             "entry_price": o_price,
                                             "amount": amount_crypto_est,
@@ -3782,7 +3732,7 @@ class ExitManager:
                                             "target_sl_pct": SL_PCT
                                         }
                                         db.upsert_position(pair, adopt_data)
-                                        send_telegram_message(f"🔄 *SYNC PENDING BUY* 🔄\nPair: `{pair}`\nPrice: Rp {o_price:,.0f}")
+                                        send_telegram_message(f" *SYNC PENDING BUY* \nPair: `{pair}`\nPrice: Rp {o_price:,.0f}")
                                         pos = adopt_data
                                         open_positions[pair] = adopt_data
                                         
@@ -3790,7 +3740,7 @@ class ExitManager:
                                         coin_sym = pair[:-3]
                                         remain_coin = float(order.get(f'remain_{coin_sym}', 0))
                                         
-                                        log_message(f"🔄 Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
+                                        log_message(f" Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
                                         adopt_data = {
                                             "entry_price": o_price * 0.95,
                                             "amount": remain_coin,
@@ -3805,12 +3755,12 @@ class ExitManager:
                                             "target_sl_pct": SL_PCT
                                         }
                                         db.upsert_position(pair, adopt_data)
-                                        send_telegram_message(f"🔄 *SYNC EXITING SELL* 🔄\nPair: `{pair}`\nSell Price: Rp {o_price:,.0f}")
+                                        send_telegram_message(f" *SYNC EXITING SELL* \nPair: `{pair}`\nSell Price: Rp {o_price:,.0f}")
                                         pos = adopt_data
                                         open_positions[pair] = adopt_data
                                 else:
                                     if o_type == 'sell' and pos.get('status') == 'OPEN':
-                                        log_message(f"🔄 Active Order Sync: {pair} was OPEN but has active SELL order. Updating to EXITING.")
+                                        log_message(f" Active Order Sync: {pair} was OPEN but has active SELL order. Updating to EXITING.")
                                         pos['status'] = 'EXITING'
                                         pos['exit_order_id'] = o_id
                                         db.upsert_position(pair, pos)
@@ -3822,7 +3772,7 @@ class ExitManager:
             log_message(f"Reality Check Failed: {e}")
             # [Fix BUG #2] Dead code dihapus — 'order' tidak terdefinisi di scope ini
 
-    # ── Shadow Jaring (Liquidity Grab) ───────────────────────────────────
+    #  Shadow Jaring (Liquidity Grab) 
 
     def _sync_jaring_from_db(self):
         """Recover active jaring orders from SQLite on startup."""

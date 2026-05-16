@@ -76,12 +76,12 @@ def _validate_pair_setup_coverage(pairs: list[str], pair_setup_map: dict[str, di
         preview += f", ... (+{len(missing_pairs)-10} lainnya)"
 
     if strict_per_coin:
-        print("❌ Strict per-coin aktif: setup teknikal per-koin belum lengkap.")
+        print(" Strict per-coin aktif: setup teknikal per-koin belum lengkap.")
         print(f"   Missing pair setup: {preview}")
         print("   Jalankan `analyze` dulu agar backtest_coin_analysis terisi untuk semua pair tersebut.")
         return False
 
-    print("⚠️ Per-coin setup belum lengkap, menjalankan fallback ke profile global untuk pair yang missing.")
+    print("[WARN] Per-coin setup belum lengkap, menjalankan fallback ke profile global untuk pair yang missing.")
     print(f"   Missing pair setup: {preview}")
     return True
 
@@ -132,9 +132,9 @@ def _cache_backtest_results(all_results: list[dict], days: int, start: datetime,
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, "wb") as f:
             pickle.dump({"results": all_results, "days": days, "start": start, "now": end}, f)
-        logger.info(f"[run] 💾 Results cached to {cache_file}")
+        logger.info(f"[run]  Results cached to {cache_file}")
     except Exception as e:
-        logger.warning(f"[run] ⚠️  Failed to cache results: {e}")
+        logger.warning(f"[run] [WARN]  Failed to cache results: {e}")
 
 
 def run_backtest(
@@ -162,11 +162,11 @@ def run_backtest(
         return
 
     if float(min_liquidity_24h_idr) > 0 or float(min_price_idr) > 0:
-        print("ℹ️ Catatan: filter likuiditas/harga diabaikan pada mode strict per-koin ini.")
+        print("ℹ Catatan: filter likuiditas/harga diabaikan pada mode strict per-koin ini.")
 
     pair_setup_map = _load_latest_coin_setup(pairs)
     logger.info(f"[run] Loaded per-coin setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
-    print(f"ℹ️ Loaded per-coin technical setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
+    print(f"ℹ Loaded per-coin technical setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
 
     if not _validate_pair_setup_coverage(pairs, pair_setup_map, strict_per_coin):
         return
@@ -183,7 +183,7 @@ def run_backtest(
 
 
 def _persist_results(all_results, profiles, start, now):
-    logger.info("[db] 📥 Persisting results to database...")
+    logger.info("[db]  Persisting results to database...")
     for p in profiles:
         p_trades = [t for t in all_results if t["profile_id"] == p["id"]]
         if p_trades:
@@ -197,4 +197,4 @@ def _persist_results(all_results, profiles, start, now):
                     trades=portfolio,
                     pair_setup_map=p.get("pair_setup_map"),
                 )
-                print(f"   ✅ Saved: {p['profile_name']} ({len(portfolio)} trades)")
+                print(f"   [OK] Saved: {p['profile_name']} ({len(portfolio)} trades)")

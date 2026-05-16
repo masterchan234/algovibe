@@ -55,7 +55,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── IPC address constants ──────────────────────────────────────────────────────
+#  IPC address constants 
 IPC_MARKET = "ipc:///tmp/market_stream.ipc"
 IPC_SIGNAL = "ipc:///tmp/signal_stream.ipc"
 IPC_LLM_SIGNAL = "ipc:///tmp/llm_signal_stream.ipc"
@@ -75,7 +75,7 @@ def install_uvloop() -> None:
         logger.warning("[transport] uvloop not available; falling back to default asyncio loop.")
 
 
-# ── Publisher ──────────────────────────────────────────────────────────────────
+#  Publisher 
 
 class ZMQPublisher:
     """
@@ -93,7 +93,7 @@ class ZMQPublisher:
         self._lock = threading.Lock()
         self._started = False
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     def start(self) -> None:
         """Bind the PUB socket.  Must be called before send()."""
@@ -115,7 +115,7 @@ class ZMQPublisher:
             self._started = False
         logger.info(f"[ZMQPublisher] Stopped ({self._address})")
 
-    # ── Send ──────────────────────────────────────────────────────────────────
+    #  Send 
 
     def send(self, proto_bytes: bytes, topic: str = "", latency_ms: float = 0) -> None:
         """
@@ -154,7 +154,7 @@ class ZMQPublisher:
                 # Subscriber(s) not yet connected or HWM reached — drop silently
                 pass
 
-    # ── Context manager ───────────────────────────────────────────────────────
+    #  Context manager 
 
     def __enter__(self):
         self.start()
@@ -164,7 +164,7 @@ class ZMQPublisher:
         self.stop()
 
 
-# ── Subscriber ────────────────────────────────────────────────────────────────
+#  Subscriber 
 
 class ZMQSubscriber:
     """
@@ -180,7 +180,7 @@ class ZMQSubscriber:
         self._socket: Optional[zmq.Socket] = None
         self._running = False
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     def start(self) -> None:
         """Connect the SUB socket."""
@@ -200,7 +200,7 @@ class ZMQSubscriber:
             self._socket.close(linger=0)
         logger.info(f"[ZMQSubscriber] Stopped ({self._address})")
 
-    # ── Synchronous iterator ─────────────────────────────────────────────────
+    #  Synchronous iterator 
 
     def iter_messages(self) -> Iterator[bytes]:
         """
@@ -223,7 +223,7 @@ class ZMQSubscriber:
                     logger.error(f"[ZMQSubscriber] ZMQError: {exc}")
                 break
 
-    # ── Asynchronous iterator (uvloop-friendly) ───────────────────────────────
+    #  Asynchronous iterator (uvloop-friendly) 
 
     async def aiter_messages(self) -> AsyncIterator[bytes]:
         """
@@ -249,7 +249,7 @@ class ZMQSubscriber:
         finally:
             async_sock.close(linger=0)
 
-    # ── Context manager ───────────────────────────────────────────────────────
+    #  Context manager 
 
     def __enter__(self):
         self.start()

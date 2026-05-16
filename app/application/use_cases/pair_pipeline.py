@@ -72,7 +72,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
         btc_history = db.get_ticker_history("BTC/IDR", limit=1)
         btc_last = btc_history[0]['last'] if btc_history else 0
         if btc_last == 0:
-            log_message("⚠️ Data BTC tidak tersedia di WS/DB. Melewati filter regime.")
+            log_message("[WARN] Data BTC tidak tersedia di WS/DB. Melewati filter regime.")
             btc_last = 999_999_999
 
     btc_history = db.get_ticker_history("BTC/IDR", limit=20)
@@ -80,7 +80,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
         btc_prices = [h['last'] for h in btc_history]
         btc_sma = sum(btc_prices) / 20
         if btc_last < btc_sma:
-            log_message(f"⚠️ [BTC Filter] BTC sedang bearish ({btc_last} < {btc_sma:.0f}). Bot stand-by.")
+            log_message(f"[WARN] [BTC Filter] BTC sedang bearish ({btc_last} < {btc_sma:.0f}). Bot stand-by.")
             time.sleep(30)
             return None
 
@@ -110,7 +110,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
                     }
                     high_speed.append(p_dict)
             except Exception as e:
-                log_message(f"⚠️ Warning: Gagal sinkronisasi tracking untuk {hp}: {e}")
+                log_message(f"[WARN] Warning: Gagal sinkronisasi tracking untuk {hp}: {e}")
 
     return high_speed
 
@@ -118,7 +118,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
 def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg):
     open_positions = db.get_open_positions()
 
-    # ── [DAILY TARGET & LOSS LIMIT GATE] ──────────────────────────────────────
+    #  [DAILY TARGET & LOSS LIMIT GATE] 
     # Cek status progress target profit harian sebelum membuka posisi baru.
     target_status = bot.oracle.get_daily_target_status()
     target_idr = target_status["target_idr"]
@@ -138,7 +138,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         # Simpan faktor sizing 50% ke bot agar trade_execution bisa membacanya
         bot._recovery_size_factor = 0.5
         log_message(
-            f"⚡ [RECOVERY MODE] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
+            f"[FAST] [RECOVERY MODE] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
             f"Threshold ultra-ketat (80%), max 1 posisi baru, ukuran -50%. "
             f"Tetap scan peluang — tidak buta terhadap market."
         )
@@ -154,7 +154,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             harvest_reentry_mode = True
             if _pre_eval_mode != "HARVEST_ONLY":
                 log_message(
-                    f"🌾 [HARVEST_ONLY] BUY normal diblok. "
+                    f" [HARVEST_ONLY] BUY normal diblok. "
                     f"Selective re-entry aktif (momentum high-quality only)."
                 )
         else:
@@ -162,7 +162,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             # If already latched, proceed silently to avoid spamming every 2-second cycle.
             if _pre_eval_mode != "HARVEST_ONLY":
                 log_message(
-                    f"🛑 [{session_info['session_mode']}] "
+                    f" [{session_info['session_mode']}] "
                     f"Target Rp {target_idr:,.0f} sudah tercapai "
                     f"(Net PnL hari ini: Rp {current_pnl:,.0f}). "
                     f"{session_info['message']}"
@@ -174,10 +174,10 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         original_threshold = adaptive_cfg.get("tech_threshold", 0.35)
         adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
         log_message(
-            f"⚠️ [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
+            f"[WARN] [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
             f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['tech_threshold']*100:.0f}% untuk menjaga cuan."
         )
-    # ── END GATE ──────────────────────────────────────────────────────────────
+    #  END GATE 
 
     for p in high_speed:
         pair = p.get('pair', 'UNKNOWN')
@@ -196,14 +196,14 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 total_conf = float(gate.get("total_confidence", 0))
                 if total_conf < 75.0:
                     log_message(
-                        f"🔒 [RECOVERY GATE] {pair} ditolak — butuh confidence teknikal ≥75%, "
+                        f" [RECOVERY GATE] {pair} ditolak — butuh confidence teknikal ≥75%, "
                         f"dapat: {total_conf:.0f}%"
                     )
                     continue
                 # Batasi ke 1 posisi baru dalam siklus recovery ini
                 if recovery_new_positions >= 1:
                     log_message(
-                        f"🔒 [RECOVERY GATE] {pair} ditolak — sudah ada posisi baru di sesi recovery."
+                        f" [RECOVERY GATE] {pair} ditolak — sudah ada posisi baru di sesi recovery."
                     )
                     continue
 
@@ -239,14 +239,14 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
 
                 if not momentum_quality_ok:
                     log_message(
-                        f"🔒 [HARVEST RE-ENTRY BLOCK] {pair} — "
+                        f" [HARVEST RE-ENTRY BLOCK] {pair} — "
                         f"conf={total_conf:.1f}% tq={tq_prob*100:.0f}% score={score:.0f} "
                         f"mom5={ch_5m:.2f}% mom15={ch_15m:.2f}% tp={tp*100:.2f}% rr={rr_ratio:.2f}"
                     )
                     continue
 
                 log_message(
-                    f"✅ [HARVEST RE-ENTRY ALLOW] {pair} — momentum high-quality "
+                    f"[OK] [HARVEST RE-ENTRY ALLOW] {pair} — momentum high-quality "
                     f"(conf={total_conf:.1f}% tq={tq_prob*100:.0f}% score={score:.0f} "
                     f"tp={tp*100:.2f}% rr={rr_ratio:.2f})"
                 )
@@ -268,7 +268,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                     harvest_reentry_new_positions += 1
 
         except Exception as e:
-            log_message(f"⚠️ [Pair Loop Error] {pair}: {e}")
+            log_message(f"[WARN] [Pair Loop Error] {pair}: {e}")
             continue
 
     # Bersihkan recovery flag agar tidak bocor ke siklus berikutnya

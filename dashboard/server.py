@@ -40,14 +40,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 _ctx = zmq_eventlet.Context()
 _cmd_pub = _ctx.socket(zmq_eventlet.PUB)
 _cmd_pub.bind(IPC_COMMAND)
-logging.info(f"📡 [IPC] Command Publisher bound to {IPC_COMMAND}")
+logging.info(f"[IPC] Command Publisher bound to {IPC_COMMAND}")
 
 def broadcast_command(action, payload=None):
     """Broadcast a command to all subscribers (e.g. executive-core)."""
     msg = {"action": action, "payload": payload or {}, "ts": time.time()}
     # Use multipart: [topic, payload] for ZMQSubscriber compatibility
     _cmd_pub.send_multipart([b"CMD", json.dumps(msg).encode()])
-    logging.info(f"📤 [IPC] Broadcasted command: {action}")
+    logging.info(f" [IPC] Broadcasted command: {action}")
 
 # Public adapter untuk data pasar (OHLCV, ticker_all, market movers) — tidak butuh auth
 _public_adapter = IndodaxAdapter('', '')
@@ -55,7 +55,7 @@ _public_adapter = IndodaxAdapter('', '')
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-# ── Pentest Fix: Custom JSON Encoder for Datetime ──
+#  Pentest Fix: Custom JSON Encoder for Datetime 
 class CustomJSONProvider(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (datetime.date, datetime.datetime)):
@@ -65,7 +65,7 @@ class CustomJSONProvider(json.JSONEncoder):
 app.json_encoder = CustomJSONProvider
 
 
-# ── Pentest Fix: Secure Date Parsing ──
+#  Pentest Fix: Secure Date Parsing 
 def _parse_iso_date(ts_val):
     """Safe ISO date parser for both string and datetime objects."""
     if ts_val is None:
@@ -79,7 +79,7 @@ def _parse_iso_date(ts_val):
     except (ValueError, TypeError):
         return None
 
-# ── Pentest Fix: Custom JSON for SocketIO ──
+#  Pentest Fix: Custom JSON for SocketIO 
 class JSONUtil:
     @staticmethod
     def dumps(obj, **kwargs):
@@ -97,7 +97,7 @@ def handle_exception(e):
         return jsonify({"error": str(e), "path": request.path}), 500
     return "Internal Server Error", 500
 
-# ── Pentest Fix: Secure Session Configuration ──
+#  Pentest Fix: Secure Session Configuration 
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", secrets.token_hex(32))
 WS_SALT = os.getenv("WS_SALT", "algovibe_salt_2024") # Salt rahasia untuk handshake
 
@@ -108,7 +108,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=2)
 )
 
-# ── Pentest Fix: Global CSRF Protection ──
+#  Pentest Fix: Global CSRF Protection 
 # Exclude SocketIO from CSRF as it has its own mechanism
 # but keep it for normal API routes
 CORS(app, supports_credentials=True)
@@ -140,7 +140,7 @@ def validate_csrf():
 
         token = request.headers.get("X-CSRFToken")
         if not token or token != session.get("_csrf_token"):
-            logging.warning(f"🚫 CSRF Validation Failed for {request.method} {request.path}")
+            logging.warning(f"[BLOCK] CSRF Validation Failed for {request.method} {request.path}")
             abort(403)
 
 # Provide CSRF token for the frontend
@@ -182,14 +182,14 @@ def handle_connect(auth=None):
                     session_id = sess_id
                     join_room(f'session_{session_id}')
                 else:
-                    logging.warning(f"🚫 WS connect rejected: session {sess_id[:8]} is no longer active")
+                    logging.warning(f"[BLOCK] WS connect rejected: session {sess_id[:8]} is no longer active")
                     return False
             else:
                 # Legacy JWT without session_id — allow but without targeted room
                 is_authenticated = True
             join_room('authenticated')
             join_room(f"user_{payload['user_id']}")
-            logging.info(f"🔌 User '{payload.get('username')}' connected via JWT (session: {session_id or 'legacy'})")
+            logging.info(f" User '{payload.get('username')}' connected via JWT (session: {session_id or 'legacy'})")
 
     # 2. Legacy Flask session fallback
     elif 'user_id' in session:
@@ -200,21 +200,21 @@ def handle_connect(auth=None):
         if sess_id:
             session_id = sess_id
             join_room(f'session_{session_id}')
-        logging.info(f"🔌 User '{session.get('username')}' connected via Flask session")
+        logging.info(f" User '{session.get('username')}' connected via Flask session")
 
     # 3. View-only guest token
     elif client_token and client_token == generate_view_token():
         is_guest = True
         join_room('public')
-        logging.info("🔌 Guest User connected (Public/View-only mode)")
+        logging.info(" Guest User connected (Public/View-only mode)")
 
     # 4. Anonymous access is blocked for security.
     else:
-        logging.warning("🚫 Anonymous WS connection rejected")
+        logging.warning("[BLOCK] Anonymous WS connection rejected")
         return False
 
     if not is_authenticated and not is_guest:
-        logging.warning(f"🚫 Unauthorized WS connection attempt")
+        logging.warning(f"[BLOCK] Unauthorized WS connection attempt")
         return False
 
     return True
@@ -222,8 +222,8 @@ def handle_connect(auth=None):
 @socketio.on('disconnect')
 def handle_disconnect():
     username = session.get('username', 'Unknown')
-    logging.info(f"📡 User {username} disconnected from WS")
-# ── Background Throttler for UI Performance ──
+    logging.info(f"[DASHBOARD] User {username} disconnected from WS")
+#  Background Throttler for UI Performance 
 def ui_emitter_thread():
     """Mengirim update ke UI secara berkala (Throttling) agar HP user tidak panas."""
     while True:
@@ -231,7 +231,7 @@ def ui_emitter_thread():
         pass
 
 # socketio.start_background_task(ui_emitter_thread)
-# ── Authentication Middleware ──
+#  Authentication Middleware 
 def _get_jwt_secret():
     return app.config['SECRET_KEY']
 
@@ -314,11 +314,11 @@ def token_required(f):
 # Keep legacy alias so existing call-sites compiled before this change still work
 login_required = token_required
 
-# ── Default User Initialization ──
+#  Default User Initialization 
 try:
     if not db.get_user('admin'):
         db.create_user('admin', 'admin123', os.getenv('INDODAX_API_KEY', ''), os.getenv('INDODAX_API_SECRET', ''))
-        logging.info("✅ Default user 'admin' created (Pass: admin123). PLEASE CHANGE THIS!")
+        logging.info("[OK] Default user 'admin' created (Pass: admin123). PLEASE CHANGE THIS!")
 except Exception as e:
     logging.error(f"Error initializing default user: {e}")
 
@@ -350,7 +350,7 @@ from app.infrastructure.migrations import run_migrations, sync_schema_both_dbs
 # try:
 #     sync_schema_both_dbs()
 # except Exception as _sync_err:
-#     logging.warning(f"⚠️ sync_schema_both_dbs failed: {_sync_err}")
+#     logging.warning(f"[WARN] sync_schema_both_dbs failed: {_sync_err}")
 
 # Set untuk track DB path yang sudah dimigrasi di proses ini
 # Prevents redundant migration runs on every request
@@ -374,9 +374,9 @@ try:
     for _p in _open_pos:
         mws.subscribe_market_trades(_p['pair'])
     _conn.close()
-    print(f"✅ Subscribed to {len(_open_pos)} open position trade streams.")
+    print(f"[OK] Subscribed to {len(_open_pos)} open position trade streams.")
 except Exception as _e:
-    print(f"⚠️ Failed to sync initial trade streams: {_e}")
+    print(f"[WARN] Failed to sync initial trade streams: {_e}")
 
 _REAL_BALANCE_CACHE = {"free": None, "used": None, "total": None, "last_check": 0, "coins": {}}
 _REST_TICKER_CACHE = {"data": {}, "last_check": 0}
@@ -401,7 +401,7 @@ def _fetch_all_tickers_rest():
         _REST_TICKER_CACHE["last_check"] = now
         return transformed
     except Exception as e:
-        logging.error(f"⚠️ Error fetching bulk tickers: {e}")
+        logging.error(f"[WARN] Error fetching bulk tickers: {e}")
         return _REST_TICKER_CACHE["data"]
 
 def _fetch_real_idr_balance_bundle():
@@ -429,7 +429,7 @@ def _fetch_real_idr_balance_bundle():
                 "source": "DATABASE_FRESH"
             }
     except Exception as e:
-        logging.warning(f"⚠️ Failed to read balances from DB: {e}")
+        logging.warning(f"[WARN] Failed to read balances from DB: {e}")
 
     # Fallback ke REST API (Jika DB kosong atau gagal)
     try:
@@ -461,7 +461,7 @@ def _fetch_real_idr_balance_bundle():
             "coins": coins,
         }
     except Exception as e:
-        logging.error(f"❌ Error fetching real balance via REST fallback: {e}")
+        logging.error(f" Error fetching real balance via REST fallback: {e}")
         return None
 
 def _get_cached_real_balance_bundle():
@@ -621,7 +621,7 @@ def _get_trade_history_summary():
 _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari push_data_loop
 _last_market_brief_llm_ts = 0.0
 _last_market_brief_payload_hash = ""
-_latest_exchange_latency = 0.0  # Measured in market-pipe from Indodax epoch
+_latest_exchange_latency = 0.0  # Measured in [MARKET-PIPE] from Indodax epoch
 
 
 
@@ -747,7 +747,7 @@ def _generate_equity_report_llm(stats):
         "[AKSI] satu rekomendasi taktis spesifik yang harus dilakukan sekarang. "
         "Gunakan bahasa Indonesia profesional, padat, dan tajam. Tidak perlu panjang."
     )
-    logging.info(f"🧠 [ORACLE EQUITY REPORT PROMPT]\n{prompt}")
+    logging.info(f"[ORACLE] Equity Report Prompt:\n{prompt}")
     _last_equity_llm_ts = time.time()
     worker.query_async("equity_report", prompt)
 
@@ -1018,7 +1018,7 @@ def public_landing_data():
             movers_fb = " | ".join(p for p in [
                 f"↑ {_fb_gainer[0]} {_fb_gainer[1]:+.2f}%" if _fb_gainer[0] != "N/A" else "",
                 f"↓ {_fb_loser[0]} {_fb_loser[1]:+.2f}%" if _fb_loser[0] != "N/A" else "",
-                f"🔥 {_fb_trend[0]} {_fb_trend[1]:+.2f}%" if _fb_trend[0] != "N/A" else "",
+                f"{_fb_trend[0]} {_fb_trend[1]:+.2f}%" if _fb_trend[0] != "N/A" else "",
             ] if p)
             insights = [
                 {
@@ -1063,7 +1063,7 @@ def public_landing_data():
             trend_label = 'UP' if ch > 1.0 else ('DOWN' if ch < -1.0 else 'SIDEWAYS')
             public_logs.append({
                 "time": stream_ts,
-                "message": f"📡 Live: {pair_label} {ch:+.2f}% vs midrange | Vol IDR {vol/1e6:.1f}M | {trend_label}"
+                "message": f"Live: {pair_label} {ch:+.2f}% vs midrange | Vol IDR {vol/1e6:.1f}M | {trend_label}"
             })
 
         response = jsonify({
@@ -1103,21 +1103,21 @@ def login():
     if not user:
         return jsonify({"success": False, "message": "Invalid username or password"}), 401
 
-    # ── Single Login Enforcement ──
+    #  Single Login Enforcement 
     # Invalidate all existing active sessions for this user and force-logout those clients.
     old_sessions = db._live.get_active_sessions_for_user(user['id'])
     for old_sess in old_sessions:
         old_sid = old_sess['session_id']
         socketio.emit('FORCE_LOGOUT', {"reason": "logged_in_elsewhere"}, to=f'session_{old_sid}')
         db._live.deactivate_session(old_sid)
-        logging.info(f"🔐 Force-logout emitted to session {old_sid[:8]}... (user: {user['username']})")
+        logging.info(f" Force-logout emitted to session {old_sid[:8]}... (user: {user['username']})")
 
-    # ── Create new session ──
+    #  Create new session 
     session_id = str(uuid.uuid4())
     ip_address = _get_client_ip()
     user_agent = request.headers.get('User-Agent', '')
     db._live.create_user_session(session_id, user['id'], ip_address, user_agent)
-    logging.info(f"✅ New session created for '{user['username']}' from {ip_address} (session: {session_id[:8]}...)")
+    logging.info(f"[OK] New session created for '{user['username']}' from {ip_address} (session: {session_id[:8]}...)")
 
     token = _issue_token(user, session_id)
     # Also set legacy Flask session for WebSocket auth and backward-compat
@@ -1698,7 +1698,7 @@ def get_live_state():
         })
 
 
-# ── Mode-specific API aliases ─────────────────────────────────────────────────
+#  Mode-specific API aliases 
 # Routes under /api/dry/* and /api/live/* are thin wrappers that set a
 # per-request DRY_RUN override via Flask's `g` object, so that individual
 # requests see a specific mode without mutating the shared global config
@@ -1756,7 +1756,7 @@ def get_live_pnl_history(tf):
     g._dry_run_override = False
     return get_pnl_history_api(tf)
 
-# ── Backtest Endpoints ──
+#  Backtest Endpoints 
 
 @app.route('/api/backtest/profiles', methods=['GET'])
 @login_required
@@ -1854,7 +1854,7 @@ def get_backtest_result_detail(result_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 
 @app.route('/api/market-context/<pair>')
@@ -2156,7 +2156,7 @@ def toggle_loose_gates():
     
     db.save_state("dry_run_loose_gates", str(new_val).lower())
     cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
-    logging.info(f"🔄 [DYNAMIC GATES] User changed loose gates to: {new_val}")
+    logging.info(f" [DYNAMIC GATES] User changed loose gates to: {new_val}")
     return jsonify({"success": True, "loose_gates": new_val})
 
 @app.route('/api/bot/toggle-technical-only', methods=['POST'])
@@ -2179,7 +2179,7 @@ def toggle_technical_only_mode():
     cfg.clear_dry_run_cache()
     broadcast_command("STATE_UPDATE", {"key": "technical_only_mode", "value": "true" if new_val else "false"})
 
-    logging.info(f"🔧 [TECHNICAL_ONLY_MODE] Updated to: {new_val}")
+    logging.info(f" [TECHNICAL_ONLY_MODE] Updated to: {new_val}")
     return jsonify({"success": True, "technical_only_mode": new_val})
 
 @app.route('/api/bot/unblock', methods=['POST'])
@@ -2190,7 +2190,7 @@ def unblock_bot():
         current = int(db.get_state("consecutive_losses", 0) or 0)
         db.save_state("consecutive_losses", "0")
         mode = "DRY" if _is_dry_run() else "LIVE"
-        logging.info(f"[Dashboard] ✅ Bot unblocked ({mode}): consecutive_losses reset from {current} → 0")
+        logging.info(f"[Dashboard] [OK] Bot unblocked ({mode}): consecutive_losses reset from {current} → 0")
         # Push fresh stats so the frontend badge clears immediately
         try:
             socketio.emit('stats_update', _build_stats_payload())
@@ -2223,7 +2223,7 @@ def update_bot_state():
                 db.save_state("daily_profit_target", str(new_target))
                 db.save_state("session_mode", "SCALPING")
                 db.save_state("session_latched", "false")
-                logging.info(f"🎯 [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
+                logging.info(f"[TARGET] [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
             except Exception as _re:
                 logging.warning(f"Could not move goalpost during reset: {_re}")
 
@@ -2231,7 +2231,7 @@ def update_bot_state():
         # Broadcast command to notify executive-core of state change
         broadcast_command("STATE_UPDATE", {"key": key, "value": value})
         
-        logging.info(f"🛠️ [Manual Override] Updated {key} to {value}")
+        logging.info(f" [Manual Override] Updated {key} to {value}")
         return jsonify({"status": "ok", "key": key, "value": value})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2601,16 +2601,16 @@ def get_logs():
 
         # Process Oracle Data
         for o in oracle_data:
-            icon = "🔮 ORACLE"
+            icon = " ORACLE"
             level = "INFO"
             if o['key'] == 'market_regime':
-                icon = "📡 REGIME"
+                icon = "REGIME"
                 level = "INFO"
             if o['key'] == 'latest_whale':
-                icon = "🐋 WHALE"
+                icon = " WHALE"
                 level = "ALERT"
             if o['key'] == 'latest_fake_pump':
-                icon = "⚠️ FAKE PUMP"
+                icon = "[WARN] FAKE PUMP"
                 level = "WARN"
 
             results.append({
@@ -2642,7 +2642,7 @@ def get_logs():
     finally:
         conn.close()
 
-# ── Crypto News Feed ──────────────────────────────────────────────────────────
+#  Crypto News Feed 
 _news_cache = {"items": [], "fetched_at": 0}
 _NEWS_TTL = 300  # seconds
 
@@ -3145,10 +3145,10 @@ def _build_stats_payload(force_dry=None):
                     "created_at":  str(r['created_at'] or ''),
                 })
         except Exception as e:
-            print(f"⚠️ History Fetch Error: {e}")
+            print(f"[WARN] History Fetch Error: {e}")
 
 
-        # ── BTC Condition (for Signal Radar UX) ─────────────────────────────
+        #  BTC Condition (for Signal Radar UX) 
         # Realtime-first: price/24h from WS summary. If interval metrics are
         # empty or stale in DB, recompute from the latest BTC history snapshot.
         _btc_ticker = ws_tickers.get('btcidr', {}) or {}
@@ -3628,10 +3628,10 @@ def _build_logs_payload():
             })
             
         icon_map = {
-            'market_regime': '📡 REGIME',
-            'regime_leader': '🔮 ORACLE',
-            'latest_whale':  '🐋 WHALE',
-            'latest_fake_pump': '⚠️ FAKE PUMP'
+            'market_regime': 'REGIME',
+            'regime_leader': ' ORACLE',
+            'latest_whale':  ' WHALE',
+            'latest_fake_pump': '[WARN] FAKE PUMP'
         }
         for o in oracle_data:
             val = o['value'] or ''
@@ -3811,7 +3811,7 @@ def _build_llm_decisions_payload(limit: int = 20):
             regime_label = "Warming up" if regime == "SCANNING" else regime
             gainer_part = f"↑ {top_gainer[0]} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
             loser_part = f"↓ {top_loser[0]} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
-            trend_part = f"🔥 {top_trending[0]} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
+            trend_part = f"{top_trending[0]} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
             movers = " | ".join(p for p in [gainer_part, loser_part, trend_part] if p)
             brief_message = (
                 f"Market live: {len(_active_pairs)} pair aktif"
@@ -3920,7 +3920,7 @@ def push_data_loop():
                 "trades": _build_market_trades_payload()
             })
 
-            # ── Supreme Commander: forward pending approval to frontend ──────────────
+            #  Supreme Commander: forward pending approval to frontend 
             try:
                 raw_approval = db.get_state("pending_approval")
                 if raw_approval:
@@ -3938,13 +3938,13 @@ def push_data_loop():
             except Exception as _ae:
                 logging.warning(f"[ApprovalGate] Error checking pending_approval: {_ae}")
 
-            # ── Auto-harvest silent toast notification ────────────────────────────
+            #  Auto-harvest silent toast notification 
             try:
                 raw_notif = db.get_state("auto_harvest_notification")
                 if raw_notif:
                     notif = json.loads(raw_notif)
                     socketio.emit('toast_notification', {
-                        "title": "🚀 Auto-Harvest",
+                        "title": "Auto-Harvest",
                         "message": notif.get("message", "Basket Exit Completed (Profit Secured)"),
                         "type": "success",
                     })
@@ -3952,7 +3952,7 @@ def push_data_loop():
             except Exception as _ne:
                 logging.warning(f"[AutoHarvest] Error forwarding notification: {_ne}")
 
-            # ── Strategic Break: forward full-screen blocking popup to frontend ──
+            #  Strategic Break: forward full-screen blocking popup to frontend 
             try:
                 raw_sb = db.get_state("strategic_break_payload")
                 if raw_sb:
@@ -3965,7 +3965,7 @@ def push_data_loop():
             except Exception as _sbe:
                 logging.warning(f"[StrategicBreak] Error forwarding payload: {_sbe}")
 
-            # ── Bracket Exit Confirm: forward negative-PnL exit popup to frontend ──
+            #  Bracket Exit Confirm: forward negative-PnL exit popup to frontend 
             try:
                 raw_bec = db.get_state("bracket_exit_confirm")
                 if raw_bec:
@@ -4011,7 +4011,7 @@ def push_data_loop():
                 # individual emitters wrapped in try-except to prevent one failure from killing the whole loop
                 # Emit stats for both modes so users on either dashboard see updates
                 try: 
-                    logging.info("📡 Emitting stats_update for DRY and LIVE modes...")
+                    logging.info("[DASHBOARD] Emitting stats_update for DRY and LIVE modes...")
                     socketio.emit('stats_update', _build_stats_payload(force_dry=True))
                     socketio.emit('stats_update', _build_stats_payload(force_dry=False))
                 except Exception as _e: 
@@ -4234,7 +4234,7 @@ def get_resilience_status():
     and Telegram bot can surface SYSTEM_PAUSE alerts to the user.
 
     Response keys
-    ─────────────
+    
     circuit_breaker_status : "CLOSED" | "OPEN" | "HALF_OPEN" (from bot_state DB)
     circuit_breaker_tripped_at : ISO timestamp or empty string
     system_pause_active    : bool — True when session_mode is "SYSTEM_PAUSE"
@@ -4260,7 +4260,7 @@ def get_resilience_status():
 # Start background thread
 socketio.start_background_task(push_data_loop)
 
-# ── ZMQ Equity Bridge — forward executive-core equity updates to SocketIO ────
+#  ZMQ Equity Bridge — forward executive-core equity updates to SocketIO 
 def _zmq_equity_bridge():
     """Background task: subscribe to equity_stream.ipc and emit equity_update events.
 
@@ -4298,7 +4298,7 @@ def _zmq_equity_bridge():
 
 socketio.start_background_task(_zmq_equity_bridge)
 
-# ── ZMQ Market Bridge — forward market-pipe ticks to dashboard ────────────────
+#  ZMQ Market Bridge — forward market-pipe ticks to dashboard 
 def _zmq_market_bridge():
     ctx = zmq_eventlet.Context.instance()
     sub = ctx.socket(zmq_eventlet.SUB)
@@ -4383,15 +4383,15 @@ def _zmq_market_bridge():
 
 socketio.start_background_task(_zmq_market_bridge)
 
-# ── Inject SocketIO emit into the shared EmergencyNotifier ──────────────────
+#  Inject SocketIO emit into the shared EmergencyNotifier 
 try:
     from app.infrastructure.resilience import emergency_notifier as _emergency_notifier
     _emergency_notifier.set_socketio_fn(
         lambda event, data: socketio.emit(event, data, to="public")
     )
-    logging.info("✅ EmergencyNotifier SocketIO channel wired.")
+    logging.info("[DASHBOARD] EmergencyNotifier SocketIO channel wired.")
 except Exception as _wire_err:
-    logging.warning(f"⚠️ Could not wire EmergencyNotifier SocketIO: {_wire_err}")
+    logging.warning(f"[DASHBOARD] Could not wire EmergencyNotifier SocketIO: {_wire_err}")
 
 def _background_wallet_sync_loop():
     """
@@ -4497,7 +4497,7 @@ def _background_wallet_sync_loop():
 _enable_dashboard_wallet_sync = os.getenv("ENABLE_DASHBOARD_WALLET_SYNC", "false").lower() in ("1", "true", "yes")
 if _enable_dashboard_wallet_sync:
     socketio.start_background_task(_background_wallet_sync_loop)
-    logging.warning("⚠️ ENABLE_DASHBOARD_WALLET_SYNC=true: dashboard wallet sync loop aktif (legacy mode).")
+    logging.warning("[WARN] ENABLE_DASHBOARD_WALLET_SYNC=true: dashboard wallet sync loop aktif (legacy mode).")
 else:
     logging.info("[WalletSync] Dashboard background wallet sync dinonaktifkan; gunakan service exchange-reconcile.")
 

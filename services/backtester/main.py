@@ -93,7 +93,7 @@ def main():
     _ensure_schema_upgraded()
 
     if args.command == "fetch":
-        print("ℹ️ No standalone fetch step is required. Backtest reads from table ohlcv_1m.")
+        print("ℹ No standalone fetch step is required. Backtest reads from table ohlcv_1m.")
     elif args.command == "run":
         run_backtest(
             args.days,
@@ -112,7 +112,7 @@ def main():
     elif args.command == "restore":
         handle_restore_command()
     elif args.command == "sync-coin-analysis":
-        print("🔄 Menyinkronkan setup teknikal per-koin dari backtest_coin_analysis ke coin_analysis trading...")
+        print(" Menyinkronkan setup teknikal per-koin dari backtest_coin_analysis ke coin_analysis trading...")
         from app.infrastructure.database import db as trading_db
 
         sync_result = trading_db.sync_backtest_coin_analysis_to_trading(
@@ -120,13 +120,13 @@ def main():
         )
         if sync_result.get("ok"):
             print(
-                "✅ Sync selesai: "
+                "[OK] Sync selesai: "
                 f"fetched={sync_result.get('fetched', 0)} | "
                 f"live={sync_result.get('live_written', 0)} | "
                 f"dryrun={sync_result.get('dryrun_written', 0)}"
             )
         else:
-            print(f"❌ Sync gagal: {sync_result.get('error', 'unknown error')}")
+            print(f" Sync gagal: {sync_result.get('error', 'unknown error')}")
     elif args.command == "analyze":
         handle_analyze_command(args)
     elif args.command == "optimize":

@@ -232,7 +232,7 @@ def run_training_cycle(db_path: str, model_path: str, model_tmp: str, min_sample
         f"Model baru di-deploy: accuracy {new_acc:.4f} "
         f"(CV {cv_mean:.4f}±{cv_std:.4f}, +{new_acc - old_acc:.4f} dari lama {old_acc:.4f})"
     )
-    logger.info(f"✅ {result['reason']}")
+    logger.info(f"[OK] {result['reason']}")
     return result
 
 

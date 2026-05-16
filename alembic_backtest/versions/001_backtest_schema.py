@@ -23,12 +23,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     # 1. ohlcv_1m — raw market data (TimescaleDB hypertable)
     #    Primary bucket: (pair, timestamp).
     #    90-day retention policy handled at application level or via
     #    `add_retention_policy` called after migration.
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     op.execute("""
     CREATE TABLE IF NOT EXISTS ohlcv_1m (
         pair        TEXT        NOT NULL,
@@ -51,7 +51,7 @@ def upgrade() -> None:
     CREATE INDEX IF NOT EXISTS idx_ohlcv_pair_ts ON ohlcv_1m (pair, ts DESC);
     """)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     # 2. backtest_profiles — trading variable profiles
     #
     #  Setiap row = satu "gaya trading" yang dapat di-backtest & dicompare.
@@ -64,7 +64,7 @@ def upgrade() -> None:
     #
     #  Backtester HARUS membaca semua parameter dari tabel ini dan meneruskan
     #  ke derive_trade_signal(), calculate_atr(), dll — bukan hardcode.
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     op.execute("""
     CREATE TABLE IF NOT EXISTS backtest_profiles (
         id                          SERIAL PRIMARY KEY,
@@ -73,10 +73,10 @@ def upgrade() -> None:
         description                 TEXT DEFAULT '',
         is_active                   BOOLEAN NOT NULL DEFAULT FALSE,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- INDICATOR PERIODS
         -- Sumber: function signatures di app/domain/technicals.py
-        -- ════════════════════════════════════════════════════════════
+        -- 
 
         -- RSI (Wilder smoothing) — calculate_rsi(prices, periods=14)
         rsi_period                  INT NOT NULL DEFAULT 14,
@@ -125,10 +125,10 @@ def upgrade() -> None:
         -- config.TECH_MIN_HISTORY_POINTS = 30, EMA-50 butuh 50
         min_candles_required        INT NOT NULL DEFAULT 50,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- SCORING THRESHOLDS
         -- Sumber: derive_trade_signal() — BUY_THRESHOLD=6.0, SELL_THRESHOLD=6.0, OPPOSING_MAX=4.0
-        -- ════════════════════════════════════════════════════════════
+        -- 
         buy_threshold               DOUBLE PRECISION NOT NULL DEFAULT 6.0,
         sell_threshold              DOUBLE PRECISION NOT NULL DEFAULT 6.0,
         opposing_max_score          DOUBLE PRECISION NOT NULL DEFAULT 4.0,
@@ -140,11 +140,11 @@ def upgrade() -> None:
         -- Volume reliability guard — VOLUME_RELIABILITY_THRESHOLD = 200_000_000
         volume_reliability_idr      DOUBLE PRECISION NOT NULL DEFAULT 200000000.0,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- INDICATOR BASE WEIGHTS
         -- Sumber: derive_trade_signal() — hardcoded _w_xxx = N.N * sw['key']
         -- Default = bot live weights. Tune untuk optimasi.
-        -- ════════════════════════════════════════════════════════════
+        -- 
         weight_rsi                  DOUBLE PRECISION NOT NULL DEFAULT 3.0,
         weight_macd                 DOUBLE PRECISION NOT NULL DEFAULT 2.5,
         weight_bb                   DOUBLE PRECISION NOT NULL DEFAULT 2.0,
@@ -157,11 +157,11 @@ def upgrade() -> None:
         weight_volume_ratio         DOUBLE PRECISION NOT NULL DEFAULT 1.5,
         weight_obv_slope            DOUBLE PRECISION NOT NULL DEFAULT 1.5,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- SECTOR WEIGHT MULTIPLIERS
         -- Sumber: _SECTOR_WEIGHTS dict di derive_trade_signal()
         -- Format: sw_<sektor>_<indikator> — default = 1.0 (no change)
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- MEME: pump cepat, RSI terlambat, momentum & volume lebih relevan
         sw_meme_rsi                 DOUBLE PRECISION NOT NULL DEFAULT 0.7,
         sw_meme_macd                DOUBLE PRECISION NOT NULL DEFAULT 1.4,
@@ -214,10 +214,10 @@ def upgrade() -> None:
         sw_defi_vol                 DOUBLE PRECISION NOT NULL DEFAULT 1.0,
         sw_defi_obv                 DOUBLE PRECISION NOT NULL DEFAULT 1.2,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- ENTRY FILTERS
         -- Sumber: entry_gates.py gate 4b (ATR) dan gate 4c (EMA-50)
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- ATR limit — config: 3.0% normal, 4.5% loose gates
         atr_max_pct                 DOUBLE PRECISION NOT NULL DEFAULT 0.03,
         atr_max_pct_loose           DOUBLE PRECISION NOT NULL DEFAULT 0.045,
@@ -229,11 +229,11 @@ def upgrade() -> None:
         -- Sell-block gate: tolak BUY jika sell_score >= threshold
         sell_block_threshold        DOUBLE PRECISION NOT NULL DEFAULT 5.0,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- TP / SL / TRAILING
         -- Sumber: config.py TP_PCT=0.035, SL_PCT=-0.035
         -- AUTO_SL_ENABLED=False (SL off di bot live → configurable di backtest)
-        -- ════════════════════════════════════════════════════════════
+        -- 
         target_tp_pct               DOUBLE PRECISION NOT NULL DEFAULT 0.035,
         target_sl_pct               DOUBLE PRECISION NOT NULL DEFAULT -0.035,
         -- Trailing SL: di bot live AUTO_SL_ENABLED=False
@@ -245,22 +245,22 @@ def upgrade() -> None:
         -- Maximum hold time (menit) sebelum force-exit — config.MAX_HOLD_MINUTES=10
         max_hold_minutes            INT NOT NULL DEFAULT 10,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- DCA (Averaging Down)
         -- Sumber: config.py DCA_ENABLED=True, DCA_MAX_TIERS=1,
         --         DCA_STEP_PCT=-0.015, DCA_MULTIPLIER=1.0
-        -- ════════════════════════════════════════════════════════════
+        -- 
         dca_enabled                 BOOLEAN NOT NULL DEFAULT TRUE,
         dca_max_tiers               INT NOT NULL DEFAULT 1,
         dca_step_pct                DOUBLE PRECISION NOT NULL DEFAULT -0.015,
         dca_multiplier              DOUBLE PRECISION NOT NULL DEFAULT 1.0,
         dca_min_tech_confidence     DOUBLE PRECISION NOT NULL DEFAULT 0.65,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- FEE STRUCTURE
         -- Sumber: config.py — Indodax IDR Market PRO fee (Taker)
         -- Backtester menggunakan Taker karena market order
-        -- ════════════════════════════════════════════════════════════
+        -- 
         fee_buy_taker               DOUBLE PRECISION NOT NULL DEFAULT 0.002111,
         fee_sell_taker              DOUBLE PRECISION NOT NULL DEFAULT 0.004211,
         fee_buy_maker               DOUBLE PRECISION NOT NULL DEFAULT 0.001111,
@@ -273,20 +273,20 @@ def upgrade() -> None:
         -- Order type untuk backtest: 'taker' | 'maker'
         order_type                  TEXT NOT NULL DEFAULT 'taker',
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- SIZING & CAPITAL
-        -- ════════════════════════════════════════════════════════════
+        -- 
         initial_capital_idr         DOUBLE PRECISION NOT NULL DEFAULT 1000000.0,
         max_position_idr            DOUBLE PRECISION NOT NULL DEFAULT 100000.0,
         min_position_idr            DOUBLE PRECISION NOT NULL DEFAULT 10000.0,
         -- Jumlah posisi maksimum bersamaan
         max_open_positions          INT NOT NULL DEFAULT 3,
 
-        -- ════════════════════════════════════════════════════════════
+        -- 
         -- COOLDOWN
         -- Sumber: config.py DUST_RECOVERY_COOLDOWN_SEC=600
         -- Cooldown antar entry pada pair yang sama (detik)
-        -- ════════════════════════════════════════════════════════════
+        -- 
         cooldown_seconds            INT NOT NULL DEFAULT 300,
 
         created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -300,9 +300,9 @@ Backtester membaca semua parameter dari sini dan meneruskan ke fungsi bot yang s
 (derive_trade_signal, calculate_atr, dll) — tidak ada logika duplikat.';
     """)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     # 3. backtest_results — agregat per (profile × pair × window)
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     op.execute("""
     CREATE TABLE IF NOT EXISTS backtest_results (
         id                      SERIAL PRIMARY KEY,
@@ -338,9 +338,9 @@ Backtester membaca semua parameter dari sini dan meneruskan ke fungsi bot yang s
         'Aggregated backtest statistics per profile + pair + date window. Populated by the backtester service after a full run.';
     """)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     # 4. backtest_trades — per-trade detail
-    # ─────────────────────────────────────────────────────────────────────
+    # 
     op.execute("""
     CREATE TABLE IF NOT EXISTS backtest_trades (
         id                  BIGSERIAL PRIMARY KEY,

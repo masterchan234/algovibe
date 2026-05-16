@@ -53,14 +53,14 @@ class MarketProvider(abc.ABC):
         self._latest_tick_bytes: Optional[bytes] = None
         self._start_time: float = 0.0
 
-    # ── Identity ──────────────────────────────────────────────────────────────
+    #  Identity 
 
     @property
     @abc.abstractmethod
     def exchange_id(self) -> str:
         """Short exchange identifier, e.g. 'indodax' or 'binance'."""
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     @abc.abstractmethod
     def start(self) -> None:
@@ -85,13 +85,13 @@ class MarketProvider(abc.ABC):
     def is_connected(self) -> bool:
         """Return True if the underlying connection is live."""
 
-    # ── Data access ───────────────────────────────────────────────────────────
+    #  Data access 
 
     def get_latest_tick(self) -> Optional[bytes]:
         """Return the most recently received serialised Tick bytes (or None)."""
         return self._latest_tick_bytes
 
-    # ── Helpers for subclasses ────────────────────────────────────────────────
+    #  Helpers for subclasses 
 
     def _emit(self, tick_bytes: bytes, topic: str = "tick", latency_ms: float = 0) -> None:
         """
@@ -124,7 +124,7 @@ class MarketProvider(abc.ABC):
                     f"[{self.exchange_id}] on_trade callback raised: {exc}"
                 )
 
-    # ── Diagnostics ───────────────────────────────────────────────────────────
+    #  Diagnostics 
 
     @property
     def uptime_seconds(self) -> float:

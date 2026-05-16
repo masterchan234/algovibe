@@ -22,7 +22,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# ─── Konstanta Indodax Market WS ───────────────────────────────────────────
+#  Konstanta Indodax Market WS 
 WS_MARKET_URL   = "wss://ws3.indodax.com/ws/"
 WS_MARKET_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
@@ -97,7 +97,7 @@ class MarketDataWS:
         # Database Persistence Config
         self.write_to_db = False # Only set to True by primary ingress (market-pipe)
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    #  Public API 
 
     def start(self):
         """Mulai koneksi WS di background thread."""
@@ -178,7 +178,7 @@ class MarketDataWS:
         if self._last_msg_time == 0: return 0
         return time.time() - self._last_msg_time
 
-    # ── Internal ─────────────────────────────────────────────────────────────
+    #  Internal 
 
     def _next_id(self) -> int:
         self._req_id += 1
@@ -276,7 +276,7 @@ class MarketDataWS:
             except json.JSONDecodeError:
                 return
 
-            # ── Auth response ──────────────────────────────────────────────────
+            #  Auth response 
             if "result" in msg and "client" in msg.get("result", {}):
                 logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
                 # Step 2: Schedule subscription 1s after auth to let server state settle.
@@ -291,7 +291,7 @@ class MarketDataWS:
                 threading.Timer(1.0, lambda: ws.send(json.dumps(sub_msg))).start()
                 return
 
-            # ── Subscribe ACK ──────────────────────────────────────────────────
+            #  Subscribe ACK 
             if "id" in msg and "result" in msg and "recoverable" in msg.get("result", {}):
                 req_id = msg["id"]
                 channel_name = self._pending_subs.pop(req_id, f"unknown (id={req_id})")
@@ -299,7 +299,7 @@ class MarketDataWS:
                             f"offset={msg['result'].get('offset')}")
                 return
 
-            # ── Streaming data ─────────────────────────────────────────────────
+            #  Streaming data 
             result = msg.get("result", {})
             channel = result.get("channel", "")
             data_wrap = result.get("data", {})
@@ -375,7 +375,7 @@ class MarketDataWS:
             if len(self._ob_subscribed) < OB_TOP_PAIRS:
                 need_ob_subscribe = True
                 
-        # ── Dynamic Subscribe for Active Watch Pair ──
+        #  Dynamic Subscribe for Active Watch Pair 
         try:
             from app.infrastructure.database import db
             watch_pair = db.get_state('current_watch_pair')
@@ -516,7 +516,7 @@ class MarketDataWS:
             best_bid  = 0.0
             best_ask  = 0.0
 
-            # ── Parse BIDs ────────────────────────────────────────────────
+            #  Parse BIDs 
             for i, b in enumerate(bids[:10]):
                 price = self._safe_float(b.get("price"))
                 vol   = self._safe_float(b.get("idr_volume"))
@@ -524,7 +524,7 @@ class MarketDataWS:
                     best_bid = price
                 bid_depth += vol
 
-            # ── Parse ASKs ────────────────────────────────────────────────
+            #  Parse ASKs 
             for i, a in enumerate(asks[:10]):
                 price = self._safe_float(a.get("price"))
                 vol   = self._safe_float(a.get("idr_volume"))
@@ -557,7 +557,7 @@ class MarketDataWS:
             t["bids_list"] = [{"price": self._safe_float(b.get("price")), "vol": self._safe_float(b.get("idr_volume"))} for b in bids[:10]]
             t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
             
-            # ── Push to DB for Dashboard if enabled ──
+            #  Push to DB for Dashboard if enabled 
             if self.write_to_db:
                 try:
                     from app.infrastructure.database import db

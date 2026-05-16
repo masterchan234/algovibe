@@ -20,21 +20,21 @@ from app.domain.technicals import (
 )
 from utils.logger import log_message
 
-# ── Sigmoid RSI parameters ────────────────────────────────────────────────────
+#  Sigmoid RSI parameters 
 # Sigmoid: 1 / (1 + exp((rsi - RSI_SIGMOID_CENTER) / RSI_SIGMOID_SCALE))
 # Center=50 menjadikan RSI=50 sebagai titik netral (prob=0.50).
 # Scale=12 memberikan gradien: RSI=20→0.92, RSI=30→0.84, RSI=70→0.16, RSI=80→0.08.
 _RSI_SIGMOID_CENTER = 50.0
 _RSI_SIGMOID_SCALE  = 12.0
 
-# ── ROC scoring parameters ────────────────────────────────────────────────────
+#  ROC scoring parameters 
 # Cap pada ±5% agar outlier tidak mendominasi (scalping jarang > 5% dalam 10 tick).
 # Koefisien 0.08: setiap 1% ROC menggeser probabilitas ±0.08 dari titik netral 0.5.
 # Contoh: ROC=-5% → prob=0.90; ROC=+5% → prob=0.10.
 _ROC_CAP_PCT   = 5.0
 _ROC_COEFF     = 0.08
 
-# ── Global model cache ────────────────────────────────────────────────────────
+#  Global model cache 
 MODEL_PATH   = "models/scalper_v2.joblib"
 _model       = None
 _model_mtime: float = 0.0
@@ -50,11 +50,11 @@ def _load_model():
             _model = joblib.load(MODEL_PATH)
             _model_mtime = current_mtime
             log_message(
-                f"🔬 [Predictor] Scalper V2 Model loaded "
+                f" [Predictor] Scalper V2 Model loaded "
                 f"(mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})."
             )
     except Exception as e:
-        log_message(f"⚠️ [Predictor] Failed to load model: {e}")
+        log_message(f"[WARN] [Predictor] Failed to load model: {e}")
     return _model
 
 
@@ -66,9 +66,9 @@ def preload_model() -> None:
     """
     model = _load_model()
     if model is not None:
-        log_message("✅ [Predictor] ML model pre-loaded into memory at startup.")
+        log_message("[OK] [Predictor] ML model pre-loaded into memory at startup.")
     else:
-        log_message("⚠️ [Predictor] ML model not found at startup (will load on demand when available).")
+        log_message("[WARN] [Predictor] ML model not found at startup (will load on demand when available).")
 
 
 def _compute_technical_probability(price_history: list, ticker_data: dict = None) -> float:
@@ -90,7 +90,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     scores = []
     weights = []
 
-    # ── 1. RSI (bobot 3.0) — Sigmoid continuous scoring ─────────────────────
+    #  1. RSI (bobot 3.0) — Sigmoid continuous scoring 
     # Sigmoid menghilangkan quantization error dari step-function dan memberikan
     # gradien probabilitas yang lebih halus: RSI=20→0.92, RSI=30→0.84, RSI=50→0.50,
     # RSI=70→0.16, RSI=80→0.08.
@@ -99,7 +99,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     scores.append(max(0.05, min(0.95, rsi_score)))
     weights.append(3.0)
 
-    # ── 2. MACD Histogram (bobot 2.5) — price-relative normalisasi ───────────
+    #  2. MACD Histogram (bobot 2.5) — price-relative normalisasi 
     # Normalisasi |hist| / harga menghilangkan scale-bias antar koin IDR.
     if n >= 35:
         _, _, macd_hist = calculate_macd(prices)
@@ -111,7 +111,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
         scores.append(macd_score)
         weights.append(2.5)
 
-    # ── 3. Bollinger %B (bobot 2.0) ──────────────────────────────────────────
+    #  3. Bollinger %B (bobot 2.0) 
     if n >= 20:
         _, _, _, bb_pct = calculate_bollinger_bands(prices)
         # %B rendah = harga di lower band = peluang rebound
@@ -130,7 +130,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
         scores.append(bb_score)
         weights.append(2.0)
 
-    # ── 4. Stochastic RSI (bobot 2.0) ────────────────────────────────────────
+    #  4. Stochastic RSI (bobot 2.0) 
     stoch_k, stoch_d = calculate_stochastic_rsi(prices)
     if stoch_k < 20:
         stoch_score = 0.88
@@ -148,7 +148,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     scores.append(stoch_score)
     weights.append(2.0)
 
-    # ── 5. EMA Cross (EMA9 vs EMA21) (bobot 1.5) ─────────────────────────────
+    #  5. EMA Cross (EMA9 vs EMA21) (bobot 1.5) 
     if n >= 21:
         ema9  = calculate_ema(prices, 9)
         ema21 = calculate_ema(prices, 21)
@@ -161,7 +161,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
             scores.append(max(0.10, 0.40 - gap_pct * 5))
         weights.append(1.5)
 
-    # ── 6. Williams %R (bobot 1.5) ────────────────────────────────────────────
+    #  6. Williams %R (bobot 1.5) 
     # Konfirmator oversold/overbought independen: -100=oversold(BUY), 0=overbought(SELL).
     # Mapping: abs(wr)/100 → oversold=-100 memberi score 1.0, overbought=0 memberi 0.0.
     if n >= 14:
@@ -170,7 +170,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
         scores.append(wr_score)
         weights.append(1.5)
 
-    # ── 7. EMA Slope/Momentum (bobot 1.0) ────────────────────────────────────
+    #  7. EMA Slope/Momentum (bobot 1.0) 
     if n >= 25:
         slope = calculate_ema_slope(prices, ema_period=20, lookback=5)
         if slope > 0.5:
@@ -185,7 +185,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
             scores.append(0.18)
         weights.append(1.0)
 
-    # ── 8. Rate of Change / ROC-10 (bobot 1.0) ───────────────────────────────
+    #  8. Rate of Change / ROC-10 (bobot 1.0) 
     # Interpretasi mean-reversion: ROC negatif = oversold → BUY probability tinggi.
     if n >= 11:
         roc = calculate_roc(prices)
@@ -194,7 +194,7 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
         scores.append(roc_score)
         weights.append(1.0)
 
-    # ── 9. Order Book Pressure (bobot 2.0) ───────────────────────────────────
+    #  9. Order Book Pressure (bobot 2.0) 
     if ticker_data:
         bid_depth = float(ticker_data.get("bid_depth", 0))
         ask_depth = float(ticker_data.get("ask_depth", 0))
@@ -243,10 +243,10 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
         return -1.0  # Warming Up
 
     try:
-        # ── 1. Pure Technical Base Score ─────────────────────────────────────
+        #  1. Pure Technical Base Score 
         tech_prob = _compute_technical_probability(price_history, ticker_data)
 
-        # ── 2. Machine Learning Refinement ───────────────────────────────────
+        #  2. Machine Learning Refinement 
         model = _load_model()
         if model:
             rsi = calculate_rsi(price_history)

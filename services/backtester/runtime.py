@@ -47,12 +47,12 @@ def _is_running_in_container() -> bool:
 
 def _ensure_container_runtime(command: str) -> None:
     if os.getenv("BACKTEST_ALLOW_HOST_RUN", "0") == "1":
-        logger.warning("[runtime] BACKTEST_ALLOW_HOST_RUN=1 set, bypassing container-only guard.")
+        logger.warning("[RUNTIME] BACKTEST_ALLOW_HOST_RUN=1 set, bypassing container-only guard.")
         return
     if _is_running_in_container():
         return
 
-    print("❌ Backtester must run inside Docker container.")
+    print("[ERROR] Backtester must run inside Docker container.")
     print("   Use one of these commands:")
     print(f"   docker compose run --rm backtester {command}")
     print(f"   rtk docker compose run --rm backtester {command}")
@@ -85,7 +85,7 @@ def _progress(count, total, label="", suffix=""):
     bar_len = 30
     filled_len = int(round(bar_len * count / float(total)))
     percents = round(100.0 * count / float(total), 1)
-    bar = "█" * filled_len + "░" * (bar_len - filled_len)
+    bar = "" * filled_len + "" * (bar_len - filled_len)
     sys.stdout.write(f"[{bar}] {percents}% {count}/{total} {label} {suffix}\r")
     sys.stdout.flush()
 
@@ -96,13 +96,13 @@ def _run_backtest_migrations():
         from alembic.config import Config
         from services.backtester.db_backtest import DATABASE_URL_BACKTEST
 
-        logger.info(f"[schema] 🚀 Running backtest migrations for {DATABASE_URL_BACKTEST}...")
+        logger.info(f"[BACKTEST] [SCHEMA] Running migrations for {DATABASE_URL_BACKTEST}...")
         alembic_cfg = Config("alembic_backtest.ini")
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL_BACKTEST)
         command.upgrade(alembic_cfg, "head")
-        logger.info("[schema] ✅ Backtest migrations complete.")
+        logger.info("[SCHEMA] Backtest migrations complete.")
     except Exception as e:
-        logger.warning(f"[schema] ⚠️ Backtest migration failed (might already be up to date): {e}")
+        logger.warning(f"[SCHEMA] Backtest migration failed (might already be up to date): {e}")
 
 
 def _ensure_schema_upgraded() -> None:
@@ -118,7 +118,7 @@ def _ensure_schema_upgraded() -> None:
             """
         )
         if not cur.fetchone()["exists"]:
-            logger.error("[schema] ❌ Table 'backtest_profiles' still missing after migrations. Check your DB setup.")
+            logger.error("[SCHEMA] Table 'backtest_profiles' still missing after migrations. Check your DB setup.")
             return
 
         cur.execute(
@@ -310,12 +310,12 @@ def _ensure_schema_upgraded() -> None:
                 cur.execute(f"RELEASE SAVEPOINT {savepoint}")
             except Exception as e:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                logger.warning(f"[schema] Failed to add column {col}: {e}")
+                logger.warning(f"[SCHEMA] Failed to add column {col}: {e}")
 
         cur.execute("SELECT COUNT(*) as count FROM backtest_profiles")
         row = cur.fetchone()
         if row and row["count"] == 0:
-            logger.info("[schema] 🚀 Bootstrapping default backtest profiles...")
+            logger.info("[BACKTEST] [SCHEMA] Bootstrapping default profiles...")
             cur.execute(
                 """
                 INSERT INTO backtest_profiles (profile_name, initial_capital_idr, timeframe_minutes, strategy_mode, buy_threshold, target_tp_pct, target_sl_pct)
@@ -340,4 +340,4 @@ def _ensure_schema_upgraded() -> None:
                 ) VALUES ('anglingdharma', 100000, 10000, 10000, 5, 15, 'scalping', 4.5, 0.035, -0.02, 10000, true, 2880)
                 """
             )
-            logger.info("[schema] ✅ Bootstrap complete.")
+            logger.info("[schema] [OK] Bootstrap complete.")

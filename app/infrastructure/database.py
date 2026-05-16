@@ -17,7 +17,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# ── DB Backup Configuration ────────────────────────────────────────────────────
+#  DB Backup Configuration 
 _DB_BACKUP_INTERVAL_SEC = 6 * 3600   # 6 hours
 _DB_BACKUP_MAX_SNAPSHOTS = 4          # Keep last 4 snapshots (~24 hours)
 
@@ -72,7 +72,7 @@ class Database:
 
             # 1. Khusus Database Backtest (algovibe)
             if self.db_url == DATABASE_URL_BACKTEST:
-                logger.info("[db] 🛠️  Bootstrapping backtest schema (ohlcv_1m)...")
+                logger.info("[db]   Bootstrapping backtest schema (ohlcv_1m)...")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS ohlcv_1m (
                         ts TIMESTAMPTZ NOT NULL,
@@ -92,7 +92,7 @@ class Database:
                 
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_pair_ts ON ohlcv_1m (pair, ts DESC)")
                 
-                # ── Data Seeding (Safe check for table existence) ──
+                #  Data Seeding (Safe check for table existence) 
                 try:
                     cursor.execute("""
                         SELECT EXISTS (
@@ -107,19 +107,19 @@ class Database:
                         if cursor.fetchone()['count'] == 0:
                             seed_file = os.path.join(os.getcwd(), "seed_data.sql")
                             if os.path.exists(seed_file):
-                                logger.info(f"[db] 📥 Loading seed data from {seed_file}...")
+                                logger.info(f"[db]  Loading seed data from {seed_file}...")
                                 with open(seed_file, 'r') as f:
                                     sql = f.read()
                                     for statement in sql.split(';'):
                                         if statement.strip():
                                             cursor.execute(statement)
-                                logger.info("[db] ✅ Seed data loaded successfully.")
+                                logger.info("[db] [OK] Seed data loaded successfully.")
                             else:
-                                logger.warning("[db] ⚠️  seed_data.sql not found. Skipping data bootstrap.")
+                                logger.warning("[db] [WARN]  seed_data.sql not found. Skipping data bootstrap.")
                 except Exception as e:
-                    logger.warning(f"[db] ⚠️  Backtest bootstrap check skipped or failed: {e}")
+                    logger.warning(f"[db] [WARN]  Backtest bootstrap check skipped or failed: {e}")
                 
-                logger.info("[db] ✅ Backtest schema check complete.")
+                logger.info("[db] [OK] Backtest schema check complete.")
                 return
 
             # 2. Database Live/Dryrun (algovibe_live / algovibe_dryrun)
@@ -435,8 +435,8 @@ class Database:
                 written += 1
         return written
             
-        # ── Migrasi dijalankan secara eksplisit oleh DatabaseRouter ──
-    # ── METODE UNTUK POSITIONS ──
+        #  Migrasi dijalankan secara eksplisit oleh DatabaseRouter 
+    #  METODE UNTUK POSITIONS 
     
     def get_open_positions(self):
         with self.get_connection() as conn:
@@ -529,7 +529,7 @@ class Database:
             else:
                 cursor.execute("UPDATE positions SET status = %s WHERE pair = %s", (status, pair))
 
-    # ── METODE UNTUK TRADE HISTORY ──
+    #  METODE UNTUK TRADE HISTORY 
     
     def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
         with self.get_connection() as conn:
@@ -696,7 +696,7 @@ class Database:
             cursor.execute("SELECT * FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT %s", (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
-    # ── METODE UNTUK TICKER HISTORY ──
+    #  METODE UNTUK TICKER HISTORY 
 
     def save_ticker_history_batch(self, updates_list):
         """
@@ -773,7 +773,7 @@ class Database:
                     return []
             return []
 
-    # ── METODE UNTUK BOT STATE ──
+    #  METODE UNTUK BOT STATE 
 
     def save_state(self, key, value):
         with self.get_connection() as conn:
@@ -810,7 +810,7 @@ class Database:
             return DEFAULT_DRY_RUN
         return val.lower() in ("true", "1")
 
-    # ── [Senior Logic] Realtime Balance Sync ──
+    #  [Senior Logic] Realtime Balance Sync 
     
     def save_balances(self, balances_dict: dict):
         """
@@ -840,7 +840,7 @@ class Database:
             rows = cursor.fetchall()
             return {row['asset']: dict(row) for row in rows}
 
-    # ── METODE UNTUK AUDIT LOG & BLACKLIST ──
+    #  METODE UNTUK AUDIT LOG & BLACKLIST 
 
     def log_order(self, pair, side, price, amount, status, response=None, error=None):
         import json
@@ -893,9 +893,9 @@ class Database:
                         "INSERT INTO blacklist (pair, reason) VALUES (%s, %s)",
                         (pair, "DEFAULT_STABLECOIN")
                     )
-                logging.info(f"✅ Initialized {len(default_coins)} default blacklist entries")
+                logging.info(f"[OK] Initialized {len(default_coins)} default blacklist entries")
 
-    # ── Sector & Shadow Order Methods (Predator) ─────────────────────────
+    #  Sector & Shadow Order Methods (Predator) 
 
     def save_sector_sentiment(self, sector, score, momentum=0.0, leader='N/A', leader_ch=0.0):
         with self.get_connection() as conn:
@@ -947,7 +947,7 @@ class Database:
         with self.get_connection() as conn:
             conn.execute("DELETE FROM shadow_orders WHERE pair = %s", (pair,))
 
-    # ── Learning & Analytics Methods (Evolution) ─────────────────────────
+    #  Learning & Analytics Methods (Evolution) 
 
     def save_trade_dna(self, pair, dna_data):
         try:
@@ -1384,13 +1384,13 @@ class Database:
                 )
                 counts['bot_state_reset'] = cursor.rowcount
                 
-            logging.warning(f"[DB] 🔥 Data reset completed. Rows cleared: {counts}")
+            logging.warning(f"[DB] Data reset completed. Rows cleared: {counts}")
             return counts
         except Exception as e:
-            logging.error(f"[DB] ❌ Reset failed: {e}")
+            logging.error(f"[DB]  Reset failed: {e}")
             raise e
 
-    # ── METODE AUTENTIKASI ──
+    #  METODE AUTENTIKASI 
 
     def create_user(self, username, password, api_key='', api_secret=''):
         """Membuat user baru dengan password yang sudah di-hash."""
@@ -1433,7 +1433,7 @@ class Database:
             logging.error(f"[DB] Error updating keys: {e}")
             return False
 
-    # ── METODE SESSION MANAGEMENT ──
+    #  METODE SESSION MANAGEMENT 
 
     def create_user_session(self, session_id: str, user_id: int, ip_address: str, user_agent: str) -> bool:
         """Insert a new active session record."""
@@ -1597,7 +1597,7 @@ class DatabaseRouter:
             if "advisory" in str(e).lower():
                 self._migrated = True
 
-    # ── Scheduled 6-hour backup ────────────────────────────────────────────
+    #  Scheduled 6-hour backup 
 
     def _start_backup_scheduler(self) -> None:
         """Start a daemon thread that snapshots both DBs every 6 hours."""
@@ -1631,7 +1631,7 @@ class DatabaseRouter:
             if snap:
                 results.append(os.path.basename(snap))
         if results:
-            msg = f"💾 [DB BACKUP] 6-hour snapshot created: {', '.join(results)}"
+            msg = f" [DB BACKUP] 6-hour snapshot created: {', '.join(results)}"
             logging.info(msg)
             try:
                 from app.interfaces.telegram_bot import send_telegram_message
@@ -1661,7 +1661,7 @@ class DatabaseRouter:
     def _active(self) -> Database:
         return self._dryrun if self._read_mode_raw() else self._live
 
-    # ── Override mode-control keys so they sync across both DBs ──
+    #  Override mode-control keys so they sync across both DBs 
 
     def _sync_write(self, method: str, key: str, value: str):
         """Write a key via `method` ('set_state' or 'save_state'), syncing to both DBs for control keys."""
@@ -1685,7 +1685,7 @@ class DatabaseRouter:
             return self._live.get_state(key, default)
         return self._active().get_state(key, default)
 
-    # ── Expose both instances for dashboard multi-DB queries ──
+    #  Expose both instances for dashboard multi-DB queries 
 
     @property
     def live(self) -> Database:
