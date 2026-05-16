@@ -2276,18 +2276,37 @@ class ExitManager:
                 # (momentum SELL + tech weakness) and Tier 3 force-exit above. Any
                 # remaining position continues to hard SL / manual exit below.
 
-                # 2. Take Profit (Hard TP)
-                # Evaluasi menggunakan BID price — market sell fill di sisi bid, bukan 'last' trade.
-                # Mencegah false-positive saat 'last' spike di atas entry tapi bid masih di bawah.
+                # 2. Take Profit (Trailing TP & Hard TP)
                 _tp_ticker = current_tickers.get(pair) or {}
                 _tp_bid = float(_tp_ticker.get('buy') or 0)
                 tp_eval_price = _tp_bid if _tp_bid > 0 else current_price
+
+                # --- [TRAILING TAKE PROFIT LOGIC] ---
+                current_highest = float(data.get('highest_price', 0) or 0)
+                if tp_eval_price > current_highest:
+                    current_highest = tp_eval_price
+                    data['highest_price'] = current_highest
+                    # Trailing delta: 1.0% dari peak (sedikit longgar agar tidak kena noise)
+                    data['trailing_sl_price'] = current_highest * (1 - 0.01)
+                    db.upsert_position(pair, data)
+
+                tp_activation_price = entry_price * (1 + dynamic_tp_pct)
+                trailing_stop_price = float(data.get('trailing_sl_price', 0) or 0)
+                
+                # Sinyal Exit TTP: Sudah pernah lewat TP, dan sekarang turun di bawah trailing stop
+                is_ttp_exit = (current_highest >= tp_activation_price) and (tp_eval_price <= trailing_stop_price)
+
                 log_message(
-                    f"[EXIT-STATUS] [{pair}] TP-Status: tp_eval_price={tp_eval_price:.0f} (bid) vs tp_price={tp_price:.0f} | "
-                    f"net_pnl_idr={net_pnl_idr:.0f} | profit_pct={current_profit_pct*100:.2f}%"
+                    f"[EXIT-STATUS] [{pair}] PnL:{current_profit_pct*100:.2f}% | "
+                    f"Peak:{((current_highest/entry_price)-1)*100:.2f}% | "
+                    f"TTP-Stop:{((trailing_stop_price/entry_price)-1)*100:.2f}%"
                 )
 
-                if tp_eval_price >= tp_price:
+                if is_ttp_exit:
+                    log_message(f"[TRAILING-TP] {pair}: Momentum melandai. Exit secured at {current_profit_pct*100:.2f}% (Peak was {((current_highest/entry_price)-1)*100:.2f}%)")
+                
+                # Hard TP fallback jika tidak pakai TTP
+                if is_ttp_exit or (tp_eval_price >= tp_price and current_highest < tp_activation_price):
                     if micro_mode_active and not self.dry_run:
                         tp_guard = self._check_tp_market_sell_guard(
                             pair,
