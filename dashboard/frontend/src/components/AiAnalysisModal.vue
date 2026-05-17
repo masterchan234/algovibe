@@ -90,7 +90,7 @@
                 </div>
                 <div class="meta-item">
                   <span class="m-label">AI VERDICT</span>
-                  <span class="m-value highlight-purple">BIJAK</span>
+                  <span class="m-value highlight-purple">PRUDENT</span>
                 </div>
               </div>
             </div>
@@ -184,7 +184,7 @@ async function loadInsight() {
     const chartData = chartDataRes.status === 'fulfilled' ? chartDataRes.value : []
     const contextData = contextDataRes.status === 'fulfilled' ? contextDataRes.value : null
 
-    insight.value = resolvedInsight || 'Tidak ada nalar AI yang tersedia saat ini.'
+    insight.value = resolvedInsight || 'No AI intelligence vectors available for this sector currently.'
     context.value = contextData
     loading.value = false
 
@@ -307,7 +307,7 @@ function formatIdr(val) {
     if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
     return `${prefix}$${abs.toFixed(2)}`
   } else {
-    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}M`
     if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
     return `${prefix}Rp ${abs.toFixed(0)}`
   }

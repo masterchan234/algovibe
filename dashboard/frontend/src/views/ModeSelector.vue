@@ -146,7 +146,7 @@ async function enter(mode) {
     router.push(mode === 'live' ? '/dashboard-live' : '/dashboard-dry')
   } catch (err) {
     console.error('Failed to enter mode:', err)
-    alert(err.message || 'Gagal masuk ke mode ini. Pastikan Anda sudah login.')
+    alert(err.message || 'Failed to enter this mode. Make sure you are logged in.')
   }
 }
 

@@ -61,8 +61,8 @@
             <article :key="currentInsightIdx" class="hero-copy">
               <h2 id="hero-title">{{ currentInsightText }}</h2>
               <p>
-                Editorial desk Algovibe memantau dinamika pasar kripto {{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }} secara real-time,
-                menggabungkan konteks teknikal, arus orderbook, dan perubahan sentimen untuk keputusan trading yang lebih terukur.
+                The Algovibe editorial desk monitors {{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }} crypto market dynamics in real-time,
+                synthesizing technical analysis, order book flows, and sentiment shifts for more calculated trading decisions.
               </p>
             </article>
           </Transition>
@@ -93,14 +93,14 @@
           </article>
           <article v-else class="featured-story empty-story">
             <h2 id="featured-story-title">Featured article is being prepared</h2>
-            <p>Mesin editorial sedang menyusun analisis terbaru berbasis data market dan indikator teknis.</p>
+            <p>The editorial engine is compiling the latest analysis based on market data and technical metrics.</p>
           </article>
         </section>
 
         <section id="articles" class="section-block" aria-labelledby="latest-articles-title">
           <div class="section-headline">
             <h2 id="latest-articles-title">Latest Intelligence Articles</h2>
-            <p>Analisis mendalam tentang coin yang hype, coin yang melemah, dan struktur risiko intraday.</p>
+            <p>In-depth analysis of trending coins, decaying assets, and intraday risk structures.</p>
           </div>
           <div class="articles-list">
             <article
@@ -120,7 +120,7 @@
         <section id="signals" class="section-block" aria-labelledby="live-signals-title">
           <div class="section-headline">
             <h2 id="live-signals-title">Live Market Signals</h2>
-            <p>Snapshot kekuatan trend dan skor momentum berbasis stream data pasar.</p>
+            <p>Real-time trend strength snapshots and momentum scoring based on active market streams.</p>
           </div>
           <div class="signals-grid">
             <div v-for="sig in landingData.signals" :key="sig.pair" class="sig-brief">
@@ -322,7 +322,7 @@ const backendUrl = import.meta.env.DEV
 
 const DEFAULT_SEO = {
   title: 'Algovibe Intelligence | Crypto Market Blog & Live Signals',
-  description: 'Analisis pasar kripto berbasis data, artikel trading insight, dan live market signals untuk ekosistem IDR.',
+  description: 'Data-driven crypto market analysis, quantitative insights, and real-time live trading signals.',
 }
 
 let insightInterval = null

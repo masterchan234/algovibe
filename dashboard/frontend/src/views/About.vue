@@ -25,16 +25,16 @@
           <p class="hero-kicker">SYSTEM SPECIFICATIONS & DESIGN PHILOSOPHY</p>
           <h1>QUANTITATIVE SYSTEM PROFILE</h1>
           <p class="hero-desc">
-            Algovibe adalah arsitektur mikroservis kuantitatif berkecepatan tinggi yang dirancang untuk scalping crypto asset secara real-time. 
-            Menggabungkan pipeline ingress WebSocket, in-memory engine, dan konfluensi matematis tanpa intervensi psikologis manusia.
+            Algovibe is a high-speed quantitative microservice architecture designed for real-time crypto asset scalping. 
+            It integrates a WebSocket ingress pipeline, an in-memory computation engine, and mathematical confluences, completely eliminating human psychological bias.
           </p>
           <div class="hero-stats">
             <div class="stat-badge">
-              <span class="label">MODE OPERASI</span>
+              <span class="label">OPERATING MODE</span>
               <span class="value cyan">TECHNICAL_ONLY</span>
             </div>
             <div class="stat-badge">
-              <span class="label">INDIKATOR AKTIF</span>
+              <span class="label">ACTIVE INDICATORS</span>
               <span class="value green">11 MATHEMATICAL METRICS</span>
             </div>
             <div class="stat-badge">
@@ -60,9 +60,9 @@
         <div v-if="activeTab === 'architecture'" class="tab-content animate-fade">
           <div class="grid-layout">
             <div class="main-column">
-              <h2>Arsitektur Mikroservis Algovibe</h2>
+              <h2>Algovibe Microservice Architecture</h2>
               <p>
-                Algovibe beroperasi menggunakan jaringan kontainer terisolasi (Docker Compose) yang berkomunikasi secara real-time untuk memastikan data pasar tidak pernah stale.
+                Algovibe operates using a network of isolated containers (Docker Compose) communicating in real-time to ensure market data never becomes stale.
               </p>
               
               <!-- Premium Flow Diagram using CSS-styled blocks -->
@@ -71,7 +71,7 @@
                   <div class="step-icon">📡</div>
                   <div class="step-info">
                     <h4>Market Ingress (market-pipe)</h4>
-                    <p>Mengkonsumsi stream WebSocket real-time dari Binance/Indodax spot secara non-blocking.</p>
+                    <p>Consumes real-time WebSocket streams from Binance/Indodax Spot in a non-blocking manner.</p>
                   </div>
                 </div>
                 <div class="flow-arrow">↓</div>
@@ -79,7 +79,7 @@
                   <div class="step-icon">🧠</div>
                   <div class="step-info">
                     <h4>Scoring Engine (brain-inference)</h4>
-                    <p>Mengkalkulasi 11 indikator teknis di in-memory cache untuk meminimalkan lag persistensi database.</p>
+                    <p>Calculates 11 technical indicators in an in-memory cache to minimize database persistence lag.</p>
                   </div>
                 </div>
                 <div class="flow-arrow">↓</div>
@@ -87,7 +87,7 @@
                   <div class="step-icon">🛡️</div>
                   <div class="step-info">
                     <h4>Risk Defense (entry-gates)</h4>
-                    <p>Menyaring sinyal masuk dengan parameter volatilitas ATR dan filter tren multi-timeframe EMA.</p>
+                    <p>Filters incoming signals using ATR volatility parameters and multi-timeframe EMA trend filters.</p>
                   </div>
                 </div>
                 <div class="flow-arrow">↓</div>
@@ -95,7 +95,7 @@
                   <div class="step-icon">⚙️</div>
                   <div class="step-info">
                     <h4>Execution Core (executive-core)</h4>
-                    <p>Mengelola lifecycle order, memantau dynamic trailing take profit, dan melakukan rekonsiliasi state.</p>
+                    <p>Manages order lifecycle, monitors dynamic trailing take profit, and performs state reconciliation.</p>
                   </div>
                 </div>
               </div>
@@ -129,10 +129,10 @@
         <!-- Tab Content: Technical Indicators -->
         <div v-else-if="activeTab === 'indicators'" class="tab-content animate-fade">
           <div class="section-header">
-            <h2>Konfluensi 11 Indikator Teknikal</h2>
+            <h2>11 Technical Indicators Confluence</h2>
             <p>
-              Scoring engine menghitung total skor konfluensi hingga maksimum ~19.5 dari 11 indikator aktif. 
-              Sinyal BUY/SELL dipicu jika total skor melampaui ambang batas threshold (BUY >= 6.0, SELL opposing < 4.0) secara real-time.
+              The scoring engine calculates a total confluence score up to a maximum of ~19.5 from 11 active indicators. 
+              A BUY/SELL signal is triggered in real-time if the total score exceeds the threshold boundaries (BUY >= 6.0, opposing SELL < 4.0).
             </p>
           </div>
 
@@ -140,68 +140,68 @@
             <div class="indicator-card">
               <div class="ind-badge text-cyan">01</div>
               <h4>RSI-14 (Wilder Smoothing)</h4>
-              <p>Mendeteksi wilayah jenuh beli/jenuh jual menggunakan metode smoothing Wilder yang presisi.</p>
-              <div class="ind-weight">Bobot: 3.0</div>
+              <p>Detects overbought/oversold regions using the precise Wilder smoothing method.</p>
+              <div class="ind-weight">Weight: 3.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">02</div>
               <h4>Price-Normalized MACD</h4>
-              <p>Kalkulasi histogram MACD yang dinormalisasi harga (x1000) untuk mendeteksi momentum awal tanpa bias nominal.</p>
-              <div class="ind-weight">Bobot: 2.5</div>
+              <p>Calculates a price-normalized (x1000) MACD histogram to detect early momentum shifts without nominal price bias.</p>
+              <div class="ind-weight">Weight: 2.5</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">03</div>
               <h4>Bollinger %B</h4>
-              <p>Mengukur posisi harga secara relatif terhadap deviasi standar band atas dan band bawah.</p>
-              <div class="ind-weight">Bobot: 2.0</div>
+              <p>Measures the relative position of the price against upper and lower standard deviation bands.</p>
+              <div class="ind-weight">Weight: 2.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">04</div>
               <h4>Stochastic RSI</h4>
-              <p>Kombinasi Stochastics dan RSI untuk memetakan jenuh momentum yang sangat cepat beserta crossover K/D.</p>
-              <div class="ind-weight">Bobot: 2.0</div>
+              <p>Combines Stochastics and RSI to map ultra-fast momentum exhaustion along with K/D crossover tracking.</p>
+              <div class="ind-weight">Weight: 2.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">05</div>
               <h4>EMA 9/21 Crossover</h4>
-              <p>Menentukan pergeseran tren jangka menengah melalui persilangan rata-rata bergerak eksponensial.</p>
-              <div class="ind-weight">Bobot: 1.5</div>
+              <p>Determines medium-term trend shifts via dynamic exponential moving average crossovers.</p>
+              <div class="ind-weight">Weight: 1.5</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">06</div>
               <h4>Williams %R</h4>
-              <p>Indikator momentum independen untuk mendeteksi kekuatan swing ekstrim.</p>
-              <div class="ind-weight">Bobot: 1.5</div>
+              <p>An independent momentum indicator to detect the strength of extreme market swings.</p>
+              <div class="ind-weight">Weight: 1.5</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">07</div>
               <h4>Linear Regression Slope</h4>
-              <p>Mengukur akselerasi momentum tren melalui kemiringan garis regresi linier terkini.</p>
-              <div class="ind-weight">Bobot: 1.0</div>
+              <p>Measures the acceleration of trend momentum through the slope of the latest linear regression line.</p>
+              <div class="ind-weight">Weight: 1.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">08</div>
               <h4>ROC-10 (Rate of Change)</h4>
-              <p>Mengukur persentase perubahan harga untuk mengidentifikasi potensi pembalikan rata-rata (mean-reversion).</p>
-              <div class="ind-weight">Bobot: 1.0</div>
+              <p>Measures the percentage change in price to identify potential mean-reversion opportunities.</p>
+              <div class="ind-weight">Weight: 1.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">09</div>
               <h4>Order Book Pressure</h4>
-              <p>Menganalisis rasio kedalaman bid/ask secara real-time (jatuh kembali ke Volume Ratio jika data depth tidak tersedia).</p>
-              <div class="ind-weight">Bobot: 2.0</div>
+              <p>Analyzes real-time bid/ask depth pressure (falls back to Volume Ratio if order book depth is unavailable).</p>
+              <div class="ind-weight">Weight: 2.0</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">10</div>
               <h4>Volume Ratio</h4>
-              <p>Rasio volume transaksi saat ini dibandingkan rata-rata 20 candle. Lonjakan volume menandakan breakout valid.</p>
-              <div class="ind-weight">Bobot: 1.5</div>
+              <p>The ratio of current trading volume against its 20-candle moving average. Volume spikes validate trend breakouts.</p>
+              <div class="ind-weight">Weight: 1.5</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">11</div>
               <h4>OBV Slope</h4>
-              <p>Membaca akumulasi dan distribusi volume terakumulasi secara diam-diam sebelum pergerakan harga terjadi.</p>
-              <div class="ind-weight">Bobot: 1.5</div>
+              <p>Tracks discrete volume accumulation and distribution before nominal price movement occurs.</p>
+              <div class="ind-weight">Weight: 1.5</div>
             </div>
           </div>
         </div>
@@ -210,9 +210,9 @@
         <div v-else-if="activeTab === 'safety'" class="tab-content animate-fade">
           <div class="grid-layout">
             <div class="main-column">
-              <h2>Entry Gate Sequence & Proteksi Risiko</h2>
+              <h2>Entry Gate Sequence & Risk Mitigation</h2>
               <p>
-                Sebelum order eksekusi diteruskan ke pasar, sinyal trading harus melewati serangkaian gerbang pengaman (Entry Gates) untuk meminimalkan risiko terjebak dalam pembalikan harga (falling knife) atau volatilitas ekstrem.
+                Before execution orders are dispatched to the market, trading signals must traverse a sequence of safety barriers (Entry Gates) to minimize risk against falling knives or extreme volatility spikes.
               </p>
 
               <div class="gates-timeline">
@@ -220,24 +220,24 @@
                   <div class="gate-num">Gate 1-2</div>
                   <div class="gate-detail">
                     <h4>Blacklist & Cooldown Guard</h4>
-                    <p>Memastikan koin tidak dalam daftar larangan aktif dan mematuhi batas cooldown transaksi untuk menghindari transaksi berturut-turut pada koin yang sama.</p>
+                    <p>Ensures the asset is not on the active blacklist and complies with transaction cooldown intervals to prevent rapid consecutive trades on the same pair.</p>
                   </div>
                 </div>
                 <div class="gate-block">
                   <div class="gate-num">Gate 4b</div>
                   <div class="gate-detail">
-                    <h4>ATR Volatility Guard (Filter Volatilitas)</h4>
-                    <p>Menolak eksekusi jika volatilitas ATR melampaui 3% dari harga saat ini (atau 4.5% pada konfigurasi longgar). Ini melindungi bot dari lonjakan harga artifisial.</p>
+                    <h4>ATR Volatility Guard (Volatility Filter)</h4>
+                    <p>Rejects execution if the ATR volatility exceeds 3% of the current price (or 4.5% in loose configurations). This protects the bot from artificial price spikes.</p>
                   </div>
                 </div>
                 <div class="gate-block">
                   <div class="gate-num">Gate 4c</div>
                   <div class="gate-detail">
-                    <h4>EMA-50 Trend Guard (Filter Tren Utama)</h4>
-                    <p>Secara default memblokir transaksi jika harga berada di bawah garis tren jangka panjang EMA-50.</p>
+                    <h4>EMA-50 Trend Guard (Core Trend Filter)</h4>
+                    <p>By default, blocks transactions if the price resides below the long-term EMA-50 trend line.</p>
                     <div class="exception-alert">
-                      <strong>PENGECUALIAN (Bottom-Explosion):</strong>
-                      Filter EMA-50 akan dilewati secara otomatis jika terdeteksi kondisi pembalikan ekstrem: 
+                      <strong>EXCEPTION (Bottom-Explosion):</strong>
+                      The EMA-50 filter is automatically bypassed if extreme oversold reversal conditions are detected: 
                       <code>RSI &lt; 26</code> + <code>Buy Pressure &gt; 66%</code> + <code>Volume Ratio &gt; 2.1</code>.
                     </div>
                   </div>
@@ -246,7 +246,7 @@
                   <div class="gate-num">Gate 10-13</div>
                   <div class="gate-detail">
                     <h4>Consecutive-Loss Halt & Final Confidence Threshold</h4>
-                    <p>Menghentikan aktivitas secara otomatis jika terjadi loss beruntun, serta memvalidasi korelasi pola K-NN sebelum akhirnya mengeksekusi order buy.</p>
+                    <p>Automatically halts trading activity if consecutive losses occur, and validates K-NN pattern correlations before final buy order dispatch.</p>
                   </div>
                 </div>
               </div>
@@ -257,16 +257,16 @@
                 <h3>Exit Rules & Capital Preservation</h3>
                 <ul class="specs-list">
                   <li><strong>Micro Profit Exit:</strong>
-                    <span>Dievaluasi ketat pada harga <code>bid</code> (bukan last price) untuk memastikan keuntungan nyata setelah dikurangi biaya transaksi.</span>
+                    <span>Evaluated strictly against the bid price (not last trade price) to guarantee real net profitability after transaction fees.</span>
                   </li>
                   <li><strong>Trailing Take Profit (TTP):</strong>
-                    <span>Mengikuti kenaikan tren harga dan mengunci profit saat terdeteksi pembalikan kecil.</span>
+                    <span>Follows rising price trends and locks in profit when minor trend reversals are detected.</span>
                   </li>
                   <li><strong>Auto Stop-Loss (Auto-SL):</strong>
-                    <span>Pelindung modal otomatis yang langsung melepas aset jika pergerakan harga menembus toleransi risiko.</span>
+                    <span>An automated capital protection guard that instantly exits the asset if price action breaches the risk tolerance threshold.</span>
                   </li>
                   <li><strong>Database State Protection:</strong>
-                    <span>Cost basis (<code>amount</code>) tidak boleh ditimpa selama proses rekonsiliasi data.</span>
+                    <span>The cost basis (<code>amount_idr</code>) must never be overwritten during exchange state reconciliation.</span>
                   </li>
                 </ul>
               </div>
@@ -278,28 +278,28 @@
         <div v-else-if="activeTab === 'ai'" class="tab-content animate-fade">
           <div class="grid-layout">
             <div class="main-column">
-              <h2>Peran AI Layer (The Oracle) & Technical Only Mode</h2>
+              <h2>AI Layer (The Oracle) Role & Technical Only Mode</h2>
               <p>
-                Algovibe didesain dengan pemisahan tanggung jawab yang sangat ketat antara logika kecerdasan buatan (Artificial Intelligence) dan algoritma eksekusi trading.
+                Algovibe is designed with a strict separation of concerns between artificial intelligence logic and core trade execution algorithms.
               </p>
               
               <div class="ai-concept-grid">
                 <div class="concept-card">
                   <h4>TECHNICAL_ONLY_MODE = true</h4>
                   <p>
-                    Semua keputusan entry dan exit trading 100% dihitung menggunakan indikator teknikal murni secara non-bias. AI layer <strong>tidak diizinkan</strong> melakukan intervensi atau memberikan sinyal beli/jual langsung ke mesin eksekusi.
+                    All entry and exit trading decisions are 100% determined by objective mathematical technical indicators. The AI layer is strictly prohibited from executing orders or injecting trading signals into the execution core.
                   </p>
                 </div>
                 <div class="concept-card">
                   <h4>AI & Oracle Editorial Role</h4>
                   <p>
-                    AI layer bertindak sebagai analis riset terpisah (The Oracle). Ia memproses teks berita pasar, mengidentifikasi anomali tren, dan menyusun laporan intelijen pasar serta artikel editorial yang dipublikasikan secara real-time di halaman portal ini.
+                    The AI layer acts as an isolated research analyst (The Oracle). It processes market news, identifies trend anomalies, and compiles market intelligence reports and editorial articles published in real-time on this portal.
                   </p>
                 </div>
               </div>
 
               <blockquote class="quant-quote">
-                "Disiplin dalam eksekusi dicapai dengan mematikan subjektivitas. Matematika murni menentukan eksekusi, sementara kecerdasan buatan bertugas mengurai konteks global secara terpisah."
+                "Execution discipline is achieved by eliminating subjectivity. Pure mathematics dictates execution, while artificial intelligence deciphers the global context in isolation."
               </blockquote>
             </div>
 

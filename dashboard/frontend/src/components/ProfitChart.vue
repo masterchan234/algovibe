@@ -26,7 +26,7 @@
           class="unblock-btn"
           :disabled="isUnblocking"
           @click="handleUnblock"
-          :title="`Bot di-pause karena ${stats.consecutive_losses} losses berturut-turut. Klik untuk reset.`"
+          :title="`Bot paused due to ${stats.consecutive_losses} consecutive losses. Click to reset.`"
         >{{ isUnblocking ? '...' : `⛔ UNBLOCK (${stats.consecutive_losses}×)` }}</button>
       </div>
       <div class="kpi-item">
@@ -77,7 +77,7 @@
           :class="{ active: stats.dry_run_loose_gates }"
           :disabled="isTogglingGates"
           @click="handleToggleLooseGates"
-          :title="stats.dry_run_loose_gates ? 'LOOSE GATES aktif — klik untuk menonaktifkan' : 'Aktifkan LOOSE GATES (lewati filter ketat)'"
+          :title="stats.dry_run_loose_gates ? 'LOOSE GATES active — click to deactivate' : 'Activate LOOSE GATES (bypass strict filters)'"
         >{{ isTogglingGates ? '...' : (stats.dry_run_loose_gates ? '🔓 ON' : '🔒 OFF') }}</button>
       </div>
     </div>
@@ -200,11 +200,11 @@
             v-model="radarSearch"
             class="radar-search"
             type="text"
-            placeholder="🔍 Cari coin…"
+            placeholder="🔍 Search coin…"
             spellcheck="false"
           />
         </div>
-        <div class="radar-audit-mini" title="Histori 24 jam, bukan status live saat ini">
+        <div class="radar-audit-mini" title="24-hour history, not current live status">
           <span class="audit-label">Audit 24h</span>
           <span>BUY {{ radarAudit.buy_signals_24h || 0 }}</span>
           <span>Blocked {{ radarAudit.buy_blocked_total_24h || 0 }}</span>
@@ -214,7 +214,7 @@
       <div class="radar-scroll-wrap">
         <!-- Held coins group -->
         <template v-if="radarDisplayPairs.held.length">
-          <div class="radar-group-label">📦 Dipegang ({{ radarDisplayPairs.held.length }})</div>
+          <div class="radar-group-label">📦 Held ({{ radarDisplayPairs.held.length }})</div>
           <div class="radar-list">
             <div
               v-for="pair in radarDisplayPairs.held"
@@ -222,7 +222,7 @@
               class="radar-item radar-held"
               :class="{ 'active-radar': chartModalPair === pair.pair }"
               :style="heatmapStyle(pair)"
-              :title="formatPair(pair.pair) + ' [DIPEGANG] · klik = chart, kanan = detail'"
+              :title="formatPair(pair.pair) + ' [HELD] · click = chart, right-click = detail'"
               @click="onRadarClick(pair)"
               @contextmenu="onRadarRightClick($event, pair)"
             >
@@ -245,7 +245,7 @@
               class="radar-item"
               :class="{ 'active-radar': chartModalPair === pair.pair }"
               :style="heatmapStyle(pair)"
-              :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '') + ' · klik = chart, kanan = detail'"
+              :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '') + ' · click = chart, right-click = detail'"
               @click="onRadarClick(pair)"
               @contextmenu="onRadarRightClick($event, pair)"
             >
@@ -259,7 +259,7 @@
         </template>
 
         <div v-if="radarSearch && !radarDisplayPairs.held.length && !radarDisplayPairs.others.length" class="radar-empty">
-          Tidak ada coin yang cocok dengan "{{ radarSearch }}"
+          No coin matches "{{ radarSearch }}"
         </div>
       </div>
 
@@ -425,7 +425,7 @@ function onRadarClick(pairObj) {
     const match = store.radarPairs.find(p => p.pair === pairObj.pair)
     if (match) fullData = { ...match, ...pairObj }
   }
-  // Jika klik kanan (Ctrl+click) → buka AI detail; klik biasa → chart
+  // Right-click (or Ctrl+click) -> open AI detail; normal click -> chart
   chartModalPair.value = fullData.pair
   showChartModal.value = true
 }
@@ -475,12 +475,12 @@ async function fetchAiInsight(pair) {
     const res = await fetch(`${backendUrl}/api/reasoning/${pairName}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
-      return data.reasoning || 'Tidak ada nalar AI yang tersedia saat ini.'
+      return data.reasoning || 'No AI intelligence vectors available for this sector currently.'
     }
   } catch (e) {
     console.error('Failed to fetch AI insight:', e)
   }
-  return 'Gagal mengambil data intelijen Oracle.'
+  return 'Failed to fetch Oracle intelligence data.'
 }
 
 const regimeClass = computed(() => {
@@ -551,8 +551,8 @@ async function toggleBuyGates() {
 async function handleToggleLooseGates() {
   if (isTogglingGates.value) return
   const current = stats.value?.dry_run_loose_gates ?? false
-  const action = current ? 'nonaktifkan' : 'aktifkan'
-  if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} LOOSE GATES? ${current ? 'Filter entry ketat akan aktif kembali.' : 'Semua filter entry ketat akan dilewati.'}`)) return
+  const action = current ? 'deactivate' : 'activate'
+  if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} LOOSE GATES? ${current ? 'Strict entry filters will be reactivated.' : 'All strict entry filters will be bypassed.'}`)) return
   isTogglingGates.value = true
   try {
     const backendUrl = import.meta.env.DEV
@@ -567,11 +567,11 @@ async function handleToggleLooseGates() {
     if (data.success) {
       store.stats.dry_run_loose_gates = data.loose_gates
     } else {
-      alert('Gagal toggle loose gates.')
+      alert('Failed to toggle loose gates.')
     }
   } catch (err) {
     console.error('Toggle loose gates error:', err)
-    alert('Error saat toggle loose gates.')
+    alert('Error while toggling loose gates.')
   } finally {
     isTogglingGates.value = false
   }
@@ -580,7 +580,7 @@ async function handleToggleLooseGates() {
 async function handleUnblock() {
   if (isUnblocking.value) return
   const losses = stats.value?.consecutive_losses ?? 0
-  if (!confirm(`Reset ${losses} consecutive losses dan cabut GLOBAL PAUSE? Bot akan kembali mencari entry.`)) return
+  if (!confirm(`Reset ${losses} consecutive losses and lift GLOBAL PAUSE? Bot will resume seeking entries.`)) return
   isUnblocking.value = true
   try {
     const backendUrl = import.meta.env.DEV
@@ -595,10 +595,10 @@ async function handleUnblock() {
     if (data.success) {
       store.stats.consecutive_losses = 0
     } else {
-      alert(data.message || 'Unblock gagal.')
+      alert(data.message || 'Unblock failed.')
     }
   } catch (e) {
-    alert('Gagal terhubung ke server.')
+    alert('Failed to connect to the server.')
   } finally {
     isUnblocking.value = false
   }
@@ -634,18 +634,18 @@ function recommendationOf(pair) {
 
 function shortStatus(pair) {
   if (pair?.ai_veto) {
-    const raw = String(pair?.ai_veto_reason || pair?.tradable_reason || 'AI memveto entry ini')
+    const raw = String(pair?.ai_veto_reason || pair?.tradable_reason || 'AI vetoed this entry')
     return raw.length > 68 ? raw.slice(0, 68) + '...' : raw
   }
   if (pair?.tradable === false) {
-    const raw = String(pair?.tradable_reason || pair?.gate_status || 'Belum memenuhi gate entry')
+    const raw = String(pair?.tradable_reason || pair?.gate_status || 'Gate entry conditions not met yet')
     return raw.length > 68 ? raw.slice(0, 68) + '...' : raw
   }
   const radarReason = String(pair?.radar_reason || '')
   if (radarReason) {
     return radarReason.length > 68 ? radarReason.slice(0, 68) + '...' : radarReason
   }
-  return 'Ready untuk eksekusi jika gate lain lolos'
+  return 'Ready for execution if other gates pass'
 }
 
 function signalPriority(pair) {

@@ -80,7 +80,7 @@
                 <div class="target-marker tp" title="Take Profit"></div>
               </div>
               <div v-else class="dust-note">
-                DUST tracked - menunggu BUY signal untuk top-up dan promosi kembali ke OPEN.
+                DUST tracked - waiting for BUY signal to top-up and promote back to OPEN.
               </div>
               <div v-if="!isDustPosition(pos)" class="target-labels">
                 <span class="sl-val">SL -{{ Math.abs(pos.target_sl || 0).toFixed(1) }}%</span>
@@ -169,7 +169,7 @@
           :class="{ active: activeStreamTab === 'analisa' }" 
           @click="activeStreamTab = 'analisa'"
         >
-          <span class="tab-icon">🧠</span> Analisa AI
+          <span class="tab-icon">🧠</span> AI Analysis
         </button>
         <button
           :class="{ active: activeStreamTab === 'llm' }"
@@ -305,7 +305,7 @@ async function handleManualExit(pair) {
         window.dispatchEvent(new CustomEvent('algovibe:require-login', {
           detail: { source: 'manual-exit', pair }
         }))
-        alert('Sesi login diperlukan untuk manual EXIT. Silakan login terlebih dahulu.')
+        alert('Login session required for manual EXIT. Please login first.')
       } else {
         alert(`Exit failed: ${err.error || res.statusText}`)
       }
@@ -392,7 +392,7 @@ const filteredStream = computed(() => {
       created_at: String(pos?.created_at || pos?.timestamp || new Date().toISOString()),
       pair,
       side: 'MONITOR',
-      message: `Monitoring aktif ${formatPair(pair)} (${status}) — menunggu sinyal analisa/log terbaru.`,
+      message: `Active monitoring for ${formatPair(pair)} (${status}) — waiting for latest analysis/log signals.`,
       source: 'SYNTHETIC',
     }
   })
@@ -494,7 +494,7 @@ function formatIdr(val, signed = true) {
     if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
     return `${prefix}$${abs.toFixed(2)}`
   }
-  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}M`
   return `${prefix}Rp ${abs.toLocaleString('id-ID')}`
 }
 </script>
