@@ -145,7 +145,7 @@
               :key="asset.pair" 
               class="heatmap-tile"
               :style="tileStyle(asset.pnl)"
-              v-tooltip="`${asset.trades} Trades | ${formatIdr(asset.pnl)}`"
+              :title="`${asset.trades} Trades | ${formatIdr(asset.pnl)}`"
               @click="onRadarClick(asset)"
             >
               <span class="tile-label">{{ formatPair(asset.pair) }}</span>
@@ -360,7 +360,7 @@ const tileStyle = (pnl) => {
 
 onMounted(() => {
   clockIntervalId = setInterval(() => {
-    currentTime.value = new Date().toLocaleTimeString('id-ID')
+    currentTime.value = new Date().toLocaleTimeString('en-US')
   }, 5000)
 })
 const chartContainer = ref(null)
@@ -860,7 +860,7 @@ function formatIdr(val) {
     if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
     return `${prefix}$${abs.toFixed(2)}`
   } else {
-    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}M`
     if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
     return `${prefix}Rp ${abs.toFixed(0)}`
   }
@@ -901,7 +901,7 @@ function getCommonOption(times, values, lineColor, label) {
         const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
         const formattedValue = isUsdt 
           ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-          : `Rp ${n.toLocaleString('id-ID')}`
+          : `Rp ${n.toLocaleString('en-US')}`
         return `<div style="font-size:10px;color:#8b949e">${p.axisValue}</div>
                 <div style="font-size:10px;color:#8b949e">${label}</div>
                 <div style="font-weight:700;color:${lineColor}">${prefix}${formattedValue}</div>`
@@ -932,7 +932,7 @@ function getCommonOption(times, values, lineColor, label) {
             if (Math.abs(v) >= 1_000) return '$' + (v / 1_000).toFixed(0) + 'K'
             return '$' + v
           } else {
-            if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'jt'
+            if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M'
             if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(0) + 'k'
             return v
           }
@@ -1250,7 +1250,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   padding: 16px 20px;
-  background: rgba(163, 113, 247, 0.02);
+  background: linear-gradient(180deg, rgba(163, 113, 247, 0.04) 0%, rgba(13, 17, 23, 0.4) 100%);
+  border-top: 1px solid rgba(163, 113, 247, 0.15);
   min-height: 0;
   overflow-y: auto;
 }
@@ -1536,38 +1537,43 @@ onUnmounted(() => {
 .heatmap-grid::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
 
 .heatmap-tile {
-  flex: 0 0 calc(6.66% - 3px);
-  min-width: 32px;
-  height: 32px;
+  flex: 0 0 calc(20% - 3px); /* 5 tiles per row for premium spacing */
+  min-width: 48px;
+  height: 38px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  border-radius: 2px;
-  padding: 1px;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  cursor: crosshair;
+  border-radius: 6px;
+  padding: 3px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
   border: 1px solid rgba(255,255,255,0.05);
 }
 
 .heatmap-tile:hover {
-  transform: scale(1.3) translateY(-2px);
-  filter: brightness(1.5);
-  z-index: 50;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-  border-color: #fff;
+  transform: translateY(-2px) scale(1.08);
+  filter: brightness(1.2);
+  z-index: 5;
+  box-shadow: 0 4px 15px rgba(163, 113, 247, 0.25);
+  border-color: rgba(163, 113, 247, 0.5) !important;
 }
 
 .tile-label {
-  font-size: 7px;
-  font-weight: 900;
+  font-size: 8px;
+  font-weight: 800;
   font-family: 'JetBrains Mono', monospace;
-  line-height: 1;
+  line-height: 1.1;
   text-transform: uppercase;
 }
 
 .tile-pnl {
-  display: none; /* Hide to keep it clean, info is in tooltip */
+  display: block;
+  font-size: 7px;
+  font-weight: 700;
+  margin-top: 2px;
+  line-height: 1;
+  opacity: 0.85;
 }
 
 .intel-loading {
