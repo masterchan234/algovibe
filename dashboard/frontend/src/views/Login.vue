@@ -7,10 +7,10 @@
           <h1>ALGOVIBE <span class="sub">INTELLIGENCE</span></h1>
         </div>
         <nav class="portal-nav" aria-label="Primary Navigation">
-          <a href="/about-us">About Us</a>
-          <a href="#hero-2">Featured Story</a>
-          <a href="#articles">Articles</a>
-          <a href="#signals">Live Signals</a>
+          <router-link to="/about-us">About Us</router-link>
+          <a href="#hero-2" @click.prevent="scrollToSection('hero-2')">Featured Story</a>
+          <a href="#articles" @click.prevent="scrollToSection('articles')">Articles</a>
+          <a href="#signals" @click.prevent="scrollToSection('signals')">Live Signals</a>
           <button @click="activeTab = 'auth'" class="login-trigger">login</button>
         </nav>
       </div>
@@ -333,6 +333,19 @@ onMounted(() => {
   fetchLandingData()
   startTime()
 
+  if (route.query.showAuth === 'true') {
+    activeTab.value = 'auth'
+  }
+
+  const hash = route.hash || window.location.hash
+  if (hash) {
+    const cleanHash = hash.replace('#', '')
+    requestAnimationFrame(() => {
+      const el = document.getElementById(cleanHash)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
   insightInterval = setInterval(() => {
     if (landingData.insights.length > 1) {
       currentInsightIdx.value = (currentInsightIdx.value + 1) % landingData.insights.length
@@ -362,6 +375,22 @@ watch(() => heroArticle.value, () => {
 watch(() => landingData.articles, () => {
   syncArticleFromRoute()
   renderStructuredData()
+})
+
+watch(() => route.query.showAuth, (val) => {
+  if (val === 'true') {
+    activeTab.value = 'auth'
+  }
+})
+
+watch(() => route.hash, (val) => {
+  if (val) {
+    const cleanHash = val.replace('#', '')
+    requestAnimationFrame(() => {
+      const el = document.getElementById(cleanHash)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
 })
 
 function startTime() {
@@ -505,6 +534,16 @@ function goArticles() {
     const section = document.getElementById('articles')
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' })
   })
+}
+
+function scrollToSection(id) {
+  closeArticle()
+  if (route.name !== 'login') {
+    router.push({ name: 'login', hash: `#${id}` })
+  } else {
+    const el = document.getElementById(id)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 }
 
 function syncArticleFromRoute() {
