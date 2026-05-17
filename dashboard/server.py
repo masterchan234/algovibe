@@ -50,7 +50,13 @@ def broadcast_command(action, payload=None):
     logging.info(f" [IPC] Broadcasted command: {action}")
 
 # Public adapter untuk data pasar (OHLCV, ticker_all, market movers) — tidak butuh auth
-_public_adapter = IndodaxAdapter('', '')
+eid = os.getenv("EXCHANGE", "binance").lower()
+if eid == "binance":
+    from app.infrastructure.providers.binance_adapter import BinanceAdapter
+    _public_adapter = BinanceAdapter('', '')
+else:
+    from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
+    _public_adapter = IndodaxAdapter('', '')
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -406,17 +412,20 @@ def _fetch_all_tickers_rest():
 
 def _fetch_real_idr_balance_bundle():
     """
-    Fetch real IDR balance bundle (free/used/total) + all non-IDR coins.
+    Fetch real balance bundle (free/used/total) + all non-quote coins.
     [Senior Logic] ALWAYS FETCH FRESH from DB (no cache) to keep dashboard in sync with bot.
     """
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    quote_asset = "USDT" if eid == "binance" else "IDR"
+    
     # ALWAYS fetch fresh from Database (no caching — balance changes every cycle)
     try:
         db_bal = db.get_balances()
-        if db_bal and 'IDR' in db_bal:
-            idr_data = db_bal['IDR']
+        if db_bal and quote_asset in db_bal:
+            idr_data = db_bal[quote_asset]
             coins = {}
             for asset, data in db_bal.items():
-                if asset == 'IDR': continue
+                if asset == quote_asset: continue
                 total_val = float(data.get('total', 0))
                 if total_val > 0: # Tampilkan semua koin > 0
                     coins[asset] = total_val
@@ -438,18 +447,26 @@ def _fetch_real_idr_balance_bundle():
             return None
 
         import ccxt
-        ex = ccxt.indodax({
-            'apiKey': user['api_key'],
-            'secret': user['api_secret'],
-            'enableRateLimit': True
-        })
+        if eid == "binance":
+            ex = ccxt.binance({
+                'apiKey': user['api_key'] or os.getenv('BINANCE_API_KEY', ''),
+                'secret': user['api_secret'] or os.getenv('BINANCE_API_SECRET', ''),
+                'enableRateLimit': True,
+                'options': {'adjustForTimeDifference': True}
+            })
+        else:
+            ex = ccxt.indodax({
+                'apiKey': user['api_key'] or os.getenv('INDODAX_API_KEY', ''),
+                'secret': user['api_secret'] or os.getenv('INDODAX_API_SECRET', ''),
+                'enableRateLimit': True
+            })
         balance = ex.fetch_balance()
-        idr = balance.get('IDR', {})
+        idr = balance.get(quote_asset, {})
         total_data = balance.get('total', {})
         
         coins = {}
         for coin, val in total_data.items():
-            if coin == 'IDR' or coin == 'info': continue
+            if coin == quote_asset or coin == 'info': continue
             amount = float(val or 0)
             if amount > 0: # Tampilkan semua koin > 0
                 coins[coin] = amount
@@ -480,21 +497,23 @@ def _get_cached_real_balance_bundle():
     return None
 
 def _get_cached_real_balance():
-    """Backward-compatible helper returning only free IDR."""
+    """Backward-compatible helper returning only free quote balance."""
     val = _get_cached_real_balance_bundle()
     return val.get("free") if val else None
 
 def _get_coin_equity_idr(coins: dict, ws_tickers: dict) -> float:
     """
-    Hitung total nilai IDR dari semua koin non-IDR yang dipegang di exchange.
+    Hitung total nilai quote dari semua koin non-quote yang dipegang di exchange.
     coins: {"AXL": 7.94, "DRX": 98.0, ...}
     ws_tickers: hasil mws.get_tickers()
     """
     total = 0.0
     rest_tickers = None
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    suffix = "usdt" if eid == "binance" else "idr"
     
     for coin, amount in coins.items():
-        pair_key = f"{coin.lower()}idr"
+        pair_key = f"{coin.lower()}{suffix}"
         
         # 1. Coba ambil dari WebSocket (Paling cepat)
         price = 0
@@ -1534,7 +1553,7 @@ def get_chart_data(pair):
     tf = request.args.get('tf', '15')
     limit = min(int(request.args.get('limit', 100)), 300)
     try:
-        adapter = IndodaxAdapter('', '')
+        adapter = _public_adapter
         candles = adapter.fetch_ohlc(pair, tf=tf, limit=limit)
         if not candles:
             return jsonify({"success": False, "message": "Tidak ada data OHLC"}), 404
@@ -4414,15 +4433,23 @@ def _background_wallet_sync_loop():
                 continue
 
             user = db.get_user('admin')
-            api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
-            api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            if eid == "binance":
+                api_key = (user['api_key'] if user else None) or os.getenv('BINANCE_API_KEY', '')
+                api_secret = (user['api_secret'] if user else None) or os.getenv('BINANCE_API_SECRET', '')
+            else:
+                api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
+                api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
 
             if not api_key or not api_secret:
                 socketio.sleep(300)
                 continue
 
             import ccxt as _ccxt
-            ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
+            if eid == "binance":
+                ex = _ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'adjustForTimeDifference': True}})
+            else:
+                ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
             balance = ex.fetch_balance()
             total_bal = balance.get('total', {})
 
@@ -4444,7 +4471,7 @@ def _background_wallet_sync_loop():
 
             # Ghost removal
             for pair, pos in list(current_positions.items()):
-                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
+                coin = pair[:-4].upper() if eid == "binance" else pair[:-3].upper()
                 amount_on_exchange = float(total_bal.get(coin, 0) or 0)
                 if amount_on_exchange < 1e-8:
                     db.delete_position(pair)

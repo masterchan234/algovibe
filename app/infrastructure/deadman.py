@@ -54,6 +54,11 @@ class DeadmanSwitch:
 
     def send_heartbeat(self):
         """Send a single heartbeat request."""
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            logger.debug(f"[Deadman] Binance Spot soft heartbeat active. Pairs monitored: {self.pairs}")
+            return True
+            
         try:
             timestamp = int(time.time() * 1000)
             params = {

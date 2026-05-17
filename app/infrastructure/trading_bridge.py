@@ -55,6 +55,8 @@ def _load_adapters():
     """Lazily import all known adapter modules so they can register."""
     from app.infrastructure.providers.indodax_adapter import IndodaxAdapter  # noqa: F401
     _REGISTRY.setdefault("indodax", IndodaxAdapter)
+    from app.infrastructure.providers.binance_adapter import BinanceAdapter  # noqa: F401
+    _REGISTRY.setdefault("binance", BinanceAdapter)
 
 
 #  TradingBridge 
@@ -85,15 +87,15 @@ class TradingBridge:
         resolved_id = (
             exchange_id
             or self._read_exchange_id_from_db()
-            or os.getenv("EXCHANGE", "indodax")
+            or os.getenv("EXCHANGE", "binance")
         ).lower()
 
         if resolved_id not in _REGISTRY:
             logger.warning(
-                "[TradingBridge] Unknown exchange '%s', falling back to 'indodax'.",
+                "[TradingBridge] Unknown exchange '%s', falling back to 'binance'.",
                 resolved_id,
             )
-            resolved_id = "indodax"
+            resolved_id = "binance"
 
         adapter_cls = _REGISTRY[resolved_id]
 

@@ -91,10 +91,17 @@ class BrainInferenceService:
         self._pre_load_history()
         
         # Adapter for public REST API backfill (no API key needed)
-        from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
-        _api_key = os.getenv("INDODAX_API_KEY", "")
-        _api_secret = os.getenv("INDODAX_API_SECRET", "")
-        self._adapter = IndodaxAdapter(_api_key, _api_secret)
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            from app.infrastructure.providers.binance_adapter import BinanceAdapter
+            _api_key = os.getenv("BINANCE_API_KEY", "")
+            _api_secret = os.getenv("BINANCE_API_SECRET", "")
+            self._adapter = BinanceAdapter(_api_key, _api_secret)
+        else:
+            from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
+            _api_key = os.getenv("INDODAX_API_KEY", "")
+            _api_secret = os.getenv("INDODAX_API_SECRET", "")
+            self._adapter = IndodaxAdapter(_api_key, _api_secret)
         self._backfill_thread = None
 
         # OHLC H/L/Volume cache untuk ATR akurat + OBV/Volume Ratio aktif

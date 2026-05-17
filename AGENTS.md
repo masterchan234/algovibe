@@ -3,7 +3,7 @@
 Agent instructions for this repository. Keep changes small, safe, and trading-aware.
 
 ## 1) Project Purpose
-- Crypto scalping bot for Indodax with WebSocket-driven market/private streams and microservice architecture.
+- Crypto scalping bot for Indodax and Binance Spot with WebSocket-driven market/private streams and microservice architecture.
 - Primary runtime uses Docker Compose services (`market-pipe`, `brain-inference`, `litert-lm-decision`, `executive-core`, `dashboard-api`).
 - Persistence runtime utama menggunakan PostgreSQL/TimescaleDB (container `algovibe-timescaledb`) dengan state sync lintas service.
 - **TECHNICAL_ONLY_MODE = true** (default dan sudah di-set di DB `bot_state`). LLM (`litert-lm-decision`) hanya digunakan untuk article writing; semua keputusan trading 100% dari indikator teknikal.
@@ -11,6 +11,9 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 ## 2) Setup and Run
 - Install deps (opsional untuk native debugging): `pip install -r requirements.txt`
 - Required env vars in `.env`:
+  - `EXCHANGE` (either `binance` or `indodax`)
+  - `BINANCE_API_KEY`
+  - `BINANCE_API_SECRET`
   - `INDODAX_API_KEY`
   - `INDODAX_API_SECRET`
 - Primary runtime (recommended): Docker Compose
@@ -35,8 +38,8 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - `services/litert_lm_decision/main.py`: LLM service — trading signal path dinonaktifkan (TECHNICAL_ONLY_MODE); tetap UP untuk article writing.
 - `services/executive_core/main.py`: execution engine, reconciliation, position lifecycle; LLM signal path diberi guard TECHNICAL_ONLY_MODE.
 - `config.py`: central strategy/risk constants and paths.
-- `app/infrastructure/ws_market.py`: market stream cache + IPC subscriber bridge.
-- `app/infrastructure/ws_private.py`: private/order updates feed.
+- `app/infrastructure/ws_market.py`: market stream cache + IPC subscriber bridge (supports dynamic Indodax/Binance feeds).
+- `app/infrastructure/ws_private.py`: private/order updates feed (handles Binance listenKeys and executionReport mappings).
 - `app/application/exit_manager.py`: open-position monitoring and exits. Cost basis (`amount_idr`) TIDAK boleh ditimpa saat reconcile.
 - `app/application/use_cases/entry_gates.py`: semua pre-entry gate checks; berisi ATR filter (gate 4b) dan EMA-50 trend filter (gate 4c).
 - `app/application/use_cases/trade_execution.py`: BUY execution; fee-trap guard menggunakan pure-percentage (0.5%), bukan hard floor.
@@ -60,7 +63,9 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - Keep default-safe behavior intact unless asked:
   - `DRY_RUN` behavior must remain predictable.
   - Risk caps and thresholds in `config.py` should not be altered incidentally.
-- Keep minimum trade threshold consistent across containers (`MIN_TRADE_IDR=10000`).
+- **Quote / DB Alignment**:
+  - Untuk menghindari resiko skema database, nilai nominal `USDT` (saat `EXCHANGE=binance` aktif) disimpan langsung di bawah kolom legacy bertipe numeric/varchar (seperti `amount_idr`, `pnl_idr`, `vol_idr`).
+- Keep minimum trade threshold consistent across containers (`MIN_TRADE_IDR=10000` / `MIN_TRADE_USDT=10`).
   - If threshold appears stale in logs, force-recreate related containers.
 - For `MICRO_PROFIT_EXIT`, preserve safety cushion behavior — evaluasi di harga `bid`, bukan `last`.
 - JANGAN timpa `amount_idr` (cost basis) di reconcile path. Hanya `amount_crypto` yang boleh disync dari exchange.

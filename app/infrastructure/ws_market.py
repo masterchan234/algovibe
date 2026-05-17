@@ -1,15 +1,8 @@
 """
-Market Data WebSocket Client — Indodax
-======================================
-Menggantikan REST polling (requests.get /api/tickers) dengan
-WebSocket real-time stream dari wss://ws3.indodax.com/ws/
-
-Channel yang digunakan:
-  - market:summary-24h  → semua ticker (harga, volume, spread)
-  - market:order-book-<pair>  → orderbook per pair (opsional)
-  - market:trade-activity-<pair> → trade activity per pair
-
-Referensi: Marketdata-websocket.md
+Market Data WebSocket Client — Indodax & Binance Spot
+===================================================
+Menggantikan REST polling dengan WebSocket real-time stream.
+Mendukung dynamic exchange switching antara Indodax dan Binance.
 """
 
 import json
@@ -22,8 +15,13 @@ import os
 
 logger = logging.getLogger(__name__)
 
-#  Konstanta Indodax Market WS 
-WS_MARKET_URL   = "wss://ws3.indodax.com/ws/"
+# Config switching
+def _get_ws_url():
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    if eid == "binance":
+        return "wss://stream.binance.com:9443/stream"
+    return "wss://ws3.indodax.com/ws/"
+
 WS_MARKET_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
     ".eyJleHAiOjE5NDY2MTg0MTV9"
@@ -31,22 +29,20 @@ WS_MARKET_TOKEN = (
 )
 
 CHANNEL_SUMMARY = "market:summary-24h"
-CHANNEL_OB_PFX  = "market:order-book-"   # + pair, e.g. market:order-book-btc_idr
-CHANNEL_TRADE_PFX = "market:trade-activity-" # + pair
+CHANNEL_OB_PFX  = "market:order-book-"   # Indodax
+CHANNEL_TRADE_PFX = "market:trade-activity-" # Indodax
 
-# Berapa banyak pair teratas (by volume) yang akan di-subscribe order book-nya
 OB_TOP_PAIRS     = 50
-# Filter volume minimum sebelum subscribe order book (hindari pair mati)
-OB_MIN_VOL_IDR   = 50_000_000  # 50 Juta IDR (diturunkan agar lebih banyak pair tercover)
-# Pair yang SELALU di-subscribe order book terlepas dari volume threshold.
-# btcidr wajib ada agar Oracle regime filter tidak mengalami error
-# "Data BTC tidak tersedia di WS/DB. Melewati filter regime."
-# PLUS all currently OPEN positions (so exit monitor gets fresh tickers immediately).
-# Will be built dynamically after WS connects.
-OB_HIGH_PRIORITY_PAIRS: frozenset = frozenset({"btcidr"})
+OB_MIN_VOL_IDR   = 15000.0  # USDT or IDR scale depending on active exchange
 
-# Indeks kolom pada payload market:summary-24h
-# [pair, epoch, last, low, high, open, vol_idr, vol_coin]
+# Pair yang SELALU di-subscribe order book terlepas dari volume threshold
+def _get_high_priority_pairs():
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    if eid == "binance":
+        return frozenset({"btcusdt"})
+    return frozenset({"btcidr"})
+
+# Indeks kolom pada payload market:summary-24h (Indodax)
 IDX_PAIR     = 0
 IDX_EPOCH    = 1
 IDX_LAST     = 2
@@ -59,14 +55,7 @@ IDX_VOL_COIN = 7
 
 class MarketDataWS:
     """
-    WebSocket client untuk Market Data Indodax.
-
-    Penggunaan:
-        mws = MarketDataWS()
-        mws.start()          # non-blocking, jalan di thread terpisah
-        ...
-        tickers = mws.get_tickers()   # ambil snapshot terbaru
-        mws.stop()
+    WebSocket client untuk Market Data (Indodax / Binance Spot).
     """
 
     def __init__(self, on_tick=None, on_trade=None):
@@ -77,13 +66,13 @@ class MarketDataWS:
         self._running = False
         self._req_id  = 0
         self._last_msg_time = 0
-        self._connected = threading.Event()  # set saat autentikasi berhasil
-        self._ob_subscribed: set = set()     # pair yang sudah di-subscribe order book
-        self._trade_subscribed: set = set()  # pair yang sudah di-subscribe trade
+        self._connected = threading.Event()  
+        self._ob_subscribed: set = set()     
+        self._trade_subscribed: set = set()  
         self._trades: dict = {}              # {pair: [[ts, price, vol, side, id], ...]}
-        self._ws_ref = None                  # ref ke ws instance untuk subscribe dinamis
-        self._ob_done = False                # True setelah OB subscribe pertama selesai
-        self._pending_subs: dict = {}        # {req_id: channel_name} untuk ACK tracking
+        self._ws_ref = None                  
+        self._ob_done = False                
+        self._pending_subs: dict = {}        
         
         # Callbacks
         self.on_tick = on_tick
@@ -114,43 +103,40 @@ class MarketDataWS:
         logger.info("[MarketWS] Stopped.")
 
     def wait_ready(self, timeout: float = 30.0) -> bool:
-        """Blok hingga data pertama diterima (atau timeout detik)."""
+        """Blok hingga data pertama diterima."""
         return self._connected.wait(timeout=timeout)
 
     def subscribe_open_positions(self):
-        """Subscribe to orderbook for all open live positions.
-        
-        Called after database is ready to ensure exit monitor gets fresh tickers
-        for all open positions (not just pairs that have appeared in summary-24h yet).
-        """
+        """Subscribe to orderbook for all open live positions."""
+        eid = os.getenv("EXCHANGE", "binance").lower()
         try:
             from app.infrastructure.database import db
             live_pos = db.get_open_positions()
             if not live_pos:
                 return
             
-            # Ensure each open position has an orderbook subscription
             for pair in live_pos.keys():
                 if pair not in self._ob_subscribed and self._ws_ref:
                     try:
                         req_id = self._next_id()
-                        channel = f"{CHANNEL_OB_PFX}{pair}"
-                        sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+                        if eid == "binance":
+                            stream_name = f"{pair.lower()}@depth10"
+                            sub_msg = {"method": "SUBSCRIBE", "params": [stream_name], "id": req_id}
+                        else:
+                            channel = f"{CHANNEL_OB_PFX}{pair}"
+                            sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+                        
                         self._ws_ref.send(json.dumps(sub_msg))
                         self._ob_subscribed.add(pair)
                         logger.info(f"[MarketWS] Subscribed OB for open position: {pair}")
-                        time.sleep(0.05)  # Small delay between subscriptions
+                        time.sleep(0.05)
                     except Exception as e:
                         logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
         except Exception as e:
             logger.warning(f"[MarketWS] Failed to subscribe_open_positions: {e}")
 
     def get_tickers(self) -> dict:
-        """
-        Kembalikan snapshot ticker saat ini.
-        Format kompatibel dengan /api/tickers Indodax REST:
-          {pair: {last, buy, sell, high, low, vol_idr, vol_<coin>}}
-        """
+        """Kembalikan snapshot ticker saat ini."""
         with self._lock:
             return dict(self._tickers)
 
@@ -174,7 +160,6 @@ class MarketDataWS:
         return self._connected.is_set() and (time.time() - self._last_msg_time < 30)
 
     def get_latency(self):
-        """Estimate latency based on message frequency or specific ping/pong."""
         if self._last_msg_time == 0: return 0
         return time.time() - self._last_msg_time
 
@@ -185,14 +170,12 @@ class MarketDataWS:
         return self._req_id
 
     def _run(self):
-        """Loop utama dengan auto-reconnect."""
         if self._use_hub:
             self._run_subscriber()
         else:
             self._run_direct()
 
     def _run_subscriber(self):
-        """Mode SaaS Subscriber: Ambil data dari Market Hub lokal via ZMQ."""
         logger.info(f"[MarketWS] Starting in SUBSCRIBER mode (Hub: {self._hub_host}:{self._hub_port})")
         context = zmq.Context()
         subscriber = context.socket(zmq.SUB)
@@ -200,7 +183,6 @@ class MarketDataWS:
         subscriber.setsockopt_string(zmq.SUBSCRIBE, "tickers")
         subscriber.setsockopt_string(zmq.SUBSCRIBE, "heartbeat")
         
-        # Set socket timeout agar loop bisa berhenti saat self._running = False
         subscriber.RCVTIMEO = 2000 
 
         while self._running:
@@ -229,36 +211,50 @@ class MarketDataWS:
         context.term()
 
     def _run_direct(self):
-        """Mode Standalone: Konek langsung ke Indodax WS."""
+        url = _get_ws_url()
+        logger.info(f"[MarketWS] Connecting directly to {url}")
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
-                    WS_MARKET_URL,
+                    url,
                     on_open    = self._on_open,
                     on_message = self._on_message,
                     on_error   = self._on_error,
                     on_close   = self._on_close,
                 )
-                # suppress_origin=True — hindari 403 Forbidden (lihat Troubleshooting docs)
                 self._ws.run_forever(suppress_origin=True, ping_interval=20, ping_timeout=10)
             except Exception as e:
                 logger.error(f"[MarketWS] run_forever exception: {e}")
 
             if self._running:
-                self._conn_token = None
-                self._ob_subscribed.clear()   # reset agar re-subscribe setelah reconnect
-                self._ob_done = False         # reset flag agar trigger ulang
+                self._ob_subscribed.clear()   
+                self._trade_subscribed.clear()
+                self._ob_done = False         
                 logger.warning("[MarketWS] Disconnected, reconnecting in 5s…")
                 time.sleep(5)
 
     def _on_open(self, ws):
         self._ws_ref = ws
-        logger.info("[MarketWS] Connected. Authenticating…")
-        auth_msg = {
-            "params": {"token": WS_MARKET_TOKEN},
-            "id": self._next_id(),
-        }
-        ws.send(json.dumps(auth_msg))
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        logger.info(f"[MarketWS] Connected to {eid.upper()}. Initiating subscriptions...")
+        
+        if eid == "binance":
+            # Subscribe to the Binance global ticker array
+            req_id = self._next_id()
+            sub_msg = {
+                "method": "SUBSCRIBE",
+                "params": ["!ticker@arr"],
+                "id": req_id
+            }
+            ws.send(json.dumps(sub_msg))
+            self._connected.set()
+        else:
+            # Indodax Auth & Summary
+            auth_msg = {
+                "params": {"token": WS_MARKET_TOKEN},
+                "id": self._next_id(),
+            }
+            ws.send(json.dumps(auth_msg))
 
     def _safe_float(self, val, default=0.0):
         try:
@@ -269,59 +265,225 @@ class MarketDataWS:
 
     def _on_message(self, ws, raw: str):
         self._last_msg_time = time.time()
-        import traceback
+        eid = os.getenv("EXCHANGE", "binance").lower()
         try:
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 return
 
-            #  Auth response 
-            if "result" in msg and "client" in msg.get("result", {}):
-                logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
-                # Step 2: Schedule subscription 1s after auth to let server state settle.
-                # Use threading.Timer to avoid blocking the WS receive thread.
-                req_id = self._next_id()
-                sub_msg = {
-                    "method": 1,
-                    "params": {"channel": CHANNEL_SUMMARY},
-                    "id": req_id,
-                }
-                self._pending_subs[req_id] = CHANNEL_SUMMARY
-                threading.Timer(1.0, lambda: ws.send(json.dumps(sub_msg))).start()
-                return
-
-            #  Subscribe ACK 
-            if "id" in msg and "result" in msg and "recoverable" in msg.get("result", {}):
-                req_id = msg["id"]
-                channel_name = self._pending_subs.pop(req_id, f"unknown (id={req_id})")
-                logger.info(f"[MarketWS] Subscribed to {channel_name} | "
-                            f"offset={msg['result'].get('offset')}")
-                return
-
-            #  Streaming data 
-            result = msg.get("result", {})
-            channel = result.get("channel", "")
-            data_wrap = result.get("data", {})
-
-            if channel == CHANNEL_SUMMARY:
-                rows = data_wrap.get("data", [])
-                self._process_summary(rows)
-
-            elif channel.startswith(CHANNEL_OB_PFX):
-                pair = channel[len(CHANNEL_OB_PFX):]
-                ob_data = data_wrap.get("data", {})
-                self._process_orderbook(pair, ob_data)
-
-            elif channel.startswith(CHANNEL_TRADE_PFX):
-                pair = channel[len(CHANNEL_TRADE_PFX):]
-                trade_data = data_wrap.get("data", [])
-                self._process_trades(pair, trade_data)
+            if eid == "binance":
+                self._on_message_binance(ws, msg)
+            else:
+                self._on_message_indodax(ws, msg)
         except Exception as e:
-            logger.error(f"[MarketWS] Critical Error in _on_message: {e}\n{traceback.format_exc()}")
+            logger.error(f"[MarketWS] Error in _on_message: {e}", exc_info=True)
+
+    def _on_message_binance(self, ws, msg: dict):
+        if "result" in msg:
+            # Subscription ACK
+            return
+        
+        stream = msg.get("stream", "")
+        data = msg.get("data", {})
+        
+        if stream == "!ticker@arr":
+            self._process_binance_summary(data)
+        elif stream.endswith("@depth10"):
+            symbol = stream.split("@")[0]
+            self._process_binance_orderbook(symbol, data)
+        elif stream.endswith("@trade"):
+            symbol = stream.split("@")[0]
+            self._process_binance_trades(symbol, data)
+
+    def _on_message_indodax(self, ws, msg: dict):
+        #  Auth response 
+        if "result" in msg and "client" in msg.get("result", {}):
+            logger.info(f"[MarketWS] Auth OK — client: {msg['result']['client']}")
+            req_id = self._next_id()
+            sub_msg = {
+                "method": 1,
+                "params": {"channel": CHANNEL_SUMMARY},
+                "id": req_id,
+            }
+            self._pending_subs[req_id] = CHANNEL_SUMMARY
+            threading.Timer(1.0, lambda: ws.send(json.dumps(sub_msg))).start()
+            return
+
+        #  Subscribe ACK 
+        if "id" in msg and "result" in msg and "recoverable" in msg.get("result", {}):
+            req_id = msg["id"]
+            channel_name = self._pending_subs.pop(req_id, f"unknown (id={req_id})")
+            logger.info(f"[MarketWS] Subscribed to {channel_name}")
+            return
+
+        #  Streaming data 
+        result = msg.get("result", {})
+        channel = result.get("channel", "")
+        data_wrap = result.get("data", {})
+
+        if channel == CHANNEL_SUMMARY:
+            rows = data_wrap.get("data", [])
+            self._process_summary(rows)
+
+        elif channel.startswith(CHANNEL_OB_PFX):
+            pair = channel[len(CHANNEL_OB_PFX):]
+            ob_data = data_wrap.get("data", {})
+            self._process_orderbook(pair, ob_data)
+
+        elif channel.startswith(CHANNEL_TRADE_PFX):
+            pair = channel[len(CHANNEL_TRADE_PFX):]
+            trade_data = data_wrap.get("data", [])
+            self._process_trades(pair, trade_data)
+
+    #  Binance Stream Processors 
+
+    def _process_binance_summary(self, data: list):
+        if not data: return
+        updated = {}
+        for t in data:
+            sym = t.get("s", "").lower()
+            if not sym.endswith("usdt"):
+                continue
+            
+            last = float(t.get("c", 0.0))
+            low = float(t.get("l", 0.0))
+            high = float(t.get("h", 0.0))
+            open_p = float(t.get("o", 0.0))
+            vol_usdt = float(t.get("q", 0.0))  # quote volume in USDT (concept vol_idr)
+            vol_coin = t.get("v", "0")
+            
+            change_24h = float(t.get("P", 0.0))
+            existing = self._tickers.get(sym, {})
+            
+            updated[sym] = {
+                "pair":      sym,
+                "last":      last,
+                "change_24h": change_24h,
+                "buy":       existing.get("buy", last) if existing.get("buy", last) != existing.get("last", last) else last,
+                "sell":      existing.get("sell", last) if existing.get("sell", last) != existing.get("last", last) else last,
+                "high":      high,
+                "low":       low,
+                "open":      open_p,
+                "vol_idr":   vol_usdt,
+                "vol_coin":  vol_coin,
+                "bid_depth": existing.get("bid_depth", 0),
+                "ask_depth": existing.get("ask_depth", 0),
+            }
+
+        if self.on_tick:
+            for pair, d in updated.items():
+                self.on_tick(pair, d)
+
+        need_ob_subscribe = False
+        with self._lock:
+            self._tickers.update(updated)
+            if not self._connected.is_set():
+                self._connected.set()
+                logger.info(f"[MarketWS] First Binance data received — {len(self._tickers)} symbols.")
+            
+            if len(self._ob_subscribed) < OB_TOP_PAIRS:
+                need_ob_subscribe = True
+
+        # Dynamic Watch Pair
+        try:
+            from app.infrastructure.database import db
+            watch_pair = db.get_state('current_watch_pair')
+            if watch_pair:
+                if watch_pair not in self._ob_subscribed:
+                    self._subscribe_specific_ob(watch_pair)
+                if watch_pair not in self._trade_subscribed:
+                    self.subscribe_market_trades(watch_pair)
+        except Exception: pass
+
+        if need_ob_subscribe and self._ws_ref:
+            with self._lock:
+                snapshot = dict(self._tickers)
+            self._subscribe_top_orderbooks(snapshot)
+
+    def _process_binance_orderbook(self, symbol: str, data: dict):
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        if not bids and not asks:
+            return
+
+        bid_depth = 0.0
+        ask_depth = 0.0
+        best_bid = 0.0
+        best_ask = 0.0
+
+        bids_list = []
+        for i, b in enumerate(bids[:10]):
+            p = float(b[0])
+            v = float(b[1]) * p
+            if i == 0:
+                best_bid = p
+            bid_depth += v
+            bids_list.append({"price": p, "vol": v})
+
+        asks_list = []
+        for i, a in enumerate(asks[:10]):
+            p = float(a[0])
+            v = float(a[1]) * p
+            if i == 0:
+                best_ask = p
+            ask_depth += v
+            asks_list.append({"price": p, "vol": v})
+
+        with self._lock:
+            if symbol not in self._tickers:
+                self._tickers[symbol] = {
+                    "last": best_bid, "buy": best_bid, "sell": best_ask,
+                    "high": 0, "low": 0, "open": 0,
+                    "vol_idr": 0, "vol_coin": "0",
+                    "bid_depth": 0, "ask_depth": 0,
+                    "bids_list": [], "asks_list": []
+                }
+            t = self._tickers[symbol]
+            if best_bid > 0: t["buy"] = best_bid
+            if best_ask > 0: t["sell"] = best_ask
+            t["bid_depth"] = bid_depth
+            t["ask_depth"] = ask_depth
+            t["bids_list"] = bids_list
+            t["asks_list"] = asks_list
+
+            if self.write_to_db:
+                try:
+                    from app.infrastructure.database import db
+                    db.save_market_depth(symbol, bids_list, asks_list)
+                except Exception as _e:
+                    logger.debug(f"[MarketWS] DB Save error: {_e}")
+
+    def _process_binance_trades(self, symbol: str, data: dict):
+        price = float(data.get("p", 0.0))
+        amount = float(data.get("q", 0.0))
+        vol_usdt = price * amount
+        side = "sell" if data.get("m") else "buy"
+        t_seq = str(data.get("t", ""))
+        t_time = int(data.get("T", time.time() * 1000))
+
+        trade_item = [
+            symbol,
+            t_time,
+            t_seq,
+            side,
+            price,
+            vol_usdt,
+            amount
+        ]
+
+        with self._lock:
+            if symbol not in self._trades:
+                self._trades[symbol] = []
+            self._trades[symbol].insert(0, trade_item)
+            self._trades[symbol] = self._trades[symbol][:50]
+
+            if self.on_trade:
+                self.on_trade(symbol, trade_item)
+
+    #  Indodax Stream Processors 
 
     def _process_summary(self, rows: list):
-        """Parse baris market:summary-24h dan update internal ticker dict."""
         if not rows: return
         updated = {}
         for row in rows:
@@ -337,14 +499,11 @@ class MarketDataWS:
 
             change_24h = ((last - open_p) / open_p * 100) if open_p > 0 else 0
             
-            # Estimasi buy/sell dari last (WS summary tidak kirim bid/ask).
-            # Jika data Order Book yang lebih akurat sudah ada, pertahankan nilainya.
             existing = self._tickers.get(pair, {})
             updated[pair] = {
                 "pair":      pair,
                 "last":      last,
                 "change_24h": change_24h,
-                # Gunakan harga real dari OB jika sudah ada, jangan timpa dengan estimasi
                 "buy":       existing.get("buy", last) if existing.get("buy", last) != existing.get("last", last) else last,
                 "sell":      existing.get("sell", last) if existing.get("sell", last) != existing.get("last", last) else last,
                 "high":      high,
@@ -352,30 +511,24 @@ class MarketDataWS:
                 "open":      open_p,
                 "vol_idr":   vol_idr,
                 "vol_coin":  vol_coin,
-                # Pertahankan kedalaman order book jika sudah ada
                 "bid_depth": existing.get("bid_depth", 0),
                 "ask_depth": existing.get("ask_depth", 0),
             }
         
-        # Trigger Callbacks
         if self.on_tick:
             for pair, data in updated.items():
                 self.on_tick(pair, data)
 
-        # Trigger OB subscribe dinamis, seiring bertambahnya pair bervolume tinggi
-        # (Karena summary-24h payload-nya parsial, tidak datang 200 pair sekaligus)
         need_ob_subscribe = False
         with self._lock:
             self._tickers.update(updated)
             if not self._connected.is_set():
                 self._connected.set()
-                logger.info(f"[MarketWS] First data received — {len(self._tickers)} pairs loaded.")
+                logger.info(f"[MarketWS] First Indodax summary received — {len(self._tickers)} pairs.")
             
-            # Jika belum mencapai kuota maksimal langganan OB
             if len(self._ob_subscribed) < OB_TOP_PAIRS:
                 need_ob_subscribe = True
                 
-        #  Dynamic Subscribe for Active Watch Pair 
         try:
             from app.infrastructure.database import db
             watch_pair = db.get_state('current_watch_pair')
@@ -391,46 +544,142 @@ class MarketDataWS:
                 snapshot = dict(self._tickers)
             self._subscribe_top_orderbooks(snapshot)
 
+    def _process_orderbook(self, pair: str, data: dict):
+        bids = data.get("bid", [])
+        asks = data.get("ask", [])
+        if not bids and not asks:
+            return
+
+        try:
+            bid_depth = 0.0
+            ask_depth = 0.0
+            best_bid  = 0.0
+            best_ask  = 0.0
+
+            for i, b in enumerate(bids[:10]):
+                price = self._safe_float(b.get("price"))
+                vol   = self._safe_float(b.get("idr_volume"))
+                if i == 0:
+                    best_bid = price
+                bid_depth += vol
+
+            for i, a in enumerate(asks[:10]):
+                price = self._safe_float(a.get("price"))
+                vol   = self._safe_float(a.get("idr_volume"))
+                if i == 0:
+                    best_ask = price
+                ask_depth += vol
+        except Exception:
+            return
+
+        with self._lock:
+            if pair not in self._tickers:
+                self._tickers[pair] = {
+                    "last": best_bid, "buy": best_bid, "sell": best_ask,
+                    "high": 0, "low": 0, "open": 0,
+                    "vol_idr": 0, "vol_coin": "0",
+                    "bid_depth": 0, "ask_depth": 0,
+                    "bids_list": [], "asks_list": []
+                }
+            t = self._tickers[pair]
+            if best_bid > 0: t["buy"] = best_bid
+            if best_ask > 0: t["sell"] = best_ask
+            t["bid_depth"] = bid_depth
+            t["ask_depth"] = ask_depth
+            t["bids_list"] = [{"price": self._safe_float(b.get("price")), "vol": self._safe_float(b.get("idr_volume"))} for b in bids[:10]]
+            t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
+            
+            if self.write_to_db:
+                try:
+                    from app.infrastructure.database import db
+                    db.save_market_depth(pair, t["bids_list"], t["asks_list"])
+                except Exception as _e:
+                    logger.debug(f"[MarketWS] DB Save error: {_e}")
+
+    def _process_trades(self, pair: str, data: list):
+        if not data: return
+        with self._lock:
+            if pair not in self._trades: self._trades[pair] = []
+            for t in data:
+                self._trades[pair].insert(0, t)
+            self._trades[pair] = self._trades[pair][:50]
+            
+            if self.on_trade:
+                for t in data:
+                    self.on_trade(pair, t)
+
+    #  Subscribing & Fetching helper methods 
+
     def _subscribe_specific_ob(self, pair: str):
-        """Subscribe ke satu koin spesifik secara langsung."""
         if not self._ws_ref: return
+        eid = os.getenv("EXCHANGE", "binance").lower()
         try:
             req_id = self._next_id()
-            channel = f"{CHANNEL_OB_PFX}{pair}"
-            sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+            if eid == "binance":
+                stream = f"{pair.lower()}@depth10"
+                sub_msg = {"method": "SUBSCRIBE", "params": [stream], "id": req_id}
+            else:
+                channel = f"{CHANNEL_OB_PFX}{pair}"
+                sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
             self._ws_ref.send(json.dumps(sub_msg))
             self._ob_subscribed.add(pair)
             logger.info(f"[MarketWS] Dynamic OB Subscribed: {pair}")
         except Exception: pass
 
     def subscribe_market_trades(self, pair: str):
-        """Public API untuk subscribe ke aktivitas trade koin tertentu."""
-        # 1. Fetch initial trades via REST for immediate UI population
         threading.Thread(target=self._fetch_initial_trades, args=(pair,), daemon=True).start()
-
         if not self._ws_ref: return
+        eid = os.getenv("EXCHANGE", "binance").lower()
         try:
             req_id = self._next_id()
-            channel = f"{CHANNEL_TRADE_PFX}{pair}"
-            sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+            if eid == "binance":
+                stream = f"{pair.lower()}@trade"
+                sub_msg = {"method": "SUBSCRIBE", "params": [stream], "id": req_id}
+            else:
+                channel = f"{CHANNEL_TRADE_PFX}{pair}"
+                sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
             self._ws_ref.send(json.dumps(sub_msg))
             self._trade_subscribed.add(pair)
-            logger.info(f"[MarketWS] Dynamic Trade Subscribed: {pair} (req_id={req_id})")
+            logger.info(f"[MarketWS] Dynamic Trade Subscribed: {pair}")
         except Exception as e:
             logger.error(f"[MarketWS] Failed to subscribe trades for {pair}: {e}")
 
     def _fetch_initial_trades(self, pair: str):
-        """Ambil data trade terakhir via REST untuk mengisi UI saat pertama kali subscribe."""
+        eid = os.getenv("EXCHANGE", "binance").lower()
         p_rest = pair.lower().replace('/', '')
+        
+        if eid == "binance":
+            try:
+                from app.infrastructure.exchange_factory import create_exchange_provider
+                provider = create_exchange_provider("binance")
+                trades = provider.fetch_trades(pair, limit=50)
+                converted = []
+                for t in trades:
+                    price = float(t["price"])
+                    amount = float(t["amount"])
+                    converted.append([
+                        pair,
+                        t["timestamp"],
+                        t["tid"],
+                        t["side"],
+                        price,
+                        price * amount,
+                        amount
+                    ])
+                with self._lock:
+                    existing = self._trades.get(pair, [])
+                    if not existing:
+                        self._trades[pair] = converted
+                        logger.info(f"[MarketWS] Pre-filled {len(converted)} trades for {pair}")
+            except Exception as e:
+                logger.warning(f"[MarketWS] Failed initial trades for Binance {pair}: {e}")
+            return
+
+        # Indodax REST Fallback
         try:
-            # Indodax REST: /api/trades/<pair>
             import requests
             url = f"https://indodax.com/api/trades/{p_rest}"
             resp = requests.get(url, timeout=5).json()
-            
-            # Format REST: [{"date": "...", "price": "...", "amount": "...", "tid": "...", "type": "buy"}, ...]
-            # Kita konversi ke format WS internal kita agar konsisten
-            # [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
             converted = []
             for t in resp:
                 price = float(t['price'])
@@ -444,145 +693,47 @@ class MarketDataWS:
                     price * amount,
                     amount
                 ])
-            
             with self._lock:
-                # Jangan override data WS yang mungkin sudah masuk
                 existing = self._trades.get(p_rest, [])
                 if not existing:
                     self._trades[p_rest] = converted
                     logger.info(f"[MarketWS] Pre-filled {len(converted)} trades for {p_rest}")
         except Exception as e:
-            logger.warning(f"[MarketWS] Failed initial trades for {p_rest}: {e}")
+            logger.warning(f"[MarketWS] Failed initial trades for Indodax {p_rest}: {e}")
 
     def _subscribe_top_orderbooks(self, summary_snapshot: dict):
-        """Subscribe ke order-book channel untuk top N pairs bervolume tinggi.
-        
-        OB_HIGH_PRIORITY_PAIRS (e.g. btcidr) selalu di-subscribe pertama agar
-        Oracle regime filter tidak mengalami error "Data BTC tidak tersedia".
-        """
         candidates = [
             (pair, d["vol_idr"])
             for pair, d in summary_snapshot.items()
             if (d.get("vol_idr") or 0) >= OB_MIN_VOL_IDR
         ]
-        # Urutkan descending by volume
         candidates.sort(key=lambda x: x[1], reverse=True)
-        
-        # Ambil sampai batas OB_TOP_PAIRS, lalu sisipkan high-priority di depan
         top_pairs = [p for p, _ in candidates[:OB_TOP_PAIRS]]
-        for hp in OB_HIGH_PRIORITY_PAIRS:
+        
+        hp_pairs = _get_high_priority_pairs()
+        for hp in hp_pairs:
             if hp not in top_pairs:
                 top_pairs.insert(0, hp)
 
+        eid = os.getenv("EXCHANGE", "binance").lower()
         for pair in top_pairs:
             if pair in self._ob_subscribed:
                 continue
             try:
                 req_id = self._next_id()
-                channel = f"{CHANNEL_OB_PFX}{pair}"
-                sub_msg = {
-                    "method": 1,
-                    "params": {"channel": channel},
-                    "id": req_id,
-                }
-                self._pending_subs[req_id] = channel
+                if eid == "binance":
+                    stream = f"{pair.lower()}@depth10"
+                    sub_msg = {"method": "SUBSCRIBE", "params": [stream], "id": req_id}
+                else:
+                    channel = f"{CHANNEL_OB_PFX}{pair}"
+                    sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+                
                 self._ws_ref.send(json.dumps(sub_msg))
                 self._ob_subscribed.add(pair)
                 logger.info(f"[MarketWS] Subscribed order-book: {pair}")
-                time.sleep(0.1) # Stagger subscriptions to avoid Indodax rate-limits
+                time.sleep(0.1)
             except Exception as e:
                 logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
-
-    def _process_orderbook(self, pair: str, data: dict):
-        """
-        Update bid/ask terbaik dari payload order book.
-        Format Indodax yang sudah dikonfirmasi:
-        {
-          'pair': 'usdtidr',
-          'ask': [{'price': '17291', 'idr_volume': '295908835', 'usdt_volume': '...'}, ...],
-          'bid': [{'price': '17290', 'idr_volume': '...', 'usdt_volume': '...'}, ...]
-        }
-        """
-        bids = data.get("bid", [])
-        asks = data.get("ask", [])
-
-        if not bids and not asks:
-            logger.warning(f"[MarketWS] OB ({pair}): both bid and ask are empty — data keys: {list(data.keys())}")
-            return
-
-        try:
-            bid_depth = 0.0
-            ask_depth = 0.0
-            best_bid  = 0.0
-            best_ask  = 0.0
-
-            #  Parse BIDs 
-            for i, b in enumerate(bids[:10]):
-                price = self._safe_float(b.get("price"))
-                vol   = self._safe_float(b.get("idr_volume"))
-                if i == 0:
-                    best_bid = price
-                bid_depth += vol
-
-            #  Parse ASKs 
-            for i, a in enumerate(asks[:10]):
-                price = self._safe_float(a.get("price"))
-                vol   = self._safe_float(a.get("idr_volume"))
-                if i == 0:
-                    best_ask = price
-                ask_depth += vol
-
-            if best_bid == 0 and best_ask == 0:
-                logger.warning(f"[MarketWS] OB ({pair}): best_bid=0 best_ask=0 — bids={len(bids)} asks={len(asks)}")
-                return
-        except (IndexError, ValueError, TypeError):
-            return
-
-        with self._lock:
-            if pair not in self._tickers:
-                self._tickers[pair] = {
-                    "last": best_bid, "buy": best_bid, "sell": best_ask,
-                    "high": 0, "low": 0, "open": 0,
-                    "vol_idr": 0, "vol_coin": "0",
-                    "bid_depth": 0, "ask_depth": 0,
-                    "bids_list": [], "asks_list": []
-                }
-            
-            t = self._tickers[pair]
-            if best_bid > 0: t["buy"] = best_bid
-            if best_ask > 0: t["sell"] = best_ask
-            t["bid_depth"] = bid_depth
-            t["ask_depth"] = ask_depth
-            # Simpan rincian Top 10 untuk Dashboard
-            t["bids_list"] = [{"price": self._safe_float(b.get("price")), "vol": self._safe_float(b.get("idr_volume"))} for b in bids[:10]]
-            t["asks_list"] = [{"price": self._safe_float(a.get("price")), "vol": self._safe_float(a.get("idr_volume"))} for a in asks[:10]]
-            
-            #  Push to DB for Dashboard if enabled 
-            if self.write_to_db:
-                try:
-                    from app.infrastructure.database import db
-                    db.save_market_depth(pair, t["bids_list"], t["asks_list"])
-                except Exception as _e:
-                    logger.debug(f"[MarketWS] DB Save error: {_e}")
-
-    def _process_trades(self, pair: str, data: list):
-        """Parse market:trade-activity-<pair>."""
-        if not data: return
-        with self._lock:
-            if pair not in self._trades: self._trades[pair] = []
-            for t in data:
-                # Format: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
-                self._trades[pair].insert(0, t)
-            # Simpan 50 terakhir
-            self._trades[pair] = self._trades[pair][:50]
-            
-            # Trigger Callbacks
-            if self.on_trade:
-                for t in data:
-                    self.on_trade(pair, t)
-            
-            logger.info(f"[MarketWS] Stored {len(self._trades[pair])} trades for {pair}")
-
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")

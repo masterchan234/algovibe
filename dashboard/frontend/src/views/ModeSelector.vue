@@ -78,7 +78,7 @@
         </div>
         <h2 class="ms-card-title">LIVE TRADING FLOOR</h2>
         <p class="ms-card-desc">
-          Real capital execution on Indodax exchange. Every order is live.
+          Real capital execution on Binance Spot exchange. Every order is live.
           High-stakes environment — proceed with discipline.
         </p>
         <ul class="ms-feature-list">

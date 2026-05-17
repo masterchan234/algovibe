@@ -1,19 +1,8 @@
 """
-services/market_pipe/providers/indodax.py — Indodax Market Provider
-====================================================================
-Wraps the existing MarketDataWS (app/infrastructure/ws_market.py) and
-translates its internal ticker dict into Protobuf Tick messages that are
-emitted to the on_tick callback.
-
-The provider polls the MarketDataWS snapshot at a configurable interval
-(default 100 ms) so that the ZMQ publisher receives updates at sub-second
-granularity without blocking the WS thread.
-
-Latency is calculated by comparing the Indodax epoch with local time.
-
-Future extension:
-  Replace the polling loop with a direct callback hook inside MarketDataWS
-  once the WS layer exposes an on_update(pair, data) hook.
+services/market_pipe/providers/indodax.py — Dynamic Market Provider
+==================================================================
+Wraps the dynamic MarketDataWS (app/infrastructure/ws_market.py) and
+translates its internal ticker dict into Protobuf Tick/Trade messages.
 """
 
 import logging
@@ -39,11 +28,7 @@ logger = logging.getLogger(__name__)
 
 class IndodaxProvider(MarketProvider):
     """
-    Indodax market-data provider.
-
-    Connects to the Indodax WebSocket (via the existing MarketDataWS client),
-    normalises every ticker and trade into Protobuf messages, and emits them
-    via callbacks.
+    Dynamic exchange provider supporting Indodax and Binance Spot.
     """
 
     def __init__(
@@ -64,7 +49,7 @@ class IndodaxProvider(MarketProvider):
 
     @property
     def exchange_id(self) -> str:
-        return "indodax"
+        return os.getenv("EXCHANGE", "binance").lower()
 
     #  Lifecycle 
 
@@ -75,34 +60,35 @@ class IndodaxProvider(MarketProvider):
         
         # Subscribe to essential pairs for trades on startup
         threading.Thread(target=self._initial_subscriptions, daemon=True).start()
-        
-        logger.info("[IndodaxProvider] Started.")
+        logger.info(f"[{self.exchange_id.upper()} Provider] Started.")
 
     def _initial_subscriptions(self) -> None:
-        """Subscribe to essential and active-universe trade channels on startup."""
-        time.sleep(2) # Wait for WS connection
+        """Subscribe to essential trade channels on startup."""
+        time.sleep(2)  # Wait for WS connection
         from app.infrastructure.database import db
         
         # Wait gracefully for database migrations to be ready (up to 60 seconds)
-        watch_pair = 'btcidr'
+        eid = self.exchange_id
+        default_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        watch_pair = default_pair
+        
         db_ready = False
         for i in range(30):
             try:
-                watch_pair = db.get_state('current_watch_pair') or 'btcidr'
-                # Check if positions table is readable too
+                watch_pair = db.get_state('current_watch_pair') or default_pair
                 with db.get_connection() as conn:
                     conn.execute("SELECT 1 FROM positions LIMIT 1")
-                logger.info("[IndodaxProvider] DB tables are ready for initial subscriptions.")
+                logger.info(f"[{eid.upper()} Provider] DB tables are ready for initial subscriptions.")
                 db_ready = True
                 break
             except Exception as e:
-                logger.warning(f"[IndodaxProvider] DB not ready yet (attempt {i+1}/30): {e}")
+                logger.warning(f"[{eid.upper()} Provider] DB not ready yet (attempt {i+1}/30): {e}")
                 time.sleep(2)
         
         if not db_ready:
-            logger.error("[IndodaxProvider] DB tables never became ready. Falling back to default subscriptions.")
+            logger.error(f"[{eid.upper()} Provider] DB tables never became ready. Falling back.")
 
-        pairs = {'btcidr', str(watch_pair).lower()}
+        pairs = {default_pair, str(watch_pair).lower()}
 
         # Also subscribe to all open positions
         try:
@@ -113,8 +99,6 @@ class IndodaxProvider(MarketProvider):
                     if p:
                         pairs.add(p)
 
-                # Tambahkan universe pair aktif dari ticker_history agar Market Feed tidak BTC-only.
-                # Dibatasi agar tetap ringan saat startup.
                 hist_rows = conn.execute(
                     "SELECT pair FROM ticker_history ORDER BY updated_at DESC LIMIT 40"
                 ).fetchall()
@@ -123,9 +107,9 @@ class IndodaxProvider(MarketProvider):
                     if p:
                         pairs.add(p)
         except Exception as e:
-            logger.warning(f"[IndodaxProvider] Could not load positions or history from DB: {e}")
+            logger.warning(f"[{eid.upper()} Provider] Could not load positions or history: {e}")
 
-        # Subscribe dengan jeda kecil agar tidak burst request ke WS gateway.
+        # Subscribe dynamically with minor gaps
         subscribed = 0
         for p in sorted(pairs):
             try:
@@ -135,12 +119,12 @@ class IndodaxProvider(MarketProvider):
             except Exception:
                 continue
 
-        logger.info(f"[IndodaxProvider] Initial trade subscriptions: {subscribed} pairs")
+        logger.info(f"[{eid.upper()} Provider] Initial trade subscriptions: {subscribed} pairs")
 
     def stop(self) -> None:
         self._running = False
         self._mws.stop()
-        logger.info("[IndodaxProvider] Stopped.")
+        logger.info(f"[{self.exchange_id.upper()} Provider] Stopped.")
 
     def wait_ready(self, timeout: float = 30.0) -> bool:
         return self._mws.wait_ready(timeout=timeout)
@@ -151,7 +135,6 @@ class IndodaxProvider(MarketProvider):
     #  Internal Handlers 
 
     def _handle_tick_update(self, pair: str, data: dict) -> None:
-        """Callback from MarketDataWS when a ticker updates."""
         try:
             ts_ms = int(time.time() * 1000)
             price = _safe_float(data.get("last"))
@@ -162,20 +145,22 @@ class IndodaxProvider(MarketProvider):
             tick.price       = price
             tick.volume      = _safe_float(data.get("vol_coin"))
             tick.timestamp   = ts_ms
-            tick.exchange_id = ExchangeId.Value("EXCHANGE_INDODAX")
+            
+            eid = self.exchange_id
+            if eid == "binance":
+                tick.exchange_id = ExchangeId.Value("EXCHANGE_BINANCE")
+            else:
+                tick.exchange_id = ExchangeId.Value("EXCHANGE_INDODAX")
+                
             tick.bid         = _safe_float(data.get("buy"))
             tick.ask         = _safe_float(data.get("sell"))
             tick.high_24h    = _safe_float(data.get("high"))
             tick.low_24h     = _safe_float(data.get("low"))
             tick.vol_idr     = _safe_float(data.get("vol_idr"))
 
-            # --- [LATENCY CALCULATION] ---
-            # Indodax summary message IDX_EPOCH is at index 1 of the inner data row.
-            # We use it to measure the gap from Indodax server to our bot.
+            # Latency check
             latency_ms = 0.0
             try:
-                # The data dict passed here from ws_market.py has already been partially parsed.
-                # If IDX_EPOCH (epoch) is present, use it.
                 epoch = data.get("epoch")
                 if epoch:
                     latency_ms = (time.time() - float(epoch)) * 1000.0
@@ -186,11 +171,9 @@ class IndodaxProvider(MarketProvider):
             if not self._ready_event.is_set():
                 self._ready_event.set()
         except Exception as e:
-            logger.error(f"[IndodaxProvider] Tick serialisation error for {pair}: {e}")
+            logger.error(f"[{self.exchange_id.upper()} Provider] Tick serialisation error for {pair}: {e}")
 
     def _handle_trade_update(self, pair: str, trade_data: list) -> None:
-        """Callback from MarketDataWS when a new trade arrives."""
-        # Format trade_data: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
         try:
             t = Trade()
             t.symbol = pair
@@ -199,12 +182,18 @@ class IndodaxProvider(MarketProvider):
             t.side = str(trade_data[3])
             t.price = float(trade_data[4])
             t.amount = float(trade_data[6])
-            t.exchange_id = ExchangeId.Value("EXCHANGE_INDODAX")
+            
+            eid = self.exchange_id
+            if eid == "binance":
+                t.exchange_id = ExchangeId.Value("EXCHANGE_BINANCE")
+            else:
+                t.exchange_id = ExchangeId.Value("EXCHANGE_INDODAX")
 
-            logger.info(f"[IndodaxProvider] Emitting trade: {pair}")
+            logger.info(f"[{eid.upper()} Provider] Emitting trade: {pair}")
             self._emit_trade(t.SerializeToString())
         except Exception as e:
-            logger.error(f"[IndodaxProvider] Trade serialisation error for {pair}: {e}")
+            logger.error(f"[{eid.upper()} Provider] Trade serialisation error for {pair}: {e}")
+
 
 def _safe_float(val, default: float = 0.0) -> float:
     try:

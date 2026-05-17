@@ -35,7 +35,7 @@
         <p class="hero-tagline">AI = <strong>Aku dan Intelligence</strong></p>
         <div class="chips">
           <span>Eksperimen: <b>Vibe Coding x Real-Time Trading</b></span>
-          <span>Fokus: <b>Crypto Scalping (Indodax)</b></span>
+          <span>Fokus: <b>Crypto Scalping (Binance Spot)</b></span>
           <span>Prinsip: <b>Creativity in Build, Discipline in Execution</b></span>
         </div>
       </section>
@@ -43,7 +43,7 @@
       <section id="what-is" class="block">
         <h3>Apa Itu Algovibe</h3>
         <p>
-          Algovibe adalah sistem trading bot untuk market IDR yang dibangun dari kolaborasi manusia + AI.
+          Algovibe adalah sistem trading bot untuk market USDT yang dibangun dari kolaborasi manusia + AI.
           Awalnya berangkat dari bot sederhana, tapi berkembang menjadi arsitektur yang memadukan indikator teknikal,
           pembacaan konteks market, veto AI, dan loop pembelajaran agar keputusan tidak berhenti di pola statis.
         </p>
