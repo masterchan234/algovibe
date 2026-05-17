@@ -111,14 +111,6 @@
           <div ref="chartContainer" class="chart-canvas-small" :style="{ visibility: (timeframe !== 'live' || store.pnlHistory.length > 0) ? 'visible' : 'hidden' }"></div>
         </div>
 
-        <!-- Executive Report Text -->
-        <div class="intel-reasoning report-style" v-if="stats.equity_reasoning">
-          {{ stats.equity_reasoning }}
-        </div>
-        
-        <div class="report-meta">
-          LAST AUDIT: {{ currentTime }}
-        </div>
 
         <!-- Pulse Metrics Grid -->
         <div class="intel-pulse-grid" v-if="stats.alpha_contributor || stats.best_trade">
@@ -328,7 +320,7 @@ import { useAuth } from '../composables/useAuth'
 const store = useTradeStore()
 const { getAuthHeaders } = useAuth()
 const stats = computed(() => store.stats)
-const currentTime = ref(new Date().toLocaleTimeString('id-ID'))
+
 const radarFilter = ref('all')
 const radarSearch = ref('')
 const showChartModal = ref(false)
@@ -340,7 +332,7 @@ const radarAudit = ref({
   buy_blocked_gate_24h: 0,
   buy_tradable_24h: 0,
 })
-let clockIntervalId = null
+
 let radarAuditIntervalId = null
 
 const tileStyle = (pnl) => {
@@ -358,11 +350,7 @@ const tileStyle = (pnl) => {
   }
 }
 
-onMounted(() => {
-  clockIntervalId = setInterval(() => {
-    currentTime.value = new Date().toLocaleTimeString('en-US')
-  }, 5000)
-})
+
 const chartContainer = ref(null)
 let chart = null
 let resizeObserver = null
@@ -1014,10 +1002,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (clockIntervalId) {
-    clearInterval(clockIntervalId)
-    clockIntervalId = null
-  }
+
   if (radarAuditIntervalId) {
     clearInterval(radarAuditIntervalId)
     radarAuditIntervalId = null
