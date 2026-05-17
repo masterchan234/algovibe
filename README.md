@@ -173,10 +173,10 @@ chmod +x install.sh
 ./install.sh --prod  # Atau --dev untuk Development
 ```
 
-### Operasional Kontainer (Docker Compose)
+### Operasional Kontainer - Development (Docker Compose)
 
 ```bash
-# Menyalakan stack microservices secara background
+# Menyalakan stack microservices secara background (dev mode dengan host mount)
 docker compose up -d
 
 # Restart layanan tertentu setelah perubahan kode
@@ -184,6 +184,63 @@ docker compose restart executive-core dashboard-api
 
 # Melihat live logs untuk memantau trading
 docker compose logs -f executive-core market-pipe
+```
+
+### Operasional Kontainer - Production (Host-Mount-Free)
+
+Untuk deployment di server production, **sangat direkomendasikan** menggunakan `docker-compose-prod.yml` yang beroperasi **100% tanpa mounting host**. Seluruh kode aplikasi dan skema database dibake langsung ke dalam Docker image untuk menjamin isolasi, keamanan, portabilitas tinggi, dan performa optimal.
+
+#### 1. Keunggulan Arsitektur Produksi:
+* **Image Aplikasi**: Dibuild langsung ke target image `algovibe-binance:latest` (menggunakan `Dockerfile`).
+* **Image Database**: Menggunakan image kustom `algovibe-timescaledb:latest` (menggunakan `Dockerfile.db`) yang menyertakan script inisialisasi skema database tanpa mounting.
+* **Storage & RAM IPC**: Menggunakan Docker Named Volumes dan RAM-disk (`tmpfs` volume `algovibe_ipc` sebesar 64MB) untuk komunikasi latensi ultra-rendah antar kontainer.
+* **Resource Priority**: Service `executive-core` diberikan CPU shares tinggi (`cpu_shares: 2048`) untuk mengutamakan eksekusi order exit penting.
+
+#### 2. Proses Build Image Production:
+
+Proses build pada spesifikasi production ini memanfaatkan arsitektur build yang sangat bersih dan teroptimasi:
+
+*   **Image Aplikasi (`Dockerfile`) - Multi-Stage Build**:
+    *   **Stage 1 (Frontend Builder)**: Menggunakan Node.js (`node:20-slim`) untuk mengompilasi kode sumber Dashboard SPA (Vue.js) yang berlokasi di `dashboard/frontend` menjadi berkas static web siap saji di `/app/dashboard/static/dist`.
+    *   **Stage 2 (Python Runtime)**: Berbasis `python:3.12-slim` dengan zona waktu Jakarta (`Asia/Jakarta`). Menginstal dependensi Python dari `requirements.txt`, menyalin aset Dashboard terkompilasi dari Stage 1, serta menyalin seluruh modul kode aplikasi. Dibuat user non-root aman `algovibe` untuk eksekusi container. Target tag: `algovibe-binance:latest`.
+*   **Image Database (`Dockerfile.db`)**:
+    *   Berbasis `timescale/timescaledb:latest-pg15` yang secara otomatis menyalin `init-pg.sh` ke `/docker-entrypoint-initdb.d/init-pg.sh` dan memberikan izin eksekusi. Target tag: `algovibe-timescaledb:latest`.
+
+#### 3. Perintah Operasional:
+
+##### A. Build Image Manual (Menggunakan Native Docker CLI):
+Jika Anda ingin membangun image satu per satu secara terpisah (misalnya untuk kebutuhan CI/CD pipeline):
+```bash
+# Build image aplikasi utama terkompilasi (algovibe-binance:latest)
+docker build -t algovibe-binance:latest -f Dockerfile.prod .
+
+# Build image database kustom (algovibe-timescaledb:latest)
+docker build -t algovibe-timescaledb:latest -f Dockerfile.db .
+```
+
+##### B. Build Image Menggunakan Docker Compose (Direkomendasikan):
+```bash
+# Build semua image kustom production secara otomatis (Aplikasi + DB)
+docker compose -f docker-compose-prod.yml build
+
+# Alternatif: Build salah satu service secara spesifik jika diinginkan
+docker compose -f docker-compose-prod.yml build market-pipe   # Mem-build image aplikasi utama
+docker compose -f docker-compose-prod.yml build timescaledb   # Mem-build image database TimescaleDB
+```
+
+##### C. Manajemen Kontainer & Deployment:
+```bash
+# 1. Buat network external reverse proxy jika menggunakan Nginx Proxy Manager (NPM)
+docker network create npm_default
+
+# 2. Jalankan seluruh stack microservices production secara background
+docker compose -f docker-compose-prod.yml up -d
+
+# 3. Memantau logs kontainer production
+docker compose -f docker-compose-prod.yml logs -f executive-core dashboard-api
+
+# 4. Menghentikan stack production
+docker compose -f docker-compose-prod.yml down
 ```
 
 ---

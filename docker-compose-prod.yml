@@ -1,0 +1,423 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Algovibe Production Docker Compose Specification
+# Build level: Production
+# Target Image: algovibe-binance:latest
+# Host mountings: NONE (100% self-contained images with named/tmpfs volumes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ─── Production TimescaleDB ──────────────────────────────────────────────────
+  timescaledb:
+    image: algovibe-timescaledb:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    container_name: algovibe-timescaledb
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=algovibe
+      - POSTGRES_PASSWORD=secretpassword
+    volumes:
+      - algovibe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algovibe -d algovibe_live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - default
+
+  # ─── AI Model Downloader (Init Container) ────────────────────────────────────
+  model-downloader:
+    image: alpine:3.19
+    container_name: algovibe-model-init
+    restart: "no"
+    user: root
+    volumes:
+      - algovibe_models:/models
+    environment:
+      - MODEL_FILE=/models/gemma-4-E2B-it.litertlm
+      - MODEL_URL=https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm
+      - MODEL_EXPECTED_SIZE=2583085056
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /models/cache
+
+        if [ -f "$$MODEL_FILE" ]; then
+          ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
+          if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
+            echo "[model-init] ✅ Model sudah ada di volume ($$ACTUAL_SIZE bytes). Skip download."
+            exit 0
+          fi
+          echo "[model-init] ⚠️  Model tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Re-download..."
+          rm -f "$$MODEL_FILE"
+        fi
+
+        echo "[model-init] ⬇️  Mulai download model AI (~2.5GB)..."
+        DOWNLOADED=0
+        for attempt in 1 2 3; do
+          echo "[model-init] Attempt $$attempt/3..."
+          if wget -q -T 60 -O "$$MODEL_FILE" "$$MODEL_URL"; then
+            ACTUAL_SIZE=$$(wc -c < "$$MODEL_FILE" 2>/dev/null || echo 0)
+            if [ "$$ACTUAL_SIZE" -ge "$$MODEL_EXPECTED_SIZE" ]; then
+              echo "[model-init] ✅ Download selesai! Size: $$ACTUAL_SIZE bytes."
+              DOWNLOADED=1
+              break
+            fi
+            echo "[model-init] ⚠️  File tidak valid ($$ACTUAL_SIZE/$$MODEL_EXPECTED_SIZE). Retry..."
+          else
+            echo "[model-init] ⚠️  wget gagal pada attempt $$attempt. Retry..."
+          fi
+          rm -f "$$MODEL_FILE"
+        done
+
+        if [ "$$DOWNLOADED" -ne 1 ]; then
+          echo "[model-init] ❌ Gagal download model setelah 3 percobaan."
+          exit 1
+        fi
+
+  # ─── Microservice 1: market-pipe (WebSocket Ingress) ──────────────────────────
+  market-pipe:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-market-pipe
+    restart: unless-stopped
+    stop_grace_period: 15s
+    network_mode: host             # Minimum latency WS connection
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # network_mode:host utilizes host loopback interface to connect to timescaledb
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@localhost:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@localhost:5432/algovibe_dryrun
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_ipc:/tmp           # Shared IPC volume for ZMQ sockets
+    shm_size: 256mb
+    command: ["python", "-m", "services.market_pipe.main"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import zmq; c=zmq.Context(); s=c.socket(zmq.SUB); s.RCVTIMEO=2000; s.setsockopt(zmq.SUBSCRIBE,b''); s.connect('ipc:///tmp/market_stream.ipc'); s.recv(); s.close(); c.term()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+
+  # ─── Microservice 2: executive-core (Brain & Muscle) ──────────────────────────
+  executive-core:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-executive-core
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      market-pipe:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - MIGRATION_PRIMARY=true
+      - MODEL_PATH=/tmp/disabled_model
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_ipc:/tmp
+    shm_size: 256mb
+    cpu_shares: 2048               # Elevate CPU priority for critical order execution
+    command: ["python", "-m", "services.executive_core.main"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import os; f=open('data/algovibe_bot.pid'); pid=int(f.read()); os.kill(pid,0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─── Microservice 3: brain-inference (AI Signals) ─────────────────────────────
+  brain-inference:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-brain-inference
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      model-downloader:
+        condition: service_completed_successfully
+      market-pipe:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - GLOG_minloglevel=2          # Suppress C++ logging noise
+      - MODEL_PATH=/tmp/disabled_model
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
+      - algovibe_ipc:/tmp
+    shm_size: 256mb
+    command: ["python", "-m", "services.brain_inference.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─── Microservice: exchange-reconcile (State Alignment) ──────────────────────
+  exchange-reconcile:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-exchange-reconcile
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      executive-core:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - RECONCILE_INTERVAL_SEC=${RECONCILE_INTERVAL_SEC:-10}
+      - RECONCILE_STARTUP_DELAY_SEC=${RECONCILE_STARTUP_DELAY_SEC:-20}
+    volumes:
+      - algovibe_data:/app/data
+    shm_size: 256mb
+    command: ["python", "-m", "services.exchange_reconcile.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─── Service: backtester (Triggered Manually) ─────────────────────────────────
+  backtester:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-backtester
+    restart: "no"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+    volumes:
+      - algovibe_data:/app/data
+    shm_size: 128mb
+    entrypoint: ["python", "-m", "services.backtester.main"]
+    command: ["all"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─── Service: news-maker ─────────────────────────────────────────────────────
+  news-maker:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-news-maker
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      timescaledb: { condition: service_healthy }
+      model-downloader: { condition: service_completed_successfully }
+      market-pipe: { condition: service_healthy }
+      brain-inference: { condition: service_started }
+    env_file: [.env]
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - MODEL_PATH=/app/models/gemma-4-E2B-it.litertlm
+      - NEWS_LLM_PROVIDER=${NEWS_LLM_PROVIDER:-local}
+      - NEWS_REMOTE_TIMEOUT_SEC=${NEWS_REMOTE_TIMEOUT_SEC:-60}
+      - NEWS_HF_API_URL=${NEWS_HF_API_URL:-}
+      - NEWS_HF_API_TOKEN=${NEWS_HF_API_TOKEN:-}
+      - NEWS_CF_API_URL=${NEWS_CF_API_URL:-}
+      - NEWS_CF_API_TOKEN=${NEWS_CF_API_TOKEN:-}
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_models:/app/models
+      - algovibe_ipc:/tmp
+    shm_size: 256mb
+    command: ["python", "-m", "services.news_maker.main"]
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ─── Microservice 5: dashboard-api (Vue SPA Server) ───────────────────────────
+  dashboard-api:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-dashboard
+    restart: unless-stopped
+    stop_grace_period: 10s
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      executive-core:
+        condition: service_started
+      exchange-reconcile:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+    ports:
+      - "8080:8080"
+    volumes:
+      - algovibe_data:/app/data
+      - algovibe_ipc:/tmp
+    command: ["python", "-m", "dashboard.server"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - default
+      - npm_external
+
+  # ─── Redis Cache ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:alpine
+    container_name: algovibe-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - algovibe_redis_data:/data
+    networks:
+      - default
+
+  # ─── KNN Background Classifier Worker ────────────────────────────────────────
+  knn-worker:
+    image: algovibe-binance:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: algovibe-knn-worker
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - algovibe_data:/app/data
+    command: ["python", "-m", "services.knn_worker.main"]
+    networks:
+      - default
+
+# ─── Network Infrastructure ──────────────────────────────────────────────────
+networks:
+  default:
+    driver: bridge
+  # Production external network integration (e.g. for Nginx Proxy Manager)
+  # Please ensure the 'npm_default' network is created before startup via:
+  #   docker network create npm_default
+  # Or comment it out if local-only stand-alone deployment is desired.
+  npm_external:
+    external: true
+    name: npm_default
+
+# ─── Storage Infrastructure ──────────────────────────────────────────────────
+volumes:
+  algovibe_data:
+  algovibe_models:
+  algovibe_pgdata:
+  algovibe_redis_data:
+  # Production IPC tmpfs named volume for high performance inter-container communication
+  algovibe_ipc:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,mode=1777"

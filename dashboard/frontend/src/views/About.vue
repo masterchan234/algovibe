@@ -266,7 +266,7 @@
                     <span>An automated capital protection guard that instantly exits the asset if price action breaches the risk tolerance threshold.</span>
                   </li>
                   <li><strong>Database State Protection:</strong>
-                    <span>The cost basis (<code>amount_idr</code>) must never be overwritten during exchange state reconciliation.</span>
+                    <span>The cost basis (<code>amount</code>) must never be overwritten during exchange state reconciliation.</span>
                   </li>
                 </ul>
               </div>
