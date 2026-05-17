@@ -266,7 +266,7 @@
                     <span>Pelindung modal otomatis yang langsung melepas aset jika pergerakan harga menembus toleransi risiko.</span>
                   </li>
                   <li><strong>Database State Protection:</strong>
-                    <span>Cost basis (<code>amount_idr</code>) tidak boleh ditimpa selama proses rekonsiliasi data.</span>
+                    <span>Cost basis (<code>amount</code>) tidak boleh ditimpa selama proses rekonsiliasi data.</span>
                   </li>
                 </ul>
               </div>
