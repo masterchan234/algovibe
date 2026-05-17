@@ -18,6 +18,44 @@ def dispatch_entry(bot, p, enriched, gate, target):
     Handles Indodax TooManyRequests errors with a 60-second hibernation.
     """
     pair = p.get('pair', 'UNKNOWN')
+
+    # 5-second Wick Delay and retrace abort filter on breakout momentum
+    velocity = float(gate.get("velocity", 0.0) if isinstance(gate, dict) else 0.0)
+    if velocity > 0.3:
+        breakout_price = float(p['last'])
+        baseline_price = float(gate.get("baseline_price", breakout_price * 0.99))
+        pump_height = max(1e-8, breakout_price - baseline_price)
+
+        log_message(
+            f" [WICK DELAY] Velocity spike ({velocity:.2f}%) detected on {pair}. "
+            f"Waiting 5 seconds... Breakout price: {breakout_price:.4f}"
+        )
+        time.sleep(5)
+
+        # Get latest ticker price from WebSocket stream cache in O(1)
+        tickers = bot.market_ws.get_tickers()
+        latest_price = breakout_price
+        if tickers and pair in tickers:
+            latest_price = float(tickers[pair].get('last', breakout_price))
+
+        retrace = breakout_price - latest_price
+        retrace_pct = (retrace / pump_height) * 100.0 if pump_height > 0 else 0.0
+
+        if retrace_pct > 30.0:
+            log_message(
+                f" [WICK ABORT] {pair} aborted: Retraced {retrace_pct:.1f}% "
+                f"(> 30% limit) of breakout pump. Current price: {latest_price:.4f}"
+            )
+            return False
+
+        log_message(
+            f" [WICK OK] Wick delay passed on {pair} (retraced only {retrace_pct:.1f}%). "
+            f"Proceeding with order entry."
+        )
+
+        # Update entry price to the improved post-delay level
+        p['last'] = latest_price
+
     try:
         traded = bot.execute_trade(
             pair,

@@ -12,6 +12,7 @@ import threading
 import websocket   # websocket-client
 import zmq
 import os
+from app.infrastructure.volume_tracker import RealtimeVolumeTracker
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class MarketDataWS:
         # Callbacks
         self.on_tick = on_tick
         self.on_trade = on_trade
+        self.volume_tracker = RealtimeVolumeTracker()
 
         # SaaS Hub Config
         self._use_hub = os.getenv("USE_MARKET_HUB", "false").lower() == "true"
@@ -500,6 +502,8 @@ class MarketDataWS:
             amount
         ]
 
+        self.volume_tracker.add_trade(symbol, vol_usdt, bool(data.get("m", False)))
+
         with self._lock:
             if symbol not in self._trades:
                 self._trades[symbol] = []
@@ -630,6 +634,12 @@ class MarketDataWS:
             if pair not in self._trades: self._trades[pair] = []
             for t in data:
                 self._trades[pair].insert(0, t)
+                try:
+                    is_buyer_maker = (t[3] == "sell")
+                    vol_val = float(t[5])
+                    self.volume_tracker.add_trade(pair, vol_val, is_buyer_maker)
+                except Exception:
+                    pass
             self._trades[pair] = self._trades[pair][:50]
             
             if self.on_trade:

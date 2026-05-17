@@ -2142,6 +2142,19 @@ class ExitManager:
 
                 active_sl_price = initial_sl_price
 
+                # Dynamic Trailing Stop Loss / Breakeven Lock
+                current_highest = float(data.get('highest_price', 0) or 0)
+                if current_highest >= entry_price * 1.003: # +0.3% gross
+                    # Lock stop loss at breakeven + 0.02% to cover fees
+                    active_sl_price = max(active_sl_price, entry_price * 1.0002)
+                    
+                if current_highest >= entry_price * 1.005: # +0.5% gross
+                    # Tight trailing stop loss at 0.2% pullback from peak for slow trades (>=2m)
+                    if pos_age_min >= 2.0:
+                        active_sl_price = max(active_sl_price, current_highest * (1 - 0.002))
+                    else:
+                        active_sl_price = max(active_sl_price, current_highest * (1 - 0.003))
+
                 # DEBUG: Log key values for SL verification
                 log_message(f"[DEBUG-SL] {pair}: Entry={entry_price:.2f} | Curr={current_price:.2f} | ActiveSL={active_sl_price:.2f} | PnL={pnl_pct:.2f}%")
 
@@ -2353,8 +2366,15 @@ class ExitManager:
                 if tp_eval_price > current_highest:
                     current_highest = tp_eval_price
                     data['highest_price'] = current_highest
-                    # Trailing delta: 0.7% dari peak (lebih ketat untuk momentum scalping)
-                    data['trailing_sl_price'] = current_highest * (1 - 0.007)
+                    # Trailing delta: 0.4% dari peak (dioptimalkan dari 0.7% untuk penguncian profit cepat)
+                    raw_trail_price = current_highest * (1 - 0.004)
+                    
+                    # Target Floor Lock: Jika puncak harga sudah melampaui target TP,
+                    # kunci trailing stop minimal setara dengan target TP (tp_price) agar profit tidak longsor ke bawah target!
+                    if current_highest >= tp_price:
+                        data['trailing_sl_price'] = max(raw_trail_price, tp_price)
+                    else:
+                        data['trailing_sl_price'] = raw_trail_price
                     db.upsert_position(pair, data)
 
                 # Aktivasi TTP lebih awal untuk scalping: jika profit sudah > 1.0% (atau setengah dari TP), langsung aktif!
@@ -2364,6 +2384,18 @@ class ExitManager:
                 
                 # Sinyal Exit TTP: Sudah pernah lewat aktivasi (1%), dan sekarang turun di bawah trailing stop
                 is_ttp_exit = (current_highest >= tp_activation_price) and (tp_eval_price <= trailing_stop_price)
+
+                # Momentum Fading Profit Lock: Jika posisi sudah dalam keadaan solid net profit (>0.3% gross),
+                # dan indikator momentum berubah menjadi SELL, tren melemah (confidence < 0.40), atau
+                # trade berjalan lambat (signal != BUY dan usia >= 2.0m), langsung amankan profit!
+                is_momentum_fading_exit = False
+                if current_profit_pct >= 0.003:
+                    if (momentum_signal != 'BUY' and pos_age_min >= 2.0) or momentum_signal == 'SELL' or technical_confidence < 0.40:
+                        is_momentum_fading_exit = True
+                        log_message(
+                            f"[MOMENTUM-FADE-LOCK] {pair}: Mengamankan net profit {current_profit_pct*100:.2f}% "
+                            f"karena tren melambat/slow (Signal: {momentum_signal}, Conf: {technical_confidence:.2f}, Usia: {pos_age_min:.1f}m)."
+                        )
 
                 log_message(
                     f"[EXIT-STATUS] [{pair}] PnL:{current_profit_pct*100:.2f}% | "
@@ -2375,8 +2407,8 @@ class ExitManager:
                 if is_ttp_exit:
                     log_message(f"[TRAILING-TP] {pair}: Momentum melandai. Exit secured at {current_profit_pct*100:.2f}% (Peak was {((current_highest/entry_price)-1)*100:.2f}%)")
                 
-                # Hard TP fallback jika tidak pakai TTP
-                if is_ttp_exit or (tp_eval_price >= tp_price and current_highest < tp_activation_price):
+                # Hard TP / Momentum Fade / TTP exit trigger
+                if is_ttp_exit or is_momentum_fading_exit or (tp_eval_price >= tp_price and current_highest < tp_activation_price):
                     if micro_mode_active and not self.dry_run:
                         tp_guard = self._check_tp_market_sell_guard(
                             pair,

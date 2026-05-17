@@ -455,6 +455,44 @@ services:
       - default
       - npm_external
 
+  redis:
+    image: redis:alpine
+    container_name: algovibe-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - algovibe_redis_data:/data
+    networks:
+      - default
+
+  knn-worker:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-knn-worker
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - algovibe_data:/app/data
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    command: ["python", "-m", "services.knn_worker.main"]
+    networks:
+      - default
+
 networks:
   default:
     driver: bridge
@@ -466,6 +504,7 @@ volumes:
   algovibe_data:
   algovibe_models:
   algovibe_pgdata:
+  algovibe_redis_data:
   # Shared /tmp volume — mounts as /tmp in every service so ZMQ IPC sockets
   # (ipc:///tmp/*.ipc) are accessible across all containers.
   # Security: this is a Docker-managed named tmpfs volume, NOT the host /tmp.
@@ -477,3 +516,4 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=64m,mode=1777"
+
