@@ -72,7 +72,7 @@ HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 # --- [Scalping Targets] ---
 TP_PCT = 0.035                  # Target TP 3.5%
 SL_PCT = -0.035                 # [SL/DCA SYNC] -3.5%
-AUTO_SL_ENABLED = True          # [MOMENTUM FOCUS] Auto-SL
+AUTO_SL_ENABLED = False          # [MOMENTUM FOCUS] Auto-SL
 MAX_HOLD_MINUTES = 10           # Anti-Zombie
 
 # Dynamic tiered profit thresholds for exit_manager
