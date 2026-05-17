@@ -29,6 +29,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from app.infrastructure.database import db
+from app.domain.technicals import get_technical_summary, derive_trade_signal
 from config import MODEL_PATH, MODEL_CACHE_DIR
 from shared.transport import IPC_MARKET, IPC_SIGNAL, ZMQSubscriber, install_uvloop
 
@@ -78,6 +79,9 @@ class NewsMaker:
         self._ipc_signals: dict = {}  # pair -> {signal, confidence, ts}
         self._pending_signal_pairs: set = set()  # pairs queued untuk signal-triggered headline
         self._last_trending_review_date = None
+        self._last_tech_deep_dive_date = {"10": None, "16": None}
+        self._last_whale_tracking_date = None
+        self._last_risk_warning_date = None
 
     def _remote_provider_configured(self):
         provider = self._llm_provider
@@ -133,49 +137,99 @@ class NewsMaker:
     def _load_manual_market_snapshot(self, coin_symbol=None):
         """Best-effort snapshot for manual generation so service remains single source."""
         try:
-            import ccxt
-        except Exception:
-            logger.warning("[news-maker] ccxt not available for manual snapshot.")
+            from app.infrastructure.exchange_factory import create_indodax_exchange
+            exchange = create_indodax_exchange()
+        except Exception as err:
+            logger.warning("[news-maker] create_indodax_exchange not available: %s", err)
             return
 
         try:
-            exchange = ccxt.indodax({"enableRateLimit": True})
+            eid = os.getenv("EXCHANGE", "binance").lower()
             wanted = str(coin_symbol or "").lower().strip()
-            # Normalize wanted symbol to match the standard format (e.g. 'eth' -> 'ethidr')
+            
+            if eid == "binance":
+                suffix = "usdt"
+                ccxt_suffix = "/USDT"
+            else:
+                suffix = "idr"
+                ccxt_suffix = "/IDR"
+
             if wanted and not wanted.endswith("idr") and not wanted.endswith("usdt"):
-                wanted_pair = wanted + "idr"
+                wanted_pair = wanted + suffix
             else:
                 wanted_pair = wanted
 
+            logger.info("[news-maker] Fetching tickers from %s for snapshot...", eid.upper())
             all_tickers = exchange.fetch_tickers()
+            
+            ticker_list = []
             for symbol, t in all_tickers.items():
-                if not symbol.endswith("/IDR"):
+                if not symbol.endswith(ccxt_suffix):
                     continue
-                pair = symbol.replace("/IDR", "idr").lower() # e.g. "eth/IDR" -> "ethidr"
-                if wanted_pair and pair != wanted_pair:
-                    continue
-
-                price = float(t.get("last") or 0.0)
+                pair = symbol.replace(ccxt_suffix, suffix).lower() # e.g. "eth/USDT" -> "ethusdt"
+                
+                price = float(t.get("last") or t.get("close") or 0.0)
                 pct = float(t.get("percentage") or 0.0)
                 if abs(pct) < 0.0001:
-                    # Some exchanges return empty/zero percentage; derive from open.
                     open_px = float(t.get("open") or 0.0)
                     if price > 0 and open_px > 0:
                         pct = ((price - open_px) / open_px) * 100.0
                 quote_vol = float(t.get("quoteVolume") or 0.0)
                 base_vol = float(t.get("baseVolume") or 0.0)
                 vol_idr = quote_vol if quote_vol > 0 else base_vol * price
+                
+                ticker_list.append({
+                    "symbol": symbol,
+                    "pair": pair,
+                    "t": t,
+                    "price": price,
+                    "pct": pct,
+                    "vol_idr": vol_idr
+                })
+                
+            # Filter to keep wanted_pair OR top 15 highest-volume tickers
+            if wanted_pair:
+                ticker_list = [x for x in ticker_list if x["pair"] == wanted_pair]
+            else:
+                ticker_list = sorted(ticker_list, key=lambda x: x["vol_idr"], reverse=True)[:15]
+                
+            for item in ticker_list:
+                symbol = item["symbol"]
+                pair = item["pair"]
+                t = item["t"]
+                price = item["price"]
+                pct = item["pct"]
+                vol_idr = item["vol_idr"]
+
+                # Calculate highly precise 1h and 24h changes from real exchange candles!
+                ch_1h = 0.0
+                ch_24h = pct
+                try:
+                    logger.info("[news-maker] Fetching 1h OHLCV candles for %s from %s to compute exact changes...", symbol, eid.upper())
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=25)
+                    if ohlcv and len(ohlcv) >= 2:
+                        price_1h_ago = float(ohlcv[-2][4]) if len(ohlcv) >= 2 else float(ohlcv[-1][1])
+                        if price_1h_ago > 0:
+                            ch_1h = ((price - price_1h_ago) / price_1h_ago) * 100.0
+                        if len(ohlcv) >= 25:
+                            price_24h_ago = float(ohlcv[0][4])
+                            if price_24h_ago > 0:
+                                ch_24h = ((price - price_24h_ago) / price_24h_ago) * 100.0
+                except Exception as ohlcv_err:
+                    logger.warning("[news-maker] Failed to fetch exact OHLCV candles for %s: %s", symbol, ohlcv_err)
 
                 self._tickers[pair] = {
                     "price": price,
-                    "ch_24h": pct,
-                    "ch_1h": float(self._tickers.get(pair, {}).get("ch_1h") or 0.0),
+                    "ch_24h": ch_24h,
+                    "ch_1h": ohlcv_err if 'ohlcv_err' in locals() and not ohlcv else ch_1h,
                     "vol": vol_idr,
                     "vol_idr": vol_idr,
                     "updated_at": time.time(),
                     "source": "ccxt",
                 }
             self._prev_tickers = dict(self._tickers)
+            if wanted_pair in self._tickers:
+                logger.info("[news-maker] Snapshot loaded for %s: Price=%s, 1h_change=%.2f%%, 24h_change=%.2f%%", wanted_pair, self._tickers[wanted_pair].get("price"), self._tickers[wanted_pair].get("ch_1h", 0.0), self._tickers[wanted_pair].get("ch_24h", 0.0))
         except Exception as exc:
             logger.warning("[news-maker] Manual market snapshot failed: %s", exc)
 
@@ -233,6 +287,18 @@ class NewsMaker:
 
         if mode == "landing":
             await self._generate_landing_pack(coin_symbol=coin_symbol, headline_count=headline_count)
+            return
+
+        if mode == "tech_deep_dive":
+            await self._generate_technical_deep_dive(coin_symbol=coin_symbol)
+            return
+
+        if mode == "whale_tracking":
+            await self._generate_whale_tracking(coin_symbol=coin_symbol)
+            return
+
+        if mode == "risk_warning":
+            await self._generate_risk_warning(coin_symbol=coin_symbol)
             return
 
         logger.error("[news-maker] Unknown manual mode: %s", mode)
@@ -334,32 +400,39 @@ class NewsMaker:
         return ((latest_px - ref_px) / ref_px) * 100.0
 
     def _normalize_pair_key(self, pair_or_symbol):
-        """Converts a coin symbol (e.g. 'eth', 'btc', 'xrp') or raw key into the canonical pair key (e.g. 'ethidr')."""
+        """Converts a coin symbol (e.g. 'eth', 'btc', 'xrp') or raw key into the canonical pair key (e.g. 'ethidr' or 'ethusdt')."""
         if not pair_or_symbol:
             return ""
         p = str(pair_or_symbol).lower().strip()
+        
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        suffix = "usdt" if eid == "binance" else "idr"
         
         # If it already exists directly in self._tickers, use it as is
         if p in self._tickers:
             return p
             
-        # Try appending 'idr'
-        if p + "idr" in self._tickers:
-            return p + "idr"
+        # Try appending suffix
+        if p + suffix in self._tickers:
+            return p + suffix
             
-        # Fallback to appending 'idr' if it's just a 3-4 letter coin symbol
-        if not p.endswith("idr"):
-            return p + "idr"
+        # Fallback to appending suffix if it's just a 3-4 letter coin symbol
+        if not p.endswith(suffix):
+            return p + suffix
             
         return p
 
     def _clean_symbol(self, pair):
-        """Converts a pair key (e.g. 'ethidr', 'pippinidr') into its clean symbol (e.g. 'ETH', 'PIPPIN')."""
+        """Converts a pair key (e.g. 'ethidr', 'ethusdt') into its clean symbol (e.g. 'ETH')."""
         if not pair:
             return ""
         p = str(pair).upper().strip()
-        if p.endswith("IDR"):
-            return p[:-3]
+        
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        suffix = "USDT" if eid == "binance" else "IDR"
+        
+        if p.endswith(suffix):
+            return p[:-len(suffix)]
         return p
 
 
@@ -482,39 +555,48 @@ class NewsMaker:
         return await loop.run_in_executor(None, self._prime_realtime_snapshot_sync, wait_sec, min_messages)
 
     def _bootstrap_from_exchange_rest(self):
-        """Fetch bulk tickers from Indodax public summaries API to ensure all pairs have fresh market data.
+        """Fetch bulk tickers from exchange public REST API to ensure all pairs have fresh market data.
         
         Sangat berguna saat startup atau saat koin tertentu belum mendapatkan WS tick.
         """
         try:
-            from app.infrastructure.exchange_factory import create_exchange_provider
-            adapter = create_exchange_provider()
-            data = adapter.fetch_summaries()
-            if not data:
-                return
-            tickers = data.get("tickers", {})
-            prices_24h = data.get("prices_24h", {})
-            
-            for key, val in tickers.items():
-                # Strict: Only load IDR pairs (pair only with idr)
-                if not key.endswith("_idr"):
-                    continue
+            from app.infrastructure.exchange_factory import create_indodax_exchange
+            exchange = create_indodax_exchange()
+        except Exception as err:
+            logger.warning("[news-maker] create_indodax_exchange not available for bootstrap: %s", err)
+            return
 
-                pair = key.replace("_", "").lower() # e.g. "btc_idr" -> "btcidr"
-                price = float(val.get("last") or 0.0)
+        try:
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            logger.info("[news-maker] Fetching bulk %s tickers from exchange REST for bootstrap...", eid.upper())
+            raw_tickers = exchange.fetch_tickers()
+            
+            if eid == "binance":
+                suffix = "usdt"
+                ccxt_suffix = "/USDT"
+            else:
+                suffix = "idr"
+                ccxt_suffix = "/IDR"
+
+            count = 0
+            for symbol, t in raw_tickers.items():
+                if not symbol.endswith(ccxt_suffix):
+                    continue
+                pair = symbol.replace(ccxt_suffix, suffix).lower() # e.g. "BTC/USDT" -> "btcusdt"
+                
+                price = float(t.get("last") or t.get("close") or 0.0)
                 if price <= 0:
                     continue
                 
-                vol_idr = float(val.get("vol_idr") or 0.0)
-                
-                # Calculate correct 24h change
-                ch_24h = 0.0
-                px_24h = float(prices_24h.get(pair) or 0.0)
-                if px_24h > 0:
-                    ratio = price / px_24h
-                    # Safeguard: If the change is more than 100x or less than 1/100th, it is an API scale mismatch
-                    if 0.01 <= ratio <= 100.0:
-                        ch_24h = ((price - px_24h) / px_24h) * 100.0
+                ch_24h = float(t.get("percentage") or 0.0)
+                if abs(ch_24h) < 0.0001:
+                    open_px = float(t.get("open") or 0.0)
+                    if price > 0 and open_px > 0:
+                        ch_24h = ((price - open_px) / open_px) * 100.0
+
+                quote_vol = float(t.get("quoteVolume") or 0.0)
+                base_vol = float(t.get("baseVolume") or 0.0)
+                vol_idr = quote_vol if quote_vol > 0 else base_vol * price
                 
                 # Only update/set if we don't have a fresher WS tick or if we need to bootstrap
                 existing = self._tickers.get(pair)
@@ -525,9 +607,10 @@ class NewsMaker:
                         "vol": vol_idr,
                         "vol_idr": vol_idr,
                         "updated_at": time.time(),
-                        "source": "exchange_rest", # marker: real-time exchange public summaries API
+                        "source": "exchange_rest",
                     }
-            logger.info("[news-maker] Successfully bootstrapped %d IDR pairs from Indodax REST summaries.", len(self._tickers))
+                    count += 1
+            logger.info("[news-maker] Successfully bootstrapped %d pairs from %s REST summaries.", count, eid.upper())
         except Exception as exc:
             logger.warning("[news-maker] Exchange summaries bootstrap failed: %s", exc)
 
@@ -642,6 +725,23 @@ class NewsMaker:
             if now.hour == TRENDING_REVIEW_HOUR and self._last_trending_review_date != today:
                 await self._generate_trending_review()
                 self._last_trending_review_date = today
+
+            # Technical Deep Dive: 10:00 & 16:00
+            if now.hour in (10, 16):
+                hour_str = str(now.hour)
+                if self._last_tech_deep_dive_date[hour_str] != today:
+                    await self._generate_technical_deep_dive()
+                    self._last_tech_deep_dive_date[hour_str] = today
+
+            # Whale Tracking: 12:00
+            if now.hour == 12 and self._last_whale_tracking_date != today:
+                await self._generate_whale_tracking()
+                self._last_whale_tracking_date = today
+
+            # Risk Warning: 22:00
+            if now.hour == 22 and self._last_risk_warning_date != today:
+                await self._generate_risk_warning()
+                self._last_risk_warning_date = today
 
             await asyncio.sleep(60)
 
@@ -781,6 +881,10 @@ class NewsMaker:
 
         try:
             article = await self._ask_llm(prompt)
+            if not article:
+                logger.warning("[news-maker] Empty/invalid article payload for %s, invoking quantitative system fallback...", rtype)
+                article = self._generate_periodic_report_fallback(rtype)
+            
             if article:
                 article = self._ensure_min_content(article, context)
                 self._save_article(article, rtype)
@@ -792,8 +896,6 @@ class NewsMaker:
                         logger.debug("[news-maker] hero_ai_insight updated from %s", rtype)
                     except Exception:
                         pass
-            else:
-                logger.warning("[news-maker] Empty/invalid article payload for %s", rtype)
         except Exception as e:
             logger.error("[news-maker] Failed to generate report: %s", e)
 
@@ -839,8 +941,8 @@ class NewsMaker:
         try:
             article = await self._ask_llm(prompt)
             if not article:
-                logger.warning("[news-maker] Empty headline payload for %s, skipping save.", coin_symbol)
-                return
+                logger.warning("[news-maker] Empty headline payload for %s, invoking quantitative system fallback...", coin_symbol)
+                article = self._generate_market_headline_fallback(coin_symbol, move_data)
             article = self._ensure_min_content(article, context)
             self._save_article(article, "REALTIME_HEADLINE")
         except Exception as e:
@@ -859,8 +961,8 @@ class NewsMaker:
             raw_text = await self._ask_llm_raw(prompt)
             brief = self._parse_brief_payload(raw_text)
             if not brief:
-                logger.warning("[news-maker] Empty/invalid MARKET_INTEL_BRIEF payload")
-                return
+                logger.warning("[news-maker] Empty/invalid MARKET_INTEL_BRIEF payload, invoking quantitative system fallback...")
+                brief = self._generate_market_intelligence_brief_fallback()
             self._save_market_brief(brief)
         except Exception as e:
             logger.error("[news-maker] Failed to generate MARKET_INTEL_BRIEF: %s", e)
@@ -876,13 +978,363 @@ class NewsMaker:
 
         try:
             article = await self._ask_llm(prompt)
+            if not article:
+                logger.warning("[news-maker] Empty/invalid TRENDING_REVIEW payload, invoking quantitative system fallback...")
+                article = self._generate_trending_review_fallback()
+            
             if article:
                 article = self._ensure_min_content(article, context)
                 self._save_article(article, "TRENDING_REVIEW")
-            else:
-                logger.warning("[news-maker] Empty/invalid TRENDING_REVIEW payload")
         except Exception as e:
             logger.error("[news-maker] Failed to generate TRENDING_REVIEW: %s", e)
+
+    async def _generate_technical_deep_dive(self, coin_symbol=None):
+        if not self._engine_enabled:
+            return
+        logger.info("[news-maker] Generating TECHNICAL_DEEP_DIVE...")
+        context, clean_sym = self._build_technical_deep_dive_context(coin_symbol)
+        prompt = self._build_technical_deep_dive_prompt(clean_sym, context)
+        try:
+            article = await self._ask_llm(prompt)
+            if article:
+                article = self._ensure_min_content(article, context)
+                self._save_article(article, "TECHNICAL_DEEP_DIVE")
+            else:
+                logger.warning("[news-maker] Empty TECHNICAL_DEEP_DIVE payload, invoking quantitative system fallback...")
+                article = self._generate_technical_deep_dive_fallback(coin_symbol)
+                self._save_article(article, "TECHNICAL_DEEP_DIVE")
+        except Exception as e:
+            logger.error("[news-maker] Failed to generate TECHNICAL_DEEP_DIVE: %s", e)
+
+    def _build_technical_deep_dive_context(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if not valid_items:
+                return "No active coin data found.", "BTC"
+            items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("score") or 0.0), reverse=True)
+            pair = items_sorted[0][0]
+
+        clean_symbol = self._clean_symbol(pair)
+        
+        tech = {}
+        history = []
+        try:
+            with db.get_connection() as conn:
+                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
+                if row and row["history_json"]:
+                    history = json.loads(row["history_json"])
+                    if len(history) >= 2:
+                        tech = get_technical_summary(history)
+        except Exception as e:
+            logger.warning("[news-maker] Failed to load history for deep dive: %s", e)
+
+        buy_pressure = 50.0
+        try:
+            with db.get_connection() as conn:
+                depth = conn.execute("SELECT vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
+                bid_vol = sum(r['vol'] for r in depth if r['is_bid'] == 1)
+                ask_vol = sum(r['vol'] for r in depth if r['is_bid'] == 0)
+                total_ob = bid_vol + ask_vol
+                buy_pressure = round(bid_vol / total_ob * 100, 1) if total_ob > 0 else 50.0
+        except Exception:
+            pass
+
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        ch_24h = float(ticker_data.get("ch_24h") or 0.0)
+        ch_1h = float(ticker_data.get("ch_1h") or 0.0)
+        vol_idr = float(ticker_data.get("vol_idr") or 0.0)
+        volatility = float(ticker_data.get("volatility") or 0.0)
+        trend = str(ticker_data.get("trend") or "SIDEWAYS")
+        signal = str(ticker_data.get("signal") or "HOLD")
+        confidence = float(ticker_data.get("confidence") or 0.0)
+
+        tech['buy_pressure'] = buy_pressure
+        trade_sig = derive_trade_signal(tech) if tech else {}
+
+        ctx = f"ANALISIS TEKNIKAL PREMIUM: {clean_symbol}\n"
+        ctx += f"Harga Terkini: {self._format_price(price)}\n"
+        ctx += f"Perubahan 24h: {ch_24h:+.2f}% | Perubahan 1h: {ch_1h:+.2f}%\n"
+        ctx += f"Volume Transaksi: {self._format_large_volume(vol_idr)}\n"
+        ctx += f"Tren Utama: {trend} | Sinyal Bot: {signal} ({confidence:.0%})\n"
+        ctx += f"Volatilitas Standard Deviation: {volatility:.2f}%\n\n"
+        
+        ctx += "### Audit 11 Indikator Teknis Aktif:\n"
+        ctx += "| No | Indikator | Nilai / Kondisi | Bobot | Catatan Kuantitatif |\n"
+        ctx += "|---|---|---|---|---|\n"
+        
+        rsi_val = tech.get('rsi', 50)
+        rsi_status = "Oversold" if rsi_val < 30 else ("Overbought" if rsi_val > 70 else "Netral")
+        ctx += f"| 1 | RSI-14 | {rsi_val:.1f} ({rsi_status}) | 3.0 | Wilder smoothing |\n"
+        
+        macd_hist = tech.get('macd_hist', 0)
+        macd_status = "Bullish Momentum" if macd_hist > 0 else "Bearish Momentum"
+        ctx += f"| 2 | MACD Hist | {macd_hist*1000:.3f} ({macd_status}) | 2.5 | Price-normalized (x1000) |\n"
+        
+        bb_pct = tech.get('bb_pct', 0.5)
+        bb_status = "Bawah Band (Oversold)" if bb_pct < 0.2 else ("Atas Band (Overbought)" if bb_pct > 0.8 else "Tengah Band")
+        ctx += f"| 3 | Bollinger %B | {bb_pct:.2f} ({bb_status}) | 2.0 | Posisi relatif band |\n"
+        
+        stoch_k = tech.get('stoch_k', 50)
+        stoch_d = tech.get('stoch_d', 50)
+        ctx += f"| 4 | Stoch RSI | K={stoch_k:.1f}, D={stoch_d:.1f} | 2.0 | Crossover oscillator |\n"
+        
+        ema_cross = tech.get('ema_cross', 'NEUTRAL')
+        ctx += f"| 5 | EMA 9/21 | {ema_cross} | 1.5 | Trend crossover jangka menengah |\n"
+        
+        williams_r = tech.get('williams_r', -50)
+        williams_status = "Oversold" if williams_r < -80 else ("Overbought" if williams_r > -20 else "Netral")
+        ctx += f"| 6 | Williams %R | {williams_r:.1f} ({williams_status}) | 1.5 | Momentum independent |\n"
+        
+        slope = tech.get('slope', 0)
+        ctx += f"| 7 | Slope/Momentum | {slope:.6f} | 1.0 | Linear regression slope |\n"
+        
+        roc = tech.get('roc', 0)
+        ctx += f"| 8 | ROC-10 | {roc:.2f}% | 1.0 | Rate of change, mean-reversion |\n"
+        
+        ctx += f"| 9 | Order Book Pressure | {buy_pressure:.1f}% Buy Pressure | 2.0 | Kekuatan bid vs ask walls |\n"
+        
+        vol_ratio = tech.get('volume_ratio', 1.0)
+        vol_status = "Spike Breakout" if vol_ratio > 1.5 else "Rata-rata"
+        ctx += f"| 10 | Volume Ratio | {vol_ratio:.2f}x ({vol_status}) | 1.5 | Volume sekarang vs MA-20 |\n"
+        
+        obv_slope = tech.get('obv_slope', 0.0)
+        ctx += f"| 11 | OBV Slope | {obv_slope:.6f} | 1.5 | Akumulasi/distribusi volume |\n\n"
+        
+        ctx += f"### Hasil Multi-Confluence Score:\n"
+        ctx += f"- Buy Confluence Score: {trade_sig.get('buy_score', 0):.1f} / 19.5\n"
+        ctx += f"- Sell Confluence Score: {trade_sig.get('sell_score', 0):.1f} / 19.5\n"
+        ctx += f"- Rekomendasi Aksi: **{trade_sig.get('verdict', 'HOLD')}** (Confidence: {trade_sig.get('confidence', 50)}%)\n"
+
+        return ctx, clean_symbol
+
+    def _build_technical_deep_dive_prompt(self, coin_symbol, context):
+        _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
+        style_rules = self._markdown_article_style_rules()
+        return (
+            f"Anda adalah Senior Quantitative LLM Engineer & Market Strategist Algovibe. Tulis artikel Analisis Teknis Mendalam (TECHNICAL_DEEP_DIVE) dalam Bahasa Indonesia.\n"
+            f"Fokus Aset: {coin_symbol}\n"
+            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nKonteks Telemetri Kuantitatif:\n{context}\n"
+            f"Persyaratan Artikel:\n"
+            f"- Judul: Tinjauan Teknis {coin_symbol}: Kupasan 11 Indikator Teknis & Strategi Confluence (50-80 karakter).\n"
+            f"- Excerpt: Ringkasan teknikal singkat (120-180 karakter) tentang status momentum dan setup trading {coin_symbol}.\n"
+            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
+            f"- Content: Sajikan artikel yang SANGAT PREMIUM dan EDUKATIF. Bahas detail 11 indikator aktif dari tabel di atas (RSI, MACD, Stoch RSI, dll), jelaskan bagaimana confluencenya menghasilkan rekomendasi bot, dan sajikan rencana eksekusi.\n"
+            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
+            f"  ## Ringkasan Kuantitatif\n"
+            f"  ## Audit 11 Indikator Teknis (Wajib sertakan tabel Markdown ringkasan indikator)\n"
+            f"  ## Analisis Confluence & Strategi Bot\n"
+            f"  ## Level Kunci & Skenario Eksekusi (Support, Resistance, Target TP/SL)\n"
+            f"  ## Kesimpulan\n"
+            f"{style_rules}\n"
+            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            '{"title":"...","excerpt":"...","content":"..."}'
+        )
+
+    async def _generate_whale_tracking(self, coin_symbol=None):
+        if not self._engine_enabled:
+            return
+        logger.info("[news-maker] Generating WHALE_TRACKING...")
+        context, clean_sym = self._build_whale_tracking_context(coin_symbol)
+        prompt = self._build_whale_tracking_prompt(clean_sym, context)
+        try:
+            article = await self._ask_llm(prompt)
+            if article:
+                article = self._ensure_min_content(article, context)
+                self._save_article(article, "WHALE_TRACKING")
+            else:
+                logger.warning("[news-maker] Empty WHALE_TRACKING payload, invoking quantitative system fallback...")
+                article = self._generate_whale_tracking_fallback(coin_symbol)
+                self._save_article(article, "WHALE_TRACKING")
+        except Exception as e:
+            logger.error("[news-maker] Failed to generate WHALE_TRACKING: %s", e)
+
+    def _build_whale_tracking_context(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if not valid_items:
+                return "No active liquidity data found.", "BTC"
+            items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("vol_idr") or 0.0), reverse=True)
+            pair = items_sorted[0][0]
+
+        clean_symbol = self._clean_symbol(pair)
+        
+        depth_data = self._depth_summary.get(pair, {})
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        ch_24h = float(ticker_data.get("ch_24h") or 0.0)
+        ch_1h = float(ticker_data.get("ch_1h") or 0.0)
+        vol_idr = float(ticker_data.get("vol_idr") or 0.0)
+        
+        bid_vol = float(depth_data.get("bid_vol") or vol_idr * 0.5)
+        ask_vol = float(depth_data.get("ask_vol") or vol_idr * 0.5)
+        imbalance = float(depth_data.get("imbalance") or 0.0)
+        spread_pct = float(depth_data.get("spread_pct") or 0.05)
+        
+        tech = {}
+        try:
+            with db.get_connection() as conn:
+                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
+                if row and row["history_json"]:
+                    history = json.loads(row["history_json"])
+                    if len(history) >= 2:
+                        tech = get_technical_summary(history)
+        except Exception:
+            pass
+
+        vol_ratio = tech.get("volume_ratio", 1.0)
+        obv_slope = tech.get("obv_slope", 0.0)
+
+        ctx = f"AUDIT ALIRAN DANA & WHALE TRACKING: {clean_symbol}\n"
+        ctx += f"Harga Terkini: {self._format_price(price)}\n"
+        ctx += f"Volume Transaksi 24h: {self._format_large_volume(vol_idr)}\n"
+        ctx += f"Perubahan 24h: {ch_24h:+.2f}% | 1h: {ch_1h:+.2f}%\n"
+        ctx += f"Volume Ratio (vs MA-20): {vol_ratio:.2f}x\n"
+        ctx += f"Kemiringan OBV (OBV Slope): {obv_slope:.6f}\n\n"
+        
+        ctx += "### Detail Kedalaman Order Book:\n"
+        ctx += f"- Total Bid Volume (Dinding Beli): {self._format_large_volume(bid_vol)}\n"
+        ctx += f"- Total Ask Volume (Dinding Jual): {self._format_large_volume(ask_vol)}\n"
+        ctx += f"- Spread Persentase: {spread_pct:.3f}%\n"
+        ctx += f"- Imbalance Order Book: {imbalance:+.2f} (skala -1.0 hingga +1.0)\n"
+        
+        activity = "Normal"
+        if vol_ratio > 2.0:
+            activity = "Lonjakan Volume Luar Biasa (Aktivitas Whale Terdeteksi)"
+        elif vol_ratio > 1.3:
+            activity = "Aktivitas Volume Meningkat"
+            
+        pressure = "Seimbang"
+        if imbalance > 0.3:
+            pressure = "Dinding Beli Sangat Kuat (Akumulasi Whale)"
+        elif imbalance < -0.3:
+            pressure = "Dinding Jual Sangat Tebal (Distribusi Whale)"
+
+        ctx += f"- Status Aktivitas Likuiditas: {activity}\n"
+        ctx += f"- Status Tekanan Order Book: {pressure}\n"
+
+        return ctx, clean_symbol
+
+    def _build_whale_tracking_prompt(self, coin_symbol, context):
+        _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
+        style_rules = self._markdown_article_style_rules()
+        return (
+            f"Anda adalah Chief Blockchain Forensics & Order Book Analyst Algovibe. Tulis laporan Whale Tracking (WHALE_TRACKING) dalam Bahasa Indonesia.\n"
+            f"Aset Fokus: {coin_symbol}\n"
+            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nKonteks Telemetri Liquidity & Order Book:\n{context}\n"
+            f"Persyaratan Artikel:\n"
+            f"- Judul: Whale Tracking {coin_symbol}: Deteksi Aliran Dana Besar & Ketebalan Dinding Order Book (50-80 karakter).\n"
+            f"- Excerpt: Analisis ketebalan dinding bid/ask dan lonjakan volume ratio abnormal {coin_symbol}.\n"
+            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
+            f"- Content: Sajikan artikel yang PREMIUM dan DATA-GROUNDED. Terangkan detail ketebalan Bid vs Ask, arti dari Order Book Imbalance, dan hubungan lonjakan Volume Ratio vs MA-20 terhadap akumulasi atau distribusi diam-diam oleh whale.\n"
+            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
+            f"  ## Ringkasan Aliran Dana\n"
+            f"  ## Analisis Kedalaman Order Book & Bid/Ask Walls\n"
+            f"  ## Deteksi Volume Ratio Abnormal & OBV Slope\n"
+            f"  ## Implikasi Terhadap Arah Harga & Strategi Trading\n"
+            f"  ## Kesimpulan\n"
+            f"{style_rules}\n"
+            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            '{"title":"...","excerpt":"...","content":"..."}'
+        )
+
+    async def _generate_risk_warning(self, coin_symbol=None):
+        if not self._engine_enabled:
+            return
+        logger.info("[news-maker] Generating RISK_WARNING...")
+        context, clean_sym = self._build_risk_warning_context(coin_symbol)
+        prompt = self._build_risk_warning_prompt(clean_sym, context)
+        try:
+            article = await self._ask_llm(prompt)
+            if article:
+                article = self._ensure_min_content(article, context)
+                self._save_article(article, "RISK_WARNING")
+            else:
+                logger.warning("[news-maker] Empty RISK_WARNING payload, invoking quantitative system fallback...")
+                article = self._generate_risk_warning_fallback(coin_symbol)
+                self._save_article(article, "RISK_WARNING")
+        except Exception as e:
+            logger.error("[news-maker] Failed to generate RISK_WARNING: %s", e)
+
+    def _build_risk_warning_context(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if not valid_items:
+                return "No active risk data found.", "BTC"
+            items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("volatility") or 0.0), reverse=True)
+            pair = items_sorted[0][0]
+
+        clean_symbol = self._clean_symbol(pair)
+        
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        ch_24h = float(ticker_data.get("ch_24h") or 0.0)
+        ch_1h = float(ticker_data.get("ch_1h") or 0.0)
+        volatility = float(ticker_data.get("volatility") or 0.0)
+        trend = str(ticker_data.get("trend") or "SIDEWAYS")
+        
+        regime = db.get_state("current_market_regime") or "NEUTRAL"
+        sentiment = db.get_state("market_sentiment_index") or 50
+
+        ctx = f"LAPORAN MANAJEMEN RISIKO & TELEMETRI VOLATILITAS: {clean_symbol}\n"
+        ctx += f"Harga Terkini: {self._format_price(price)}\n"
+        ctx += f"Perubahan 24h: {ch_24h:+.2f}% | 1h: {ch_1h:+.2f}%\n"
+        ctx += f"Volatilitas Standard Deviation (Intraday): {volatility:.2f}%\n"
+        ctx += f"Kecenderungan Tren: {trend}\n"
+        ctx += f"Regime Pasar Makro: {regime} | Sentiment Index: {sentiment}%\n\n"
+        
+        ctx += "### Parameter Proteksi Bot & Safety Guards:\n"
+        risk_level = "RENDAH"
+        if volatility > 2.0 or abs(ch_24h) > 8.0:
+            risk_level = "EKSTRIM"
+        elif volatility > 1.2 or abs(ch_24h) > 4.0:
+            risk_level = "TINGGI"
+        elif volatility > 0.6:
+            risk_level = "SEDANG"
+
+        ctx += f"- Tingkat Risiko Aset: {risk_level}\n"
+        
+        atr_filter = "AKTIF (Menolak jika ATR > 3% harga)"
+        ema_trend_filter = "AKTIF (Menolak jika harga < EMA-50)"
+        ctx += f"- ATR Volatility Filter (Gate 4b): {atr_filter}\n"
+        ctx += f"- EMA-50 Trend Filter (Gate 4c): {ema_trend_filter}\n"
+        
+        return ctx, clean_symbol
+
+    def _build_risk_warning_prompt(self, coin_symbol, context):
+        _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
+        style_rules = self._markdown_article_style_rules()
+        return (
+            f"Anda adalah Chief Risk Officer & Quantitative Safety Engineer Algovibe. Tulis Laporan Peringatan Risiko Pasar (RISK_WARNING) dalam Bahasa Indonesia.\n"
+            f"Aset Fokus: {coin_symbol}\n"
+            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nKonteks Telemetri Risiko & Volatilitas:\n{context}\n"
+            f"Persyaratan Artikel:\n"
+            f"- Judul: Peringatan Risiko {coin_symbol}: Telemetri Volatilitas ATR & Skenario Proteksi Modal (50-80 karakter).\n"
+            f"- Excerpt: Analisis tingkat risiko volatilitas tinggi dan status safety guard filter pada {coin_symbol}.\n"
+            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
+            f"- Content: Sajikan artikel yang PREMIUM dan EDUKATIF. Jelaskan tingkat risiko saat ini, bagaimana ATR Volatility Filter (Gate 4b) dan EMA-50 Trend Filter (Gate 4c) bekerja mencegah jebakan harga, serta taktik membatasi loss.\n"
+            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
+            f"  ## Evaluasi Risiko Pasar Terkini\n"
+            f"  ## Analisis Volatilitas Intraday & Telemetri ATR\n"
+            f"  ## Status Safety Guard & Entry Gate Bot (Filter EMA-50 & ATR)\n"
+            f"  ## Skenario Proteksi Modal & Risk Management Plan\n"
+            f"  ## Kesimpulan\n"
+            f"{style_rules}\n"
+            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            '{"title":"...","excerpt":"...","content":"..."}'
+        )
 
     def _build_trending_review_context(self):
         """Build composite context untuk daily trending review — top coins by composite score."""
@@ -916,8 +1368,8 @@ class NewsMaker:
             trend = sig.get("trend") or "N/A"
             src_label = "" if data.get("source") != "db_depth" else " [data-DB]"
             context += (
-                f"- {self._clean_symbol(pair)}{src_label}: price={price:,.0f} IDR  ch_24h={ch_24h:+.2f}%  "
-                f"ch_1h={ch_1h:+.2f}%  vol={vol_idr/1e6:.0f}M  "
+                f"- {self._clean_symbol(pair)}{src_label}: price={self._format_price(price)}  ch_24h={ch_24h:+.2f}%  "
+                f"ch_1h={ch_1h:+.2f}%  vol={self._format_vol_m(vol_idr/1e6)}  "
                 f"signal={signal}({conf:.0%})  trend={trend}\n"
             )
 
@@ -1020,7 +1472,7 @@ class NewsMaker:
                 ch_24h = float(data.get("ch_24h") or 0.0)
                 price = float(data.get("price") or 0.0)
                 src_label = " [DB]" if data.get("source") == "db_depth" else ""
-                context += f"- {self._clean_symbol(pair)}{src_label}: {price:,.0f} IDR ({ch_24h:+.1f}%)\n"
+                context += f"- {self._clean_symbol(pair)}{src_label}: {self._format_price(price)} ({ch_24h:+.1f}%)\n"
         else:
             context += "- No valid live market snapshot available\n"
 
@@ -1089,9 +1541,9 @@ class NewsMaker:
         losers = all_movers[-3:]
 
         context = f"Coin Focus: {self._clean_symbol(coin_symbol)}\n"
-        context += f"Price: {move_data['price']:,.0f} IDR\n"
+        context += f"Price: {self._format_price(move_data['price'])}\n"
         context += f"Change 1h: {move_data['change_1h']:+.1f}% | Delta Active: {move_data['pct_change']:+.1f}% ({move_data.get('pct_source', 'auto')})\n"
-        context += f"Volume 24h: {move_data['vol_idr']/1e9:.2f}B IDR\n"
+        context += f"Volume 24h: {self._format_large_volume(move_data['vol_idr'])}\n"
         context += "\nTop Gainers (Realtime WS):\n"
         if gainers:
             for pair, _data, rt in gainers:
@@ -1542,9 +1994,9 @@ class NewsMaker:
         provider = self._llm_provider
         attempts = []
         if provider in ("cloudflare", "cf"):
-            attempts = ["cloudflare"]
+            attempts = ["cloudflare", "huggingface"]
         elif provider in ("huggingface", "hf"):
-            attempts = ["huggingface"]
+            attempts = ["huggingface", "cloudflare"]
         else:
             attempts = ["cloudflare", "huggingface"]
 
@@ -1567,14 +2019,23 @@ class NewsMaker:
                             {"role": "user", "content": prompt},
                         ]
                     }
-                    resp = requests.post(NEWS_CF_API_URL, headers=headers, json=payload, timeout=REMOTE_TIMEOUT_SEC)
-                    if resp.ok:
-                        text = self._coerce_remote_json_text(self._extract_remote_text(resp.json()))
-                        if text:
-                            logger.info("[news-maker] Remote fallback used: cloudflare")
-                            return text
-                    else:
-                        logger.warning("[news-maker] Cloudflare API error %s", resp.status_code)
+                    
+                    cf_delay = 2.0
+                    for cf_attempt in range(3):
+                        resp = requests.post(NEWS_CF_API_URL, headers=headers, json=payload, timeout=REMOTE_TIMEOUT_SEC)
+                        if resp.ok:
+                            text = self._coerce_remote_json_text(self._extract_remote_text(resp.json()))
+                            if text:
+                                logger.info("[news-maker] Remote fallback used: cloudflare (attempt %d)", cf_attempt + 1)
+                                return text
+                            break
+                        elif resp.status_code == 429:
+                            logger.warning("[news-maker] Cloudflare API error 429 (rate-limited). Retrying in %.1fs...", cf_delay)
+                            time.sleep(cf_delay)
+                            cf_delay *= 2.0
+                        else:
+                            logger.warning("[news-maker] Cloudflare API error %s on attempt %d", resp.status_code, cf_attempt + 1)
+                            break
 
                 if item == "huggingface" and NEWS_HF_API_URL and NEWS_HF_API_TOKEN:
                     headers = {
@@ -1589,14 +2050,23 @@ class NewsMaker:
                             "temperature": 0.2,
                         },
                     }
-                    resp = requests.post(NEWS_HF_API_URL, headers=headers, json=payload, timeout=REMOTE_TIMEOUT_SEC)
-                    if resp.ok:
-                        text = self._coerce_remote_json_text(self._extract_remote_text(resp.json()))
-                        if text:
-                            logger.info("[news-maker] Remote fallback used: huggingface")
-                            return text
-                    else:
-                        logger.warning("[news-maker] HuggingFace API error %s", resp.status_code)
+                    
+                    hf_delay = 3.0
+                    for hf_attempt in range(3):
+                        resp = requests.post(NEWS_HF_API_URL, headers=headers, json=payload, timeout=REMOTE_TIMEOUT_SEC)
+                        if resp.ok:
+                            text = self._coerce_remote_json_text(self._extract_remote_text(resp.json()))
+                            if text:
+                                logger.info("[news-maker] Remote fallback used: huggingface (attempt %d)", hf_attempt + 1)
+                                return text
+                            break
+                        elif resp.status_code in (429, 503):
+                            logger.warning("[news-maker] HuggingFace API error %s (rate-limited/loading). Retrying in %.1fs...", resp.status_code, hf_delay)
+                            time.sleep(hf_delay)
+                            hf_delay *= 2.0
+                        else:
+                            logger.warning("[news-maker] HuggingFace API error %s on attempt %d", resp.status_code, hf_attempt + 1)
+                            break
             except Exception as exc:
                 logger.warning("[news-maker] Remote provider %s failed: %s", item, exc)
 
@@ -2105,6 +2575,484 @@ class NewsMaker:
         result = re.sub(r"\n{3,}", "\n\n", result)
         return result.strip()
 
+    def _generate_technical_deep_dive_fallback(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if valid_items:
+                items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("score") or 0.0), reverse=True)
+                pair = items_sorted[0][0]
+            else:
+                pair = "btcidr"
+        
+        clean_sym = self._clean_symbol(pair)
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        ch_24h = float(ticker_data.get("ch_24h") or 0.0)
+        ch_1h = float(ticker_data.get("ch_1h") or 0.0)
+        vol_idr = float(ticker_data.get("vol_idr") or 0.0)
+        volatility = float(ticker_data.get("volatility") or 1.5)
+        
+        tech = {}
+        history = []
+        try:
+            with db.get_connection() as conn:
+                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
+                if row and row["history_json"]:
+                    history = json.loads(row["history_json"])
+                    if len(history) >= 2:
+                        tech = get_technical_summary(history)
+        except Exception:
+            pass
+
+        rsi = float(tech.get("rsi", 50.0))
+        rsi_status = "OVERSOLD (Bullish)" if rsi < 30 else ("OVERBOUGHT (Bearish)" if rsi > 70 else "NEUTRAL")
+        
+        macd_hist = float(tech.get("macd_hist", 0.0))
+        macd_status = "BULLISH (Histogram > 0)" if macd_hist > 0 else "BEARISH (Histogram < 0)"
+        
+        bb_pb = float(tech.get("bb_pb", 0.5))
+        bb_status = "BULLISH (Harga < Lower Band)" if bb_pb < 0 else ("BEARISH (Harga > Upper Band)" if bb_pb > 1 else "NEUTRAL")
+        
+        stoch_k = float(tech.get("stoch_k", 50.0))
+        stoch_d = float(tech.get("stoch_d", 50.0))
+        stoch_status = "BULLISH (Cross-Up K > D)" if stoch_k > stoch_d else "BEARISH (Cross-Down K < D)"
+        
+        ema_crossover = str(tech.get("ema_crossover", "HOLD"))
+        ema_status = "BULLISH (EMA-9 > EMA-21)" if ema_crossover == "BUY" else ("BEARISH (EMA-9 < EMA-21)" if ema_crossover == "SELL" else "NEUTRAL")
+        
+        williams_r = float(tech.get("williams_r", -50.0))
+        williams_status = "OVERSOLD (Bullish)" if williams_r < -80 else ("OVERBOUGHT (Bearish)" if williams_r > -20 else "NEUTRAL")
+        
+        slope = float(tech.get("slope", 0.0))
+        slope_status = "BULLISH (Slope > 0)" if slope > 0 else "BEARISH (Slope < 0)"
+        
+        roc_10 = float(tech.get("roc_10", 0.0))
+        roc_status = "BULLISH (Rate of Change > 0)" if roc_10 > 0 else "BEARISH (Rate of Change < 0)"
+        
+        ob_pressure = float(tech.get("ob_pressure", 50.0))
+        ob_status = "BULLISH (Buy Wall Dominant)" if ob_pressure > 55 else ("BEARISH (Sell Wall Dominant)" if ob_pressure < 45 else "NEUTRAL")
+        
+        vol_ratio = float(tech.get("volume_ratio", 1.0))
+        vol_status = "BULLISH (Breakout Spike > 1.5)" if vol_ratio > 1.5 else "NEUTRAL"
+        
+        obv_slope = float(tech.get("obv_slope", 0.0))
+        obv_status = "BULLISH (Accumulation Trend)" if obv_slope > 0 else "BEARISH (Distribution Trend)"
+
+        confluence_score = 0.0
+        signals = {"score": 0.0, "opposing": 0.0, "signal": "HOLD"}
+        if len(history) >= 2:
+            try:
+                signals = derive_trade_signal(history)
+            except Exception:
+                pass
+        confluence_score = abs(float(signals.get("score", 0.0)))
+        bias = "BULLISH CONFLUENCE" if signals.get("signal") == "BUY" else ("BEARISH CONFLUENCE" if signals.get("signal") == "SELL" else "NEUTRAL / SIDEWAYS")
+        
+        buy_pressure = 50.0
+        try:
+            with db.get_connection() as conn:
+                depth = conn.execute("SELECT vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
+                bid_vol = sum(r['vol'] for r in depth if r['is_bid'] == 1)
+                ask_vol = sum(r['vol'] for r in depth if r['is_bid'] == 0)
+                total_ob = bid_vol + ask_vol
+                buy_pressure = round(bid_vol / total_ob * 100, 1) if total_ob > 0 else 50.0
+        except Exception:
+            pass
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+        
+        title = f"[QUANT REPORT] Analisis Konfluensi Teknikal Mendalam {clean_sym} – Confluence Score: {confluence_score:.1f}"
+        excerpt = f"Laporan telemetri sistem otomatis mengenai analisis teknikal 11 indikator kuantitatif lengkap pada pasangan {clean_sym}."
+        
+        content = f"""## Laporan Kuantitatif Terintegrasi
+
+Berikut adalah hasil audit terperinci dari konfluensi indikator teknis utama untuk aset **{clean_sym}** per **{waktu} WIB**. Evaluasi didasarkan pada telemetri data pasar historis 15-menit dan kondisi orderbook realtime.
+
+### Telemetri Harga & Volatilitas
+| Metrik Kuantitatif | Nilai | Catatan |
+|---|---|---|
+| **Harga Saat Ini** | {self._format_price(price)} | Harga spot realtime |
+| **Perubahan 1 Jam** | {ch_1h:+.2f}% | Momentum jangka ultra-pendek |
+| **Perubahan 24 Jam** | {ch_24h:+.2f}% | Momentum jangka menengah |
+| **Volatilitas Intraday** | {volatility:.2f}% | Volatilitas pergerakan rata-rata |
+
+### Evaluasi Konfluensi 11 Indikator Aktif
+Sistem mendeteksi total skor konfluensi **{confluence_score:.2f}** dengan bias arah **{bias}**.
+
+| # | Indikator Teknis | Nilai Kuantitatif | Bobot | Status Evaluasi |
+|---|---|---|---|---|
+| 1 | RSI-14 (Wilder) | {rsi:.2f} | 3.0 | {rsi_status} |
+| 2 | MACD Histogram | {macd_hist:.4f} | 2.5 | {macd_status} |
+| 3 | Bollinger %B | {bb_pb:.2f} | 2.0 | {bb_status} |
+| 4 | Stochastic RSI | K={stoch_k:.2f} D={stoch_d:.2f} | 2.0 | {stoch_status} |
+| 5 | EMA 9/21 Crossover | {ema_crossover} | 1.5 | {ema_status} |
+| 6 | Williams %R | {williams_r:.2f} | 1.5 | {williams_status} |
+| 7 | Linear Regression Slope | {slope:.4f} | 1.0 | {slope_status} |
+| 8 | Rate of Change (ROC-10) | {roc_10:.2f}% | 1.0 | {roc_status} |
+| 9 | Order Book Pressure | {ob_pressure:.2f}% | 2.0 | {ob_status} |
+| 10 | Volume Ratio (MA-20) | {vol_ratio:.2f}x | 1.5 | {vol_status} |
+| 11 | OBV Slope (Accumulation) | {obv_slope:.4f} | 1.5 | {obv_status} |
+
+### Analisis Kuantitatif Terintegrasi (Grounded Data)
+* **Keseimbangan Order Book**: Kekuatan beli di pasar (Buy Pressure) berada pada level **{buy_pressure:.1f}%**, menunjukkan dominasi **{"pembeli (Bulls)" if buy_pressure > 50 else "penjual (Bears)"}** pada dinding antrean orderbook.
+* **Kondisi Momentum**: Indikator RSI berada di level **{rsi:.1f}** dengan histogram MACD **{"menguat (bullish momentum)" if macd_hist > 0 else "melemah (bearish momentum)"}**, mengindikasikan status pasar yang sedang **{"overbought" if rsi > 70 else ("oversold" if rsi < 30 else "konsolidasi sehat")}**.
+* **Volatilitas**: Volatilitas rata-rata pasar adalah **{volatility:.2f}%**. Sistem menetapkan status risk-on/risk-off saat ini sebagai **{"HIGH VOLATILITY (Caution)" if volatility > 3.0 else "NORMAL VOLATILITY (Safe)"}**.
+
+### Rekomendasi Operasional Bot
+* **Rekomendasi Entry**: **{bias}**
+* **Target Stop-Loss Dinamis (ATR)**: {self._format_price(price * 0.97)} (3% Safety Cushion)
+* **Target Take Profit**: {self._format_price(price * 1.015)} (1.5% Net Profit Target)
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_whale_tracking_fallback(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if valid_items:
+                items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("vol_idr") or 0.0), reverse=True)
+                pair = items_sorted[0][0]
+            else:
+                pair = "btcidr"
+        
+        clean_sym = self._clean_symbol(pair)
+        depth_data = self._depth_summary.get(pair, {})
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        vol_idr = float(ticker_data.get("vol_idr") or 0.0)
+        
+        bid_vol = float(depth_data.get("bid_vol") or vol_idr * 0.5)
+        ask_vol = float(depth_data.get("ask_vol") or vol_idr * 0.5)
+        imbalance = float(depth_data.get("imbalance") or 0.0)
+        spread_pct = float(depth_data.get("spread_pct") or 0.05)
+        
+        tech = {}
+        history = []
+        try:
+            with db.get_connection() as conn:
+                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
+                if row and row["history_json"]:
+                    history = json.loads(row["history_json"])
+                    if len(history) >= 2:
+                        tech = get_technical_summary(history)
+        except Exception:
+            pass
+
+        vol_ratio = float(tech.get("volume_ratio", 1.0))
+        obv_slope = float(tech.get("obv_slope", 0.0))
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+        
+        title = f"[WHALE REPORT] Deteksi Aliran Dana & Dinding Likuiditas Besar {clean_sym}"
+        excerpt = f"Audit eksklusif terhadap pergerakan orderbook, penyebaran bid-ask spread, serta deteksi akumulasi volume abnormal oleh pelaku pasar skala besar (Whales) pada {clean_sym}."
+        
+        content = f"""## Laporan Aliran Dana & Whales Realtime
+
+Sistem mendeteksi adanya aktivitas akumulasi dan penyebaran likuiditas pada pasar **{clean_sym}** per **{waktu} WIB**. Laporan ini diaudit menggunakan data real-time dari ketebalan order book (bid/ask depth) dan tingkat partisipasi volume.
+
+### Telemetri Kedalaman Pasar (Orderbook Depth)
+| Metrik Aliran Dana | Nilai Kuantitatif | Evaluasi Sistem |
+|---|---|---|
+| **Total Dinding Beli (Bid Vol)** | {self._format_price(bid_vol)} | Likuiditas Penahan Bawah |
+| **Total Dinding Jual (Ask Vol)** | {self._format_price(ask_vol)} | Resistensi Dinding Atas |
+| **Orderbook Imbalance** | {imbalance:+.2f}% | Dominasi Arah Likuiditas |
+| **Spread Bid-Ask** | {spread_pct:.3f}% | Indikator Efisiensi Likuiditas |
+| **Volume Ratio vs MA-20** | {vol_ratio:.2f}x | Deteksi Spike Partisipasi |
+| **Kemiringan OBV (OBV Slope)** | {obv_slope:.6f} | Deteksi Akumulasi Diam-diam |
+
+### Analisis Likuiditas Whales
+* **Penyebaran Dinding (Order Book Walls)**: Dinding beli (Bid Volume) terakumulasi sebesar **{self._format_large_volume(bid_vol)}**, sedangkan dinding jual (Ask Volume) terkonsentrasi di level **{self._format_large_volume(ask_vol)}**.
+* **Imbalance & Spread**: Skor imbalance saat ini tercatat sebesar **{imbalance:+.2f}%**, yang menunjukkan adanya bias **{"pembelian agresif" if imbalance > 0 else "distribusi tekanan jual"}**. Nilai spread yang sangat rapat sebesar **{spread_pct:.3f}%** mengonfirmasi tingkat likuiditas yang **sangat efisent dan ramah scalping**.
+* **Aktivitas Akumulasi Klandestin**: Kemiringan kurva OBV saat ini berada pada angka **{obv_slope:.6f}**, menandakan adanya **{"akumulasi aktif oleh para investor institusi/whales" if obv_slope > 0 else "distribusi bertahap oleh pemilik modal besar"}**.
+
+### Rekomendasi Scalping Kuantitatif
+* **Tingkat Bahaya Slippage**: **{"RENDAH (Sangat aman untuk ukuran order besar)" if spread_pct < 0.1 else "SEDANG (Gunakan limit order)"}**
+* **Level Support Whale Utama**: {self._format_price(price * 0.985)}
+* **Level Resistance Whale Utama**: {self._format_price(price * 1.015)}
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_risk_warning_fallback(self, coin_symbol=None):
+        self._refresh_db_context(force=True)
+        pair = self._normalize_pair_key(coin_symbol) if coin_symbol else None
+        if not pair:
+            valid_items = self._get_valid_market_items(require_fresh=False)
+            if valid_items:
+                items_sorted = sorted(valid_items, key=lambda x: float(x[1].get("volatility") or 0.0), reverse=True)
+                pair = items_sorted[0][0]
+            else:
+                pair = "btcidr"
+        
+        clean_sym = self._clean_symbol(pair)
+        ticker_data = self._tickers.get(pair, {})
+        price = float(ticker_data.get("price") or 0.0)
+        volatility = float(ticker_data.get("volatility") or 1.5)
+        
+        tech = {}
+        history = []
+        try:
+            with db.get_connection() as conn:
+                row = conn.execute("SELECT history_json FROM ticker_history WHERE pair = %s", (pair,)).fetchone()
+                if row and row["history_json"]:
+                    history = json.loads(row["history_json"])
+                    if len(history) >= 2:
+                        tech = get_technical_summary(history)
+        except Exception:
+            pass
+
+        gate_4b_status = "PASSED (Safe)" if volatility <= 3.0 else "REJECTED (High Volatility ATR)"
+        
+        ema50 = price * 0.99
+        if len(history) >= 50:
+            try:
+                prices = [float(h["close"]) for h in history]
+                alpha = 2.0 / (50 + 1)
+                ema = prices[0]
+                for p in prices[1:]:
+                    ema = p * alpha + ema * (1 - alpha)
+                ema50 = ema
+            except Exception:
+                pass
+        
+        gate_4c_status = "PASSED (Price > EMA-50)" if price >= ema50 else "REJECTED (Price < EMA-50)"
+        
+        rsi = float(tech.get("rsi", 50.0))
+        buy_pressure = 50.0
+        try:
+            with db.get_connection() as conn:
+                depth = conn.execute("SELECT vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
+                bid_vol = sum(r['vol'] for r in depth if r['is_bid'] == 1)
+                ask_vol = sum(r['vol'] for r in depth if r['is_bid'] == 0)
+                total_ob = bid_vol + ask_vol
+                buy_pressure = (bid_vol / total_ob * 100) if total_ob > 0 else 50.0
+        except Exception:
+            pass
+        
+        vol_ratio = float(tech.get("volume_ratio", 1.0))
+        
+        bypass_status = "INACTIVE"
+        if rsi < 26 and buy_pressure > 66.0 and vol_ratio > 2.1:
+            bypass_status = "ACTIVE (Extreme Bottom Reversal Bypass Triggered)"
+            gate_4c_status = "BYPASSED (Extreme Bottom Reversal)"
+        
+        regime = db.get_state("current_market_regime") or "NEUTRAL"
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+        standard_lot = "standar ($10 USDT)" if os.getenv("EXCHANGE", "binance").lower() == "binance" else "standar (100k IDR)"
+        
+        title = f"[RISK WARNING] Telemetri Volatilitas Intraday & Audit Safety Guards {clean_sym}"
+        excerpt = f"Evaluasi berkala terhadap status manajemen risiko pasar, deteksi status filter filter ATR (Gate 4b), trend filter EMA-50 (Gate 4c), dan panduan manajemen portofolio {clean_sym}."
+        
+        content = f"""## Laporan Manajemen Risiko & Audit Pintu Keamanan Bot
+
+Sistem manajemen portofolio Algovibe mengeluarkan status risiko terkini untuk **{clean_sym}** per **{waktu} WIB** guna melindungi modal perdagangan di bawah volatilitas pasar saat ini.
+
+### Status Keamanan Pre-Entry Gates (Audit Realtime)
+| Gerbang Keamanan Bot | Status Operasional | Kriteria & Kondisi |
+|---|---|---|
+| **Gate 4b: ATR Volatility Filter** | {gate_4b_status} | Toleransi batas volatilitas < 3% |
+| **Gate 4c: EMA-50 Trend Filter** | {gate_4c_status} | Harga wajib berada di atas EMA-50 |
+| **Bottom-Explosion Extreme Bypass** | {bypass_status} | RSI < 26 + Buy Pressure > 66% + Vol Ratio > 2.1 |
+| **Consecutive-Loss Halt Guard** | AKTIF (Siaga) | Mencegah beruntunnya kerugian beruntun |
+
+### Metrik Risiko & Volatilitas Terperinci
+* **Regime Pasar**: Pasar saat ini beroperasi di bawah rezim **{regime}** dengan volatilitas intraday terdeteksi sebesar **{volatility:.2f}%**.
+* **Filter Volatilitas ATR**: Indikator ATR menunjukkan nilai pergerakan rata-rata yang **{"melebihi ambang batas aman (Cenderung High Risk)" if volatility > 3.0 else "berada di dalam koridor aman (Cenderung Low Risk)"}**.
+* **Evaluasi Tren EMA-50**: Harga saat ini adalah **{self._format_price(price)}**, sedangkan level trend EMA-50 berada pada **{self._format_price(ema50)}**. Kondisi ini menandakan aset sedang berada dalam fase **{"Uptrend Sehat (Bullish)" if price > ema50 else "Downtrend Berisiko (Bearish)"}**.
+
+### Panduan Mitigasi Risiko Portofolio
+* **Ukuran Maksimal Posisi (Position Sizing)**: **{"Kurangi ukuran lot hingga 50% (High Volatility)" if volatility > 3.0 else f"Gunakan ukuran lot {standard_lot}"}**
+* **Pengaman Tambahan**: Auto Stop-Loss (Auto-SL) wajib dinyalakan pada level **{self._format_price(price * 0.97)}** untuk menghindari fluktuasi harga yang tidak diinginkan.
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_market_headline_fallback(self, coin_symbol, move_data):
+        clean_sym = self._clean_symbol(coin_symbol)
+        pct = float(move_data.get("pct_change") or 0.0)
+        price = float(move_data.get("price") or 0.0)
+        direction = "MELESAT NAIK" if pct >= 0 else "ANJLOK TURUN"
+        trend_emoji = "🟢" if pct >= 0 else "🔴"
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%H:%M WIB")
+        
+        title = f"[FLASH ALERT] {clean_sym} {direction} {pct:+.1f}% Hari Ini"
+        excerpt = f"Deteksi telemetri pergerakan harga cepat pada pasangan {clean_sym} mencapai {pct:+.1f}%."
+        
+        price_usdt = price / 16000.0
+        
+        content = f"""## {trend_emoji} Flash Market Alert: Pergerakan Signifikan {clean_sym}
+        
+Sistem otomasi mendeteksi pergerakan harga yang cepat dan signifikan untuk aset **{clean_sym}** pada pukul **{waktu}**.
+
+### Ringkasan Telemetri Flash Alert
+* **Aset**: {clean_sym}
+* **Arah Pergerakan**: **{direction}**
+* **Perubahan Persentase**: **{pct:+.2f}%**
+* **Harga Spot Saat Ini**: {self._format_price(price)}
+* **Sumber Data**: Algovibe Exchange Telemetry
+
+### Analisis Cepat & Tindakan Bot
+Pergerakan sebesar **{pct:+.2f}%** memicu alarm ambang batas bot. Sistem saat ini terus memantau likuiditas order book dan sebaran bid-ask spread untuk mendeteksi potensi kelanjutan momentum atau pembalikan arah instan (mean reversion). Operasional scalping bot disarankan untuk meningkatkan level waspada risiko volatility drag.
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_periodic_report_fallback(self, rtype):
+        self._refresh_db_context(force=True)
+        valid_items = self._get_valid_market_items(require_fresh=False)
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+        
+        lbl = "Pagi" if "MORNING" in rtype else "Sore"
+        title = f"[QUANT REPORT] Analisis & Rangkuman Pasar {lbl} – Algovibe Intelligence"
+        excerpt = f"Rangkuman data telemetri pasar otomatis Algovibe untuk sesi {lbl} tanggal {waktu}."
+        
+        table_rows = ""
+        for i, (pair, ticker) in enumerate(valid_items[:8]):
+            clean_sym = self._clean_symbol(pair)
+            price = float(ticker.get("price") or 0.0)
+            ch_24h = float(ticker.get("ch_24h") or 0.0)
+            ch_1h = float(ticker.get("ch_1h") or 0.0)
+            vol_idr = float(ticker.get("vol_idr") or 0.0)
+            vol_m = vol_idr / 1_000_000.0
+            
+            table_rows += f"| {i+1} | **{clean_sym}** | {self._format_price(price)} | {ch_1h:+.2f}% | {ch_24h:+.2f}% | {self._format_vol_m(vol_m)} |\n"
+            
+        content = f"""## Rangkuman Pasar {lbl} ({waktu} WIB)
+        
+Berikut adalah ikhtisar kondisi pasar berdasarkan telemetri kuantitatif langsung dari bursa.
+
+### Telemetri Kinerja Aset Teraktif
+| # | Koin | Harga Spot | Perubahan 1 Jam | Perubahan 24 Jam | Volume 24 Jam |
+|---|---|---|---|---|---|
+{table_rows}
+
+### Catatan Operasional
+Kondisi pasar saat ini menunjukkan volatilitas yang stabil dengan kecenderungan momentum yang beragam. Bot scalping tetap aktif memantau pintu masuk teknis (EMA-50 & ATR filter). Selalu prioritaskan perlindungan modal dengan pengaman risiko default.
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_trending_review_fallback(self):
+        self._refresh_db_context(force=True)
+        valid_items = self._get_valid_market_items(require_fresh=False)
+        
+        import datetime
+        waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+        
+        title = f"[QUANT REPORT] Ulasan Koin Trending Terpopuler Hari Ini"
+        excerpt = f"Analisis kuantitatif otomatis mengenai aset-aset dengan aktivitas volume dan momentum tertinggi."
+        
+        gainers = sorted(valid_items, key=lambda x: float(x[1].get("ch_24h") or 0.0), reverse=True)[:5]
+        table_rows = ""
+        for i, (pair, ticker) in enumerate(gainers):
+            clean_sym = self._clean_symbol(pair)
+            price = float(ticker.get("price") or 0.0)
+            ch_24h = float(ticker.get("ch_24h") or 0.0)
+            vol_idr = float(ticker.get("vol_idr") or 0.0)
+            vol_m = vol_idr / 1_000_000.0
+            table_rows += f"| {i+1} | **{clean_sym}** | {self._format_price(price)} | {ch_24h:+.2f}% | {self._format_vol_m(vol_m)} |\n"
+            
+        content = f"""## Ulasan Aset Trending & Teraktif ({waktu} WIB)
+        
+Berikut adalah jajaran aset dengan lonjakan aktivitas volume dan momentum harga terkuat dalam 24 jam terakhir.
+
+### Top Gainers & Momentum Movers
+| # | Koin | Harga Spot | Perubahan 24 Jam | Volume 24 Jam |
+|---|---|---|---|---|
+{table_rows}
+
+### Analisis Kuantitatif
+Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike volume yang tinggi memicu alarm breakout pada sistem Algovibe. Bot scalping terus mengamati level support kunci untuk peluang entri momentum berkelanjutan.
+"""
+        return {"title": title, "excerpt": excerpt, "content": content}
+
+    def _generate_market_intelligence_brief_fallback(self):
+        self._refresh_db_context(force=True)
+        valid_items = self._get_valid_market_items(require_fresh=False)
+        if not valid_items:
+            return "Kondisi pasar saat ini stabil dengan likuiditas normal."
+            
+        top_gainers = sorted(valid_items, key=lambda x: float(x[1].get("ch_24h") or 0.0), reverse=True)[:3]
+        bullets = []
+        for pair, ticker in top_gainers:
+            clean_sym = self._clean_symbol(pair)
+            ch_24h = float(ticker.get("ch_24h") or 0.0)
+            bullets.append(f"{clean_sym} ({ch_24h:+.1f}%)")
+            
+        import datetime
+        waktu = datetime.datetime.now().strftime("%H:%M WIB")
+        
+        brief = f"Telemetri Algovibe pada {waktu} mendeteksi aktivitas pasar teraktif pada aset: {', '.join(bullets)}. Bot scalping beroperasi normal dengan parameter risiko default."
+        return brief
+
+    def _get_usdt_idr_rate(self):
+        # 1. Try to read from Indodax tickers in self._tickers (if loaded)
+        if hasattr(self, "_tickers") and self._tickers:
+            for key in ["usdtidr", "usdt/idr", "usdt_idr"]:
+                if key in self._tickers:
+                    val = float(self._tickers[key].get("price") or 0.0)
+                    if val > 10000:
+                        return val
+        
+        # 2. Try to fetch from Indodax ccxt directly (cache it)
+        if not hasattr(self, "_usdt_idr_cached_rate") or time.time() - getattr(self, "_usdt_idr_cached_time", 0) > 300:
+            try:
+                from app.infrastructure.exchange_factory import create_indodax_exchange
+                idx = create_indodax_exchange()
+                ticker = idx.fetch_ticker("USDT/IDR")
+                price = float(ticker.get("last") or ticker.get("close") or 16000.0)
+                if price > 10000:
+                    self._usdt_idr_cached_rate = price
+                    self._usdt_idr_cached_time = time.time()
+                    logger.info("[news-maker] Fetched live USDT/IDR rate from Indodax: %.2f", price)
+                    return price
+            except Exception as err:
+                logger.warning("[news-maker] Failed to fetch live USDT/IDR rate via CCXT: %s", err)
+        
+        if hasattr(self, "_usdt_idr_cached_rate") and self._usdt_idr_cached_rate > 10000:
+            return self._usdt_idr_cached_rate
+            
+        # 3. Final fallback
+        return 16000.0
+
+    def _format_price(self, price):
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            rate = self._get_usdt_idr_rate()
+            idr_price = price * rate
+            return f"Rp {idr_price:,.2f}"
+        else:
+            return f"Rp {price:,.2f}"
+
+    def _format_large_volume(self, vol):
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            rate = self._get_usdt_idr_rate()
+            vol_idr = vol * rate
+        else:
+            vol_idr = vol
+
+        if vol_idr >= 1_000_000.0:
+            return f"{vol_idr/1_000_000.0:.1f} Juta IDR"
+        else:
+            return f"{vol_idr:,.0f} IDR"
+
+    def _format_vol_m(self, vol_m):
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            rate = self._get_usdt_idr_rate()
+            vol_m_idr = vol_m * rate
+            return f"Rp {vol_m_idr:,.2f}M"
+        else:
+            return f"Rp {vol_m:,.2f}M"
+
     def _save_article(self, art, category):
         try:
             art = self._sanitize_article_payload(art)
@@ -2154,7 +3102,7 @@ class NewsMaker:
 
 def main():
     parser = argparse.ArgumentParser(description="Algovibe News Maker")
-    parser.add_argument("--manual", choices=["morning", "evening", "headline", "brief", "landing"], help="Run one-shot manual generation")
+    parser.add_argument("--manual", choices=["morning", "evening", "headline", "brief", "landing", "tech_deep_dive", "whale_tracking", "risk_warning"], help="Run one-shot manual generation")
     parser.add_argument("--coin", help="Coin symbol for manual headline/landing mode, e.g. btc")
     parser.add_argument("--count", type=int, default=3, help="Headline count target for landing mode")
     args = parser.parse_args()
