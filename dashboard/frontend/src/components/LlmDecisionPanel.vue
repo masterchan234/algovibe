@@ -7,7 +7,7 @@
 
     <div class="decisions-list">
       <div v-if="decisions.length === 0" class="empty-state">
-        Belum ada keputusan LLM. Service sedang memantau posisi terbuka.
+        No LLM decisions yet. The service is actively monitoring open positions.
       </div>
       <div
         v-for="d in decisions"
@@ -85,7 +85,7 @@ function formatPair(pair) {
 function formatTime(ts) {
   if (!ts) return '--:--'
   try {
-    return new Date(ts).toLocaleTimeString('id-ID', {
+    return new Date(ts).toLocaleTimeString('en-US', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',

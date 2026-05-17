@@ -25,7 +25,7 @@
         <!-- Stats grid -->
         <div class="rdm-stats">
           <div class="rdm-stat">
-            <span class="rdm-stat-label">Prediksi</span>
+            <span class="rdm-stat-label">Prediction</span>
             <span class="rdm-stat-val rdm-prob">{{ pair?.prediction != null ? ((pair.prediction * 100).toFixed(0) + '%') : 'N/A' }}</span>
           </div>
           <div class="rdm-stat">
@@ -43,7 +43,7 @@
             <span class="rdm-stat-val">{{ pair.vol_score }}</span>
           </div>
           <div class="rdm-stat" v-if="pair?.last_price != null">
-            <span class="rdm-stat-label">Harga</span>
+            <span class="rdm-stat-label">Price</span>
             <span class="rdm-stat-val">{{ formatPrice(pair.last_price) }}</span>
           </div>
           <div class="rdm-stat" v-if="pair?.change_24h != null">
@@ -57,7 +57,7 @@
         <!-- AI Veto block -->
         <div class="rdm-veto-block" v-if="pair?.ai_veto">
           <span class="rdm-veto-chip">AI VETO {{ pair.ai_veto_confidence || 0 }}%</span>
-          <span class="rdm-veto-reason">{{ pair.ai_veto_reason || 'Diveto oleh AI' }}</span>
+          <span class="rdm-veto-reason">{{ pair.ai_veto_reason || 'Vetoed by AI' }}</span>
         </div>
 
         <!-- Status / reason text -->
@@ -70,7 +70,7 @@
 
         <!-- Footer -->
         <div class="rdm-footer">
-          <button class="rdm-btn-cancel" @click="onClose">Tutup</button>
+          <button class="rdm-btn-cancel" @click="onClose">Close</button>
           <button class="rdm-btn-ai" @click="onDeepAnalysis">
             🤖 AI Deep Analysis
           </button>
@@ -161,12 +161,12 @@ const trendClass = computed(() => {
 
 const fullStatus = computed(() => {
   if (props.pair?.ai_veto) {
-    return String(props.pair?.ai_veto_reason || props.pair?.tradable_reason || 'AI memveto entry ini')
+    return String(props.pair?.ai_veto_reason || props.pair?.tradable_reason || 'AI vetoed this entry')
   }
   if (props.pair?.tradable === false) {
-    return String(props.pair?.tradable_reason || props.pair?.gate_status || 'Belum memenuhi gate entry')
+    return String(props.pair?.tradable_reason || props.pair?.gate_status || 'Gate entry conditions not met yet')
   }
-  return String(props.pair?.radar_reason || 'Ready untuk eksekusi jika gate lain lolos')
+  return String(props.pair?.radar_reason || 'Ready for execution if other gates pass')
 })
 </script>
 

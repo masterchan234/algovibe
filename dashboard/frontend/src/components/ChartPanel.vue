@@ -21,7 +21,7 @@
     </div>
 
     <!-- Loading / Error -->
-    <div v-if="loading" class="chart-state">⏳ Memuat data chart…</div>
+    <div v-if="loading" class="chart-state">⏳ Loading chart data…</div>
     <div v-else-if="error" class="chart-state error">⚠️ {{ error }}</div>
 
     <!-- ECharts candlestick -->
@@ -112,7 +112,7 @@ async function fetchChart() {
       { headers: getAuthHeaders() }
     )
     const data = await res.json()
-    if (!data.success) throw new Error(data.message || 'Gagal memuat chart')
+    if (!data.success) throw new Error(data.message || 'Failed to load chart')
     candles.value    = data.candles || []
     indicators.value = data.indicators || {}
   } catch (e) {
