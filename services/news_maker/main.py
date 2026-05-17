@@ -1115,23 +1115,23 @@ class NewsMaker:
         _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
         style_rules = self._markdown_article_style_rules()
         return (
-            f"Anda adalah Senior Quantitative LLM Engineer & Market Strategist Algovibe. Tulis artikel Analisis Teknis Mendalam (TECHNICAL_DEEP_DIVE) dalam Bahasa Indonesia.\n"
-            f"Fokus Aset: {coin_symbol}\n"
-            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
-            f"\nKonteks Telemetri Kuantitatif:\n{context}\n"
-            f"Persyaratan Artikel:\n"
-            f"- Judul: Tinjauan Teknis {coin_symbol}: Kupasan 11 Indikator Teknis & Strategi Confluence (50-80 karakter).\n"
-            f"- Excerpt: Ringkasan teknikal singkat (120-180 karakter) tentang status momentum dan setup trading {coin_symbol}.\n"
-            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
-            f"- Content: Sajikan artikel yang SANGAT PREMIUM dan EDUKATIF. Bahas detail 11 indikator aktif dari tabel di atas (RSI, MACD, Stoch RSI, dll), jelaskan bagaimana confluencenya menghasilkan rekomendasi bot, dan sajikan rencana eksekusi.\n"
-            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
-            f"  ## Ringkasan Kuantitatif\n"
-            f"  ## Audit 11 Indikator Teknis (Wajib sertakan tabel Markdown ringkasan indikator)\n"
-            f"  ## Analisis Confluence & Strategi Bot\n"
-            f"  ## Level Kunci & Skenario Eksekusi (Support, Resistance, Target TP/SL)\n"
-            f"  ## Kesimpulan\n"
+            f"You are the Senior Quantitative LLM Engineer & Market Strategist at Algovibe. Write a TECHNICAL_DEEP_DIVE technical analysis report in English.\n"
+            f"Asset Focus: {coin_symbol}\n"
+            f"Date: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nQuantitative Telemetry Context:\n{context}\n"
+            f"Article Requirements:\n"
+            f"- Title: Technical Review of {coin_symbol}: Audit of 11 Technical Indicators & Confluence Strategy (50-80 chars).\n"
+            f"- Excerpt: Brief technical summary (120-180 chars) of the momentum status and trading setup for {coin_symbol}.\n"
+            f"- Content length: minimum {_prompt_min_chars} characters.\n"
+            f"- Content: Present a highly premium, educational technical report in English. Discuss in detail the 11 active indicators from the context above (RSI, MACD, Stoch RSI, etc.), explain how their confluence shapes the bot's trade recommendations, and outline the execution plan.\n"
+            f"- Format: MARKDOWN. Use exactly this heading structure:\n"
+            f"  ## Quantitative Summary\n"
+            f"  ## Audit of 11 Technical Indicators\n"
+            f"  ## Confluence Analysis & Bot Strategy\n"
+            f"  ## Key Levels & Execution Scenarios\n"
+            f"  ## Conclusion\n"
             f"{style_rules}\n"
-            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
@@ -1226,23 +1226,23 @@ class NewsMaker:
         _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
         style_rules = self._markdown_article_style_rules()
         return (
-            f"Anda adalah Chief Blockchain Forensics & Order Book Analyst Algovibe. Tulis laporan Whale Tracking (WHALE_TRACKING) dalam Bahasa Indonesia.\n"
-            f"Aset Fokus: {coin_symbol}\n"
-            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
-            f"\nKonteks Telemetri Liquidity & Order Book:\n{context}\n"
-            f"Persyaratan Artikel:\n"
-            f"- Judul: Whale Tracking {coin_symbol}: Deteksi Aliran Dana Besar & Ketebalan Dinding Order Book (50-80 karakter).\n"
-            f"- Excerpt: Analisis ketebalan dinding bid/ask dan lonjakan volume ratio abnormal {coin_symbol}.\n"
-            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
-            f"- Content: Sajikan artikel yang PREMIUM dan DATA-GROUNDED. Terangkan detail ketebalan Bid vs Ask, arti dari Order Book Imbalance, dan hubungan lonjakan Volume Ratio vs MA-20 terhadap akumulasi atau distribusi diam-diam oleh whale.\n"
-            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
-            f"  ## Ringkasan Aliran Dana\n"
-            f"  ## Analisis Kedalaman Order Book & Bid/Ask Walls\n"
-            f"  ## Deteksi Volume Ratio Abnormal & OBV Slope\n"
-            f"  ## Implikasi Terhadap Arah Harga & Strategi Trading\n"
-            f"  ## Kesimpulan\n"
+            f"You are the Chief Blockchain Forensics & Order Book Analyst at Algovibe. Write a Whale Tracking (WHALE_TRACKING) report in English.\n"
+            f"Asset Focus: {coin_symbol}\n"
+            f"Date: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nLiquidity & Order Book Telemetry Context:\n{context}\n"
+            f"Article Requirements:\n"
+            f"- Title: Whale Tracking for {coin_symbol}: Large Fund Flows & Order Book Depth Detection (50-80 chars).\n"
+            f"- Excerpt: Analysis of bid/ask walls and abnormal volume ratio spikes for {coin_symbol}.\n"
+            f"- Content length: minimum {_prompt_min_chars} characters.\n"
+            f"- Content: Present a highly premium, data-grounded report in English. Detail the Bid vs Ask wall depth, the impact of Order Book Imbalance, and explain the relationship of Volume Ratio spikes vs MA-20 regarding secret distribution or accumulation by whales.\n"
+            f"- Format: MARKDOWN. Use exactly this heading structure:\n"
+            f"  ## Fund Flow Summary\n"
+            f"  ## Order Book Depth & Bid/Ask Walls Analysis\n"
+            f"  ## Abnormal Volume Ratio & OBV Slope Detection\n"
+            f"  ## Price Direction & Trading Strategy Implications\n"
+            f"  ## Conclusion\n"
             f"{style_rules}\n"
-            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
@@ -1316,23 +1316,23 @@ class NewsMaker:
         _prompt_min_chars = max(1000, MIN_NEWS_CONTENT_CHARS)
         style_rules = self._markdown_article_style_rules()
         return (
-            f"Anda adalah Chief Risk Officer & Quantitative Safety Engineer Algovibe. Tulis Laporan Peringatan Risiko Pasar (RISK_WARNING) dalam Bahasa Indonesia.\n"
-            f"Aset Fokus: {coin_symbol}\n"
-            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
-            f"\nKonteks Telemetri Risiko & Volatilitas:\n{context}\n"
-            f"Persyaratan Artikel:\n"
-            f"- Judul: Peringatan Risiko {coin_symbol}: Telemetri Volatilitas ATR & Skenario Proteksi Modal (50-80 karakter).\n"
-            f"- Excerpt: Analisis tingkat risiko volatilitas tinggi dan status safety guard filter pada {coin_symbol}.\n"
-            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
-            f"- Content: Sajikan artikel yang PREMIUM dan EDUKATIF. Jelaskan tingkat risiko saat ini, bagaimana ATR Volatility Filter (Gate 4b) dan EMA-50 Trend Filter (Gate 4c) bekerja mencegah jebakan harga, serta taktik membatasi loss.\n"
-            f"- Format MARKDOWN. Gunakan struktur heading persis seperti ini:\n"
-            f"  ## Evaluasi Risiko Pasar Terkini\n"
-            f"  ## Analisis Volatilitas Intraday & Telemetri ATR\n"
-            f"  ## Status Safety Guard & Entry Gate Bot (Filter EMA-50 & ATR)\n"
-            f"  ## Skenario Proteksi Modal & Risk Management Plan\n"
-            f"  ## Kesimpulan\n"
+            f"You are the Chief Risk Officer & Quantitative Safety Engineer at Algovibe. Write a Market Risk Warning (RISK_WARNING) report in English.\n"
+            f"Asset Focus: {coin_symbol}\n"
+            f"Date: {datetime.now(WIB_TZ).strftime('%d %b %Y %H:%M WIB')}\n"
+            f"\nRisk & Volatility Telemetry Context:\n{context}\n"
+            f"Article Requirements:\n"
+            f"- Title: Risk Warning for {coin_symbol}: ATR Volatility Telemetry & Capital Protection Scenarios (50-80 chars).\n"
+            f"- Excerpt: High risk volatility analysis and safety guard filter status for {coin_symbol}.\n"
+            f"- Content length: minimum {_prompt_min_chars} characters.\n"
+            f"- Content: Present a highly premium, educational risk management report in English. Explain the current risk levels, how the ATR Volatility Filter (Gate 4b) and EMA-50 Trend Filter (Gate 4c) operate to protect against price traps, and tactical capital preservation plans.\n"
+            f"- Format: MARKDOWN. Use exactly this heading structure:\n"
+            f"  ## Current Market Risk Evaluation\n"
+            f"  ## Intraday Volatility & ATR Telemetry Analysis\n"
+            f"  ## Safety Guard & Entry Gate Bot Status (EMA-50 & ATR)\n"
+            f"  ## Capital Protection & Risk Management Scenarios\n"
+            f"  ## Conclusion\n"
             f"{style_rules}\n"
-            "Balas HANYA 1 JSON object tanpa wrapper block:\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
@@ -1379,20 +1379,20 @@ class NewsMaker:
         return context
 
     def _build_trending_review_prompt(self, context):
-        """Prompt untuk daily trending review — multi-coin analysis."""
+        """Prompt for daily trending review — multi-coin analysis."""
         _prompt_min_chars = max(700, MIN_NEWS_CONTENT_CHARS // 3)
         return (
-            f"Anda adalah Senior Market Analyst Algovibe. Tulis Daily Trending Review dalam Bahasa Indonesia.\n"
-            f"Tanggal: {datetime.now(WIB_TZ).strftime('%d %b %Y')}\n"
-            f"\nKonteks Data:\n{context}\n"
-            f"Persyaratan Artikel:\n"
-            f"- Judul: sebutkan 2-3 coin terpilih, 50-80 karakter.\n"
-            f"- Excerpt: ringkasan 100-150 karakter.\n"
-            f"- Panjang konten: minimal {_prompt_min_chars} karakter.\n"
-            f"- Content: PADAT (250-400 kata). Bahas tiap coin: harga, arah, sinyal, level penting.\n"
-            f"- Format MARKDOWN. Struktur: ## Ringkasan → ## Analisis Per Coin → ## Kesimpulan\n"
-            f"- Fokus ke data konkret di atas, hindari narasi generik.\n"
-            "Balas HANYA 1 JSON object:\n"
+            f"You are the Senior Market Analyst at Algovibe. Write a Daily Trending Review in English.\n"
+            f"Date: {datetime.now(WIB_TZ).strftime('%d %b %Y')}\n"
+            f"\nData Context:\n{context}\n"
+            f"Article Requirements:\n"
+            f"- Title: Must mention 2-3 selected trending coins (50-80 chars).\n"
+            f"- Excerpt: Brief summary (100-150 chars).\n"
+            f"- Content length: minimum {_prompt_min_chars} characters.\n"
+            f"- Content: Concise (250-400 words). Discuss each coin: price, direction, trade signals, and key technical levels.\n"
+            f"- Format: MARKDOWN. Structure: ## Summary → ## Coin Analysis → ## Conclusion\n"
+            f"- Focus strictly on the concrete data above, avoid generic statements.\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
@@ -1597,34 +1597,34 @@ class NewsMaker:
             title_rule="Title: Breaking news impactful, 50-80 karakter. Include: coin + action + pct.",
             excerpt_rule="Excerpt: Summary 120-180 karakter. Jelaskan: apa geraknya, kenapa significant, dampaknya.",
             min_chars=_prompt_min_chars,
-            content_hint=f"RINGKAS & PADAT (150-250 kata) dalam FORMAT MARKDOWN. Fokus ke data utama dan analisis singkat.",
+            content_hint=f"CONCISE & SHARP (150-250 words) in MARKDOWN. Focus strictly on key data and brief analysis.",
         )
         return (
-            f"Anda adalah Market Analyst Algovibe. Tulis Breaking News pasar kripto dalam Bahasa Indonesia.\n"
-            f"Analisis: {self._clean_symbol(coin_symbol)} - {direction.upper()} {abs(move_data['pct_change']):.1f}%\n"
-            f"\nKonteks Data:\n{context}\n"
+            f"You are a Market Analyst at Algovibe. Write crypto market Breaking News in English.\n"
+            f"Analysis: {self._clean_symbol(coin_symbol)} - {direction.upper()} {abs(move_data['pct_change']):.1f}%\n"
+            f"\nData Context:\n{context}\n"
             f"{contract}\n"
-            "Balas HANYA 1 JSON object tanpa wrapper block.\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
     def _build_report_prompt(self, rtype, context):
-        title = "Morning Briefing" if rtype == "MORNING_BRIEF" else "Market Review Malam"
+        title = "Morning Briefing" if rtype == "MORNING_BRIEF" else "Evening Market Review"
         # Target lebih rendah agar LLM generate lebih cepat; _ensure_min_content akan pad jika kurang.
         _prompt_min_chars = max(700, MIN_NEWS_CONTENT_CHARS // 3)
         contract = self._markdown_article_output_contract(
             variant="report",
-            title_rule="Judul: catchy, informatif, 50-80 karakter.",
-            excerpt_rule="Excerpt: ringkasan 100-150 karakter yang mengecup poin utama.",
+            title_rule="Title: catchy, highly informative, 50-80 chars.",
+            excerpt_rule="Excerpt: engaging 100-150 character summary capturing key points.",
             min_chars=_prompt_min_chars,
-            content_hint="PADAT (250-400 kata) dalam FORMAT MARKDOWN PROPER yang nyaman dibaca di news feed.",
+            content_hint="CONCISE (250-400 words) in clean MARKDOWN suitable for the news feed.",
         )
         return (
-            f"Anda adalah Chief Editor Algovibe Intelligence. Tulis artikel blog profesional dalam Bahasa Indonesia.\n"
-            f"Tipe: {title}\n"
-            f"Konteks Data:\n{context}\n"
+            f"You are the Chief Editor at Algovibe Intelligence. Write a professional market report in English.\n"
+            f"Type: {title}\n"
+            f"Data Context:\n{context}\n"
             f"{contract}\n"
-            "Balas HANYA 1 JSON object, tanpa extra wrapper, tanpa teks tambahan.\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"title":"...","excerpt":"...","content":"..."}'
         )
 
@@ -1633,10 +1633,10 @@ class NewsMaker:
         section_template = self._markdown_article_section_template(variant)
         style_rules = self._markdown_article_style_rules()
         return (
-            "Persyaratan Artikel (Output PROPER MARKDOWN, inline-friendly):\n"
+            "Article Requirements (Output in clean, inline-friendly MARKDOWN):\n"
             f"- {title_rule}\n"
             f"- {excerpt_rule}\n"
-            f"- Panjang konten: minimal {int(min_chars)} karakter (WAJIB).\n"
+            f"- Content length: minimum {int(min_chars)} characters (MANDATORY).\n"
             f"- Content: {content_hint}\n"
             f"{style_rules}\n"
             f"{section_template}"
@@ -1645,39 +1645,39 @@ class NewsMaker:
     def _markdown_article_style_rules(self):
         """Shared formatting contract to keep article markdown consistent."""
         return (
-            "Aturan style seragam:\n"
-            "- paragraf pendek 2-4 kalimat\n"
-            "- heading maksimal 1 baris per section\n"
-            "- bullet list pendek dan langsung ke poin\n"
-            "- tabel hanya jika ada angka yang benar-benar perlu dibandingkan\n"
-            "- satu baris kosong antar section\n"
-            "- jangan pakai code fence, HTML, blockquote, atau nested list\n"
-            "- hindari section yang saling tumpang tindih isinya\n"
+            "Shared formatting style rules:\n"
+            "- short paragraphs of 2-4 sentences\n"
+            "- maximum 1 heading line per section\n"
+            "- short, direct bulleted lists\n"
+            "- markdown tables only for comparing key numerical metrics\n"
+            "- exactly one empty line between sections\n"
+            "- do NOT use markdown code fences (```), HTML tags, blockquotes, or nested lists\n"
+            "- avoid repetitive content between sections\n"
         )
 
     def _markdown_article_section_template(self, variant):
         """Return a consistent markdown section plan for all article variants."""
         if variant == "headline":
             return (
-                "Struktur section wajib seragam:\n"
-                "1. ## Ringkasan Cepat\n"
-                "2. ## Data Utama\n"
-                "3. ## Analisis Teknis\n"
-                "4. ## Level & Strategi\n"
-                "5. ## Risiko & Skenario\n"
-                "6. ## Kesimpulan\n"
-                "Aturan isi: ringkas, tegas, dan fokus ke market move yang sedang dibahas."
+                "Mandatory standardized section structure:\n"
+                "1. ## Quick Summary\n"
+                "2. ## Key Metrics\n"
+                "3. ## Technical Analysis\n"
+                "4. ## Levels & Strategy\n"
+                "5. ## Risks & Scenarios\n"
+                "6. ## Conclusion\n"
+                "Content rules: sharp, direct, and focused on the market moves."
             )
 
         return (
-            "Struktur section wajib seragam:\n"
-            "1. ## Ringkasan Pasar\n"
-            "2. ## Data Utama\n"
-            "3. ## Analisis Teknis\n"
-            "4. ## Level & Strategi\n"
-            "5. ## Risiko & Skenario\n"
-            "6. ## Kesimpulan\n"
-            "Aturan isi: runut, konsisten, dan mudah dipindai di news feed."
+            "Mandatory standardized section structure:\n"
+            "1. ## Market Summary\n"
+            "2. ## Key Metrics\n"
+            "3. ## Technical Analysis\n"
+            "4. ## Levels & Strategy\n"
+            "5. ## Risks & Scenarios\n"
+            "6. ## Conclusion\n"
+            "Content rules: logical, consistent, and easy to scan in the news feed."
         )
 
     def _normalize_markdown_content(self, content):
@@ -1695,15 +1695,15 @@ class NewsMaker:
 
     def _build_market_brief_prompt(self, context):
         return (
-            "Anda adalah MARKET INTELLIGENCE EDITOR untuk landing page Algovibe.\n"
-            "Tulis ringkasan singkat berbasis data pasar real yang diberikan.\n"
-            f"Konteks Data:\n{context}\n"
-            "Aturan output:\n"
-            "- Fokus pada kondisi market terkini, bukan narasi generik.\n"
-            "- Maksimal 2 kalimat, total <= 260 karakter.\n"
-            "- Wajib sebutkan minimal 1 sinyal konkret (trend/signal/ch_1h/regime/sentiment).\n"
-            "- Jangan gunakan markdown/code block.\n"
-            "Balas HANYA JSON object:\n"
+            "You are the MARKET INTELLIGENCE EDITOR for the Algovibe landing page.\n"
+            "Write a brief summary in English based on the real-time market data provided.\n"
+            f"Data Context:\n{context}\n"
+            "Output rules:\n"
+            "- Focus strictly on the latest market conditions, avoid generic narratives.\n"
+            "- Maximum of 2 sentences, total length <= 260 characters.\n"
+            "- Must mention at least 1 concrete technical metric (trend/signal/ch_1h/regime/sentiment).\n"
+            "- Do NOT use markdown code fences or HTML blocks.\n"
+            "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"brief":"..."}'
         )
 
@@ -1721,29 +1721,27 @@ class NewsMaker:
             article["content"] = content
             return article
 
-        #  Build data-driven extension dari context yang sudah terstruktur 
+        #  Build data-driven extension from structured context 
         extension = self._build_content_extension(content, context)
 
-        _ext_count = 0
-        while len(content) < MIN_NEWS_CONTENT_CHARS and _ext_count < 2:
+        if len(content) < MIN_NEWS_CONTENT_CHARS:
             content += "\n\n" + extension
-            _ext_count += 1
 
-        article["content"] = self._normalize_markdown_content(content[: max(MIN_NEWS_CONTENT_CHARS, len(content))])
+        article["content"] = self._normalize_markdown_content(content)
         if not article.get("excerpt"):
             article["excerpt"] = self._strip_markdown_plain(content)[:220]
         return article
 
     def _build_content_extension(self, existing_content, context):
-        """Build a data-driven article extension dari market context.
+        """Build a data-driven article extension from market context.
 
-        Tidak pernah menyertakan instruksi prompt atau raw context dump.
-        Semua section berisi data konkret atau narasi editorial yang layak baca.
+        Does not include prompt instructions or raw context dumps.
+        All sections contain concrete quantitative metrics or editorial commentary.
         """
         existing_lower = str(existing_content or "").lower()
         parts = []
 
-        #  Parse context untuk data konkret 
+        #  Parse context for concrete metrics 
         ctx_str = str(context or "")
         movers = self._parse_context_movers(ctx_str)
         regime = "NEUTRAL"
@@ -1755,57 +1753,57 @@ class NewsMaker:
         if sentiment_m:
             sentiment = sentiment_m.group(1)
 
-        #  Section: Level & Strategi (skip jika sudah ada) 
-        if "level" not in existing_lower or "strategi" not in existing_lower:
-            strat = "## Level & Strategi\n\n"
+        #  Section: Levels & Strategy (skip if already exists) 
+        if "level" not in existing_lower or "strategy" not in existing_lower:
+            strat = "## Levels & Strategy\n\n"
             if regime == "BULL":
                 strat += (
-                    "### Skenario Bullish\n"
-                    "Regime pasar saat ini mendukung posisi agresif. Entry bertahap setelah konfirmasi "
-                    "volume dan candle close di atas resistance intraday. Pastikan trend alignment di "
-                    "timeframe 5m/15m/1h sebelum scaling in.\n\n"
-                    "### Skenario Koreksi\n"
-                    "Jika terjadi koreksi, pantau area support terdekat. Koreksi sehat biasanya "
-                    "tidak menembus EMA-21 di timeframe 1h.\n"
+                    "### Bullish Scenario\n"
+                    "The current market regime supports aggressive positions. Scale in gradually after "
+                    "volume confirmation and candle close above intraday resistance. Ensure trend alignment "
+                    "across 5m/15m/1h timeframes before entry.\n\n"
+                    "### Correction Scenario\n"
+                    "In case of a correction, monitor the nearest support area. A healthy correction typically "
+                    "does not break the 1h EMA-21.\n"
                 )
             elif regime == "BEAR":
                 strat += (
-                    "### Skenario Bearish\n"
-                    "Regime pasar sedang dalam tekanan. Utamakan proteksi modal dan batasi eksposur. "
-                    "Gunakan stop-loss ketat berbasis struktur pasar terdekat.\n\n"
-                    "### Skenario Recovery\n"
-                    "Tunggu konfirmasi reversal berupa double bottom atau bullish divergence RSI "
-                    "sebelum membuka posisi baru.\n"
+                    "### Bearish Scenario\n"
+                    "The market regime is currently under pressure. Prioritize capital preservation and limit exposure. "
+                    "Use a tight stop-loss based on the nearest market structure.\n\n"
+                    "### Recovery Scenario\n"
+                    "Wait for reversal confirmation such as a double bottom or bullish RSI divergence "
+                    "before opening new positions.\n"
                 )
             else:
                 strat += (
-                    "### Skenario Bullish\n"
-                    "Entry bertahap setelah konfirmasi volume dan breakout resistance intraday. "
-                    "Pastikan trend alignment di timeframe 5m/15m/1h sebelum scaling in.\n\n"
-                    "### Skenario Netral\n"
-                    "Fokus range trading dengan ukuran posisi kecil. Hindari overtrading saat "
-                    "spread melebar atau volatilitas extreme.\n\n"
-                    "### Skenario Bearish\n"
-                    "Utamakan proteksi modal dan batasi eksposur leverage. Gunakan stop-loss ketat "
-                    "berbasis struktur pasar terdekat.\n"
+                    "### Bullish Scenario\n"
+                    "Scale in gradually after volume confirmation and breakout of intraday resistance. "
+                    "Ensure trend alignment across 5m/15m/1h timeframes before entry.\n\n"
+                    "### Neutral Scenario\n"
+                    "Focus on range trading with small position sizes. Avoid overtrading during "
+                    "wide spreads or extreme volatility.\n\n"
+                    "### Bearish Scenario\n"
+                    "Prioritize capital preservation and limit leverage exposure. Use a tight "
+                    "stop-loss based on the nearest market structure.\n"
                 )
             parts.append(strat)
 
-        #  Section: Risiko & Skenario (skip jika sudah ada) 
-        if "risiko" not in existing_lower:
+        #  Section: Risk & Portfolio Management (skip if already exists) 
+        if "risk" not in existing_lower and "risiko" not in existing_lower:
             risk = (
-                "## Risiko & Manajemen\n\n"
-                "- Risiko per posisi: maksimal 1-2% ekuitas portofolio\n"
-                "- Take-profit: gunakan partial TP untuk lock profit secara bertahap\n"
-                "- Evaluasi ulang: segera review jika volatilitas melonjak tiba-tiba\n"
-                "- Stop-loss: wajib dipasang berbasis level teknikal, bukan persentase acak\n"
+                "## Risk & Portfolio Management\n\n"
+                "- Risk per position: maximum 1-2% of portfolio equity\n"
+                "- Take-profit: use partial TP to lock in profits incrementally\n"
+                "- Re-evaluation: immediately review if volatility spikes suddenly\n"
+                "- Stop-loss: must be set based on technical support levels, not random percentages\n"
             )
             parts.append(risk)
 
-        #  Section: Snapshot Pasar (data movers dari context, bukan raw dump) 
+        #  Section: Latest Market Snapshot (data movers from context) 
         if movers and "snapshot" not in existing_lower:
-            snap = "## Snapshot Pasar Terkini\n\n"
-            snap += f"Regime pasar: **{regime}** | Sentimen: **{sentiment}%**\n\n"
+            snap = "## Latest Market Snapshot\n\n"
+            snap += f"Market regime: **{regime}** | Sentiment: **{sentiment}%**\n\n"
             gainers = [m for m in movers if m.get("pct", 0) > 0]
             losers = [m for m in movers if m.get("pct", 0) < 0]
             if gainers:
@@ -1820,33 +1818,33 @@ class NewsMaker:
                 snap += "\n"
             parts.append(snap)
 
-        #  Section: Validasi Pre-Entry (checklist konkret) 
-        if "validasi" not in existing_lower and "checklist" not in existing_lower:
+        #  Section: Pre-Entry Technical Validation (checklist) 
+        if "validation" not in existing_lower and "validasi" not in existing_lower and "checklist" not in existing_lower:
             check = (
-                "## Validasi Teknikal Pre-Entry\n\n"
-                "| Checklist | Keterangan |\n"
+                "## Pre-Entry Technical Validation\n\n"
+                "| Checklist | Description |\n"
                 "| --- | --- |\n"
-                "| Trend alignment 5m/15m/1h | Semua timeframe harus searah |\n"
-                "| Spread health | Spread harus tight untuk eksekusi optimal |\n"
-                "| Orderbook imbalance | Harus mendukung arah posisi |\n"
-                "| TP/SL realistic | Target harus realistis terhadap volatilitas terbaru |\n"
+                "| Trend alignment 5m/15m/1h | All timeframes must be aligned |\n"
+                "| Spread health | Bid-ask spread must be tight for optimal execution |\n"
+                "| Orderbook imbalance | Must support position direction |\n"
+                "| TP/SL realistic | Target must be realistic relative to recent ATR volatility |\n"
             )
             parts.append(check)
 
-        #  Section: Kesimpulan (skip jika sudah ada) 
-        if "kesimpulan" not in existing_lower:
+        #  Section: Conclusion (skip if already exists) 
+        if "conclusion" not in existing_lower and "kesimpulan" not in existing_lower:
             regime_narr = {
-                "BULL": "Kondisi pasar bullish mendukung posisi long dengan manajemen risiko ketat.",
-                "BEAR": "Kondisi pasar bearish menuntut kehati-hatian ekstra dan proteksi modal.",
-                "NEUTRAL": "Pasar dalam fase konsolidasi. Prioritaskan quality setup dan hindari overtrading.",
-            }.get(regime, "Pantau perkembangan pasar dan tunggu konfirmasi sinyal yang lebih jelas.")
-            parts.append(f"## Kesimpulan\n\n{regime_narr}")
+                "BULL": "Bullish market conditions support long positions under strict risk management.",
+                "BEAR": "Bearish market conditions demand extra caution and capital protection.",
+                "NEUTRAL": "Market is in a consolidation phase. Prioritize high-quality setups and avoid overtrading.",
+            }.get(regime, "Monitor market developments and await clearer signal confirmations.")
+            parts.append(f"## Conclusion\n\n{regime_narr}")
 
         return "\n".join(parts).strip() if parts else (
-            "## Catatan\n\n"
-            "Pergerakan harga kripto bersifat dinamis dan berisiko tinggi. "
-            "Selalu lakukan riset mandiri dan gunakan manajemen risiko yang ketat "
-            "sebelum mengambil keputusan trading."
+            "## Notes\n\n"
+            "Crypto price movements are highly dynamic and carry significant risk. "
+            "Always perform independent research and utilize strict risk management "
+            "before making trading decisions."
         )
 
     def _parse_context_movers(self, ctx_str):
@@ -2613,7 +2611,7 @@ class NewsMaker:
         macd_status = "BULLISH (Histogram > 0)" if macd_hist > 0 else "BEARISH (Histogram < 0)"
         
         bb_pb = float(tech.get("bb_pb", 0.5))
-        bb_status = "BULLISH (Harga < Lower Band)" if bb_pb < 0 else ("BEARISH (Harga > Upper Band)" if bb_pb > 1 else "NEUTRAL")
+        bb_status = "BULLISH (Price < Lower Band)" if bb_pb < 0 else ("BEARISH (Price > Upper Band)" if bb_pb > 1 else "NEUTRAL")
         
         stoch_k = float(tech.get("stoch_k", 50.0))
         stoch_d = float(tech.get("stoch_d", 50.0))
@@ -2664,25 +2662,25 @@ class NewsMaker:
         import datetime
         waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
         
-        title = f"[QUANT REPORT] Analisis Konfluensi Teknikal Mendalam {clean_sym} – Confluence Score: {confluence_score:.1f}"
-        excerpt = f"Laporan telemetri sistem otomatis mengenai analisis teknikal 11 indikator kuantitatif lengkap pada pasangan {clean_sym}."
+        title = f"[QUANT REPORT] Deep Technical Confluence Analysis for {clean_sym} – Confluence Score: {confluence_score:.1f}"
+        excerpt = f"Automated system telemetry report outlining the full technical analysis of 11 quantitative indicators on the {clean_sym} pair."
         
-        content = f"""## Laporan Kuantitatif Terintegrasi
+        content = f"""## Integrated Quantitative Report
 
-Berikut adalah hasil audit terperinci dari konfluensi indikator teknis utama untuk aset **{clean_sym}** per **{waktu} WIB**. Evaluasi didasarkan pada telemetri data pasar historis 15-menit dan kondisi orderbook realtime.
+Below is the detailed audit of the confluence of key technical indicators for **{clean_sym}** as of **{waktu} WIB**. The evaluation is based on historical 15-minute market data telemetry and real-time order book conditions.
 
-### Telemetri Harga & Volatilitas
-| Metrik Kuantitatif | Nilai | Catatan |
+### Price & Volatility Telemetry
+| Quantitative Metric | Value | Note |
 |---|---|---|
-| **Harga Saat Ini** | {self._format_price(price)} | Harga spot realtime |
-| **Perubahan 1 Jam** | {ch_1h:+.2f}% | Momentum jangka ultra-pendek |
-| **Perubahan 24 Jam** | {ch_24h:+.2f}% | Momentum jangka menengah |
-| **Volatilitas Intraday** | {volatility:.2f}% | Volatilitas pergerakan rata-rata |
+| **Current Price** | {self._format_price(price)} | Real-time spot price |
+| **1-Hour Change** | {ch_1h:+.2f}% | Ultra-short term momentum |
+| **24-Hour Change** | {ch_24h:+.2f}% | Medium-term momentum |
+| **Intraday Volatility** | {volatility:.2f}% | Average movement volatility |
 
-### Evaluasi Konfluensi 11 Indikator Aktif
-Sistem mendeteksi total skor konfluensi **{confluence_score:.2f}** dengan bias arah **{bias}**.
+### Confluence Evaluation of 11 Active Indicators
+The system has detected a total confluence score of **{confluence_score:.2f}** with a directional bias of **{bias}**.
 
-| # | Indikator Teknis | Nilai Kuantitatif | Bobot | Status Evaluasi |
+| # | Technical Indicator | Quantitative Value | Weight | Evaluation Status |
 |---|---|---|---|---|
 | 1 | RSI-14 (Wilder) | {rsi:.2f} | 3.0 | {rsi_status} |
 | 2 | MACD Histogram | {macd_hist:.4f} | 2.5 | {macd_status} |
@@ -2696,15 +2694,15 @@ Sistem mendeteksi total skor konfluensi **{confluence_score:.2f}** dengan bias a
 | 10 | Volume Ratio (MA-20) | {vol_ratio:.2f}x | 1.5 | {vol_status} |
 | 11 | OBV Slope (Accumulation) | {obv_slope:.4f} | 1.5 | {obv_status} |
 
-### Analisis Kuantitatif Terintegrasi (Grounded Data)
-* **Keseimbangan Order Book**: Kekuatan beli di pasar (Buy Pressure) berada pada level **{buy_pressure:.1f}%**, menunjukkan dominasi **{"pembeli (Bulls)" if buy_pressure > 50 else "penjual (Bears)"}** pada dinding antrean orderbook.
-* **Kondisi Momentum**: Indikator RSI berada di level **{rsi:.1f}** dengan histogram MACD **{"menguat (bullish momentum)" if macd_hist > 0 else "melemah (bearish momentum)"}**, mengindikasikan status pasar yang sedang **{"overbought" if rsi > 70 else ("oversold" if rsi < 30 else "konsolidasi sehat")}**.
-* **Volatilitas**: Volatilitas rata-rata pasar adalah **{volatility:.2f}%**. Sistem menetapkan status risk-on/risk-off saat ini sebagai **{"HIGH VOLATILITY (Caution)" if volatility > 3.0 else "NORMAL VOLATILITY (Safe)"}**.
+### Integrated Quantitative Analysis
+* **Order Book Balance**: Market buying power (Buy Pressure) is at **{buy_pressure:.1f}%**, indicating dominance of **{"buyers (Bulls)" if buy_pressure > 50 else "sellers (Bears)"}** in the orderbook queue.
+* **Momentum Conditions**: The RSI indicator is at **{rsi:.1f}** with the MACD histogram **{"strengthening (bullish momentum)" if macd_hist > 0 else "weakening (bearish momentum)"}**, indicating a market state of **{"overbought" if rsi > 70 else ("oversold" if rsi < 30 else "healthy consolidation")}**.
+* **Volatility**: The average market volatility is **{volatility:.2f}%**. The system defines the current risk mode as **{"HIGH VOLATILITY (Caution)" if volatility > 3.0 else "NORMAL VOLATILITY (Safe)"}**.
 
-### Rekomendasi Operasional Bot
-* **Rekomendasi Entry**: **{bias}**
-* **Target Stop-Loss Dinamis (ATR)**: {self._format_price(price * 0.97)} (3% Safety Cushion)
-* **Target Take Profit**: {self._format_price(price * 1.015)} (1.5% Net Profit Target)
+### Bot Operational Recommendations
+* **Entry Recommendation**: **{bias}**
+* **Dynamic Stop-Loss Target (ATR)**: {self._format_price(price * 0.97)} (3% Safety Cushion)
+* **Take Profit Target**: {self._format_price(price * 1.015)} (1.5% Net Profit Target)
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2748,32 +2746,32 @@ Sistem mendeteksi total skor konfluensi **{confluence_score:.2f}** dengan bias a
         import datetime
         waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
         
-        title = f"[WHALE REPORT] Deteksi Aliran Dana & Dinding Likuiditas Besar {clean_sym}"
-        excerpt = f"Audit eksklusif terhadap pergerakan orderbook, penyebaran bid-ask spread, serta deteksi akumulasi volume abnormal oleh pelaku pasar skala besar (Whales) pada {clean_sym}."
+        title = f"[WHALE REPORT] Fund Flow & Order Book Liquidity Detection for {clean_sym}"
+        excerpt = f"Exclusive audit of order book dynamics, bid-ask spread distribution, and abnormal volume accumulation by whales on {clean_sym}."
         
-        content = f"""## Laporan Aliran Dana & Whales Realtime
+        content = f"""## Real-Time Fund Flow & Whales Report
+        
+The system has detected liquidity accumulation and distribution patterns in the **{clean_sym}** market as of **{waktu} WIB**. This report is audited using real-time order book depth and volume participation rate.
 
-Sistem mendeteksi adanya aktivitas akumulasi dan penyebaran likuiditas pada pasar **{clean_sym}** per **{waktu} WIB**. Laporan ini diaudit menggunakan data real-time dari ketebalan order book (bid/ask depth) dan tingkat partisipasi volume.
-
-### Telemetri Kedalaman Pasar (Orderbook Depth)
-| Metrik Aliran Dana | Nilai Kuantitatif | Evaluasi Sistem |
+### Order Book Depth Telemetry
+| Fund Flow Metric | Quantitative Value | System Evaluation |
 |---|---|---|
-| **Total Dinding Beli (Bid Vol)** | {self._format_price(bid_vol)} | Likuiditas Penahan Bawah |
-| **Total Dinding Jual (Ask Vol)** | {self._format_price(ask_vol)} | Resistensi Dinding Atas |
-| **Orderbook Imbalance** | {imbalance:+.2f}% | Dominasi Arah Likuiditas |
-| **Spread Bid-Ask** | {spread_pct:.3f}% | Indikator Efisiensi Likuiditas |
-| **Volume Ratio vs MA-20** | {vol_ratio:.2f}x | Deteksi Spike Partisipasi |
-| **Kemiringan OBV (OBV Slope)** | {obv_slope:.6f} | Deteksi Akumulasi Diam-diam |
+| **Total Bid Wall (Bid Vol)** | {self._format_price(bid_vol)} | Downside Support Liquidity |
+| **Total Ask Wall (Ask Vol)** | {self._format_price(ask_vol)} | Upside Resistance Liquidity |
+| **Order Book Imbalance** | {imbalance:+.2f}% | Liquidity Direction Bias |
+| **Bid-Ask Spread** | {spread_pct:.3f}% | Liquidity Efficiency Metric |
+| **Volume Ratio vs MA-20** | {vol_ratio:.2f}x | Participation Spike Detection |
+| **OBV Slope** | {obv_slope:.6f} | Secret Accumulation Detection |
 
-### Analisis Likuiditas Whales
-* **Penyebaran Dinding (Order Book Walls)**: Dinding beli (Bid Volume) terakumulasi sebesar **{self._format_large_volume(bid_vol)}**, sedangkan dinding jual (Ask Volume) terkonsentrasi di level **{self._format_large_volume(ask_vol)}**.
-* **Imbalance & Spread**: Skor imbalance saat ini tercatat sebesar **{imbalance:+.2f}%**, yang menunjukkan adanya bias **{"pembelian agresif" if imbalance > 0 else "distribusi tekanan jual"}**. Nilai spread yang sangat rapat sebesar **{spread_pct:.3f}%** mengonfirmasi tingkat likuiditas yang **sangat efisent dan ramah scalping**.
-* **Aktivitas Akumulasi Klandestin**: Kemiringan kurva OBV saat ini berada pada angka **{obv_slope:.6f}**, menandakan adanya **{"akumulasi aktif oleh para investor institusi/whales" if obv_slope > 0 else "distribusi bertahap oleh pemilik modal besar"}**.
+### Whales Liquidity Analysis
+* **Order Book Walls**: Buying walls (Bid Volume) are accumulated at **{self._format_large_volume(bid_vol)}**, while selling walls (Ask Volume) are concentrated at **{self._format_large_volume(ask_vol)}**.
+* **Imbalance & Spread**: The current order book imbalance is recorded at **{imbalance:+.2f}%**, indicating a directional bias of **{"aggressive buying" if imbalance > 0 else "selling pressure distribution"}**. The ultra-tight spread of **{spread_pct:.3f}%** confirms a **highly efficient and scalping-friendly** liquidity status.
+* **Clandestine Accumulation Activity**: The current OBV slope stands at **{obv_slope:.6f}**, indicating **{"active accumulation by institutional investors/whales" if obv_slope > 0 else "gradual distribution by large capital holders"}**.
 
-### Rekomendasi Scalping Kuantitatif
-* **Tingkat Bahaya Slippage**: **{"RENDAH (Sangat aman untuk ukuran order besar)" if spread_pct < 0.1 else "SEDANG (Gunakan limit order)"}**
-* **Level Support Whale Utama**: {self._format_price(price * 0.985)}
-* **Level Resistance Whale Utama**: {self._format_price(price * 1.015)}
+### Quantitative Scalping Guidelines
+* **Slippage Risk Level**: **{"LOW (Extremely safe for large order sizes)" if spread_pct < 0.1 else "MEDIUM (Use limit orders)"}**
+* **Major Whale Support Level**: {self._format_price(price * 0.985)}
+* **Major Whale Resistance Level**: {self._format_price(price * 1.015)}
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2844,31 +2842,31 @@ Sistem mendeteksi adanya aktivitas akumulasi dan penyebaran likuiditas pada pasa
         
         import datetime
         waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
-        standard_lot = "standar ($10 USDT)" if os.getenv("EXCHANGE", "binance").lower() == "binance" else "standar (100k IDR)"
+        standard_lot = "standard ($10)" if os.getenv("EXCHANGE", "binance").lower() == "binance" else "standard ($10 equivalent)"
         
-        title = f"[RISK WARNING] Telemetri Volatilitas Intraday & Audit Safety Guards {clean_sym}"
-        excerpt = f"Evaluasi berkala terhadap status manajemen risiko pasar, deteksi status filter filter ATR (Gate 4b), trend filter EMA-50 (Gate 4c), dan panduan manajemen portofolio {clean_sym}."
+        title = f"[RISK WARNING] Intraday Volatility Telemetry & Safety Guards Audit for {clean_sym}"
+        excerpt = f"Periodic evaluation of market risk status, ATR filter (Gate 4b), EMA-50 trend filter (Gate 4c), and portfolio management guide for {clean_sym}."
         
-        content = f"""## Laporan Manajemen Risiko & Audit Pintu Keamanan Bot
+        content = f"""## Risk Management & Bot Safety Gates Audit
+        
+The Algovibe portfolio management system has issued the latest risk status for **{clean_sym}** as of **{waktu} WIB** to protect trading capital under the current market volatility.
 
-Sistem manajemen portofolio Algovibe mengeluarkan status risiko terkini untuk **{clean_sym}** per **{waktu} WIB** guna melindungi modal perdagangan di bawah volatilitas pasar saat ini.
-
-### Status Keamanan Pre-Entry Gates (Audit Realtime)
-| Gerbang Keamanan Bot | Status Operasional | Kriteria & Kondisi |
+### Pre-Entry Safety Gates Status (Real-time Audit)
+| Bot Safety Gate | Operational Status | Criteria & Conditions |
 |---|---|---|
-| **Gate 4b: ATR Volatility Filter** | {gate_4b_status} | Toleransi batas volatilitas < 3% |
-| **Gate 4c: EMA-50 Trend Filter** | {gate_4c_status} | Harga wajib berada di atas EMA-50 |
+| **Gate 4b: ATR Volatility Filter** | {gate_4b_status} | Volatility threshold limit < 3% |
+| **Gate 4c: EMA-50 Trend Filter** | {gate_4c_status} | Price must be above EMA-50 |
 | **Bottom-Explosion Extreme Bypass** | {bypass_status} | RSI < 26 + Buy Pressure > 66% + Vol Ratio > 2.1 |
-| **Consecutive-Loss Halt Guard** | AKTIF (Siaga) | Mencegah beruntunnya kerugian beruntun |
+| **Consecutive-Loss Halt Guard** | ACTIVE (Standby) | Protects against consecutive loss streaks |
 
-### Metrik Risiko & Volatilitas Terperinci
-* **Regime Pasar**: Pasar saat ini beroperasi di bawah rezim **{regime}** dengan volatilitas intraday terdeteksi sebesar **{volatility:.2f}%**.
-* **Filter Volatilitas ATR**: Indikator ATR menunjukkan nilai pergerakan rata-rata yang **{"melebihi ambang batas aman (Cenderung High Risk)" if volatility > 3.0 else "berada di dalam koridor aman (Cenderung Low Risk)"}**.
-* **Evaluasi Tren EMA-50**: Harga saat ini adalah **{self._format_price(price)}**, sedangkan level trend EMA-50 berada pada **{self._format_price(ema50)}**. Kondisi ini menandakan aset sedang berada dalam fase **{"Uptrend Sehat (Bullish)" if price > ema50 else "Downtrend Berisiko (Bearish)"}**.
+### Detailed Risk & Volatility Metrics
+* **Market Regime**: The market is currently operating under the **{regime}** regime with an intraday volatility of **{volatility:.2f}%**.
+* **ATR Volatility Filter**: The ATR indicator shows average movement volatility **{"exceeding the safe threshold (High Risk Bias)" if volatility > 3.0 else "within the safe corridor (Low Risk Bias)"}**.
+* **EMA-50 Trend Evaluation**: The current price is **{self._format_price(price)}**, while the EMA-50 trend level is at **{self._format_price(ema50)}**. This indicates the asset is in a **{"Healthy Uptrend (Bullish)" if price > ema50 else "Risky Downtrend (Bearish)"}** phase.
 
-### Panduan Mitigasi Risiko Portofolio
-* **Ukuran Maksimal Posisi (Position Sizing)**: **{"Kurangi ukuran lot hingga 50% (High Volatility)" if volatility > 3.0 else f"Gunakan ukuran lot {standard_lot}"}**
-* **Pengaman Tambahan**: Auto Stop-Loss (Auto-SL) wajib dinyalakan pada level **{self._format_price(price * 0.97)}** untuk menghindari fluktuasi harga yang tidak diinginkan.
+### Portfolio Risk Mitigation Guide
+* **Maximum Position Sizing**: **{"Reduce lot size by 50% (High Volatility)" if volatility > 3.0 else f"Use standard lot size ({standard_lot})"}**
+* **Additional Safeguards**: Auto Stop-Loss (Auto-SL) is mandatory at **{self._format_price(price * 0.97)}** to prevent adverse price movements.
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2876,30 +2874,28 @@ Sistem manajemen portofolio Algovibe mengeluarkan status risiko terkini untuk **
         clean_sym = self._clean_symbol(coin_symbol)
         pct = float(move_data.get("pct_change") or 0.0)
         price = float(move_data.get("price") or 0.0)
-        direction = "MELESAT NAIK" if pct >= 0 else "ANJLOK TURUN"
+        direction = "RALLYING UP" if pct >= 0 else "SLAMMING DOWN"
         trend_emoji = "🟢" if pct >= 0 else "🔴"
         
         import datetime
         waktu = datetime.datetime.now().strftime("%H:%M WIB")
         
-        title = f"[FLASH ALERT] {clean_sym} {direction} {pct:+.1f}% Hari Ini"
-        excerpt = f"Deteksi telemetri pergerakan harga cepat pada pasangan {clean_sym} mencapai {pct:+.1f}%."
+        title = f"[FLASH ALERT] {clean_sym} {direction} {pct:+.1f}% Today"
+        excerpt = f"Rapid price movement telemetry detected on {clean_sym} reaching {pct:+.1f}%."
         
-        price_usdt = price / 16000.0
+        content = f"""## {trend_emoji} Flash Market Alert: Significant Movement in {clean_sym}
         
-        content = f"""## {trend_emoji} Flash Market Alert: Pergerakan Signifikan {clean_sym}
-        
-Sistem otomasi mendeteksi pergerakan harga yang cepat dan signifikan untuk aset **{clean_sym}** pada pukul **{waktu}**.
+The automated system has detected a rapid and significant price movement for **{clean_sym}** at **{waktu} WIB**.
 
-### Ringkasan Telemetri Flash Alert
-* **Aset**: {clean_sym}
-* **Arah Pergerakan**: **{direction}**
-* **Perubahan Persentase**: **{pct:+.2f}%**
-* **Harga Spot Saat Ini**: {self._format_price(price)}
-* **Sumber Data**: Algovibe Exchange Telemetry
+### Flash Alert Telemetry Summary
+* **Asset**: {clean_sym}
+* **Movement Direction**: **{direction}**
+* **Percentage Change**: **{pct:+.2f}%**
+* **Current Spot Price**: {self._format_price(price)}
+* **Data Source**: Algovibe Exchange Telemetry
 
-### Analisis Cepat & Tindakan Bot
-Pergerakan sebesar **{pct:+.2f}%** memicu alarm ambang batas bot. Sistem saat ini terus memantau likuiditas order book dan sebaran bid-ask spread untuk mendeteksi potensi kelanjutan momentum atau pembalikan arah instan (mean reversion). Operasional scalping bot disarankan untuk meningkatkan level waspada risiko volatility drag.
+### Quick Analysis & Bot Action
+A movement of **{pct:+.2f}%** has triggered the bot's threshold alarms. The system is actively monitoring order book liquidity and bid-ask spread distribution to detect potential momentum continuation or immediate mean reversion. Traders are advised to exercise caution regarding volatility drag.
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2910,9 +2906,9 @@ Pergerakan sebesar **{pct:+.2f}%** memicu alarm ambang batas bot. Sistem saat in
         import datetime
         waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
         
-        lbl = "Pagi" if "MORNING" in rtype else "Sore"
-        title = f"[QUANT REPORT] Analisis & Rangkuman Pasar {lbl} – Algovibe Intelligence"
-        excerpt = f"Rangkuman data telemetri pasar otomatis Algovibe untuk sesi {lbl} tanggal {waktu}."
+        lbl = "Morning" if "MORNING" in rtype else "Evening"
+        title = f"[QUANT REPORT] {lbl} Market Summary & Analysis – Algovibe Intelligence"
+        excerpt = f"Automated Algovibe market telemetry summary for the {lbl} session of {waktu}."
         
         active_tickers = sorted(
             valid_items,
@@ -2931,17 +2927,17 @@ Pergerakan sebesar **{pct:+.2f}%** memicu alarm ambang batas bot. Sistem saat in
             
             table_rows += f"| {i+1} | **{clean_sym}** | {self._format_price(price)} | {ch_1h:+.2f}% | {ch_24h:+.2f}% | {self._format_vol_m(vol_m)} |\n"
             
-        content = f"""## Rangkuman Pasar {lbl} ({waktu} WIB)
+        content = f"""## {lbl} Market Summary ({waktu} WIB)
         
-Berikut adalah ikhtisar kondisi pasar berdasarkan telemetri kuantitatif langsung dari bursa.
+Below is an overview of market conditions based on direct quantitative telemetry from the exchange.
 
-### Telemetri Kinerja Aset Teraktif
-| # | Koin | Harga Spot | Perubahan 1 Jam | Perubahan 24 Jam | Volume 24 Jam |
+### Active Assets Performance Telemetry
+| # | Coin | Spot Price | 1-Hour Change | 24-Hour Change | 24-Hour Volume |
 |---|---|---|---|---|---|
 {table_rows}
 
-### Catatan Operasional
-Kondisi pasar saat ini menunjukkan volatilitas yang stabil dengan kecenderungan momentum yang beragam. Bot scalping tetap aktif memantau pintu masuk teknis (EMA-50 & ATR filter). Selalu prioritaskan perlindungan modal dengan pengaman risiko default.
+### Operational Notes
+The market currently shows stable volatility with varied momentum trends. The scalping bot remains active monitoring technical entry levels (EMA-50 & ATR filters). Always prioritize capital preservation with default risk settings.
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2952,8 +2948,8 @@ Kondisi pasar saat ini menunjukkan volatilitas yang stabil dengan kecenderungan 
         import datetime
         waktu = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
         
-        title = f"[QUANT REPORT] Ulasan Koin Trending Terpopuler Hari Ini"
-        excerpt = f"Analisis kuantitatif otomatis mengenai aset-aset dengan aktivitas volume dan momentum tertinggi."
+        title = f"[QUANT REPORT] Daily Trending & Momentum Coins Analysis"
+        excerpt = f"Automated quantitative review of assets with the highest volume activity and price momentum."
         
         gainers = sorted(valid_items, key=lambda x: float(x[1].get("ch_24h") or 0.0), reverse=True)[:5]
         table_rows = ""
@@ -2965,17 +2961,17 @@ Kondisi pasar saat ini menunjukkan volatilitas yang stabil dengan kecenderungan 
             vol_m = vol_idr / 1_000_000.0
             table_rows += f"| {i+1} | **{clean_sym}** | {self._format_price(price)} | {ch_24h:+.2f}% | {self._format_vol_m(vol_m)} |\n"
             
-        content = f"""## Ulasan Aset Trending & Teraktif ({waktu} WIB)
+        content = f"""## Trending & Active Assets Review ({waktu} WIB)
         
-Berikut adalah jajaran aset dengan lonjakan aktivitas volume dan momentum harga terkuat dalam 24 jam terakhir.
+Below are the assets experiencing the strongest volume surges and price momentum over the last 24 hours.
 
 ### Top Gainers & Momentum Movers
-| # | Koin | Harga Spot | Perubahan 24 Jam | Volume 24 Jam |
+| # | Coin | Spot Price | 24-Hour Change | 24-Hour Volume |
 |---|---|---|---|---|
 {table_rows}
 
-### Analisis Kuantitatif
-Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike volume yang tinggi memicu alarm breakout pada sistem Algovibe. Bot scalping terus mengamati level support kunci untuk peluang entri momentum berkelanjutan.
+### Quantitative Analysis
+The above assets are currently dominating market transaction volumes. High volume spikes trigger breakout alarms on the Algovibe system. The scalping bot is actively monitoring key support levels for potential continuation entries.
 """
         return {"title": title, "excerpt": excerpt, "content": content}
 
@@ -2983,7 +2979,7 @@ Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike v
         self._refresh_db_context(force=True)
         valid_items = self._get_valid_market_items(require_fresh=False)
         if not valid_items:
-            return "Kondisi pasar saat ini stabil dengan likuiditas normal."
+            return "Market conditions are currently stable with normal liquidity."
             
         top_gainers = sorted(valid_items, key=lambda x: float(x[1].get("ch_24h") or 0.0), reverse=True)[:3]
         bullets = []
@@ -2995,7 +2991,7 @@ Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike v
         import datetime
         waktu = datetime.datetime.now().strftime("%H:%M WIB")
         
-        brief = f"Telemetri Algovibe pada {waktu} mendeteksi aktivitas pasar teraktif pada aset: {', '.join(bullets)}. Bot scalping beroperasi normal dengan parameter risiko default."
+        brief = f"Algovibe telemetry at {waktu} WIB detected the most active market movements in: {', '.join(bullets)}. Scalping bot is operating normally with default risk parameters."
         return brief
 
     def _get_usdt_idr_rate(self):
@@ -3028,36 +3024,68 @@ Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike v
         # 3. Final fallback
         return 16000.0
 
+    def _get_usdt_usd_rate(self):
+        # 1. Try to read from tickers (if loaded)
+        if hasattr(self, "_tickers") and self._tickers:
+            for key in ["usdtusd", "usdt/usd", "usdt_usd"]:
+                if key in self._tickers:
+                    val = float(self._tickers[key].get("price") or 0.0)
+                    if 0.5 < val < 2.0:
+                        return val
+        
+        # 2. Try to fetch from ccxt directly (cache it)
+        if not hasattr(self, "_usdt_usd_cached_rate") or time.time() - getattr(self, "_usdt_usd_cached_time", 0) > 300:
+            try:
+                # USDT to USD is pegged to 1.0
+                price = 1.0
+                self._usdt_usd_cached_rate = price
+                self._usdt_usd_cached_time = time.time()
+                return price
+            except Exception as err:
+                logger.warning("[news-maker] Failed to fetch live USDT/USD rate: %s", err)
+        
+        if hasattr(self, "_usdt_usd_cached_rate") and 0.5 < self._usdt_usd_cached_rate < 2.0:
+            return self._usdt_usd_cached_rate
+            
+        # 3. Final fallback
+        return 1.0
+
     def _format_price(self, price):
         eid = os.getenv("EXCHANGE", "binance").lower()
         if eid == "binance":
-            rate = self._get_usdt_idr_rate()
-            idr_price = price * rate
-            return f"Rp {idr_price:,.2f}"
+            rate = self._get_usdt_usd_rate()
+            usd_price = price * rate
+            return f"$ {usd_price:,.2f}"
         else:
-            return f"Rp {price:,.2f}"
+            # indodax native IDR -> convert to USD
+            rate = self._get_usdt_idr_rate()
+            usd_price = price / rate if rate > 0 else 0.0
+            return f"$ {usd_price:,.2f}"
 
     def _format_large_volume(self, vol):
         eid = os.getenv("EXCHANGE", "binance").lower()
         if eid == "binance":
+            rate = self._get_usdt_usd_rate()
+            vol_usd = vol * rate
+        else:
             rate = self._get_usdt_idr_rate()
-            vol_idr = vol * rate
-        else:
-            vol_idr = vol
+            vol_usd = vol / rate if rate > 0 else 0.0
 
-        if vol_idr >= 1_000_000.0:
-            return f"{vol_idr/1_000_000.0:.1f} Juta IDR"
+        if vol_usd >= 1_000_000.0:
+            return f"${vol_usd/1_000_000.0:.1f}M USD"
         else:
-            return f"{vol_idr:,.0f} IDR"
+            return f"${vol_usd:,.0f} USD"
 
     def _format_vol_m(self, vol_m):
         eid = os.getenv("EXCHANGE", "binance").lower()
         if eid == "binance":
-            rate = self._get_usdt_idr_rate()
-            vol_m_idr = vol_m * rate
-            return f"Rp {vol_m_idr:,.2f}"
+            rate = self._get_usdt_usd_rate()
+            vol_m_usd = vol_m * rate
+            return f"$ {vol_m_usd:,.2f}"
         else:
-            return f"Rp {vol_m:,.2f}"
+            rate = self._get_usdt_idr_rate()
+            vol_m_usd = vol_m / rate if rate > 0 else 0.0
+            return f"$ {vol_m_usd:,.2f}"
 
     def _save_article(self, art, category):
         try:

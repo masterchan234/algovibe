@@ -82,7 +82,7 @@
               class="read-btn"
               @click="openArticle(heroArticle)"
             >
-              READ_FULL_REPORT
+              READ FULL REPORT
             </button>
           </div>
           <article v-if="heroArticle" class="featured-story">
