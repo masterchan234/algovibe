@@ -87,7 +87,7 @@
       <div class="intel-header">
         <div class="intel-title">
           <span class="intel-icon">📊</span>
-          <span>EQUITY PERFORMANCE ORACLE</span>
+          <span>EQUITY PERFORMANCE</span>
         </div>
         <div class="intel-meta">
           <div class="tf-selector">
