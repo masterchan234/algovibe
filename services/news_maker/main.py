@@ -221,7 +221,7 @@ class NewsMaker:
                 self._tickers[pair] = {
                     "price": price,
                     "ch_24h": ch_24h,
-                    "ch_1h": ohlcv_err if 'ohlcv_err' in locals() and not ohlcv else ch_1h,
+                    "ch_1h": ch_1h,
                     "vol": vol_idr,
                     "vol_idr": vol_idr,
                     "updated_at": time.time(),
@@ -600,7 +600,7 @@ class NewsMaker:
                 
                 # Only update/set if we don't have a fresher WS tick or if we need to bootstrap
                 existing = self._tickers.get(pair)
-                if not existing or existing.get("source") != "ws":
+                if not existing or existing.get("source") not in ["ws", "ccxt"]:
                     self._tickers[pair] = {
                         "price": price,
                         "ch_24h": ch_24h,
@@ -2914,8 +2914,14 @@ Pergerakan sebesar **{pct:+.2f}%** memicu alarm ambang batas bot. Sistem saat in
         title = f"[QUANT REPORT] Analisis & Rangkuman Pasar {lbl} – Algovibe Intelligence"
         excerpt = f"Rangkuman data telemetri pasar otomatis Algovibe untuk sesi {lbl} tanggal {waktu}."
         
+        active_tickers = sorted(
+            valid_items,
+            key=lambda x: float(x[1].get("vol_idr") or x[1].get("vol") or 0.0),
+            reverse=True
+        )[:8]
+        
         table_rows = ""
-        for i, (pair, ticker) in enumerate(valid_items[:8]):
+        for i, (pair, ticker) in enumerate(active_tickers):
             clean_sym = self._clean_symbol(pair)
             price = float(ticker.get("price") or 0.0)
             ch_24h = float(ticker.get("ch_24h") or 0.0)
@@ -3049,9 +3055,9 @@ Aset-aset di atas mendominasi volume transaksi pasar saat ini. Kehadiran spike v
         if eid == "binance":
             rate = self._get_usdt_idr_rate()
             vol_m_idr = vol_m * rate
-            return f"Rp {vol_m_idr:,.2f}M"
+            return f"Rp {vol_m_idr:,.2f}"
         else:
-            return f"Rp {vol_m:,.2f}M"
+            return f"Rp {vol_m:,.2f}"
 
     def _save_article(self, art, category):
         try:
