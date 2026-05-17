@@ -9,6 +9,34 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+# --- Dynamic Multi-Exchange Helpers ---
+import os
+
+def get_quote_suffix() -> str:
+    return "usdt" if os.getenv("EXCHANGE", "binance").lower() == "binance" else "idr"
+
+def get_base_coin(pair: str) -> str:
+    suffix = get_quote_suffix()
+    if pair.endswith(suffix):
+        return pair[:-len(suffix)].upper()
+    return pair.upper()
+
+def to_ccxt_symbol(pair: str) -> str:
+    suffix = get_quote_suffix()
+    if pair.endswith(suffix):
+        base = pair[:-len(suffix)].upper()
+        quote = suffix.upper()
+        return f"{base}/{quote}"
+    return pair.upper()
+
+def to_pair_param(pair: str) -> str:
+    suffix = get_quote_suffix()
+    if pair.endswith(suffix):
+        base = pair[:-len(suffix)]
+        return f"{base}_{suffix}"
+    return pair
+# --------------------------------------
+
 from config import (
     TP_PCT, SL_PCT, AUTO_SL_ENABLED, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
     FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
@@ -153,7 +181,7 @@ class ExitManager:
     def _fetch_live_bids(self, pair, depth_limit=20):
         """Get latest bid levels from exchange; fallback to DB snapshot when unavailable."""
         bids = []
-        symbol = f"{pair[:-3].upper()}/IDR"
+        symbol = to_ccxt_symbol(pair)
 
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=depth_limit)
@@ -367,8 +395,9 @@ class ExitManager:
 
         if not self.dry_run:
             try:
-                bal = self.exchange.fetch_balance()
-                free_idr = float((bal or {}).get('free', {}).get('IDR', 0) or 0)
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                free_idr = float((bal or {}).get('free', {}).get(quote_currency, 0) or 0)
                 if free_idr > 0:
                     self._cached_effective_balance_idr = free_idr
                     self._cached_effective_balance_ts = now_ts
@@ -632,8 +661,8 @@ class ExitManager:
 
     def _cancel_open_sell_orders_for_pair(self, pair, exit_order_id=None):
         """Cancel open sell orders for a pair using the most compatible exchange params."""
-        symbol = f"{pair[:-3].upper()}/IDR"
-        pair_param = f"{pair[:-3]}_idr"
+        symbol = to_ccxt_symbol(pair)
+        pair_param = to_pair_param(pair)
         cancelled = False
 
         # Try the known exit order id first.
@@ -1002,7 +1031,7 @@ class ExitManager:
                 
                 ghosts_removed = []
                 for pair in list(positions.keys()):
-                    coin = pair[:-3].upper() # Ambil simbol koin (e.g., 'AXL' dari 'axlidr')
+                    coin = get_base_coin(pair) # Ambil simbol koin (e.g., 'AXL' dari 'axlidr')
                     amount_on_exchange = float(total_balances.get(coin, 0) or 0)
                     is_dust_status = str(positions[pair].get('status', '')).upper() == 'DUST'
                     
@@ -1865,7 +1894,7 @@ class ExitManager:
                     #  FALLBACK: Fetch from REST API if WebSocket ticker is missing 
                     # (Happens when summary-24h broadcast hasn't included this pair yet)
                     try:
-                        ticker = self.exchange.fetch_ticker(pair.upper() + "/IDR")
+                        ticker = self.exchange.fetch_ticker(to_ccxt_symbol(pair))
                         current_tickers[pair] = {
                             'last': ticker.get('last', 0),
                             'buy': ticker.get('bid', ticker.get('last', 0)),
@@ -2025,8 +2054,8 @@ class ExitManager:
                         reason = "Timeout (3m+)" if is_timeout else f"Harga menjauh (+{spread_pct*100:.2f}%)"
                         try:
                             # [Senior Fix] Standard CCXT Symbol for Validation
-                            symbol_cancel = f"{pair[:-3].upper()}/IDR"
-                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': pair[:-3] + "_idr", 'side': 'buy'})
+                            symbol_cancel = to_ccxt_symbol(pair)
+                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': to_pair_param(pair), 'side': 'buy'})
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
                             
@@ -2458,7 +2487,7 @@ class ExitManager:
                             self.exchange.cancel_order(
                                 order['id'],
                                 symbol,
-                                params={'pair': pair[:-3] + '_idr', 'side': 'buy'},
+                                params={'pair': to_pair_param(pair), 'side': 'buy'},
                             )
                             log_message(
                                 f"[DEFENSIVE-CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
@@ -2479,12 +2508,16 @@ class ExitManager:
                         tracked_open_pairs.add(pair)
 
                 for coin, amount in total_bal.items():
-                    if coin in ('IDR', 'info'):
+                    eid = os.getenv("EXCHANGE", "binance").lower()
+                    quote_currency = "USDT" if eid == "binance" else "IDR"
+                    quote_currency_lower = quote_currency.lower()
+                    min_trade_val = 10 if eid == "binance" else 10000
+                    if coin in (quote_currency, 'info'):
                         continue
                     amount = float(amount or 0)
                     if amount <= 0:
                         continue
-                    pair = f"{coin.lower()}idr"
+                    pair = f"{coin.lower()}{quote_currency_lower}"
                     if pair in tracked_open_pairs:
                         continue  # Already handled by the DB-tracked basket exit loop
                     # Estimate value in IDR to filter out dust
@@ -2496,17 +2529,19 @@ class ExitManager:
                     if price <= 0:
                         continue
                     idr_value = amount * price
-                    if idr_value < 10000:
-                        continue  # Skip dust (< Rp 10.000)
+                    if idr_value < min_trade_val:
+                        continue  # Skip dust
                     try:
-                        symbol = f"{coin.upper()}/IDR"
+                        symbol = f"{coin.upper()}/{quote_currency}"
                         self.exchange.create_order(
                             symbol, 'market', 'sell', amount, None,
-                            {'pair': pair[:-3] + '_idr'}
+                            {'pair': to_pair_param(pair)}
                         )
+                        currency_prefix = "$" if eid == "binance" else "Rp "
+                        val_formatted = f"{currency_prefix}{idr_value:,.2f}" if eid == "binance" else f"Rp {idr_value:,.0f}"
                         log_message(
                             f"[DEFENSIVE-CLOSE] Sold orphan {coin} ({amount}) "
-                            f"≈ Rp {idr_value:,.0f} via {reason}"
+                            f"≈ {val_formatted} via {reason}"
                         )
                     except Exception as _se:
                         log_message(f"[WARN] [DEFENSIVE_CLOSE] Sell orphan {coin} error: {_se}")
@@ -2598,7 +2633,7 @@ class ExitManager:
             is_emergency = reason in ("STOP_LOSS", "HARD_STOP_LOSS", "EXIT_TIMEOUT", "BASKET_EXIT", "MANUAL_DASHBOARD_EXIT")
             # TP exits menggunakan market sell untuk eksekusi instan
             is_tp_exit = reason in ("TAKE_PROFIT", "FORCE_PROFIT_HIGH_TIER", "RAPID_TP_GOOD_PROFIT")
-            symbol = f"{pair[:-3].upper()}/IDR"
+            symbol = to_ccxt_symbol(pair)
 
             if is_tp_exit and not self.dry_run:
                 amount_idr_effective = float(amount_idr or 0)
@@ -2639,7 +2674,7 @@ class ExitManager:
 
             # [Senior Scaling Fix] PIGGYBACK + SAFETY CLAMP: jangan pernah jual melebihi saldo free.
             # Ini mencegah error "Insufficient balance" saat amount posisi > saldo real (partial/rounding/locked).
-            coin = pair[:-3].upper()
+            coin = get_base_coin(pair)
             try:
                 if not self.dry_run:
                     balance = self.exchange.fetch_balance()
@@ -2691,7 +2726,7 @@ class ExitManager:
                     "symbol": symbol
                 }
             else:
-                params = {'pair': pair[:-3] + "_idr"}
+                params = {'pair': to_pair_param(pair)}
                 # [Final Fix] Market-only sell path
                 try:
                     # Indodax via ccxt tetap butuh price; pakai bid agresif agar taker-like.
@@ -2920,8 +2955,7 @@ class ExitManager:
             # Indodax create_order market buy membutuhkan quantity koin (amount_crypto),
             # bukan nilai IDR. Mengirim IDR langsung menyebabkan 'Minimum order X COIN' error.
             add_amount_crypto = add_amount_idr / current_price
-            
-            symbol = f"{pair[:-3].upper()}/IDR"
+            symbol = to_ccxt_symbol(pair)
             
             if self.dry_run:
                 # Simulasi penambahan muatan
@@ -2931,7 +2965,7 @@ class ExitManager:
                 )
             else:
                 # DCA entry dipaksa market buy agar eksekusi instan dan konsisten.
-                params = {'pair': pair[:-3] + "_idr"}
+                params = {'pair': to_pair_param(pair)}
                 try:
                     tkr = self.exchange.fetch_ticker(symbol)
                     taker_buy_price = float(tkr.get('ask') or tkr.get('last') or current_price or 1)
@@ -3452,7 +3486,7 @@ class ExitManager:
                 return amount * current_price
 
             for pair, pos in open_positions.items():
-                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
+                coin = get_base_coin(pair)
                 amount_on_exchange = float(balance['total'].get(coin, 0))
                 position_idr_value = _current_value_idr(pair, amount_on_exchange)
                 # Threshold minimum per pair dari exchange (bukan hardcoded global)
@@ -3475,7 +3509,7 @@ class ExitManager:
                 # Jika ada → skip, biarkan order settlement berjalan.
                 if pos.get('status') == "EXITING":
                     try:
-                        symbol = f"{pair[:-3].upper()}/IDR"
+                        symbol = to_ccxt_symbol(pair)
                         open_orders_pair = self.exchange.fetch_open_orders() or []
                         exit_oid = str(pos.get('exit_order_id') or '')
                         has_active_sell = False
@@ -3648,7 +3682,7 @@ class ExitManager:
                         _entry_price = float(pos.get('entry_price', 0))
                         _amount_crypto = float(pos.get('amount_crypto', 0))
                         _amount_idr = float(pos.get('amount_idr', 0))
-                        _symbol = f"{pair[:-3].upper()}/IDR"
+                        _symbol = to_ccxt_symbol(pair)
                         _reconcile_exit_price = None
                         _reconcile_exec_type = "MAKER"
                         _reconcile_real_fee = 0
@@ -3694,16 +3728,18 @@ class ExitManager:
             #  [Auto-Adoption] Sync orphans from wallet to DB 
             _blacklist = set(db.get_blacklist())
             for coin, coin_amount in balance['total'].items():
-                if coin == 'IDR' or coin_amount <= 0:
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                if coin == quote_currency or coin_amount <= 0:
                     continue
                     
-                pair = f"{coin.lower()}idr"
+                pair = f"{coin.lower()}{quote_currency.lower()}"
                 if pair in _blacklist:
                     continue
                 if pair not in open_positions:
                     try:
                         # Gunakan REST API karena ExitManager tidak punya akses ke Market WS
-                        ticker_rest = self.exchange.fetch_ticker(pair.upper().replace("IDR", "/IDR"))
+                        ticker_rest = self.exchange.fetch_ticker(to_ccxt_symbol(pair))
                         current_price = float(ticker_rest['last'])
                             
                         value_idr = coin_amount * current_price
@@ -3713,7 +3749,9 @@ class ExitManager:
                         if value_idr > 0 or coin_amount > 0:
                             is_dust = value_idr < pair_min_idr_adopt
                             adopt_status = "DUST" if is_dust else "OPEN"
-                            log_message(f" Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: Rp {value_idr:,.0f}). Adopting as {adopt_status}!")
+                            currency_prefix = "$" if eid == "binance" else "Rp "
+                            val_formatted = f"{currency_prefix}{value_idr:,.2f}" if eid == "binance" else f"Rp {value_idr:,.0f}"
+                            log_message(f" Orphan Adoption: Found {coin_amount} {coin} in wallet (Value: {val_formatted}). Adopting as {adopt_status}!")
 
                             adopt_data = {
                                 "entry_price": current_price,
@@ -3731,7 +3769,7 @@ class ExitManager:
                             }
                             db.upsert_position(pair, adopt_data)
                             if not is_dust:
-                                send_telegram_message(f" *ORPHAN ADOPTED* \nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: Rp {value_idr:,.0f}")
+                                send_telegram_message(f" *ORPHAN ADOPTED* \nPair: `{pair}`\nQty: {coin_amount}\nEst. Value: {val_formatted}")
                     except Exception as e:
                         log_message(f"Failed to adopt orphan {pair}: {e}")
             
@@ -3759,9 +3797,9 @@ class ExitManager:
                                     log_message(f"[WARN] [Stuck Exit] {p} order {oid} is stuck for {age_sec:.0f}s. Cancelling and performing Emergency Exit...")
                                     try:
                                         # Format Indodax: aih_idr, Format CCXT: AIH/IDR
-                                        ccxt_symbol = p.upper().replace("IDR", "/IDR")
+                                        ccxt_symbol = to_ccxt_symbol(p)
                                         # Indodax cancel_order requires 'type' (buy/sell) and 'pair' (with underscore)
-                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': p[:-3] + "_idr", 'type': 'sell'})
+                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': to_pair_param(p), 'type': 'sell'})
                                         # Revert to OPEN so the main monitor loop can re-process it (now as Taker due to is_emergency)
                                         pos['status'] = "OPEN"
                                         pos['exit_order_id'] = None
@@ -3830,7 +3868,7 @@ class ExitManager:
                                         open_positions[pair] = adopt_data
                                         
                                     elif o_type == 'sell':
-                                        coin_sym = pair[:-3]
+                                        coin_sym = get_base_coin(pair).lower()
                                         remain_coin = float(order.get(f'remain_{coin_sym}', 0))
                                         
                                         log_message(f" Active Order Sync: Found untracked SELL order for {pair}. Adopting as EXITING.")
@@ -3863,7 +3901,6 @@ class ExitManager:
             log_message("Reality Check: Sync complete. No hallucinations found.")
         except Exception as e:
             log_message(f"Reality Check Failed: {e}")
-            # [Fix BUG #2] Dead code dihapus — 'order' tidak terdefinisi di scope ini
 
     #  Shadow Jaring (Liquidity Grab) 
 
@@ -3919,12 +3956,12 @@ class ExitManager:
             else:
                 # Market-only entry mode: jaring juga pakai market buy.
                 order = self.exchange.create_order(
-                    pair.upper().replace("IDR", "/IDR"),
+                    to_ccxt_symbol(pair),
                     'market',
                     'buy',
                     amount,
                     max(float(price or 1), 1.0),
-                    {'pair': pair[:-3] + "_idr"}
+                    {'pair': to_pair_param(pair)}
                 )
                 order_id = order['id']
             

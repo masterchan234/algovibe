@@ -21,7 +21,7 @@ import os
 import ccxt
 
 
-def create_indodax_exchange():
+def create_exchange_client():
     """Create configured ccxt client (returns ccxt.binance or ccxt.indodax depending on EXCHANGE env var)."""
     eid = os.getenv("EXCHANGE", "binance").lower()
     if eid == "binance":
@@ -43,6 +43,11 @@ def create_indodax_exchange():
                 'enableRateLimit': True,
             }
         )
+
+
+# Backward compatibility alias
+create_indodax_exchange = create_exchange_client
+
 
 
 def create_trading_bridge(

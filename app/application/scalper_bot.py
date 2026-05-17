@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from app.application.use_cases.market_cycle import run_market_cycle
 from app.application.use_cases.trade_execution import execute_trade as execute_trade_use_case
-from app.infrastructure.exchange_factory import create_indodax_exchange
+from app.infrastructure.exchange_factory import create_exchange_client
 import config
 from app.infrastructure.database import db
 from app.application.exit_manager import ExitManager
@@ -29,7 +29,7 @@ class ScalperBot:
     def __init__(self):
         load_dotenv()
 
-        self.exchange = create_indodax_exchange()
+        self.exchange = create_exchange_client()
 
         self.market_ws = MarketDataWS()
         self.oracle = Oracle(self.market_ws)
@@ -95,17 +95,20 @@ class ScalperBot:
             log_message(f" [STARTUP] New UTC day detected ({last_reset} → {today_utc}). Triggering session reset...")
             self._perform_utc_day_reset()
 
+        api_key = os.getenv('BINANCE_API_KEY') or os.getenv('INDODAX_API_KEY', '')
+        api_secret = os.getenv('BINANCE_API_SECRET') or os.getenv('INDODAX_API_SECRET', '')
+
         self.private_ws = PrivateWS(
-            api_key=os.getenv('INDODAX_API_KEY', ''),
-            api_secret=os.getenv('INDODAX_API_SECRET', ''),
+            api_key=api_key,
+            api_secret=api_secret,
             on_order_update=self.exit_manager.handle_order_update,
         )
 
         from app.infrastructure.deadman import DeadmanSwitch
 
         self.deadman = DeadmanSwitch(
-            api_key=os.getenv('INDODAX_API_KEY', ''),
-            api_secret=os.getenv('INDODAX_API_SECRET', ''),
+            api_key=api_key,
+            api_secret=api_secret,
         )
         self.deadman.start()
 
@@ -119,7 +122,9 @@ class ScalperBot:
         if not config.DRY_RUN:
             try:
                 bal = self.exchange.fetch_balance()
-                self.cached_balance = float(bal.get('free', {}).get('IDR', 0))
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                self.cached_balance = float(bal.get('free', {}).get(quote_currency, 0))
                 db.save_state("cached_idr_balance", str(self.cached_balance))
             except Exception as e:
                 log_message(f"[WARN] Initial Balance Fetch Failed: {e}")
@@ -215,7 +220,9 @@ class ScalperBot:
             return
 
         try:
-            full_idr_list = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            full_idr_list = [m['symbol'] for m in markets if m['quote'] == quote_currency and m['active']]
 
             idr_pairs = []
             skipped = 0
@@ -226,12 +233,13 @@ class ScalperBot:
                 else:
                     skipped += 1
 
-            # [BTC Fix] Selalu sertakan BTC/IDR dalam backfill agar Oracle regime filter
+            # [BTC Fix] Selalu sertakan BTC/IDR (atau BTC/USDT) dalam backfill agar Oracle regime filter
             # tidak mengalami error "Data BTC tidak tersedia di WS/DB".
-            btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == 'btcidr'), None)
+            btc_target = "btc" + quote_currency.lower()
+            btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == btc_target), None)
             if btc_symbol and btc_symbol not in idr_pairs:
                 idr_pairs.insert(0, btc_symbol)
-                log_message(" [BTC Fix] Forcing BTC/IDR into backfill for Oracle regime filter.")
+                log_message(f" [BTC Fix] Forcing {btc_symbol} into backfill for Oracle regime filter.")
 
             total_pairs = len(idr_pairs)
             log_message(f" Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")
@@ -302,11 +310,13 @@ class ScalperBot:
         try:
             bal = self.exchange.fetch_balance()
             db.save_balances(bal)
-            if 'IDR' in bal:
-                self.cached_balance = float(bal['IDR'].get('free', 0))
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            if quote_currency in bal:
+                self.cached_balance = float(bal[quote_currency].get('free', 0))
                 # Cache saldo IDR ke bot_state agar Oracle bisa membacanya untuk target harian
                 db.save_state("cached_idr_balance", str(self.cached_balance))
-                log_message(f" [BALANCE SYNC] IDR Free: {self.cached_balance:,.0f} → DB Updated")
+                log_message(f" [BALANCE SYNC] {quote_currency} Free: {self.cached_balance:,.0f} → DB Updated")
         except Exception as e:
             log_message(f"[WARN] Balance Sync Failed: {e}")
 
@@ -508,12 +518,15 @@ class ScalperBot:
             losses = stats.get('loss_count', 0)
             win_rate = (wins / total * 100) if total > 0 else 0.0
             net_pnl  = stats.get('total_pnl_idr', 0.0)
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            currency_prefix = "$" if eid == "binance" else "Rp "
+            net_profit_str = f"{currency_prefix}{net_pnl:,.2f}" if eid == "binance" else f"Rp {net_pnl:,.0f}"
             msg = (
                 f"DAILY PERFORMANCE SUMMARY\n"
                 f"Tanggal: {now_wib.strftime('%d %b %Y')} WIB\n"
                 f"Total Trades: {total} | Win: {wins} | Loss: {losses}\n"
                 f"Win Rate: {win_rate:.1f}%\n"
-                f"Net Profit: Rp {net_pnl:,.0f}"
+                f"Net Profit: {net_profit_str}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)

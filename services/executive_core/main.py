@@ -46,7 +46,7 @@ from shared.pid_lock import PidLock
 from services.executive_core.net_zero import NetZeroGuard
 from services.executive_core.profit_lock import ProfitLock
 from app.infrastructure.database import db
-from app.infrastructure.exchange_factory import create_indodax_exchange
+from app.infrastructure.exchange_factory import create_exchange_client
 from app.infrastructure.ws_private import PrivateWS
 from utils.logger import log_message, send_telegram_message
 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
@@ -72,7 +72,7 @@ class ExecutiveCoreService:
     """
 
     def __init__(self):
-        self._exchange = create_indodax_exchange()
+        self._exchange = create_exchange_client()
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
         self._equity_sub = ZMQSubscriber(IPC_EQUITY)
         self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
@@ -300,7 +300,9 @@ class ExecutiveCoreService:
         try:
             bal = self._exchange.fetch_balance()
             db.save_balances(bal)
-            self.cached_balance = float(bal.get("free", {}).get("IDR", self.cached_balance))
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            self.cached_balance = float(bal.get("free", {}).get(quote_currency, self.cached_balance))
         except Exception as exc:
             logger.debug(f"[executive-core] _sync_balances_to_db skip: {exc}")
 
@@ -327,7 +329,9 @@ class ExecutiveCoreService:
                 pair = sym.replace("/", "").lower()
             else:
                 pair = sym.lower()
-            if not pair.endswith("idr"):
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_suffix = "usdt" if eid == "binance" else "idr"
+            if not pair.endswith(quote_suffix):
                 continue
 
             info = payload.get("info") if isinstance(payload, dict) else {}
@@ -363,7 +367,7 @@ class ExecutiveCoreService:
             self._ticks[pair] = tick
             seeded += 1
 
-        logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} IDR pairs")
+        logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} pairs")
 
     #  Signal consumer 
 
@@ -660,7 +664,9 @@ class ExecutiveCoreService:
             if int(time.time()) % 10 == 0:
                 loop = asyncio.get_event_loop()
                 bal_data = await loop.run_in_executor(None, self._exchange.fetch_balance)
-                self.cached_balance = float(bal_data.get('free', {}).get('IDR', 0))
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                self.cached_balance = float(bal_data.get('free', {}).get(quote_currency, 0))
             
             stats = db.get_all_time_stats()
             self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
@@ -772,7 +778,10 @@ class ExecutiveCoreService:
                 logger.warning(f"[executive-core] Invalid order payload skipped: {order}")
                 return
 
-            ccxt_symbol = pair.upper().replace("IDR", "/IDR")
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_suffix = "usdt" if eid == "binance" else "idr"
+            quote_upper = quote_suffix.upper()
+            ccxt_symbol = pair.upper().replace(quote_upper, f"/{quote_upper}")
 
             loop = asyncio.get_event_loop()
             if hasattr(self._exchange, "place_order"):
@@ -787,7 +796,11 @@ class ExecutiveCoreService:
                     ),
                 )
             else:
-                pair_param = pair[:-3] + "_idr" if pair.endswith("idr") else pair
+                if pair.endswith(quote_suffix):
+                    base = pair[:-len(quote_suffix)]
+                    pair_param = f"{base}_{quote_suffix}"
+                else:
+                    pair_param = pair
                 result = await loop.run_in_executor(
                     None,
                     lambda: self._exchange.create_order(

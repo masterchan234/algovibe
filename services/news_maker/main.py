@@ -137,10 +137,10 @@ class NewsMaker:
     def _load_manual_market_snapshot(self, coin_symbol=None):
         """Best-effort snapshot for manual generation so service remains single source."""
         try:
-            from app.infrastructure.exchange_factory import create_indodax_exchange
-            exchange = create_indodax_exchange()
+            from app.infrastructure.exchange_factory import create_exchange_client
+            exchange = create_exchange_client()
         except Exception as err:
-            logger.warning("[news-maker] create_indodax_exchange not available: %s", err)
+            logger.warning("[news-maker] create_exchange_client not available: %s", err)
             return
 
         try:
@@ -311,8 +311,10 @@ class NewsMaker:
                 tick = Tick()
                 tick.ParseFromString(raw)
                 pair = str(tick.symbol or "").lower().strip()
-                # Enforce strict IDR-only constraint
-                if pair and pair.endswith("idr"):
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                suffix = "usdt" if eid == "binance" else "idr"
+                # Enforce strict quote-only constraint
+                if pair and pair.endswith(suffix):
                     self._apply_tick_update(pair, float(tick.price or 0), float(tick.change_24h or 0), float(tick.vol_idr or 0))
             except: pass
 
@@ -325,8 +327,10 @@ class NewsMaker:
                 sig = Signal()
                 sig.ParseFromString(raw)
                 pair = str(sig.symbol or "").lower().strip()
-                # Enforce strict IDR-only constraint
-                if not pair or not pair.endswith("idr"):
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                suffix = "usdt" if eid == "binance" else "idr"
+                # Enforce strict quote-only constraint
+                if not pair or not pair.endswith(suffix):
                     continue
                 action = _action_map.get(int(sig.action), "HOLD")
                 entry = {
@@ -347,8 +351,10 @@ class NewsMaker:
 
     def _apply_tick_update(self, pair, price, ch_24h, vol_idr):
         pair = str(pair).lower().strip()
-        # Enforce strict IDR-only constraint
-        if not pair.endswith("idr"):
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        suffix = "usdt" if eid == "binance" else "idr"
+        # Enforce strict quote-only constraint
+        if not pair.endswith(suffix):
             return
 
         self._tickers[pair] = {
@@ -560,10 +566,10 @@ class NewsMaker:
         Sangat berguna saat startup atau saat koin tertentu belum mendapatkan WS tick.
         """
         try:
-            from app.infrastructure.exchange_factory import create_indodax_exchange
-            exchange = create_indodax_exchange()
+            from app.infrastructure.exchange_factory import create_exchange_client
+            exchange = create_exchange_client()
         except Exception as err:
-            logger.warning("[news-maker] create_indodax_exchange not available for bootstrap: %s", err)
+            logger.warning("[news-maker] create_exchange_client not available for bootstrap: %s", err)
             return
 
         try:
