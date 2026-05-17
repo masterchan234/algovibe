@@ -35,6 +35,28 @@ def to_pair_param(pair: str) -> str:
         base = pair[:-len(suffix)]
         return f"{base}_{suffix}"
     return pair
+
+def format_currency(val, is_price=False, signed=False) -> str:
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    is_usdt = (eid == "binance")
+    prefix = "$" if is_usdt else "Rp "
+    val_float = float(val or 0.0)
+    sign = ""
+    if signed:
+        sign = "+" if val_float >= 0 else "-"
+    else:
+        if val_float < 0:
+            sign = "-"
+    
+    abs_val = abs(val_float)
+    if is_usdt:
+        if is_price:
+            return f"{sign}{prefix}{abs_val:,.4f}"
+        return f"{sign}{prefix}{abs_val:,.2f}"
+    else:
+        if is_price and abs_val < 1000:
+            return f"{sign}{prefix}{abs_val:,.2f}"
+        return f"{sign}{prefix}{abs_val:,.0f}"
 # --------------------------------------
 
 from config import (
@@ -354,8 +376,8 @@ class ExitManager:
                 'required_profit_idr': required_profit_idr,
                 'estimate': estimate,
                 'message': (
-                    f"est net fee-only sell Rp {est_net:,.0f} < min Rp {required_profit_idr:,.0f} "
-                    f"(harga Rp {ref_exit_price:,.0f})"
+                    f"est net fee-only sell {format_currency(est_net, signed=False)} < min {format_currency(required_profit_idr, signed=False)} "
+                    f"(harga {format_currency(ref_exit_price, is_price=True, signed=False)})"
                 ),
             }
 
@@ -397,6 +419,7 @@ class ExitManager:
             try:
                 eid = os.getenv("EXCHANGE", "binance").lower()
                 quote_currency = "USDT" if eid == "binance" else "IDR"
+                bal = self.exchange.fetch_balance()
                 free_idr = float((bal or {}).get('free', {}).get(quote_currency, 0) or 0)
                 if free_idr > 0:
                     self._cached_effective_balance_idr = free_idr
@@ -807,17 +830,17 @@ class ExitManager:
         n = len(open_pairs_for_basket)
         log_message(
             f"[NET-ZERO-SURVIVAL] ACTIVATED — Executing emergency BASKET_EXIT "
-            f"for {n} position(s). Net PnL: Rp {net_total_pnl:+,.0f} | "
-            f"Velocity: {latest_velocity:+.1f} IDR/s"
+            f"for {n} position(s). Net PnL: {format_currency(net_total_pnl, signed=True)} | "
+            f"Velocity: {latest_velocity:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s"
         )
 
         #  Persist event 
         event_msg = (
             f"NET_ZERO_SURVIVAL ACTIVATED | "
-            f"Realized: Rp {realized_pnl:+,.0f} | "
-            f"Unrealized: Rp {unrealized_pnl:+,.0f} | "
-            f"Net PnL: Rp {net_total_pnl:+,.0f} | "
-            f"Velocity: {latest_velocity:+.1f} IDR/s"
+            f"Realized: {format_currency(realized_pnl, signed=True)} | "
+            f"Unrealized: {format_currency(unrealized_pnl, signed=True)} | "
+            f"Net PnL: {format_currency(net_total_pnl, signed=True)} | "
+            f"Velocity: {latest_velocity:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s"
         )
         try:
             db.log_system_event("PORTFOLIO", "NET_ZERO_SURVIVAL", event_msg, "CRITICAL")
@@ -845,10 +868,10 @@ class ExitManager:
         telegram_msg = (
             f"[NET-ZERO-SURVIVAL-ACTIVATED]\n"
             f"[WARN] Emergency Basket Exit executed to protect principal.\n"
-            f"Realized: Rp {realized_pnl:+,.0f}\n"
-            f"Unrealized: Rp {unrealized_pnl:+,.0f}\n"
-            f"Net PnL: Rp {net_total_pnl:+,.0f}\n"
-            f"Momentum: {latest_velocity:+.1f} IDR/s\n"
+            f"Realized: {format_currency(realized_pnl, signed=True)}\n"
+            f"Unrealized: {format_currency(unrealized_pnl, signed=True)}\n"
+            f"Net PnL: {format_currency(net_total_pnl, signed=True)}\n"
+            f"Momentum: {latest_velocity:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s\n"
             f"System Paused. Manual review required."
         )
         log_message(telegram_msg.replace('*', '').replace('\n', ' | '))
@@ -865,7 +888,7 @@ class ExitManager:
 
         for pair, data, current_price, amount in open_pairs_for_basket:
             reason = "NET_ZERO_SURVIVAL"
-            log_msg = f"[NET-ZERO-SURVIVAL] {pair}: Emergency exit at Rp {current_price:,.0f}."
+            log_msg = f"[NET-ZERO-SURVIVAL] {pair}: Emergency exit at {format_currency(current_price, is_price=True, signed=False)}."
             log_message(log_msg)
             try:
                 db.log_system_event(pair, "NET_ZERO_SURVIVAL", log_msg, "CRITICAL")
@@ -996,7 +1019,7 @@ class ExitManager:
                         if price > 0 and value_idr < 10000:
                             continue
                             
-                        log_message(f"[DISCOVERY] Adopting asset: {coin} ({amount}) - Value IDR: Rp {value_idr:,.0f}")
+                        log_message(f"[DISCOVERY] Adopting asset: {coin} ({amount}) - Value: {format_currency(value_idr, signed=False)}")
                         recovery_data = {
                             "pair": pair,
                             "entry_price": price if price > 0 else 0,
@@ -1051,7 +1074,7 @@ class ExitManager:
 
                     # OPEN: hapus jika saldo sangat kecil/nol atau nilai di bawah Rp 5.000
                     if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000):
-                        log_message(f"[AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value IDR: Rp {value_idr:,.0f})")
+                        log_message(f"[AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value: {format_currency(value_idr, signed=False)})")
                         db.delete_position(pair)
                         positions.pop(pair, None)
                         ghosts_removed.append(pair)
@@ -1391,8 +1414,8 @@ class ExitManager:
                                 except Exception:
                                     pass
                                 log_message(
-                                    f"[NET-ZERO-TARGET-RATCHET] Floor naik ke Rp {active_target_floor:,.0f} "
-                                    f"(Net PnL: Rp {net_total_pnl:,.0f})"
+                                    f"[NET-ZERO-TARGET-RATCHET] Floor naik ke {format_currency(active_target_floor, signed=False)} "
+                                    f"(Net PnL: {format_currency(net_total_pnl, signed=False)})"
                                 )
 
                         # Once profit floor is locked, switch to HARVEST_ONLY (sell-only)
@@ -1410,12 +1433,12 @@ class ExitManager:
                                     pass
                                 log_message(
                                     f"[NET-ZERO-PROFIT-LOCK] HARVEST_ONLY aktif | "
-                                    f"Buy blocked | Floor: Rp {active_target_floor:,.0f}"
+                                    f"Buy blocked | Floor: {format_currency(active_target_floor, signed=False)}"
                                 )
                                 send_telegram_message(
                                     f"[NET-ZERO-PROFIT-LOCK]\n"
                                     f"Mode: HARVEST_ONLY (sell-only)\n"
-                                    f"Target Floor: Rp {active_target_floor:,.0f}\n"
+                                    f"Target Floor: {format_currency(active_target_floor, signed=False)}\n"
                                     f"Buy baru diblok untuk menjaga profit."
                                 )
 
@@ -1445,14 +1468,14 @@ class ExitManager:
                                     except Exception:
                                         pass
                                     _recovery_msg = (
-                                        f"[NET-ZERO-GUARD] Auto-recovery: PnL Rp {net_total_pnl:+,.0f} "
-                                        f"above floor Rp {fired_floor:,.0f} after {NET_ZERO_AUTO_RESET_SEC}s cooldown. "
+                                        f"[NET-ZERO-GUARD] Auto-recovery: PnL {format_currency(net_total_pnl, signed=True)} "
+                                        f"above floor {format_currency(fired_floor, signed=False)} after {NET_ZERO_AUTO_RESET_SEC}s cooldown. "
                                         f"Mode: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
                                     )
                                     log_message(_recovery_msg)
                                     send_telegram_message(
                                         f"[NET-ZERO-AUTO-RECOVERY]\n"
-                                        f"Net PnL: Rp {net_total_pnl:+,.0f} — kondisi pulih.\n"
+                                        f"Net PnL: {format_currency(net_total_pnl, signed=True)} — kondisi pulih.\n"
                                         f"Mode aktif: {'HARVEST_ONLY' if target_reached_once else 'NORMAL'}."
                                     )
 
@@ -1496,7 +1519,7 @@ class ExitManager:
                                     log_message(
                                         f"[NET-ZERO-GUARD] PRE-TARGET: guard disarmed. "
                                         f"Aktif setelah target harian tercapai. "
-                                        f"Floor (post-target): Rp {daily_target_idr:,.0f}"
+                                        f"Floor (post-target): {format_currency(daily_target_idr, signed=False)}"
                                     )
 
                             if nz_condition:
@@ -1505,9 +1528,9 @@ class ExitManager:
                                     self._net_zero_trigger_ts = _now_ts
                                     log_message(
                                         f"[NET-ZERO-GUARD] Condition detected — hysteresis timer started. "
-                                        f"Net PnL (R+U): Rp {net_total_pnl:+,.0f} | "
-                                        f"Floor: Rp {net_zero_floor:,.0f} | "
-                                        f"Avg velocity: {avg_velocity:+.1f} IDR/s | "
+                                        f"Net PnL (R+U): {format_currency(net_total_pnl, signed=True)} | "
+                                        f"Floor: {format_currency(net_zero_floor, signed=False)} | "
+                                        f"Avg velocity: {avg_velocity:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s | "
                                         f"Mode: PROFIT_PROTECT | "
                                         f"Unrealised: {unrealized_loss_pct*100:.2f}%"
                                     )
@@ -1515,7 +1538,7 @@ class ExitManager:
                                     if nz_immediate:
                                         log_message(
                                             f"[NET-ZERO-GUARD] IMMEDIATE exit — extreme crash velocity "
-                                            f"{latest_velocity:+.1f} IDR/s bypasses hysteresis."
+                                            f"{latest_velocity:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s bypasses hysteresis."
                                         )
                                     self._net_zero_fired = True
                                     try:
@@ -1574,8 +1597,8 @@ class ExitManager:
                         self._target_fired_session.add("TARGET_REACHED")
                         _tr_msg = (
                             f"[TARGET-REACHED]\n"
-                            f"Net PnL: Rp {total_net_pnl:,.0f} ≥ "
-                            f"Safety Zone Rp {_safety_zone_upper:,.0f}\n"
+                            f"Net PnL: {format_currency(total_net_pnl, signed=False)} ≥ "
+                            f"Safety Zone {format_currency(_safety_zone_upper, signed=False)}\n"
                             f"Floor Protection: ACTIVE"
                         )
                         log_message(_tr_msg.replace('\n', ' | '))
@@ -1613,7 +1636,7 @@ class ExitManager:
                         log_message(
                             f"[HARVEST-ONLY] Status: HARVEST_ONLY | BUY: Blocked | "
                             f"Strategy: {_strategy} | "
-                            f"Net Unrealized: Rp {total_net_pnl:,.0f} | "
+                            f"Net Unrealized: {format_currency(total_net_pnl, signed=False)} | "
                             f"Target Floor: {SMART_BREAK_EVEN_PCT*100:.2f}% (Gross/BE)"
                         )
                         self._last_basket_bypass_log_ts = _now_ts
@@ -1624,7 +1647,7 @@ class ExitManager:
                 _BYPASS_LOG_INTERVAL = 60  # seconds between repeated bypass log messages
                 # [LOG] Basket Exit Trigger State
                 log_message(
-                    f"[EXIT-MONITOR-CHECK] NetPnL: Rp {total_net_pnl:,.0f} | GrossPnL: Rp {total_gross_pnl:,.0f} | Fees: Rp {total_fees_idr:,.0f} | Mode: {'EMERGENCY' if btc_crash_kill else 'NORMAL'} | Trigger: {trigger_label} | n={n} | has_losers={has_losers} | has_stagnant={has_stagnant} | harvest_only={harvest_only}"
+                    f"[EXIT-MONITOR-CHECK] NetPnL: {format_currency(total_net_pnl, signed=False)} | GrossPnL: {format_currency(total_gross_pnl, signed=False)} | Fees: {format_currency(total_fees_idr, signed=False)} | Mode: {'EMERGENCY' if btc_crash_kill else 'NORMAL'} | Trigger: {trigger_label} | n={n} | has_losers={has_losers} | has_stagnant={has_stagnant} | harvest_only={harvest_only}"
                 )
 
                 #  Exception: BTC Crash Kill Switch 
@@ -1697,7 +1720,7 @@ class ExitManager:
                     if trigger_emergency_floor:
                         should_execute = True
                         trigger_label  = (
-                            f"EMERGENCY FLOOR (Target Rp{MOMENTUM_TARGET_PNL_IDR:,.0f} reached)"
+                            f"EMERGENCY FLOOR (Target {format_currency(MOMENTUM_TARGET_PNL_IDR, signed=False)} reached)"
                         )
                         action_label   = "EMERGENCY FLOOR EXIT"
 
@@ -1726,16 +1749,16 @@ class ExitManager:
                                 _latest_vel = self._velocity_readings[-1] if self._velocity_readings else 0.0
                                 log_message(
                                     f"[TIGHT-TRAILING-STOP] Safety Zone + Recovery detected. "
-                                    f"Net PnL: Rp {total_net_pnl:,.0f} | "
-                                    f"Velocity: {_latest_vel:+.1f} IDR/s | "
-                                    f"HWM Floor: Rp {self._portfolio_hwm * (1 - _effective_hwm_pullback_pct):,.0f}"
+                                    f"Net PnL: {format_currency(total_net_pnl, signed=False)} | "
+                                    f"Velocity: {_latest_vel:+.1f} {'USDT' if get_quote_suffix() == 'usdt' else 'IDR'}/s | "
+                                    f"HWM Floor: {format_currency(self._portfolio_hwm * (1 - _effective_hwm_pullback_pct), signed=False)}"
                                 )
                                 self._last_basket_bypass_log_ts = _now_ts
 
                     elif trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_hwm_pullback or trigger_harvest_pct:
                         should_execute = True
                         if trigger_hwm_pullback and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr or trigger_harvest_pct):
-                            trigger_label = f"HWM PULLBACK (Peak Rp{self._portfolio_hwm:,.0f})"
+                            trigger_label = f"HWM PULLBACK (Peak {format_currency(self._portfolio_hwm, signed=False)})"
                             action_label  = "HWM PULLBACK"
                         elif trigger_harvest_pct and not (trigger_normal or trigger_stagnant_rescue or trigger_harvest_idr):
                             trigger_label = "GUARANTEED PROFIT HARVEST"
@@ -1760,7 +1783,7 @@ class ExitManager:
                     msg = (
                         f"[PORTFOLIO-BASKET-EXIT] [{trigger_label}]\n"
                         f"Menutup {n} posisi serentak!\n"
-                        f"Estimasi Global Net Profit: Rp {total_net_pnl:,.2f}"
+                        f"Estimasi Global Net Profit: {format_currency(total_net_pnl, signed=False)}"
                     )
                     print(msg.replace('\n', ' | '))
                     send_telegram_message(msg)
@@ -1775,13 +1798,13 @@ class ExitManager:
                             # AUTO-HARVEST: bypass approval gate for profitable basket exits.
                             log_message(
                                 f"[AUTO-HARVEST] Profitable Basket Exit executed without confirmation. "
-                                f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
+                                f"Net PnL: {format_currency(total_net_pnl, signed=False)} ({net_pnl_pct:+.4f}%)"
                             )
                             # Queue a silent toast notification for the dashboard.
                             db.save_state("auto_harvest_notification", json.dumps({
                                 "message": (
                                     f"Basket Exit Completed (Profit Secured) — "
-                                    f"Net PnL: Rp {total_net_pnl:,.0f} ({net_pnl_pct:+.4f}%)"
+                                    f"Net PnL: {format_currency(total_net_pnl, signed=False)} ({net_pnl_pct:+.4f}%)"
                                 ),
                             }))
                         else:
@@ -1797,7 +1820,7 @@ class ExitManager:
                             )
                             _default_approve = not _is_harvest
                             _reason_text = (
-                                f"Net PnL: Rp {total_net_pnl:,.0f} | "
+                                f"Net PnL: {format_currency(total_net_pnl, signed=False)} | "
                                 f"Net {net_pnl_pct:+.4f}% | Trigger: {trigger_label}"
                             )
                             _pairs_desc = ", ".join(
@@ -2431,8 +2454,8 @@ class ExitManager:
                         msg = (
                             f"[TARGET] *TAKE PROFIT* [TARGET]\n"
                             f"Pair: `{pair}`\n"
-                            f"Entry: Rp {entry_price:,.2f}\n"
-                            f"Exit: Rp {current_price:,.2f}\n"
+                            f"Entry: {format_currency(entry_price, is_price=True, signed=False)}\n"
+                            f"Exit: {format_currency(current_price, is_price=True, signed=False)}\n"
                             f"PnL: {pnl_pct:+.2f}%\n"
                             f"Hold: {duration_str}"
                         )
@@ -2478,7 +2501,7 @@ class ExitManager:
 
                     reason_sl = "STOP_LOSS"
                     log_message(
-                        f"[LOSS] [AUTO-SL TRIGGERED] {pair}: Price {current_price:,.2f} hit SL {active_sl_price:,.2f} "
+                        f"[LOSS] [AUTO-SL TRIGGERED] {pair}: Price {format_currency(current_price, is_price=True, signed=False)} hit SL {format_currency(active_sl_price, is_price=True, signed=False)} "
                         f"({pnl_pct:+.2f}%). Protecting capital."
                     )
                     order_id = self.execute_exit(pair, amount, current_price, reason_sl,
@@ -2875,11 +2898,11 @@ class ExitManager:
             net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
 
             # Catat ke system_events agar muncul di Activity Feed dashboard
-            pnl_label = f"+Rp {net_pnl_idr:,.0f}" if net_pnl_idr >= 0 else f"-Rp {abs(net_pnl_idr):,.0f}"
+            pnl_label = format_currency(net_pnl_idr, signed=True)
             db.log_system_event(
                 pair,
                 "SELL",
-                f"{reason} | Rp {exit_price:,.0f} | PnL:{pnl_label}",
+                f"{reason} | {format_currency(exit_price, is_price=True, signed=False)} | PnL:{pnl_label}",
                 'SUCCESS' if net_pnl_idr >= 0 else 'WARN'
             )
 
@@ -2978,8 +3001,8 @@ class ExitManager:
             # [Senior Fix] Guard: Pastikan nominal DCA memenuhi minimum order exchange
             if add_amount_idr < MIN_TRADE_IDR:
                 log_message(
-                    f"[WARN] [DCA SKIP] {pair}: Nominal DCA Rp {add_amount_idr:,.0f} "
-                    f"di bawah minimum Rp {MIN_TRADE_IDR:,.0f}. Batalkan DCA."
+                    f"[WARN] [DCA SKIP] {pair}: Nominal DCA {format_currency(add_amount_idr, signed=False)} "
+                    f"di bawah minimum {format_currency(MIN_TRADE_IDR, signed=False)}. Batalkan DCA."
                 )
                 return False
             
@@ -2992,8 +3015,8 @@ class ExitManager:
             if self.dry_run:
                 # Simulasi penambahan muatan
                 log_message(
-                    f" [DRY RUN DCA] {pair}: Added {add_amount_idr:,.0f} IDR "
-                    f"= {add_amount_crypto:.8f} koin at Rp {current_price:,.2f}"
+                    f" [DRY RUN DCA] {pair}: Added {format_currency(add_amount_idr, signed=False)} "
+                    f"= {add_amount_crypto:.8f} koin at {format_currency(current_price, is_price=True, signed=False)}"
                 )
             else:
                 # DCA entry dipaksa market buy agar eksekusi instan dan konsisten.
@@ -3037,10 +3060,10 @@ class ExitManager:
             msg = (
                 f" *DCA SUCCESS* \n"
                 f"Pair: `{pair}` (Tier {new_tier})\n"
-                f"Old Entry: Rp {old_entry_price:,.2f}\n"
-                f"DCA Price: Rp {current_price:,.2f}\n"
-                f"New Average: Rp {new_avg_entry_price:,.2f} [SIGNAL]\n"
-                f"Total Load: Rp {new_total_amount_idr:,.0f} ({new_total_amount_crypto:.8f} koin)"
+                f"Old Entry: {format_currency(old_entry_price, is_price=True, signed=False)}\n"
+                f"DCA Price: {format_currency(current_price, is_price=True, signed=False)}\n"
+                f"New Average: {format_currency(new_avg_entry_price, is_price=True, signed=False)} [SIGNAL]\n"
+                f"Total Load: {format_currency(new_total_amount_idr, signed=False)} ({new_total_amount_crypto:.8f} koin)"
             )
             send_telegram_message(msg)
             return True
