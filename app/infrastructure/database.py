@@ -640,6 +640,10 @@ class Database:
             else:
                 params = (dry_run,)
                 
+            import os
+            EXCHANGE = os.getenv("EXCHANGE", "binance").lower()
+            exchange_filter = "AND pair LIKE '%%usdt'" if EXCHANGE == 'binance' else "AND pair LIKE '%%idr'"
+                
             query = f'''
                 SELECT 
                     COUNT(*) as total_trades,
@@ -651,7 +655,7 @@ class Database:
                     SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
                     SUM(amount_idr) as total_volume_idr
                 FROM trade_history
-                WHERE {date_filter} AND dry_run = %s AND reason != 'BACKTEST'
+                WHERE {date_filter} AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             '''
             cursor.execute(query, params)
             row = cursor.fetchone()
@@ -675,7 +679,12 @@ class Database:
             dry_run = self.is_dry_run()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            query = '''
+            
+            import os
+            EXCHANGE = os.getenv("EXCHANGE", "binance").lower()
+            exchange_filter = "AND pair LIKE '%%usdt'" if EXCHANGE == 'binance' else "AND pair LIKE '%%idr'"
+            
+            query = f'''
                 SELECT 
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
@@ -686,7 +695,7 @@ class Database:
                     SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
                     SUM(amount_idr) as total_volume_idr
                 FROM trade_history
-                WHERE dry_run = %s AND reason != 'BACKTEST'
+                WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             '''
             cursor.execute(query, (dry_run,))
             row = cursor.fetchone()

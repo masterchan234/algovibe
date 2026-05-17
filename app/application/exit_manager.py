@@ -893,6 +893,38 @@ class ExitManager:
             self._monitor_lock.release()
 
     def _monitor_and_execute_inner(self, current_tickers, price_history=None, get_prediction_fn=None):
+        # [Senior Logic] Exchange-Aware Scale Mismatch Auto-Reset
+        import os
+        EXCHANGE = os.getenv("EXCHANGE", "binance").lower()
+        
+        target_raw = db.get_state("daily_profit_target")
+        daily_target_id = float(target_raw) if target_raw else 0.0
+        locked_target_raw = db.get_state("net_zero_target_floor")
+        locked_target_fl = float(locked_target_raw) if locked_target_raw else 0.0
+        peak_raw = db.get_state("peak_pnl_today")
+        peak_pnl_td = float(peak_raw) if peak_raw else 0.0
+        
+        if EXCHANGE == "binance":
+            if peak_pnl_td > 1000.0 or daily_target_id > 1000.0 or locked_target_fl > 1000.0:
+                log_message("[SYSTEM] Stale IDR database states detected in Binance mode. Resetting to USDT scale.")
+                db.save_state("peak_pnl_today", "0.0")
+                db.save_state("daily_profit_target", "0.0")
+                db.save_state("net_zero_target_floor", "0.0")
+                db.save_state("session_mode", "SCALPING")
+                db.save_state("session_buy_enabled", "true")
+                db.save_state("session_latched", "false")
+                db.save_state("target_protection_active", "false")
+        elif EXCHANGE == "indodax":
+            if (0.0 < peak_pnl_td < 500.0) or (0.0 < daily_target_id < 500.0) or (0.0 < locked_target_fl < 500.0):
+                log_message("[SYSTEM] Stale USDT database states detected in Indodax mode. Resetting to IDR scale.")
+                db.save_state("peak_pnl_today", "0.0")
+                db.save_state("daily_profit_target", "0.0")
+                db.save_state("net_zero_target_floor", "0.0")
+                db.save_state("session_mode", "SCALPING")
+                db.save_state("session_buy_enabled", "true")
+                db.save_state("session_latched", "false")
+                db.save_state("target_protection_active", "false")
+
         all_positions = self.get_open_positions()
         current_dr_val = 1 if self.dry_run else 0
         
@@ -1307,6 +1339,9 @@ class ExitManager:
 
                         peak_raw = db.get_state("peak_pnl_today")
                         peak_pnl_today = float(peak_raw) if peak_raw else 0.0
+
+
+
                         target_reached_once = (
                             (daily_target_idr > 0 and peak_pnl_today >= daily_target_idr)
                             or locked_target_floor > 0

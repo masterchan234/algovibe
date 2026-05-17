@@ -582,7 +582,9 @@ def _get_trade_history_summary():
     try:
         conn = get_db_connection()
         dry_val = 1 if cfg.DRY_RUN else 0
-        row = conn.execute("""
+        exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
+        
+        row = conn.execute(f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins,
@@ -593,18 +595,18 @@ def _get_trade_history_summary():
                 ROUND(MIN(pnl_idr), 0) as worst_trade,
                 ROUND(SUM(pnl_idr), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
         """, (bool(dry_val),)).fetchone()
 
-        exits = conn.execute("""
+        exits = conn.execute(f"""
             SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             GROUP BY reason ORDER BY cnt DESC LIMIT 6
         """, (bool(dry_val),)).fetchall()
 
-        top_pairs = conn.execute("""
+        top_pairs = conn.execute(f"""
             SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
         """, (bool(dry_val),)).fetchall()
 
@@ -1328,7 +1330,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
     import config as cfg
 
     amount = float(amount or 0)
-    entry
+    entry_price = float(entry_price or 0)
     amount_idr = float(amount_idr or 0)
     if amount <= 0 or entry_price <= 0:
         return {
@@ -1442,6 +1444,7 @@ def get_pnl_history_api(tf):
     try:
         import config as cfg
         dr_val = 1 if _is_dry_run() else 0
+        exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
         
         tf_map = {
             '1h': '-1 hours',
@@ -1450,16 +1453,17 @@ def get_pnl_history_api(tf):
         }
         interval = tf_map.get(tf, '-24 hours')
         
-        base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
-            (interval, dr_val)
-        ).fetchone()
+        base_row = conn.execute(f"""
+            SELECT SUM(pnl_idr) as total FROM trade_history 
+            WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' {exchange_filter}
+        """, (interval, dr_val)).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
-        trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
-            (interval, dr_val)
-        ).fetchall()
+        trades = conn.execute(f"""
+            SELECT pnl_idr, created_at FROM trade_history 
+            WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' {exchange_filter} 
+            ORDER BY created_at ASC
+        """, (interval, dr_val)).fetchall()
         
         results = []
         results.append({
@@ -2246,12 +2250,17 @@ def update_bot_state():
             try:
                 stats = _build_stats_payload()
                 current_pnl = float(stats.get('net_pnl', 0))
-                # Add a buffer (Rp 10k or 0.1% of capital, whichever is higher)
-                new_target = current_pnl + 10000 
+                # Add a buffer (Rp 10k / $1.0 USDT or 0.1% of capital, whichever is higher)
+                if eid == 'binance':
+                    new_target = current_pnl + 1.0
+                    label = f"${new_target:,.2f}"
+                else:
+                    new_target = current_pnl + 10000
+                    label = f"Rp {new_target:,.0f}"
                 db.save_state("daily_profit_target", str(new_target))
                 db.save_state("session_mode", "SCALPING")
                 db.save_state("session_latched", "false")
-                logging.info(f"[TARGET] [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
+                logging.info(f"[TARGET] [Manual Target Reset] Moving target to {label} and resuming SCALPING.")
             except Exception as _re:
                 logging.warning(f"Could not move goalpost during reset: {_re}")
 
@@ -2878,7 +2887,7 @@ def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
     import config as cfg
     # Determine which mode we are building for
-    dr_val = force_dry if force_dry is not None else bool(cfg.DRY_RUN)
+    dr_val = force_dry if force_dry is not None else _is_dry_run()
     
     # Use the appropriate DB instance
     db_inst = db.dryrun if dr_val else db.live
@@ -3058,17 +3067,19 @@ def _build_stats_payload(force_dry=None):
         net_total_pnl = float(active_pnl) + float(unrealized_pnl)
 
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
-        top_pair_row = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s "
-            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1", (dr_val,)
-        ).fetchone()
+        exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
         
-        contribution_rows = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s "
-            "GROUP BY pair ORDER BY total_pnl DESC", (dr_val,)
-        ).fetchall()
+        top_pair_row = conn.execute(f"""
+            SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
+            GROUP BY pair ORDER BY total_pnl DESC LIMIT 1
+        """, (dr_val,)).fetchone()
+        
+        contribution_rows = conn.execute(f"""
+            SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
+            GROUP BY pair ORDER BY total_pnl DESC
+        """, (dr_val,)).fetchall()
         
         asset_contributions = []
         for row in contribution_rows:
@@ -3078,10 +3089,10 @@ def _build_stats_payload(force_dry=None):
                 "trades": row['tx_count']
             })
 
-        best_trade_row = conn.execute(
-            "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s", (bool(dr_val),)
-        ).fetchone()
+        best_trade_row = conn.execute(f"""
+            SELECT MAX(pnl_idr) FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
+        """, (bool(dr_val),)).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
         best_trade = float(best_trade_row[0] or 0)
@@ -3152,11 +3163,11 @@ def _build_stats_payload(force_dry=None):
         # --- Recent Trades for History Tab ---
         recent_trades = []
         try:
-            recent_trades_rows = conn.execute("""
+            recent_trades_rows = conn.execute(f"""
                 SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
                        pnl_idr, pnl_pct, reason, duration_seconds, created_at, ai_confidence
                 FROM trade_history
-                WHERE reason != 'BACKTEST' AND dry_run = %s
+                WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
                 ORDER BY created_at DESC LIMIT 20
             """, (bool(dr_val),)).fetchall()
             for r in recent_trades_rows:
