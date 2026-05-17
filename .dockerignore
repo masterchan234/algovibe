@@ -49,3 +49,5 @@ graphify-out/
 # Misc dev artifacts
 default.profraw
 *.profraw
+.rtk/
+.kilo/
