@@ -29,26 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY . .
 
 # Run Cython compiler to convert all core logic (.py) into binary shared libraries (.so)
-# We exclude:
-# - package boundary indicators (__init__.py)
-# - database migrations folders (alembic / alembic_backtest)
-# - simple launcher (main.py)
-RUN python3 -c " \
-import os, subprocess, sys \
-from pathlib import Path \
-failed = False \
-for p in Path('.').glob('**/*.py'): \
-    # Skip criteria \
-    if p.name == '__init__.py' or p.name == 'main.py' or 'alembic' in p.parts or 'alembic_backtest' in p.parts or '.venv' in p.parts: \
-        continue \
-    print(f'[Compiler] Cythonizing: {p}') \
-    res = subprocess.run([sys.executable, '-m', 'cython', '-i', '-3', str(p)]) \
-    if res.returncode != 0: \
-        print(f'[Compiler] ❌ Failed to compile {p}') \
-        failed = True \
-if failed: \
-    sys.exit(1) \
-"
+RUN python3 compile_prod.py && rm compile_prod.py
 
 # Clean up source code .py files and C files that we compiled
 # leaving only the compiled .so binaries and package structures!
