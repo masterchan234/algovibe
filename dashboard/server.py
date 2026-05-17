@@ -3126,7 +3126,7 @@ def _build_stats_payload(force_dry=None):
         try:
             recent_trades_rows = conn.execute("""
                 SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
-                       pnl_idr, pnl_pct, reason, duration_seconds, created_at
+                       pnl_idr, pnl_pct, reason, duration_seconds, created_at, ai_confidence
                 FROM trade_history
                 WHERE reason != 'BACKTEST' AND dry_run = %s
                 ORDER BY created_at DESC LIMIT 20
@@ -3143,6 +3143,7 @@ def _build_stats_payload(force_dry=None):
                     "pnl_pct":     float(r['pnl_pct'] or 0),
                     "reason":      r['reason'],
                     "created_at":  str(r['created_at'] or ''),
+                    "ai_confidence": float(r.get('ai_confidence') or 0.0),
                 })
         except Exception as e:
             print(f"[WARN] History Fetch Error: {e}")
