@@ -83,6 +83,9 @@
 
 <script setup>
 import { computed } from 'vue'
+import { useTradeStore } from '../stores/trade'
+
+const store = useTradeStore()
 
 const props = defineProps({
   pair: { type: Object, default: null },
@@ -99,16 +102,24 @@ const isLeader = computed(() =>
 
 function formatPair(pair) {
   if (!pair) return ''
-  return pair.replace(/_idr$/i, '').toUpperCase()
+  return pair.replace(/_idr$/i, '').replace(/_usdt$/i, '').replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase()
 }
 
 function formatPrice(v) {
   if (v == null) return '-'
   const n = Number(v)
   if (isNaN(n)) return '-'
-  if (n >= 1_000_000) return 'Rp ' + (n / 1_000_000).toFixed(2) + 'M'
-  if (n >= 1_000) return 'Rp ' + n.toLocaleString('id-ID')
-  return 'Rp ' + n.toFixed(4)
+  
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    if (n >= 1_000_000) return '$' + (n / 1_000_000).toFixed(2) + 'M'
+    if (n >= 1_000) return '$' + n.toLocaleString('en-US')
+    return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  } else {
+    if (n >= 1_000_000) return 'Rp ' + (n / 1_000_000).toFixed(2) + 'M'
+    if (n >= 1_000) return 'Rp ' + n.toLocaleString('id-ID')
+    return 'Rp ' + n.toFixed(4)
+  }
 }
 
 const recommendation = computed(() => {

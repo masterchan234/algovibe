@@ -15,7 +15,7 @@
             <span class="rg-alert-icon">🧨</span>
             <div class="rg-alert-text">
               <strong>NEGATIVE PnL DETECTED</strong>
-              <p>Executing this basket exit will realize a net loss of Rp {{ formatNumber(Math.abs(pendingAction.impact_idr)) }}.</p>
+              <p>Executing this basket exit will realize a net loss of {{ isUsdt ? '$' : 'Rp ' }}{{ formatNumber(Math.abs(pendingAction.impact_idr)) }}.</p>
             </div>
           </div>
 
@@ -35,7 +35,7 @@
             <div class="rg-detail-row">
               <span class="rg-label">PROJECTED IMPACT</span>
               <span class="rg-value" :class="pnlClass">
-                Rp {{ formatNumber(pendingAction.impact_idr) }}
+                {{ isUsdt ? '$' : 'Rp ' }}{{ formatNumber(pendingAction.impact_idr) }}
               </span>
             </div>
           </div>
@@ -64,17 +64,20 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useTradeStore } from '../stores/trade'
 
 const props = defineProps({
   socket: { type: Object, default: null }
 })
 
+const store = useTradeStore()
 const pendingAction = ref(null)
 const isResponding = ref(false)
 const timeLeft = ref(0)
 const timerWidth = ref(100)
 let timerInterval = null
 
+const isUsdt = computed(() => store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000))
 const isCritical = computed(() => pendingAction.value?.impact_idr < 0)
 const isNegativeImpact = computed(() => pendingAction.value?.impact_idr < 0)
 const pnlClass = computed(() => {
@@ -84,7 +87,11 @@ const pnlClass = computed(() => {
 
 function formatNumber(val) {
   if (val === undefined || val === null) return '0'
-  return new Intl.NumberFormat('id-ID').format(Math.round(val))
+  if (isUsdt.value) {
+    return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(val))
+  } else {
+    return new Intl.NumberFormat('id-ID').format(Math.round(val))
+  }
 }
 
 function handlePendingAction(data) {

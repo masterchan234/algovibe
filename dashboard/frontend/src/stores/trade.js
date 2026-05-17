@@ -113,6 +113,7 @@ export const useTradeStore = defineStore('trade', () => {
     entry_gate_at: '',
     session_mode: 'NORMAL',
     daily_target_hit: false,
+    exchange: 'binance',
   })
 
   // Open positions (trades)
@@ -346,6 +347,7 @@ export const useTradeStore = defineStore('trade', () => {
           session_mode: data.session_mode ?? 'NORMAL',
           daily_target_hit: data.daily_target_hit ?? false,
           session_buy_enabled: data.session_buy_enabled ?? true,
+          exchange: data.exchange ?? 'binance',
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })

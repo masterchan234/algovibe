@@ -14,13 +14,13 @@
           {{ formatIdr(stats.daily_pnl) }}
         </div>
       </div>
-      <div class="kpi-item momentum-kpi" :class="`momentum-${momentumStateClass}`" :title="`Velocity: ${stats.net_pnl_velocity >= 0 ? '+' : ''}${(stats.net_pnl_velocity || 0).toFixed(1)} IDR/s`">
+      <div class="kpi-item momentum-kpi" :class="`momentum-${momentumStateClass}`" :title="`Velocity: ${stats.net_pnl_velocity >= 0 ? '+' : ''}${(stats.net_pnl_velocity || 0).toFixed(1)} ${velocitySuffix}`">
         <div class="kpi-label">Momentum</div>
         <div class="kpi-value momentum-value" :class="`momentum-${momentumStateClass}`">
           <span class="momentum-arrow">{{ momentumIcon }}</span>
           <span class="momentum-label">{{ stats.momentum_state || 'STALLING' }}</span>
         </div>
-        <div class="momentum-velocity">{{ stats.net_pnl_velocity >= 0 ? '+' : '' }}{{ (stats.net_pnl_velocity || 0).toFixed(1) }} IDR/s</div>
+        <div class="momentum-velocity">{{ stats.net_pnl_velocity >= 0 ? '+' : '' }}{{ (stats.net_pnl_velocity || 0).toFixed(1) }} {{ velocitySuffix }}</div>
         <button
           v-if="stats.consecutive_losses >= 3"
           class="unblock-btn"
@@ -167,7 +167,7 @@
       <div class="btc-condition-bar" :class="btcBarClass">
         <div class="btc-bar-left">
           <span class="btc-icon">₿</span>
-          <span class="btc-label">BTC/IDR</span>
+          <span class="btc-label">BTC/{{ (stats.btc_price && stats.btc_price < 500000) ? 'USDT' : 'IDR' }}</span>
           <span class="btc-price">{{ formatPrice(stats.btc_price) }}</span>
         </div>
         <div class="btc-bar-mid">
@@ -267,7 +267,7 @@
       <div v-if="showChartModal" class="chart-modal-overlay" @click.self="showChartModal = false">
         <div class="chart-modal">
           <div class="chart-modal-header">
-            <span class="chart-modal-title">{{ (chartModalPair || '').replace('idr','').toUpperCase() }} / IDR</span>
+            <span class="chart-modal-title">{{ (chartModalPair || '').replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase() }} / {{ (stats.btc_price && stats.btc_price < 500000) ? 'USDT' : 'IDR' }}</span>
             <button class="chart-modal-close" @click="showChartModal = false">✕</button>
           </div>
           <div class="chart-modal-body">
@@ -504,6 +504,11 @@ const momentumIcon = computed(() => {
     case 'DROPPING':  return '▼'
     default:          return '—'
   }
+})
+
+const velocitySuffix = computed(() => {
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  return isUsdt ? 'USDT/s' : 'IDR/s'
 })
 
 const isUnblocking = ref(false)
@@ -807,10 +812,16 @@ function formatPair(pair) {
 
 function formatPrice(val) {
   const n = Number(val) || 0
-  if (n >= 1_000_000_000) return `Rp ${(n / 1_000_000_000).toFixed(2)}M`
-  if (n >= 1_000_000) return `Rp ${(n / 1_000_000).toFixed(2)}jt`
-  if (n >= 1_000) return `Rp ${(n / 1_000).toFixed(1)}k`
-  return `Rp ${n.toFixed(0)}`
+  const isUsdt = (stats.value?.btc_price && stats.value.btc_price < 500000) || n < 500000
+  if (isUsdt) {
+    if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`
+    return `$${n.toFixed(2)}`
+  } else {
+    if (n >= 1_000_000_000) return `Rp ${(n / 1_000_000_000).toFixed(2)}M`
+    if (n >= 1_000_000) return `Rp ${(n / 1_000_000).toFixed(2)}jt`
+    if (n >= 1_000) return `Rp ${(n / 1_000).toFixed(1)}k`
+    return `Rp ${n.toFixed(0)}`
+  }
 }
 
 // BTC Condition computed helpers
@@ -843,9 +854,16 @@ function formatIdr(val) {
   const n = Number(val) || 0
   const abs = Math.abs(n)
   const prefix = n >= 0 ? '+' : '-'
-  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
-  if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
-  return `${prefix}Rp ${abs.toFixed(0)}`
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    if (abs >= 1_000_000) return `${prefix}$${(abs / 1_000_000).toFixed(2)}M`
+    if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}$${abs.toFixed(2)}`
+  } else {
+    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+    if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}Rp ${abs.toFixed(0)}`
+  }
 }
 
 function buildChartOption() {
@@ -880,9 +898,13 @@ function getCommonOption(times, values, lineColor, label) {
         const p = params[0]
         const n = Number(p.value)
         const prefix = n >= 0 ? '+' : ''
+        const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+        const formattedValue = isUsdt 
+          ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : `Rp ${n.toLocaleString('id-ID')}`
         return `<div style="font-size:10px;color:#8b949e">${p.axisValue}</div>
                 <div style="font-size:10px;color:#8b949e">${label}</div>
-                <div style="font-weight:700;color:${lineColor}">${prefix}Rp ${n.toLocaleString('id-ID')}</div>`
+                <div style="font-weight:700;color:${lineColor}">${prefix}${formattedValue}</div>`
       },
     },
     xAxis: {
@@ -904,9 +926,16 @@ function getCommonOption(times, values, lineColor, label) {
         color: '#8b949e',
         fontSize: 10,
         formatter: (v) => {
-          if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'jt'
-          if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(0) + 'k'
-          return v
+          const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+          if (isUsdt) {
+            if (Math.abs(v) >= 1_000_000) return '$' + (v / 1_000_000).toFixed(1) + 'M'
+            if (Math.abs(v) >= 1_000) return '$' + (v / 1_000).toFixed(0) + 'K'
+            return '$' + v
+          } else {
+            if (Math.abs(v) >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'jt'
+            if (Math.abs(v) >= 1_000) return (v / 1_000).toFixed(0) + 'k'
+            return v
+          }
         },
       },
     },

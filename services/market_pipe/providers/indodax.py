@@ -109,17 +109,21 @@ class IndodaxProvider(MarketProvider):
         except Exception as e:
             logger.warning(f"[{eid.upper()} Provider] Could not load positions or history: {e}")
 
-        # Subscribe dynamically with minor gaps
+        # Subscribe dynamically in bulk to respect exchange rate limits
         subscribed = 0
-        for p in sorted(pairs):
-            try:
-                self._mws.subscribe_market_trades(p)
-                subscribed += 1
-                time.sleep(0.03)
-            except Exception:
-                continue
+        try:
+            if hasattr(self._mws, 'subscribe_market_trades_bulk'):
+                self._mws.subscribe_market_trades_bulk(list(pairs))
+                subscribed = len(pairs)
+            else:
+                for p in sorted(pairs):
+                    self._mws.subscribe_market_trades(p)
+                    subscribed += 1
+                    time.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"[{eid.upper()} Provider] Trade subscriptions failed: {e}")
 
-        logger.info(f"[{eid.upper()} Provider] Initial trade subscriptions: {subscribed} pairs")
+        logger.info(f"[{eid.upper()} Provider] Initial trade subscriptions registered: {subscribed} pairs")
 
     def stop(self) -> None:
         self._running = False

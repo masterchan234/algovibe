@@ -27,6 +27,19 @@ from config import (
     SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
 
+def format_currency(val, is_price=False):
+    is_usdt = getattr(config, 'EXCHANGE', 'indodax') == 'binance'
+    prefix = "$" if is_usdt else "Rp "
+    val_float = float(val or 0.0)
+    if is_usdt:
+        if is_price:
+            return f"{prefix}{val_float:,.4f}"
+        return f"{prefix}{val_float:,.2f}"
+    else:
+        if is_price and val_float < 1000:
+            return f"{prefix}{val_float:,.2f}"
+        return f"{prefix}{val_float:,.0f}"
+
 #  Per-pair minimum trade IDR cache (dari fetch_pairs() API) 
 # Di-refresh setiap jam, sehingga jarang hit API dan tidak memblokir eksekusi.
 _PAIR_MIN_IDR_CACHE: dict = {}   # {pair: min_idr_float}
@@ -107,7 +120,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
         # We need at least 3x our order size in bid depth untuk cukup liquid
         required_depth = order_size_idr * 3.0
         if bid_depth_idr < required_depth:
-            return False, f"Bid depth Rp {bid_depth_idr:,.0f} < required Rp {required_depth:,.0f}", bid_depth_idr
+            return False, f"Bid depth {format_currency(bid_depth_idr)} < required {format_currency(required_depth)}", bid_depth_idr
         
         # 3. Check if top 2 bids have meaningful volume
         if best_bid_vol < order_size_idr / best_bid_price * 0.5:
@@ -117,7 +130,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
                 if (best_bid_vol + second_bid_vol) < order_size_idr / best_bid_price * 0.5:
                     return False, f"Top bids volume too low for order size", bid_depth_idr
         
-        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth Rp {bid_depth_idr:,.0f})", bid_depth_idr
+        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth {format_currency(bid_depth_idr)})", bid_depth_idr
         
     except Exception as e:
         log_message(f"[WARN] Liquidity check error for {pair}: {e}")
@@ -198,7 +211,7 @@ def execute_trade(
         
         # 1. Global Minimum check
         if vol_24h < MIN_VOLUME_FILTER:
-            log_message(f"[WARN] SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
+            log_message(f"[WARN] SKIP {pair}: Volume 24h ({format_currency(vol_24h)}) below Min Filter ({format_currency(MIN_VOLUME_FILTER)})")
             _mark_gate(f"24h volume below minimum filter: {vol_24h:,.0f}")
             return False
 
@@ -275,7 +288,7 @@ def execute_trade(
 
                     log_message(
                         f"[EXECUTIVE] [Intelligent Sizing] Tiered clamp {pair}: "
-                        f"Rp {target_amount:,.0f} -> Rp {clamp_target:,.0f}"
+                        f"{format_currency(target_amount)} -> {format_currency(clamp_target)}"
                     )
                     target_amount = clamp_target
 
@@ -297,14 +310,14 @@ def execute_trade(
             amount_idr *= recovery_factor
             log_message(
                 f"[SELL] [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
-                f"Rp {amount_idr:,.0f} ({recovery_factor*100:.0f}% dari normal)"
+                f"{format_currency(amount_idr)} ({recovery_factor*100:.0f}% dari normal)"
             )
 
         # 2. Dynamic check (Participation Rate)
         # Kita tidak ingin trade kita > 1/Multiplier (e.g. 1/50 = 2%) dari volume harian
         required_vol = amount_idr * LIQUIDITY_MULTIPLIER
         if vol_24h < required_vol:
-            log_message(f"[WARN] SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
+            log_message(f"[WARN] SKIP {pair}: Insufficient Liquidity. Need {format_currency(required_vol)} vol, but only has {format_currency(vol_24h)}")
             _mark_gate(f"Insufficient liquidity: need {required_vol:,.0f}, got {vol_24h:,.0f}")
             return False
 
@@ -329,8 +342,8 @@ def execute_trade(
         _min_viable_net = amount_idr * 0.005  # 0.5% dari trade size, proporsional
         if _max_net_profit < _min_viable_net:
             log_message(
-                f"[WARN] SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
-                f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
+                f"[WARN] SKIP {pair}: Fee-trap! Max net profit {format_currency(_max_net_profit)} "
+                f"< {format_currency(_min_viable_net)} (trade={format_currency(amount_idr)}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
                 f"Perlu trade lebih besar atau TP lebih tinggi."
             )
             _mark_gate("Fee viability guard blocked trade")
@@ -342,9 +355,9 @@ def execute_trade(
         if taker or len(prices) < 2:
             buy_price = price
             if taker:
-                log_message(f"[EXECUTION] [Taker Execute] Market Buy at Rp {buy_price:,.2f}")
+                log_message(f"[EXECUTION] [Taker Execute] Market Buy at {format_currency(buy_price, True)}")
             else:
-                log_message(f" [Maker Entry] Insufficient history for EMA-9, using current price: Rp {buy_price:,.2f}")
+                log_message(f" [Maker Entry] Insufficient history for EMA-9, using current price: {format_currency(buy_price, True)}")
         else:
             alpha = 2 / (9 + 1)
             ema_9 = prices[0]
@@ -352,7 +365,7 @@ def execute_trade(
                 ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
 
             buy_price = ema_9
-            log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
+            log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: {format_currency(buy_price, True)}")
 
         symbol = pair.upper().replace("IDR", "/IDR")
         amount_crypto = amount_idr / buy_price
@@ -386,10 +399,10 @@ def execute_trade(
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
                 f"Rationale: _{bot.oracle.get_rationale(pair, 'BUY')}_{predator_msg}\n"
-                f"Price: Rp {buy_price:,.2f}\n"
+                f"Price: {format_currency(buy_price, True)}\n"
                 f"Qty: {amount_crypto:.8f}\n"
-                f"Target TP: Rp {tp_target:,.2f}\n"
-                f"Target SL: Rp {sl_target:,.2f}"
+                f"Target TP: {format_currency(tp_target, True)}\n"
+                f"Target SL: {format_currency(sl_target, True)}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
@@ -398,10 +411,10 @@ def execute_trade(
                 f"[RECOVERY] *LIVE BUY* [RECOVERY]\n"
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
-                f"Price: Rp {buy_price:,.2f}\n"
+                f"Price: {format_currency(buy_price, True)}\n"
                 f"Qty: {amount_crypto:.8f}\n"
-                f"Target TP: Rp {tp_target:,.2f}\n"
-                f"Target SL: Rp {sl_target:,.2f}"
+                f"Target TP: {format_currency(tp_target, True)}\n"
+                f"Target SL: {format_currency(sl_target, True)}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
@@ -431,8 +444,8 @@ def execute_trade(
             # [Audit Fix] Log actual IDR used for live trades
             actual_idr = float(order.get('cost') or (buy_price * amount_crypto))
             log_message(
-                f" [LIVE-AUDIT] {pair} order executed. Intended IDR: Rp {amount_idr:,.0f} | "
-                f"Actual Cost: Rp {actual_idr:,.0f} | Qty: {amount_crypto:.8f}"
+                f" [LIVE-AUDIT] {pair} order executed. Intended: {format_currency(amount_idr)} | "
+                f"Actual Cost: {format_currency(actual_idr)} | Qty: {amount_crypto:.8f}"
             )
             # Use actual cost if available from exchange
             if actual_idr > 0:
@@ -461,7 +474,7 @@ def execute_trade(
                 db.log_order(p, "BUY", b_p, d.get("amount_crypto", 0), o.get('status'), o)
                 db.log_system_event(
                     p, "BUY",
-                    f"{m_label} | Prob:{t_prob*100:.1f}% | Rp {b_p:,.0f} | TP:{f_tp*100:.1f}% SL:{f_sl*100:.1f}%",
+                    f"{m_label} | Prob:{t_prob*100:.1f}% | {format_currency(b_p, True)} | TP:{f_tp*100:.1f}% SL:{f_sl*100:.1f}%",
                     'INFO'
                 )
             except Exception as ex:

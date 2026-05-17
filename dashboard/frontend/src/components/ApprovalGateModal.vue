@@ -112,7 +112,12 @@ const ringOffset = computed(() => {
 const impactText = computed(() => {
   const idr = store.pendingAction?.impact_idr ?? 0
   const sign = idr >= 0 ? '+' : ''
-  return `${sign}Rp ${Math.abs(idr).toLocaleString('id-ID', { maximumFractionDigits: 0 })}`
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return `${sign}$${Math.abs(idr).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  } else {
+    return `${sign}Rp ${Math.abs(idr).toLocaleString('id-ID', { maximumFractionDigits: 0 })}`
+  }
 })
 
 const impactClass = computed(() => {

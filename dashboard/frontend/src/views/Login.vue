@@ -61,7 +61,7 @@
             <article :key="currentInsightIdx" class="hero-copy">
               <h2 id="hero-title">{{ currentInsightText }}</h2>
               <p>
-                Editorial desk Algovibe memantau dinamika pasar kripto IDR secara real-time,
+                Editorial desk Algovibe memantau dinamika pasar kripto {{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }} secara real-time,
                 menggabungkan konteks teknikal, arus orderbook, dan perubahan sentimen untuk keputusan trading yang lebih terukur.
               </p>
             </article>
@@ -69,7 +69,7 @@
           <div class="hero-meta">
             <span>Regime: {{ landingData.market.regime }}</span>
             <span>Sentiment: {{ landingData.market.sentiment }}%</span>
-            <span>BTC/IDR: {{ formatPrice(landingData.market.btc_price) }}</span>
+            <span>BTC/{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}: {{ formatPrice(landingData.market.btc_price) }}</span>
             <span>Updated: {{ currentTime }}</span>
           </div>
         </section>
@@ -127,7 +127,7 @@
               <!-- Header: pair + verdict badge -->
               <div class="sig-header">
                 <div class="sig-pair-wrap">
-                  <span class="pair">{{ sig.pair }}<span class="pair-base">/IDR</span></span>
+                  <span class="pair">{{ sig.pair }}<span class="pair-base">/{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}</span></span>
                   <span class="sig-verdict" :class="sig.verdict?.toLowerCase()">{{ sig.verdict || 'HOLD' }}</span>
                 </div>
                 <div class="sig-scores">
@@ -236,7 +236,7 @@
     <footer class="portal-footer">
       <div class="footer-container">
         <div class="market-strip">
-          <span class="market-item">BTC_IDR: {{ formatPrice(landingData.market.btc_price) }}</span>
+          <span class="market-item">BTC_{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}: {{ formatPrice(landingData.market.btc_price) }}</span>
           <span class="market-item">DB_STATE: <span :class="getDbStateClass(dbState)">{{ dbState }}</span></span>
           <span class="market-item">LATENCY: {{ latency }}ms</span>
         </div>
@@ -391,7 +391,7 @@ async function fetchLandingData() {
       dbState.value = latency.value <= 1200 ? 'OPTIMAL' : 'DEGRADED'
       landingData.insights = data.insights
       landingData.signals = (data.signals || []).map((s) => ({
-        pair: String(s.pair || '').replace(/idr$/i, '').toUpperCase(),
+        pair: String(s.pair || '').replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase(),
         score: Number(s.score ?? 0),
         sell_score: Number(s.sell_score ?? 0),
         confidence: Number(s.confidence ?? 50),
@@ -775,12 +775,20 @@ function formatIndFloat(v) {
 
 function formatPrice(p) {
   if (!p) return '0'
+  const isUsdt = p < 500000
+  if (isUsdt) {
+    return `$${p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
   return Math.round(p).toLocaleString('id-ID')
 }
 
 function formatSignalPrice(price) {
   if (!price || price <= 0) return '-'
   const p = Number(price)
+  const isUsdt = p < 500000
+  if (isUsdt) {
+    return `$${p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+  }
   let formatted = ''
   if (p >= 1000) {
     formatted = Math.round(p).toLocaleString('id-ID')

@@ -227,8 +227,6 @@ class MarketDataWS:
                 logger.error(f"[MarketWS] run_forever exception: {e}")
 
             if self._running:
-                self._ob_subscribed.clear()   
-                self._trade_subscribed.clear()
                 self._ob_done = False         
                 logger.warning("[MarketWS] Disconnected, reconnecting in 5s…")
                 time.sleep(5)
@@ -239,14 +237,39 @@ class MarketDataWS:
         logger.info(f"[MarketWS] Connected to {eid.upper()}. Initiating subscriptions...")
         
         if eid == "binance":
-            # Subscribe to the Binance global ticker array
+            # Subscribe to the Binance global mini-ticker array (much more lightweight than standard ticker)
             req_id = self._next_id()
             sub_msg = {
                 "method": "SUBSCRIBE",
-                "params": ["!ticker@arr"],
+                "params": ["!miniTicker@arr"],
                 "id": req_id
             }
             ws.send(json.dumps(sub_msg))
+            
+            # Auto-subscribe to any previously registered trades/orderbooks on connect/reconnect!
+            with self._lock:
+                if self._trade_subscribed:
+                    pairs_list = list(self._trade_subscribed)
+                    chunk_size = 20
+                    for i in range(0, len(pairs_list), chunk_size):
+                        chunk = pairs_list[i:i+chunk_size]
+                        streams = [f"{p.lower()}@trade" for p in chunk]
+                        sub_msg_trades = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
+                        ws.send(json.dumps(sub_msg_trades))
+                        logger.warning(f"[MarketWS] Subscribed to trade streams on connect/reconnect: {chunk}")
+                        time.sleep(0.2)
+                        
+                if self._ob_subscribed:
+                    pairs_list = list(self._ob_subscribed)
+                    chunk_size = 20
+                    for i in range(0, len(pairs_list), chunk_size):
+                        chunk = pairs_list[i:i+chunk_size]
+                        streams = [f"{p.lower()}@depth10" for p in chunk]
+                        sub_msg_ob = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
+                        ws.send(json.dumps(sub_msg_ob))
+                        logger.warning(f"[MarketWS] Subscribed to depth streams on connect/reconnect: {chunk}")
+                        time.sleep(0.2)
+                        
             self._connected.set()
         else:
             # Indodax Auth & Summary
@@ -266,6 +289,7 @@ class MarketDataWS:
     def _on_message(self, ws, raw: str):
         self._last_msg_time = time.time()
         eid = os.getenv("EXCHANGE", "binance").lower()
+        logger.info(f"[MarketWS] Received raw: {raw[:200]}")
         try:
             try:
                 msg = json.loads(raw)
@@ -284,10 +308,10 @@ class MarketDataWS:
             # Subscription ACK
             return
         
-        stream = msg.get("stream", "")
+        stream = msg.get("stream", "").lower()
         data = msg.get("data", {})
         
-        if stream == "!ticker@arr":
+        if stream in ("!ticker@arr", "!miniticker@arr"):
             self._process_binance_summary(data)
         elif stream.endswith("@depth10"):
             symbol = stream.split("@")[0]
@@ -353,7 +377,11 @@ class MarketDataWS:
             vol_usdt = float(t.get("q", 0.0))  # quote volume in USDT (concept vol_idr)
             vol_coin = t.get("v", "0")
             
-            change_24h = float(t.get("P", 0.0))
+            if open_p > 0:
+                change_24h = ((last - open_p) / open_p) * 100.0
+            else:
+                change_24h = float(t.get("P", 0.0))
+                
             existing = self._tickers.get(sym, {})
             
             updated[sym] = {
@@ -628,7 +656,11 @@ class MarketDataWS:
 
     def subscribe_market_trades(self, pair: str):
         threading.Thread(target=self._fetch_initial_trades, args=(pair,), daemon=True).start()
-        if not self._ws_ref: return
+        with self._lock:
+            self._trade_subscribed.add(pair)
+            if not self._ws_ref:
+                logger.warning(f"[MarketWS] WebSocket not connected yet. Queued trade subscription for: {pair}")
+                return
         eid = os.getenv("EXCHANGE", "binance").lower()
         try:
             req_id = self._next_id()
@@ -639,40 +671,48 @@ class MarketDataWS:
                 channel = f"{CHANNEL_TRADE_PFX}{pair}"
                 sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
             self._ws_ref.send(json.dumps(sub_msg))
-            self._trade_subscribed.add(pair)
-            logger.info(f"[MarketWS] Dynamic Trade Subscribed: {pair}")
+            logger.warning(f"[MarketWS] Dynamic Trade Subscribed: {pair}")
         except Exception as e:
             logger.error(f"[MarketWS] Failed to subscribe trades for {pair}: {e}")
 
+    def subscribe_market_trades_bulk(self, pairs: list):
+        if not pairs: return
+        for p in pairs:
+            threading.Thread(target=self._fetch_initial_trades, args=(p,), daemon=True).start()
+            
+        with self._lock:
+            for p in pairs:
+                self._trade_subscribed.add(p)
+            if not self._ws_ref:
+                logger.warning(f"[MarketWS] WebSocket not connected yet. Queued bulk trade subscriptions for: {pairs}")
+                return
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        try:
+            if eid == "binance":
+                # Batch streams in groups of 20 to avoid any frame size or connection limits
+                chunk_size = 20
+                for i in range(0, len(pairs), chunk_size):
+                    chunk = pairs[i:i+chunk_size]
+                    streams = [f"{p.lower()}@trade" for p in chunk]
+                    sub_msg = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
+                    self._ws_ref.send(json.dumps(sub_msg))
+                    logger.warning(f"[MarketWS] Dynamic Trades Bulk Subscribed: {chunk}")
+                    time.sleep(0.2)  # Nice safe delay between bulk messages
+            else:
+                for p in pairs:
+                    req_id = self._next_id()
+                    channel = f"{CHANNEL_TRADE_PFX}{p}"
+                    sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
+                    self._ws_ref.send(json.dumps(sub_msg))
+                    logger.warning(f"[MarketWS] Dynamic Trade Subscribed: {p}")
+                    time.sleep(0.05)
+        except Exception as e:
+            logger.error(f"[MarketWS] Failed bulk trade subscriptions: {e}")
+
     def _fetch_initial_trades(self, pair: str):
         eid = os.getenv("EXCHANGE", "binance").lower()
-        p_rest = pair.lower().replace('/', '')
-        
         if eid == "binance":
-            try:
-                from app.infrastructure.exchange_factory import create_exchange_provider
-                provider = create_exchange_provider("binance")
-                trades = provider.fetch_trades(pair, limit=50)
-                converted = []
-                for t in trades:
-                    price = float(t["price"])
-                    amount = float(t["amount"])
-                    converted.append([
-                        pair,
-                        t["timestamp"],
-                        t["tid"],
-                        t["side"],
-                        price,
-                        price * amount,
-                        amount
-                    ])
-                with self._lock:
-                    existing = self._trades.get(pair, [])
-                    if not existing:
-                        self._trades[pair] = converted
-                        logger.info(f"[MarketWS] Pre-filled {len(converted)} trades for {pair}")
-            except Exception as e:
-                logger.warning(f"[MarketWS] Failed initial trades for Binance {pair}: {e}")
+            # Skip REST fetching for historical trades to avoid 429 Too many requests
             return
 
         # Indodax REST Fallback
@@ -716,24 +756,37 @@ class MarketDataWS:
                 top_pairs.insert(0, hp)
 
         eid = os.getenv("EXCHANGE", "binance").lower()
-        for pair in top_pairs:
-            if pair in self._ob_subscribed:
-                continue
+        if eid == "binance":
+            to_sub = [p for p in top_pairs if p not in self._ob_subscribed]
+            if not to_sub: return
             try:
-                req_id = self._next_id()
-                if eid == "binance":
-                    stream = f"{pair.lower()}@depth10"
-                    sub_msg = {"method": "SUBSCRIBE", "params": [stream], "id": req_id}
-                else:
+                # Batch streams in groups of 20
+                chunk_size = 20
+                for i in range(0, len(to_sub), chunk_size):
+                    chunk = to_sub[i:i+chunk_size]
+                    streams = [f"{p.lower()}@depth10" for p in chunk]
+                    sub_msg = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
+                    self._ws_ref.send(json.dumps(sub_msg))
+                    for p in chunk:
+                        self._ob_subscribed.add(p)
+                    logger.info(f"[MarketWS] Bulk Subscribed order-books: {chunk}")
+                    time.sleep(0.2)
+            except Exception as e:
+                logger.warning(f"[MarketWS] Failed bulk OB subscription: {e}")
+        else:
+            for pair in top_pairs:
+                if pair in self._ob_subscribed:
+                    continue
+                try:
+                    req_id = self._next_id()
                     channel = f"{CHANNEL_OB_PFX}{pair}"
                     sub_msg = {"method": 1, "params": {"channel": channel}, "id": req_id}
-                
-                self._ws_ref.send(json.dumps(sub_msg))
-                self._ob_subscribed.add(pair)
-                logger.info(f"[MarketWS] Subscribed order-book: {pair}")
-                time.sleep(0.1)
-            except Exception as e:
-                logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
+                    self._ws_ref.send(json.dumps(sub_msg))
+                    self._ob_subscribed.add(pair)
+                    logger.info(f"[MarketWS] Subscribed order-book: {pair}")
+                    time.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"[MarketWS] Failed to subscribe OB for {pair}: {e}")
 
     def _on_error(self, ws, error):
         logger.error(f"[MarketWS] Error: {error}")

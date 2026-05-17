@@ -68,7 +68,12 @@ const pending = ref(false)
 const lossText = computed(() => {
   const idr = store.bracketExitConfirm?.projected_pnl ?? 0
   const abs = Math.abs(idr)
-  return `-Rp ${abs.toLocaleString('id-ID', { maximumFractionDigits: 0 })}`
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return `-$${abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  } else {
+    return `-Rp ${abs.toLocaleString('id-ID', { maximumFractionDigits: 0 })}`
+  }
 })
 
 const pairsText = computed(() => {

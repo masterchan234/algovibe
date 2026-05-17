@@ -48,6 +48,15 @@ class PrivateWS:
 
     def start(self):
         """Mulai koneksi WS di background thread."""
+        try:
+            from app.infrastructure.database import db
+            if db.is_dry_run():
+                logger.info("[PrivateWS] Dry run mode active: skipping real exchange private WebSocket connection.")
+                self._subscribed.set()
+                return
+        except Exception as e:
+            logger.debug(f"[PrivateWS] Skip dry_run check: {e}")
+
         self._running = True
         self._thread  = threading.Thread(target=self._run, daemon=True, name="PrivateWS")
         self._thread.start()

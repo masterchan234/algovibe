@@ -266,6 +266,7 @@ class BinanceAdapter(BaseExchangeAdapter):
                 return {
                     "pair": item["pair"],
                     "last": float(t.get('last', 0.0) or t.get('close', 0.0) or 0.0),
+                    "change_24h": item["change"],
                     "change_24h_pct": item["change"],
                     "vol_idr": item["vol"],
                 }

@@ -994,8 +994,9 @@ def public_landing_data():
 
         # 2. Market Stats — BTC price selalu dari live WS, fallback ke bot_state DB
         sentiment = int(db.get_state("market_sentiment_index") or 50)
-        _btc_live = ws_tickers_snap.get('btcidr', {})
-        btc_price = float(_btc_live.get('last') or 0) or float(db.get_state("last_price_btcidr") or 0)
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_live = ws_tickers_snap.get(btc_pair, {})
+        btc_price = float(_btc_live.get('last') or 0) or float(db.get_state(f"last_price_{btc_pair}") or db.get_state("last_price_btcidr") or 0)
         regime = db.get_state("current_market_regime") or "SCANNING"
 
         # 3. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
@@ -1028,11 +1029,15 @@ def public_landing_data():
                     mid = (high + low) / 2.0
                     return round(((last - mid) / mid) * 100.0, 2)
                 return float(v.get('change_24h') or 0)
-            _scored_fb = [(k.upper().replace('IDR', ''), _mid_ch_fb(v)) for k, v in _crypto_fb]
+            _scored_fb = [(k.upper().replace('USDT', '').replace('IDR', ''), _mid_ch_fb(v)) for k, v in _crypto_fb]
             _fb_gainer = max(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
             _fb_loser = min(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
             _fb_trend = max(_scored_fb, key=lambda x: abs(x[1]), default=("N/A", 0.0))
-            btc_str = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            btc_lbl = "BTC/USDT" if eid == "binance" else "BTC/IDR"
+            if eid == "binance":
+                btc_str = f" | {btc_lbl} ${btc_price:,.2f}" if btc_price and btc_price > 0 else ""
+            else:
+                btc_str = f" | {btc_lbl} {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
             regime_lbl = "Warming up" if regime == "SCANNING" else regime
             movers_fb = " | ".join(p for p in [
                 f"↑ {_fb_gainer[0]} {_fb_gainer[1]:+.2f}%" if _fb_gainer[0] != "N/A" else "",
@@ -1078,11 +1083,15 @@ def public_landing_data():
             else:
                 ch = 0.0
             vol = float(data.get('vol_idr') or 0)
-            pair_label = pair_key.upper().replace('IDR', '')
+            pair_label = pair_key.upper().replace('USDT', '').replace('IDR', '')
             trend_label = 'UP' if ch > 1.0 else ('DOWN' if ch < -1.0 else 'SIDEWAYS')
+            if eid == "binance":
+                vol_str = f"Vol ${vol/1e3:.1f}K" if vol < 1e6 else f"Vol ${vol/1e6:.1f}M"
+            else:
+                vol_str = f"Vol IDR {vol/1e6:.1f}M"
             public_logs.append({
                 "time": stream_ts,
-                "message": f"Live: {pair_label} {ch:+.2f}% vs midrange | Vol IDR {vol/1e6:.1f}M | {trend_label}"
+                "message": f"Live: {pair_label} {ch:+.2f}% vs midrange | {vol_str} | {trend_label}"
             })
 
         response = jsonify({
@@ -1292,8 +1301,8 @@ def get_positions():
                 "bid_price": round(bid_price, 8),
                 "amount_crypto": amount_crypto,
                 "amount_idr": amount_idr,
-                "pnl_idr": round(pnl_idr, 0),
-                "pnl_net_idr": round(pnl_net_idr, 0),
+                "pnl_idr": round(pnl_idr, 4 if eid == 'binance' else 0),
+                "pnl_net_idr": round(pnl_net_idr, 4 if eid == 'binance' else 0),
                 "pnl_pct": round(pnl_pct, 3),
                 "pnl_net_pct": round(pnl_net_pct, 3),
                 "status": pos['status'],
@@ -1455,7 +1464,7 @@ def get_pnl_history_api(tf):
         results = []
         results.append({
             "time": "Start",
-            "pnl": round(current_pnl, 0)
+            "pnl": round(current_pnl, 4 if eid == 'binance' else 0)
         })
         
         for t in trades:
@@ -1466,7 +1475,7 @@ def get_pnl_history_api(tf):
                 time_str = dt.strftime("%M:%S") if tf == '1h' else dt.strftime("%H:%M")
             except:
                 time_str = ts
-            results.append({"time": time_str, "pnl": round(current_pnl, 0)})
+            results.append({"time": time_str, "pnl": round(current_pnl, 4 if eid == 'binance' else 0)})
         return jsonify(results)
     except Exception as e:
         import traceback
@@ -1538,8 +1547,8 @@ def get_positions_summary():
             "positions_total": len(rows),
             "mode_counts": mode_counts,
             "status_counts": status_counts,
-            "unrealized_by_status": {k: round(v, 0) for k, v in unrealized_by_status.items()},
-            "unrealized_total": round(sum(unrealized_by_status.values()), 0),
+            "unrealized_by_status": {k: round(v, 4 if eid == 'binance' else 0) for k, v in unrealized_by_status.items()},
+            "unrealized_total": round(sum(unrealized_by_status.values()), 4 if eid == 'binance' else 0),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2071,12 +2080,12 @@ def trade_manual_exit():
         return jsonify({
             "error": f"Manual exit hanya diizinkan saat Net PnL < {cfg.MANUAL_EXIT_MAX_NET_PCT*100:.1f}%. "
                      "Biarkan bot mengelola exit saat posisi untung.",
-            "pnl_net_idr": round(pnl_net, 0),
+            "pnl_net_idr": round(pnl_net, 4 if eid == 'binance' else 0),
             "pnl_net_pct": round(pnl_net_pct * 100, 4)
         }), 400
 
     db.save_state("trigger_exit_pair", pair)
-    logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net,0)} IDR)")
+    logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net, 4 if eid == 'binance' else 0)} {'USDT' if eid == 'binance' else 'IDR'})")
     return jsonify({"status": "exit_requested", "pair": pair})
 
 @app.route('/api/mode/current')
@@ -3171,13 +3180,14 @@ def _build_stats_payload(force_dry=None):
         #  BTC Condition (for Signal Radar UX) 
         # Realtime-first: price/24h from WS summary. If interval metrics are
         # empty or stale in DB, recompute from the latest BTC history snapshot.
-        _btc_ticker = ws_tickers.get('btcidr', {}) or {}
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_ticker = ws_tickers.get(btc_pair, {}) or {}
         btc_price = float(_btc_ticker.get('last', 0))
         btc_change_24h = float(_btc_ticker.get('change_24h', 0))
         try:
             _btc_row = conn.execute(
                 "SELECT ch_5m, ch_15m, ch_1h, trend, score, history_json, updated_at "
-                "FROM ticker_history WHERE pair = 'btcidr'"
+                "FROM ticker_history WHERE pair = %s", (btc_pair,)
             ).fetchone()
         except Exception:
             _btc_row = None
@@ -3244,9 +3254,9 @@ def _build_stats_payload(force_dry=None):
         btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
 
         payload = {
-            "available_idr": round(available_idr, 0),
-            "idr_used": round(idr_used, 0),
-            "total_equity": round(total_equity, 0),
+            "available_idr": round(available_idr, 4 if eid == 'binance' else 0),
+            "idr_used": round(idr_used, 4 if eid == 'binance' else 0),
+            "total_equity": round(total_equity, 4 if eid == 'binance' else 0),
             "utilization": round(utilization_pct, 1),
             "recent_trades": recent_trades,
             "first_trade_ts": first_trade_ts,
@@ -3268,7 +3278,7 @@ def _build_stats_payload(force_dry=None):
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats.get('total_trades', 0) if dna_stats else 0,
             "active_positions": open_count,
-            "unrealized_pnl": round(unrealized_pnl, 0),
+            "unrealized_pnl": round(unrealized_pnl, 4 if eid == 'binance' else 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
             "latest_whale": stats_dict.get('latest_whale', ''),
@@ -3315,6 +3325,7 @@ def _build_stats_payload(force_dry=None):
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
+            "exchange":       eid,
             "btc_data_source": btc_data_source,
             "btc_updated_age_sec": btc_updated_age_sec,
         }
@@ -3561,8 +3572,8 @@ def _build_trades_payload():
                     "id":           f"pos_{pair}",
                     "pair":         pair,
                     "reason":       display_reason,
-                    "pnl_idr":      round(pnl_idr, 0),
-                    "pnl_net_idr":  round(pnl_net_idr, 0),
+                    "pnl_idr":      round(pnl_idr, 4 if eid == 'binance' else 0),
+                    "pnl_net_idr":  round(pnl_net_idr, 4 if eid == 'binance' else 0),
                     "pnl_pct":      round(pnl_pct, 2),
                     "pnl_net_pct":  round(pnl_net_pct, 2),
                     "entry_price":  entry_price,
@@ -3681,11 +3692,12 @@ def _build_logs_payload():
             if ts_ms <= 0:
                 ts_ms = int(time.time() * 1000)
             created_at = datetime.datetime.fromtimestamp(ts_ms / 1000.0).isoformat()
+            price_str = f"${price:,.4f}" if eid == "binance" else f"Rp {int(price):,}".replace(',', '.')
             results.append({
                 "created_at": created_at,
                 "pair": pair,
                 "side": side,
-                "price": f"Market {side} | {amount:.6f} @ Rp {int(price):,}".replace(',', '.'),
+                "price": f"Market {side} | {amount:.6f} @ {price_str}",
                 "status": "LIVE",
                 "level": "INFO",
                 "source": "MARKET_WS",
@@ -3712,7 +3724,8 @@ def _build_llm_decisions_payload(limit: int = 20):
         # Ambil snapshot live tickers dari IPC/WS bridge
         live_tickers = mws.get_tickers()
 
-        _btc_live = live_tickers.get('btcidr', {})
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_live = live_tickers.get(btc_pair, {})
         btc_price = float(_btc_live.get('last') or 0) or None
 
         _active_pairs = [
@@ -3832,11 +3845,17 @@ def _build_llm_decisions_payload(limit: int = 20):
         else:
             # Synthesize brief dari live market data saat LLM belum merespons.
             # Tidak menggunakan persisted_brief dari DB agar konten selalu fresh dan valid.
-            btc_part = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            btc_lbl = "BTC/USDT" if eid == "binance" else "BTC/IDR"
+            if eid == "binance":
+                btc_part = f" | {btc_lbl} ${btc_price:,.2f}" if btc_price and btc_price > 0 else ""
+            else:
+                btc_part = f" | {btc_lbl} {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
             regime_label = "Warming up" if regime == "SCANNING" else regime
-            gainer_part = f"↑ {top_gainer[0]} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
-            loser_part = f"↓ {top_loser[0]} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
-            trend_part = f"{top_trending[0]} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
+            def _clean_p(p):
+                return str(p or '').upper().replace('USDT', '').replace('IDR', '')
+            gainer_part = f"↑ {_clean_p(top_gainer[0])} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
+            loser_part = f"↓ {_clean_p(top_loser[0])} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
+            trend_part = f"{_clean_p(top_trending[0])} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
             movers = " | ".join(p for p in [gainer_part, loser_part, trend_part] if p)
             brief_message = (
                 f"Market live: {len(_active_pairs)} pair aktif"
@@ -4375,14 +4394,14 @@ def _zmq_market_bridge():
                             if tick.low_24h > 0: t["low"] = tick.low_24h
                             if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
 
-                    if pair == 'btcidr':
+                    if pair == ('btcusdt' if eid == 'binance' else 'btcidr'):
                         _append_btc_tick(tick.timestamp, tick.price)
                 
                 elif topic == "trade":
-                    logging.info(f"[ZMQ] Received trade for {pair if 'pair' in locals() else 'unknown'}")
                     trade = Trade()
                     trade.ParseFromString(raw)
                     pair = trade.symbol.lower()
+                    logging.info(f"[ZMQ] Received trade for {pair}")
                     # Format for dashboard: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
                     t_fmt = [
                         pair,

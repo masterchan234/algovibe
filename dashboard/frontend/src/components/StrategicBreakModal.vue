@@ -14,24 +14,24 @@
           <div class="sb-body">
             <div class="sb-row">
               <span class="sb-label">TARGET</span>
-              <span class="sb-value sb-highlight">Rp {{ fmt(store.strategicBreak.target_idr) }}</span>
+              <span class="sb-value sb-highlight">{{ fmt(store.strategicBreak.target_idr) }}</span>
             </div>
             <div class="sb-row">
               <span class="sb-label">NET PnL</span>
               <span class="sb-value" :class="store.strategicBreak.net_pnl >= 0 ? 'sb-profit' : 'sb-loss'">
-                Rp {{ fmt(store.strategicBreak.net_pnl, true) }}
+                {{ fmt(store.strategicBreak.net_pnl, true) }}
               </span>
             </div>
             <div class="sb-row">
               <span class="sb-label">REALIZED</span>
               <span class="sb-value" :class="store.strategicBreak.realized_pnl >= 0 ? 'sb-profit' : 'sb-loss'">
-                Rp {{ fmt(store.strategicBreak.realized_pnl, true) }}
+                {{ fmt(store.strategicBreak.realized_pnl, true) }}
               </span>
             </div>
             <div class="sb-row">
               <span class="sb-label">UNREALIZED</span>
               <span class="sb-value" :class="store.strategicBreak.unrealized_pnl >= 0 ? 'sb-profit' : 'sb-loss'">
-                Rp {{ fmt(store.strategicBreak.unrealized_pnl, true) }}
+                {{ fmt(store.strategicBreak.unrealized_pnl, true) }}
               </span>
             </div>
             <div class="sb-divider" />
@@ -45,15 +45,15 @@
             </div>
             <div class="sb-row">
               <span class="sb-label">MAX DRAWDOWN</span>
-              <span class="sb-value sb-loss">Rp {{ fmt(store.strategicBreak.max_drawdown) }}</span>
+              <span class="sb-value sb-loss">{{ fmt(store.strategicBreak.max_drawdown) }}</span>
             </div>
             <div class="sb-row">
               <span class="sb-label">EST. FEES</span>
-              <span class="sb-value">Rp {{ fmt(store.strategicBreak.estimated_fees) }}</span>
+              <span class="sb-value">{{ fmt(store.strategicBreak.estimated_fees) }}</span>
             </div>
             <div class="sb-row">
               <span class="sb-label">VOLUME</span>
-              <span class="sb-value">Rp {{ fmt(store.strategicBreak.total_volume_idr) }}</span>
+              <span class="sb-value">{{ fmt(store.strategicBreak.total_volume_idr) }}</span>
             </div>
           </div>
 
@@ -90,8 +90,15 @@ const errorMsg = ref('')
 
 function fmt(val, signed = false) {
   const n = Number(val || 0)
-  const prefix = signed ? (n >= 0 ? '+' : '') : ''
-  return prefix + n.toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  const sign = signed ? (n >= 0 ? '+' : '') : ''
+  const symbol = isUsdt ? '$' : 'Rp '
+  
+  if (isUsdt) {
+    return sign + symbol + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  } else {
+    return sign + symbol + n.toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  }
 }
 
 const profitFactorDisplay = computed(() => {

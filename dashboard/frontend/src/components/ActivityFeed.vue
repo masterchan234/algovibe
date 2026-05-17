@@ -58,7 +58,7 @@
             </div>
             
             <div class="col-size">
-              <div class="val-idr">{{ formatIdr(pos.amount_idr) }}</div>
+              <div class="val-idr">{{ formatIdr(pos.amount_idr, false) }}</div>
               <div class="val-coin">{{ formatCoin(pos.amount_crypto ?? pos.amount_coin) }} units</div>
             </div>
 
@@ -466,23 +466,34 @@ function calculatePosition(pos) {
 }
 
 function formatNumber(val) {
-  return Number(val || 0).toLocaleString('id-ID')
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return Number(val || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  } else {
+    return Number(val || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  }
 }
 
 function formatCoin(val) {
   const n = Number(val) || 0
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
   if (n === 0) return '0'
   if (n < 0.001) return n.toFixed(8)
   if (n < 0.1) return n.toFixed(6)
   if (n < 1) return n.toFixed(4)
   if (n < 1000) return n.toFixed(2)
-  return n.toLocaleString('id-ID', { maximumFractionDigits: 2 })
+  return n.toLocaleString(isUsdt ? 'en-US' : 'id-ID', { maximumFractionDigits: 2 })
 }
 
-function formatIdr(val) {
-  const n = Math.round(Number(val) || 0)
+function formatIdr(val, signed = true) {
+  const n = Number(val) || 0
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  const prefix = signed ? (n >= 0 ? '+' : '-') : ''
   const abs = Math.abs(n)
-  const prefix = n >= 0 ? '+' : '-'
+  if (isUsdt) {
+    if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}$${abs.toFixed(2)}`
+  }
   if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
   return `${prefix}Rp ${abs.toLocaleString('id-ID')}`
 }

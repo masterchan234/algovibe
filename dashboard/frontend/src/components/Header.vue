@@ -13,11 +13,11 @@
     <div class="header-center hide-mobile">
       <div class="stat-bubble" title="Estimated Total Equity">
         <span class="bubble-label">Total Equity</span>
-        <span class="bubble-value highlight">Rp {{ formatNumber(stats.total_equity) }}</span>
+        <span class="bubble-value highlight">{{ currencySymbol }}{{ formatNumber(stats.total_equity) }}</span>
       </div>
       <div class="stat-bubble" title="Available IDR Balance">
         <span class="bubble-label">Available</span>
-        <span class="bubble-value">Rp {{ formatNumber(stats.available_idr) }}</span>
+        <span class="bubble-value">{{ currencySymbol }}{{ formatNumber(stats.available_idr) }}</span>
       </div>
       <div class="stat-bubble" v-if="stats.utilization !== undefined">
         <span class="bubble-label">Utilization</span>
@@ -95,12 +95,12 @@
   <div class="mobile-stats-strip show-mobile" :class="headerClass">
     <div class="ms-item">
       <span class="ms-label">Equity</span>
-      <span class="ms-val highlight">Rp {{ formatNumber(stats.total_equity) }}</span>
+      <span class="ms-val highlight">{{ currencySymbol }}{{ formatNumber(stats.total_equity) }}</span>
     </div>
     <div class="ms-divider"></div>
     <div class="ms-item">
       <span class="ms-label">Available</span>
-      <span class="ms-val">Rp {{ formatNumber(stats.available_idr) }}</span>
+      <span class="ms-val">{{ currencySymbol }}{{ formatNumber(stats.available_idr) }}</span>
     </div>
     <div class="ms-divider" v-if="stats.utilization !== undefined"></div>
     <div class="ms-item" v-if="stats.utilization !== undefined">
@@ -212,9 +212,18 @@ const gateTooltip = computed(() => {
 const technicalOnlyMode = computed(() => Boolean(props.stats.technical_only_mode))
 const technicalModeLabel = computed(() => technicalOnlyMode.value ? 'TECHNICAL ONLY' : 'HYBRID')
 
+const currencySymbol = computed(() => {
+  return (props.stats.exchange === 'binance' || (props.stats.btc_price && props.stats.btc_price < 500000)) ? '$' : 'Rp '
+})
+
 function formatNumber(val) {
   if (val === undefined || val === null) return '0'
-  return new Intl.NumberFormat('id-ID').format(Math.round(val))
+  const isUsdt = props.stats.exchange === 'binance' || (props.stats.btc_price && props.stats.btc_price < 500000)
+  if (isUsdt) {
+    return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(val))
+  } else {
+    return new Intl.NumberFormat('id-ID', { maximumFractionDigits: 0 }).format(Math.round(val))
+  }
 }
 
 const backendUrl = import.meta.env.DEV

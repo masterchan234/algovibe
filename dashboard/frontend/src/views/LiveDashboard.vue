@@ -22,7 +22,7 @@
         <span class="gauge-icon">🛡️</span>
         <span class="gauge-title">SURVIVAL SAFETY GAUGE</span>
         <span class="gauge-net" :class="safetyNetPnl >= 0 ? 'profit' : 'loss'">
-          Net: {{ safetyNetPnl >= 0 ? '+' : '' }}Rp {{ formatNumber(safetyNetPnl) }}
+          Net: {{ safetyNetPnl >= 0 ? '+' : '' }}{{ currencySymbol }}{{ formatNumber(safetyNetPnl) }}
         </span>
       </div>
 
@@ -70,7 +70,7 @@
         <span class="stat-item">UPTIME: <span class="v">{{ uptimeStr }}</span></span>
       </div>
       <div class="footer-right">
-        <span>Session Peak: <strong class="gold">Rp {{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
+        <span>Session Peak: <strong class="gold">{{ currencySymbol }}{{ formatNumber(liveState.peak_net_pnl_session) }}</strong></span>
         <span>Bot Status: <strong :class="store.connected ? 'profit' : 'loss'">{{ store.connected ? 'ONLINE' : 'OFFLINE' }}</strong></span>
       </div>
     </footer>
@@ -229,6 +229,9 @@ const safetyIsDanger = computed(() => safetyGaugePct.value < 20)
 const safetyGaugeColor = computed(() => safetyGaugePct.value < 20 ? '#ff3366' : '#00ff88')
 const dataSourceLabel = computed(() => socketIsFresh.value ? 'WS REALTIME' : 'API FALLBACK')
 const dataSourceClass = computed(() => socketIsFresh.value ? 'is-realtime' : 'is-fallback')
+const currencySymbol = computed(() => {
+  return (store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)) ? '$' : 'Rp '
+})
 
 async function fetchLiveState() {
   try {
@@ -318,9 +321,23 @@ async function fetchLiveSnapshot() {
   } catch {}
 }
 
-function formatNumber(val) { return Number(val || 0).toLocaleString('id-ID') }
-function formatPrice(val) { return Number(val || 0).toLocaleString('id-ID') }
-function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').toUpperCase() : '-' }
+function formatNumber(val) { 
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return Number(val || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  } else {
+    return Number(val || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  }
+}
+function formatPrice(val) { 
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return Number(val || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  } else {
+    return Number(val || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  }
+}
+function formatPair(pair) { return pair ? pair.replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase() : '-' }
 
 let pollInt = null
 let clockInt = null

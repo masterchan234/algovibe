@@ -7,7 +7,7 @@
           <span>ORACLE INTELLIGENCE: {{ formatPair(pair?.pair) }}</span>
           <span class="live-price-badge" v-if="livePrice">
             <span class="price-dot"></span>
-            Rp {{ livePrice.toLocaleString('id-ID') }}
+            {{ isUsdt ? '$' : 'Rp ' }}{{ livePrice.toLocaleString(isUsdt ? 'en-US' : 'id-ID', { minimumFractionDigits: isUsdt ? 2 : 0, maximumFractionDigits: isUsdt ? 4 : 0 }) }}
           </span>
         </div>
         <button class="close-btn" @click="close">×</button>
@@ -51,7 +51,7 @@
                   </div>
                   <div class="m-metric">
                     <span class="mm-label">24H VOL</span>
-                    <span class="mm-value">Rp {{ (context.stats?.vol_24h / 1_000_000).toFixed(1) }}M</span>
+                    <span class="mm-value">{{ formattedVol24h }}</span>
                   </div>
                 </div>
               </div>
@@ -70,7 +70,7 @@
                 <div class="perf-metric">
                   <span class="pm-label">CONTRIBUTION</span>
                   <span class="pm-value" :class="pair.pnl >= 0 ? 'up' : 'down'">
-                    {{ pair.pnl >= 0 ? '+' : '' }}{{ formatIdr(pair.pnl) }}
+                    {{ formatIdr(pair.pnl) }}
                   </span>
                 </div>
                 <div class="perf-metric">
@@ -123,6 +123,8 @@ const props = defineProps({
 const store = useTradeStore()
 const { getAuthHeaders } = useAuth()
 
+const isUsdt = computed(() => store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000))
+
 const livePrice = computed(() => {
   if (!props.pair?.pair) return null
   const match = store.radarPairs.find(p => p.pair === props.pair.pair)
@@ -135,6 +137,19 @@ const error = ref(false)
 const chartRef = ref(null)
 const context = ref(null)
 let chartInstance = null
+
+const formattedVol24h = computed(() => {
+  const vol = context.value?.stats?.vol_24h || 0
+  if (isUsdt.value) {
+    if (vol >= 1_000_000) return `$${(vol / 1_000_000).toFixed(1)}M`
+    if (vol >= 1_000) return `$${(vol / 1_000).toFixed(1)}K`
+    return `$${vol.toFixed(2)}`
+  } else {
+    if (vol >= 1_000_000_000) return `Rp ${(vol / 1_000_000_000).toFixed(1)}B`
+    if (vol >= 1_000_000) return `Rp ${(vol / 1_000_000).toFixed(1)}M`
+    return `Rp ${vol.toLocaleString('id-ID')}`
+  }
+})
 
 const bidRatio = computed(() => {
   if (!context.value?.technicals) return 50
@@ -240,7 +255,7 @@ function initChart(data) {
       backgroundColor: '#1c2128',
       borderColor: '#30363d',
       textStyle: { color: '#e6edf3', fontSize: 10 },
-      formatter: '{b}: Rp {c}'
+      formatter: isUsdt.value ? '{b}: ${c}' : '{b}: Rp {c}'
     },
     grid: { left: '2%', right: '2%', top: '10%', bottom: '10%', containLabel: false },
     xAxis: {
@@ -287,9 +302,15 @@ function formatIdr(val) {
   const n = Number(val) || 0
   const abs = Math.abs(n)
   const prefix = n >= 0 ? '+' : '-'
-  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
-  if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
-  return `${prefix}Rp ${abs.toFixed(0)}`
+  if (isUsdt.value) {
+    if (abs >= 1_000_000) return `${prefix}$${(abs / 1_000_000).toFixed(2)}M`
+    if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}$${abs.toFixed(2)}`
+  } else {
+    if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+    if (abs >= 1_000) return `${prefix}Rp ${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}Rp ${abs.toFixed(0)}`
+  }
 }
 
 onMounted(() => {
