@@ -503,7 +503,7 @@ def execute_trade(
             "ai_confidence": tq_prob * 100,
             "is_high_opportunity_fast": 1 if is_high_opportunity_fast else 0,
             "highest_price": buy_price,              # [FIX] Initialize highest_price for TTP tracking
-            "trailing_sl_price": buy_price * (1 - 0.007),  # [FIX] Initialize trailing stop (0.7% from entry)
+            "trailing_sl_price": buy_price * (1 - config.TRAILING_TP_DELTA_PCT),  # [FIX] Initialize trailing stop from config
         }
 
         db.upsert_position(pair, data)

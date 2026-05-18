@@ -39,6 +39,56 @@ MODEL_PATH   = "models/scalper_v2.joblib"
 _model       = None
 _model_mtime: float = 0.0
 
+#  Coin-specific model cache 
+if os.path.exists("/app/models_coin"):
+    COIN_MODELS_DIR = "/app/models_coin"
+else:
+    COIN_MODELS_DIR = "models"
+
+_COIN_MODELS_CACHE = {}  # {pair: (model, P_train_mean, mtime)}
+
+
+def _load_coin_model(pair: str):
+    global _COIN_MODELS_CACHE
+    if not pair:
+        return None, 0.0
+    
+    pair = pair.replace("/", "").replace("_", "").lower()
+    model_file = f"{pair}_1m_90d_model.pkl"
+    path = os.path.join(COIN_MODELS_DIR, model_file)
+    
+    if not os.path.exists(path):
+        return None, 0.0
+        
+    try:
+        current_mtime = os.path.getmtime(path)
+        cached = _COIN_MODELS_CACHE.get(pair)
+        
+        if cached is None or current_mtime > cached[2]:
+            model = joblib.load(path)
+            
+            # Extract split thresholds for SMA_20 (feature index 6)
+            sma_thresholds = []
+            for estimator in model.estimators_:
+                tree = estimator.tree_
+                for node_idx in range(tree.node_count):
+                    if tree.feature[node_idx] == 6:  # SMA_20 index
+                        sma_thresholds.append(tree.threshold[node_idx])
+            
+            P_train_mean = np.mean(sma_thresholds) if sma_thresholds else 0.0
+            
+            _COIN_MODELS_CACHE[pair] = (model, P_train_mean, current_mtime)
+            log_message(
+                f"[Predictor] [OK] Loaded coin model for {pair.upper()} "
+                f"(P_train_mean={P_train_mean:.8f}, mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})"
+            )
+            
+        return _COIN_MODELS_CACHE[pair][0], _COIN_MODELS_CACHE[pair][1]
+        
+    except Exception as e:
+        log_message(f"[WARN] [Predictor] Failed to load coin model for {pair}: {e}")
+        return None, 0.0
+
 
 def _load_model():
     global _model, _model_mtime
@@ -222,14 +272,14 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     return float(round(max(0.0, min(0.99, prob)), 4))
 
 
-def get_prediction(price_history: list, ticker_data: dict = None) -> float:
+def get_prediction(price_history: list, ticker_data: dict = None, pair: str = None) -> float:
     """
-    Probabilitas eksekusi trade — PURE TECHNICAL (v2.0).
+    Probabilitas eksekusi trade — PURE TECHNICAL (v2.0) + Coin-Specific ML Refinement.
 
     Perubahan dari v1:
     - Semua pengaruh LLM/AI dihapus sepenuhnya.
     - Base score 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, WilliamsR, ROC, OB).
-    - Model ML (HistGradientBoosting) tetap digunakan sebagai refinement.
+    - Model ML koin khusus (RandomForestRegressor) dimuat dinamis dengan penskalaan harga otomatis.
     - Bobot blend dinamis berdasarkan tingkat kecocokan tech vs ML.
 
     Returns:
@@ -246,7 +296,72 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
         #  1. Pure Technical Base Score 
         tech_prob = _compute_technical_probability(price_history, ticker_data)
 
-        #  2. Machine Learning Refinement 
+        #  2. Machine Learning Refinement (Coin-Specific RandomForestRegressor)
+        if not pair and ticker_data:
+            pair = ticker_data.get("pair")
+            
+        model_coin, P_train_mean = _load_coin_model(pair) if pair else (None, 0.0)
+        
+        if model_coin and P_train_mean > 0:
+            prices = list(price_history)
+            
+            # Compute input features: ['open', 'high', 'low', 'close', 'volume', 'RSI', 'SMA_20']
+            close_val = float(prices[-1])
+            open_val = float(prices[-2]) if len(prices) >= 2 else close_val
+            high_val = max(open_val, close_val)
+            low_val = min(open_val, close_val)
+            
+            rsi_val = calculate_rsi(prices)
+            sma_val = sum(prices[-20:]) / 20.0
+            
+            # Dummy volume (since importance is 0.0)
+            vol_val = 10000.0
+            
+            # Apply Dynamic Price Scaling
+            P_current = sma_val if sma_val > 0 else close_val
+            S = P_train_mean / P_current if P_current > 0 else 1.0
+            
+            open_scaled = open_val * S
+            high_scaled = high_val * S
+            low_scaled = low_val * S
+            close_scaled = close_val * S
+            sma_scaled = sma_val * S
+            
+            # Feature DataFrame
+            features_df = pd.DataFrame([{
+                "open": open_scaled,
+                "high": high_scaled,
+                "low": low_scaled,
+                "close": close_scaled,
+                "volume": vol_val,
+                "RSI": rsi_val,
+                "SMA_20": sma_scaled
+            }])
+            
+            # Predict
+            pred_scaled = model_coin.predict(features_df)[0]
+            
+            # Rescale prediction back up
+            pred_final = pred_scaled / S
+            
+            # Projected expected return
+            expected_return = (pred_final - close_val) / close_val if close_val > 0 else 0.0
+            
+            # Map return to probability using sigmoid: 0% -> 50%, +1% -> 82%, -1% -> 18%
+            ml_prob = float(1.0 / (1.0 + np.exp(-expected_return * 150.0)))
+            
+            # Blend dynamically
+            divergence = abs(tech_prob - ml_prob)
+            if divergence < 0.10:
+                final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
+            elif divergence < 0.25:
+                final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+            else:
+                final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
+                
+            return float(round(max(0.0, min(final_prob, 0.99)), 4))
+
+        # Fallback to original global model (scalper_v2.joblib) if available
         model = _load_model()
         if model:
             rsi = calculate_rsi(price_history)
@@ -283,24 +398,18 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
 
             ml_prob = model.predict_proba(features_df)[0][1]
 
-            # Blend dinamis: ketika tech dan ML sepakat, kita bisa percaya lebih;
-            # ketika mereka berbeda jauh, kita tetap dominankan sinyal teknikal.
             divergence = abs(tech_prob - ml_prob)
             if divergence < 0.10:
-                # Keduanya sepakat — 55% tech, 45% ML
                 final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
             elif divergence < 0.25:
-                # Perbedaan moderat — 65% tech, 35% ML
                 final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
             else:
-                # Divergensi tinggi — percayai sinyal teknikal lebih (75% tech, 25% ML)
                 final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
         else:
-            # Tanpa model ML — murni teknikal
             final_prob = tech_prob
 
         return float(round(max(0.0, min(final_prob, 0.99)), 4))
 
     except Exception as e:
-        log_message(f"Prediction Error: {e}")
+        log_message(f"[WARN] [Predictor] Prediction Error: {e}")
         return 0.45  # Default netral, bukan 0 (agar tidak memblokir semua sinyal)

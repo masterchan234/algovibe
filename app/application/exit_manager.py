@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 from config import (
     TP_PCT, SL_PCT, AUTO_SL_ENABLED, PENDING_BUY_TIMEOUT_MINUTES, PENDING_BUY_MAX_SPREAD_PCT,
-    FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER,
+    FEE_BUY_MAKER, FEE_SELL_MAKER, FEE_BUY_TAKER, FEE_SELL_TAKER, TRAILING_TP_DELTA_PCT,
     MIN_NET_PROFIT_IDR, BASKET_HARVEST_TARGET_IDR, BASKET_HWM_PULLBACK_PCT,
     AUTO_BASKET_HARVEST_MIN, BTC_CRASH_TRIGGER_PCT,
     SELL_TAKER_OFFSET, SELL_MAKER_OFFSET, JARING_ALLOCATION_PCT, JARING_DEPTH_PCT,
@@ -2289,8 +2289,8 @@ class ExitManager:
                 if tp_eval_price > current_highest:
                     current_highest = tp_eval_price
                     data['highest_price'] = current_highest
-                    # Trailing delta: 0.7% dari peak (lebih ketat untuk momentum scalping)
-                    data['trailing_sl_price'] = current_highest * (1 - 0.007)
+                    # Trailing delta: dari peak (menggunakan TRAILING_TP_DELTA_PCT dari config)
+                    data['trailing_sl_price'] = current_highest * (1 - TRAILING_TP_DELTA_PCT)
                     db.upsert_position(pair, data)
 
                 # Aktivasi TTP lebih awal untuk scalping: jika profit sudah > 1.0% (atau setengah dari TP), langsung aktif!

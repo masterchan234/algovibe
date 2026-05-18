@@ -43,6 +43,7 @@ from app.domain.scoring import calculate_score
 from app.domain.technicals import get_technical_summary, derive_trade_signal, compute_adaptive_thresholds
 from app.application.use_cases.candidate_enrichment import enrich_pair
 from app.application.use_cases.entry_gates import check_entry_gates
+from app.domain.predictor import get_prediction
 import config
 
 logging.basicConfig(
@@ -697,10 +698,11 @@ class BrainInferenceService:
                 ch_15m = ((last - hist[-15]) / hist[-15] * 100) if len(hist) >= 15 and hist[-15] > 0 else 0.0
                 ch_1h = ((last - hist[-60]) / hist[-60] * 100) if len(hist) >= 60 and hist[-60] > 0 else 0.0
 
+                prediction_prob = get_prediction(hist, self._tickers.get(pair))
                 updates.append({
                     'pair': pair,
                     'history_json': json.dumps(hist),
-                    'prediction_prob': 0.0,
+                    'prediction_prob': prediction_prob,
                     'trend': trend,
                     'signal': signal_info['verdict'],
                     'ch_5m': ch_5m,

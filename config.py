@@ -74,6 +74,7 @@ TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fe
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
 AUTO_SL_ENABLED = False          # [MOMENTUM FOCUS] Enable auto SL to protect capital during fast momentum moves
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
+TRAILING_TP_DELTA_PCT = float(os.getenv("TRAILING_TP_DELTA_PCT", 0.003))  # [SCALPING] 0.3% pullback dari peak (lebih rapat/tight agar profit tidak tergerus dalam)
 
 # Dynamic tiered profit thresholds for exit_manager
 TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.020))  # 2.0% default (1.5% → 2.0% for 1%+ net after 0.6322% fee)

@@ -209,6 +209,7 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
+      - ./models:/app/models_coin:ro
       - algovibe_ipc:/tmp           # Same IPC volume
       - ./services:/app/services
       - ./app:/app/app
