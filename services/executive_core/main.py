@@ -372,6 +372,10 @@ class ExecutiveCoreService:
         async for raw in self._signal_sub.aiter_messages():
             if not self._running:
                 break
+            # Skip non-Signal frames (e.g. topic="tau" JSON dari lead-lag)
+            # Brain-inference publish beberapa jenis message ke socket yang sama.
+            if not raw or raw[:1] == b"{":
+                continue
             try:
                 sig = Signal()
                 sig.ParseFromString(raw)
