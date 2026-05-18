@@ -209,6 +209,43 @@ python3 -m dashboard.server                 # Terminal 6
 
 ---
 
+## 💾 Database Backup & Restore Tool
+
+Algovibe dilengkapi dengan utilitas pencadangan (*backup*) dan pemulihan (*restore*) database PostgreSQL/TimescaleDB tingkat produksi di [db_backup_restore.sh](file:///root/algovibe/scripts/db_backup_restore.sh).
+
+### Fitur Utama:
+- **Health Check Otomatis:** Memastikan kontainer database `algovibe-timescaledb` menyala dan berstatus *healthy* sebelum melakukan query.
+- **Kredensial Dinamis:** Mengekstrak kredensial PostgreSQL langsung dari `docker-compose.yml` saat runtime untuk menghindari hardcoded password.
+- **Format Biner Kustom (`-Fc`):** Menghasilkan cadangan database terkompresi secara native yang aman untuk metadata TimescaleDB.
+- **TimescaleDB Safeties:** Menjamin inisialisasi ulang ekstensi `timescaledb` dan pemutusan koneksi aktif (`pg_terminate_backend`) sebelum melakukan pemulihan data untuk menghindari kegagalan restorasi.
+- **Kebijakan Retensi:** Otomatis menghapus cadangan lama yang berumur lebih dari 7 hari.
+
+### Operasional Database Tool:
+
+```bash
+# 1. Backup semua database (live, dryrun, backtest)
+./scripts/db_backup_restore.sh backup all
+
+# 2. Backup database tertentu saja (misal: live)
+./scripts/db_backup_restore.sh backup algovibe_live
+
+# 3. Lihat daftar file backup yang tersedia
+./scripts/db_backup_restore.sh list
+
+# 4. Restore database (Interaktif & Aman)
+./scripts/db_backup_restore.sh restore ./backups/algovibe_dryrun_20260518_060000.dump algovibe_dryrun
+
+# 5. Restore database (Bypass konfirmasi - untuk otomatisasi cron/CI)
+./scripts/db_backup_restore.sh restore ./backups/algovibe_dryrun_20260518_060000.dump algovibe_dryrun --yes
+```
+
+> [!IMPORTANT]
+> **Peringatan Keamanan:** Selalu pastikan Anda me-restore ke database target yang tepat. Pemulihan ke `algovibe_live` saat bot trading aktif sangat berisiko. Matikan bot terlebih dahulu (`docker compose stop executive-core`) sebelum memulihkan database live.
+
+Dokumentasi detail & panduan otomatisasi menggunakan **Cron** tersedia di: [db_backup_restore_guide.md](file:///root/.gemini/antigravity/brain/ba037321-7323-4e3f-a8a2-697cc3b1c13d/db_backup_restore_guide.md)
+
+---
+
 ## 📰 News Maker (Automated Editorial Engine)
 
 `services/news_maker/` adalah layanan AI editorial yang menghasilkan artikel pasar kripto secara otomatis dalam Bahasa Indonesia, berdasarkan data live dari WebSocket stream dan sinyal teknikal dari Brain Inference.
