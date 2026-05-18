@@ -548,6 +548,115 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_bool = bool(dry_run)
+
+            # --- [Senior Deduplication & Ghost/Fallback Merging] ---
+            # 1. Cek duplikasi berdasarkan trade_id
+            if trade_id and str(trade_id).strip():
+                try:
+                    cursor.execute("SELECT id, created_at FROM trade_history WHERE trade_id = %s LIMIT 1", (str(trade_id),))
+                    existing = cursor.fetchone()
+                    if existing:
+                        logger.info(f"[DB] Trade ID {trade_id} already exists. Skipping duplicate insert.")
+                        return
+                except Exception as e:
+                    logger.warning(f"[DB] Error checking duplicate trade_id: {e}")
+
+            # 2. Cek duplikasi berdasarkan exit_order_id
+            if exit_order_id and str(exit_order_id).strip():
+                try:
+                    cursor.execute("SELECT id, created_at, trade_id FROM trade_history WHERE exit_order_id = %s LIMIT 1", (str(exit_order_id),))
+                    existing = cursor.fetchone()
+                    if existing:
+                        existing_id = existing['id']
+                        existing_created = existing['created_at']
+                        existing_trade_id = existing['trade_id']
+                        
+                        # Jika yang ada di DB adalah fallback/ghost (trade_id kosong) dan data baru memiliki trade_id riil
+                        if (not existing_trade_id or not str(existing_trade_id).strip()) and trade_id and str(trade_id).strip():
+                            logger.info(f"[DB] Merging real bursa trade data into ghost/fallback record for exit_order_id {exit_order_id}")
+                            cursor.execute(
+                                """
+                                UPDATE trade_history 
+                                SET trade_id = %s, entry_price = %s, exit_price = %s, amount_crypto = %s, amount_idr = %s,
+                                    pnl_idr = %s, pnl_pct = %s, reason = %s, exec_type = %s, ai_confidence = %s
+                                WHERE id = %s AND created_at = %s
+                                """,
+                                (str(trade_id), entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, ai_confidence, existing_id, existing_created)
+                            )
+                            return
+                        else:
+                            logger.info(f"[DB] Exit Order ID {exit_order_id} already exists. Skipping duplicate insert.")
+                            return
+                except Exception as e:
+                    logger.warning(f"[DB] Error checking duplicate exit_order_id: {e}")
+
+            # 3. Fuzzy Check: Cek jika ada transaksi dengan koin, harga entry, dan amount yang sama dalam window 5 menit (300 detik)
+            try:
+                target_time = created_at if created_at else datetime.now()
+                # standard parse to dt if it is string
+                if isinstance(target_time, str):
+                    try:
+                        from dateutil import parser
+                        target_time = parser.parse(target_time)
+                    except Exception:
+                        try:
+                            target_time = datetime.strptime(target_time, '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            target_time = datetime.now()
+                
+                cursor.execute(
+                    """
+                    SELECT id, created_at, trade_id, exit_order_id 
+                    FROM trade_history
+                    WHERE pair = %s 
+                      AND ABS(EXTRACT(EPOCH FROM (created_at - %s))) < 300
+                      AND ABS(entry_price - %s) < 0.01
+                      AND ABS(amount_crypto - %s) < 0.0001
+                    LIMIT 1
+                    """,
+                    (pair, target_time, entry_price, amount_crypto)
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    existing_id = existing['id']
+                    existing_created = existing['created_at']
+                    existing_trade_id = existing['trade_id']
+                    existing_exit_oid = existing['exit_order_id']
+                    
+                    # Gabungkan jika data baru memiliki trade_id/exit_order_id sedangkan data lama tidak punya
+                    new_trade_id_present = bool(trade_id and str(trade_id).strip())
+                    old_trade_id_absent = not (existing_trade_id and str(existing_trade_id).strip())
+                    
+                    new_exit_oid_present = bool(exit_order_id and str(exit_order_id).strip())
+                    old_exit_oid_absent = not (existing_exit_oid and str(existing_exit_oid).strip())
+                    
+                    if (old_trade_id_absent and new_trade_id_present) or (old_exit_oid_absent and new_exit_oid_present):
+                        logger.info(f"[DB] Fuzzy-match found! Merging new metadata into fallback record {existing_id} for {pair}")
+                        cursor.execute(
+                            """
+                            UPDATE trade_history 
+                            SET trade_id = COALESCE(%s, trade_id),
+                                exit_order_id = COALESCE(%s, exit_order_id),
+                                exit_price = %s,
+                                pnl_idr = %s,
+                                pnl_pct = %s,
+                                reason = %s,
+                                exec_type = %s
+                            WHERE id = %s AND created_at = %s
+                            """,
+                            (
+                                str(trade_id) if new_trade_id_present else None,
+                                str(exit_order_id) if new_exit_oid_present else None,
+                                exit_price, pnl_idr, pnl_pct, reason, exec_type,
+                                existing_id, existing_created
+                            )
+                        )
+                        return
+                    else:
+                        logger.info(f"[DB] Fuzzy-match found same trade in 5-min window for {pair}. Skipping duplicate.")
+                        return
+            except Exception as e:
+                logger.warning(f"[DB] Error in fuzzy check: {e}")
             
             sql = '''
                 INSERT INTO trade_history (

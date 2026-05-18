@@ -2805,6 +2805,7 @@ class ExitManager:
                         exec_type=exec_type,
                         duration_seconds=int(duration_sec),
                         dry_run=use_dry_run,
+                        trade_id=str(order.get('tradeId', '') or '') or None,
                         exit_order_id=order_id,
                         ai_confidence=position_data.get('ai_confidence', 0.0)
                     )
@@ -3646,7 +3647,9 @@ class ExitManager:
                             exec_type=_reconcile_exec_type,
                             duration_seconds=300,
                             dry_run=False,
-                            exit_order_id=_exit_oid if _exit_oid and not _exit_oid.startswith('ADOPT-') else None
+                            trade_id=None,
+                            exit_order_id=_exit_oid if _exit_oid and not _exit_oid.startswith('ADOPT-') else None,
+                            ai_confidence=pos.get('ai_confidence', 0.0)
                         )
                         log_message(f" Recorded best-effort trade for {pair} (RECONCILE_GHOST) pnl={_net:+,.0f} IDR")
                     
