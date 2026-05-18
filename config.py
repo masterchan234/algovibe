@@ -854,20 +854,9 @@ _DRY_RUN_CACHE = {"value": None, "last_check": 0}
 _TECH_MODE_CACHE = {"value": None, "last_check": 0}
 
 def get_dynamic_dry_run():
-    import time
-    now = time.time()
-    # Cache for 2 seconds to avoid slamming SQLite on high-freq loops
-    if _DRY_RUN_CACHE["value"] is not None and (now - _DRY_RUN_CACHE["last_check"]) < 2:
-        return _DRY_RUN_CACHE["value"]
-
     try:
         from app.infrastructure.database import db
-        db_val = db.get_state("dry_run")
-        if db_val is not None:
-            val = db_val.lower() in ("true", "1")
-            _DRY_RUN_CACHE["value"] = val
-            _DRY_RUN_CACHE["last_check"] = now
-            return val
+        return db.is_dry_run()
     except Exception:
         pass
     

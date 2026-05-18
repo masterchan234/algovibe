@@ -3423,6 +3423,12 @@ class ExitManager:
                 return amount * current_price
 
             for pair, pos in open_positions.items():
+                # Strict check to ensure dry_run status matches active engine mode
+                pos_dry_run = pos.get('dry_run')
+                if bool(pos_dry_run) != bool(self.dry_run):
+                    log_message(f"[reconcile] Skipping position {pair} because its dry_run status ({pos_dry_run}) does not match active engine dry_run mode ({self.dry_run})")
+                    continue
+
                 coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
                 amount_on_exchange = float(balance['total'].get(coin, 0))
                 position_idr_value = _current_value_idr(pair, amount_on_exchange)
@@ -3604,7 +3610,7 @@ class ExitManager:
                                 amount_crypto=amount_crypto, amount_idr=amount_idr,
                                 pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
                                 exec_type=participant,
-                                duration_seconds=int(duration_sec), dry_run=False,
+                                duration_seconds=int(duration_sec), dry_run=bool(pos.get('dry_run', False)),
                                 trade_id=ws_trade_id,
                                 exit_order_id=pos.get('exit_order_id'),
                                 ai_confidence=pos.get('ai_confidence', 0.0)
@@ -3651,7 +3657,7 @@ class ExitManager:
                             reason=pos.get('reason_backup', 'RECONCILE_GHOST'),
                             exec_type=_reconcile_exec_type,
                             duration_seconds=300,
-                            dry_run=False,
+                            dry_run=bool(pos.get('dry_run', False)),
                             trade_id=None,
                             exit_order_id=_exit_oid if _exit_oid and not _exit_oid.startswith('ADOPT-') else None,
                             ai_confidence=pos.get('ai_confidence', 0.0)

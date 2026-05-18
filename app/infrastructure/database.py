@@ -1807,6 +1807,10 @@ class DatabaseRouter:
             return self._live.get_state(key, default)
         return self._active().get_state(key, default)
 
+    def is_dry_run(self) -> bool:
+        """Helper to check if active mode is dry_run dynamically."""
+        return self._read_mode_raw()
+
     #  Expose both instances for dashboard multi-DB queries 
 
     @property
