@@ -548,15 +548,24 @@ def get_prediction(price_history: list, ticker_data: dict = None, pair: str = No
                 "hour_cos":         np.cos(2 * np.pi * hour / 24.0),
             }])
 
-            ml_prob = model.predict_proba(features_df)[0][1]
-
-            divergence = abs(tech_prob - ml_prob)
-            if divergence < 0.10:
-                final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
-            elif divergence < 0.25:
-                final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+            # Validasi feature compatibility — model lama mungkin expect feature set berbeda
+            if hasattr(model, 'feature_names_in_'):
+                expected = set(model.feature_names_in_)
+                provided = set(features_df.columns)
+                if not expected.issubset(provided):
+                    model = None
+            if model is None:
+                final_prob = tech_prob
             else:
-                final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
+                ml_prob = model.predict_proba(features_df)[0][1]
+
+                divergence = abs(tech_prob - ml_prob)
+                if divergence < 0.10:
+                    final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
+                elif divergence < 0.25:
+                    final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+                else:
+                    final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
         else:
             final_prob = tech_prob
 
