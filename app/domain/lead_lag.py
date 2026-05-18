@@ -168,6 +168,18 @@ def compute_cross_correlation(
     norm_b = (p_b - p_b[0]) / p_b[0] * 100.0
     norm_i = (p_i - p_i[0]) / p_i[0] * 100.0
 
+    # Guard: jika salah satu series flat (stddev=0), corrcoef akan divide-by-zero
+    if norm_b.std() < 1e-10 or norm_i.std() < 1e-10:
+        return {"tau_star_ms": 0, "peak_corr": 0.0, "is_valid": False, "profile": []}
+
+    # Helper: hitung corrcoef dengan guard stddev per-slice
+    def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+        if len(a) < 2 or a.std() < 1e-10 or b.std() < 1e-10:
+            return 0.0
+        with np.errstate(invalid='ignore', divide='ignore'):
+            r = np.corrcoef(a, b)[0, 1]
+        return 0.0 if np.isnan(r) else float(r)
+
     # Cross-correlation via lag shift
     steps_per_ms = 1.0 / grid_ms
     lag_range = range(-max_lag_ms, max_lag_ms + 1, grid_ms)
@@ -176,20 +188,20 @@ def compute_cross_correlation(
     for lag_ms in lag_range:
         shift = int(round(lag_ms * steps_per_ms))
         if shift == 0:
-            corr = float(np.corrcoef(norm_b, norm_i)[0, 1])
+            corr = _safe_corr(norm_b, norm_i)
         elif shift > 0:
             if shift >= len(norm_b):
                 profile.append((lag_ms, 0.0))
                 continue
-            corr = float(np.corrcoef(norm_b[shift:], norm_i[:-shift])[0, 1])
+            corr = _safe_corr(norm_b[shift:], norm_i[:-shift])
         else:
             s = -shift
             if s >= len(norm_b):
                 profile.append((lag_ms, 0.0))
                 continue
-            corr = float(np.corrcoef(norm_b[:-s], norm_i[s:])[0, 1])
+            corr = _safe_corr(norm_b[:-s], norm_i[s:])
 
-        profile.append((lag_ms, 0.0 if np.isnan(corr) else corr))
+        profile.append((lag_ms, corr))
 
     if not profile:
         return {"tau_star_ms": 0, "peak_corr": 0.0, "is_valid": False, "profile": []}

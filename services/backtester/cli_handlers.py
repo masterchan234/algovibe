@@ -24,7 +24,15 @@ def handle_restore_command() -> None:
 
     print(f" Restoring results from {cache_file}...")
     with open(cache_file, "rb") as f:
-        data = pickle.load(f)
+        data = pickle.load(f)  # nosec — file lokal, dibuat oleh sistem sendiri
+
+    # C3: validasi struktur setelah load untuk deteksi korupsi/manipulasi
+    if not isinstance(data, dict) or "results" not in data or "days" not in data:
+        print(f" Error: Cache file corrupt atau format tidak valid.")
+        return
+    if not isinstance(data["results"], list):
+        print(f" Error: Cache 'results' bukan list — file mungkin korup.")
+        return
 
     profiles = _load_active_profiles()
     _persist_results(data["results"], profiles, data["start"], data["now"])

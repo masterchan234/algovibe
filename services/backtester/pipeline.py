@@ -131,7 +131,9 @@ def _cache_backtest_results(all_results: list[dict], days: int, start: datetime,
 
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, "wb") as f:
-            pickle.dump({"results": all_results, "days": days, "start": start, "now": end}, f)
+            # Hanya menyimpan struktur sederhana — tidak ada objek kompleks
+            payload = {"results": all_results, "days": days, "start": start, "now": end}
+            pickle.dump(payload, f)
         logger.info(f"[run]  Results cached to {cache_file}")
     except Exception as e:
         logger.warning(f"[run] [WARN]  Failed to cache results: {e}")

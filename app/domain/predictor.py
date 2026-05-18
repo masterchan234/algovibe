@@ -58,6 +58,8 @@ def _load_coin_model(pair: str):
     path = os.path.join(COIN_MODELS_DIR, model_file)
     
     if not os.path.exists(path):
+        # C1: log warning agar operator tahu model hilang (bukan silent fallback)
+        log_message(f"[WARN] [Predictor] Coin model tidak ditemukan untuk {pair.upper()} ({path}) — fallback ke global model")
         return None, 0.0
         
     try:
@@ -66,21 +68,43 @@ def _load_coin_model(pair: str):
         
         if cached is None or current_mtime > cached[2]:
             model = joblib.load(path)
+
+            # H2: validasi tipe model setelah load untuk deteksi korupsi file
+            from sklearn.ensemble import RandomForestRegressor as _RFR
+            if not isinstance(model, _RFR):
+                log_message(f"[WARN] [Predictor] Coin model {pair.upper()} tipe tidak valid ({type(model).__name__}) — fallback ke global model")
+                return None, 0.0
             
-            # Extract split thresholds for SMA_20 (feature index 6)
+            # C2 + H1: Tentukan index SMA_20 secara dinamis dari feature_names_in_ jika tersedia
+            # Hindari asumsi hardcoded bahwa SMA_20 selalu di index 6.
+            sma_index = 6  # default fallback
+            if hasattr(model, 'feature_names_in_'):
+                feat_list = list(model.feature_names_in_)
+                if 'SMA_20' in feat_list:
+                    sma_index = feat_list.index('SMA_20')
+                else:
+                    log_message(f"[WARN] [Predictor] Coin model {pair.upper()} tidak memiliki fitur SMA_20 — P_train_mean tidak dapat diekstrak")
+                    return None, 0.0
+            
+            # Ekstrak split thresholds SMA_20 dari semua tree sebagai estimasi P_train_mean
             sma_thresholds = []
             for estimator in model.estimators_:
                 tree = estimator.tree_
                 for node_idx in range(tree.node_count):
-                    if tree.feature[node_idx] == 6:  # SMA_20 index
+                    if tree.feature[node_idx] == sma_index:
                         sma_thresholds.append(tree.threshold[node_idx])
             
             P_train_mean = np.mean(sma_thresholds) if sma_thresholds else 0.0
+
+            # H1: sanity check — jika P_train_mean jauh dari harga wajar, model mungkin stale
+            if P_train_mean <= 0:
+                log_message(f"[WARN] [Predictor] Coin model {pair.upper()} P_train_mean={P_train_mean} tidak valid — fallback ke global model")
+                return None, 0.0
             
             _COIN_MODELS_CACHE[pair] = (model, P_train_mean, current_mtime)
             log_message(
                 f"[Predictor] [OK] Loaded coin model for {pair.upper()} "
-                f"(P_train_mean={P_train_mean:.8f}, mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})"
+                f"(P_train_mean={P_train_mean:.8f}, SMA_idx={sma_index}, mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})"
             )
             
         return _COIN_MODELS_CACHE[pair][0], _COIN_MODELS_CACHE[pair][1]
@@ -97,12 +121,19 @@ def _load_model():
     try:
         current_mtime = os.path.getmtime(MODEL_PATH)
         if _model is None or current_mtime > _model_mtime:
-            _model = joblib.load(MODEL_PATH)
-            _model_mtime = current_mtime
-            log_message(
-                f" [Predictor] Scalper V2 Model loaded "
-                f"(mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})."
-            )
+            loaded = joblib.load(MODEL_PATH)
+            # H2: validasi tipe global model
+            from sklearn.ensemble import HistGradientBoostingClassifier as _HGBC
+            from sklearn.ensemble import RandomForestClassifier as _RFC
+            if not isinstance(loaded, (_HGBC, _RFC)):
+                log_message(f"[WARN] [Predictor] Global model tipe tidak valid ({type(loaded).__name__}) — model tidak diganti")
+            else:
+                _model = loaded
+                _model_mtime = current_mtime
+                log_message(
+                    f"[Predictor] Scalper V2 Model loaded "
+                    f"(mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})."
+                )
     except Exception as e:
         log_message(f"[WARN] [Predictor] Failed to load model: {e}")
     return _model
