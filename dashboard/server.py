@@ -1321,8 +1321,10 @@ def get_positions():
     """Dedicated endpoint untuk open positions dengan unrealized PnL."""
     conn = get_db_connection()
     try:
+        dr_val = _is_dry_run()
         positions = conn.execute(
-            "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp FROM positions"
+            "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp FROM positions WHERE dry_run = %s",
+            (dr_val,)
         ).fetchall()
 
         results = []

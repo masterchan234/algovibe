@@ -381,6 +381,13 @@ class ExecutiveCoreService:
                 sig.ParseFromString(raw)
                 
                 if sig.action == 1: # BUY
+                    # --- [SESSION BUY GATE] ---
+                    _buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
+                    _sess_mode   = db.get_state("session_mode") or "NORMAL"
+                    if not _buy_enabled or _sess_mode == "HARVEST_ONLY":
+                        logger.info(f"[EXECUTIVE] BUY blocked — session_buy_enabled={_buy_enabled} mode={_sess_mode}")
+                        continue
+
                     # --- [DYNAMIC TARGETING UNPACK] ---
                     raw_symbol = sig.symbol
                     pair = raw_symbol
@@ -471,6 +478,13 @@ class ExecutiveCoreService:
                     continue
 
                 if sig.action == 1:  # BUY
+                    # --- [SESSION BUY GATE] ---
+                    _buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
+                    _sess_mode   = db.get_state("session_mode") or "NORMAL"
+                    if not _buy_enabled or _sess_mode == "HARVEST_ONLY":
+                        logger.info(f"[EXECUTIVE] LLM BUY blocked — session_buy_enabled={_buy_enabled} mode={_sess_mode}")
+                        continue
+
                     # --- [DYNAMIC TARGETING UNPACK] ---
                     raw_symbol = sig.symbol
                     pair = raw_symbol

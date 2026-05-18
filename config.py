@@ -102,7 +102,7 @@ TP_PCT = 0.035                  # Target TP 3.5% (net profit = 3.5% - 0.6322% fe
 SL_PCT = -0.035                 # [SL/DCA SYNC] Dilebarkan ke -3.5% agar DCA Sniper bisa berjalan di -1.5% sebelum likuidasi
 AUTO_SL_ENABLED = False          # [MOMENTUM FOCUS] Enable auto SL to protect capital during fast momentum moves
 MAX_HOLD_MINUTES = 10           # [ANTI-ZOMBIE] Bunuh posisi mandek lebih cepat (dari 15 → 10 menit)
-TRAILING_TP_DELTA_PCT = float(os.getenv("TRAILING_TP_DELTA_PCT", 0.003))  # [SCALPING] 0.3% pullback dari peak (lebih rapat/tight agar profit tidak tergerus dalam)
+TRAILING_TP_DELTA_PCT = float(os.getenv("TRAILING_TP_DELTA_PCT", 0.0025))  # [SCALPING] 0.25% pullback dari peak — lebih rapat agar profit terkunci lebih cepat
 
 # Dynamic tiered profit thresholds for exit_manager
 TIER2_PROFIT_PCT = float(os.getenv("TIER2_PROFIT_PCT", 0.020))  # 2.0% default (1.5% → 2.0% for 1%+ net after 0.6322% fee)
@@ -114,7 +114,7 @@ TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of M
 # Auto-enable micro TP behavior when effective balance drops below threshold.
 MICRO_PROFIT_EXIT_AUTO = os.getenv("MICRO_PROFIT_EXIT_AUTO", "true").lower() in ("1", "true", "yes", "on")
 MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 100000))
-MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.008))
+MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.012))  # 1.2% — net 0.57% after fee, meaningful micro profit
 # Net floor for micro mode (after-fee estimate). Keep > 0 to avoid pseudo-profit exits.
 MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
 
@@ -185,13 +185,13 @@ def get_dynamic_tp_pct(current_balance: float = None) -> float:
     current_balance = max(current_balance, INITIAL_CAPITAL)
     
     if current_balance <= 100_000:
-        return 0.020  # 2.0% untuk small account
+        return 0.027  # 2.7% — net 2.07% after fee; R:R ~0.77:1 vs SL -3.5% (DCA rescue)
     elif current_balance <= 250_000:
-        return 0.022  # 2.2% untuk medium-small account
+        return 0.030  # 3.0% — net 2.37%; R:R ~0.86:1 vs SL -3.5%
     elif current_balance <= 1_000_000:
-        return 0.025  # 2.5% untuk medium account
+        return 0.035  # 3.5% — net 2.87%; R:R 1:1 vs SL -3.5%
     else:
-        return 0.035  # 3.5% untuk large account
+        return 0.045  # 4.5% — net 3.87%; R:R 1.3:1 vs SL -3.5%
 
 def get_dynamic_sl_pct(current_balance: float = None) -> float:
     """Calculate SL_PCT dynamically. Matching TP tightening to maintain R:R.

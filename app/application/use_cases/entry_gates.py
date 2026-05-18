@@ -343,7 +343,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
                 _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
             _last = float(p.get('last', 1.0)) or 1.0
             _atr_pct = (_atr / _last) * 100.0
-            _atr_limit = 6.0 if config.DRY_RUN_LOOSE_GATES else 3.0
+            _atr_limit = 6.0 if config.DRY_RUN_LOOSE_GATES else 4.0
             if _atr_pct > _atr_limit:
                 msg = f"[GATE] {pair} REJECTED: ATR Volatility {_atr_pct:.2f}% > {_atr_limit:.1f}% limit"
                 log_message(msg)
@@ -385,7 +385,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     #  (Binance Lead-Lag / Toxic-Flow Guard moved to top of check_entry_gates for high-priority evaluation)
 
     #  4d. Vertical Spike / RSI Ceiling Filter 
-    _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
+    _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 78.0
     _rsi_now = tech.get('rsi', 50.0)
     _velocity = tech.get('velocity', 0.0)
     _vol_ratio = tech.get('volume_ratio', 1.0)
@@ -403,7 +403,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     if _ema9 > 0:
         _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
-        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0
+        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.5
         if _dist_ema9 > _dist_limit:
             msg = f"[GATE] {pair} REJECTED: Vertical Spike {_dist_ema9:.2f}% > EMA-9 limit"
             log_message(msg)
@@ -457,7 +457,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             sideway_relaxed_ok = tq_prob >= max(tech_gate_threshold, 0.40)
         else:
             sideway_relaxed_ok = (
-                (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3)
+                (trend == "SIDEWAYS" and _velocity > 0.12 and _vol_ratio > 1.2)
                 and tq_prob >= max(tech_gate_threshold, 0.45)
                 and imbalance_ratio >= 1.05
             )
