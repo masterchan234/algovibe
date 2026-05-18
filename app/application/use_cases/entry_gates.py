@@ -368,8 +368,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         try:
             _ema50 = calculate_ema(history, 50)
             _last_price = float(p.get('last', 0.0))
-            if _last_price > 0 and _last_price < _ema50:
-                msg = f"[GATE] {pair} REJECTED: Price {_last_price:.4f} < EMA-50 {_ema50:.4f}"
+            # Toleransi 0.3% — harga noise/konsolidasi tipis bukan downtrend
+            _ema50_floor = _ema50 * 0.997
+            if _last_price > 0 and _last_price < _ema50_floor:
+                msg = f"[GATE] {pair} REJECTED: Price {_last_price:.4f} < EMA-50 {_ema50:.4f} (>{(_ema50 - _last_price)/_ema50*100:.2f}% below)"
                 log_message(msg)
                 save_gate_state(msg)
                 return None
