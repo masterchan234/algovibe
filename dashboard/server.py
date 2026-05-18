@@ -33,7 +33,7 @@ import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
 from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
-from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
+from shared.algovibe_pb2 import EquityUpdate, Tick, Trade, ExchangeId  # type: ignore[attr-defined]
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- [ZMQ COMMAND PUBLISHER] ---
@@ -622,6 +622,88 @@ _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari pus
 _last_market_brief_llm_ts = 0.0
 _last_market_brief_payload_hash = ""
 _latest_exchange_latency = 0.0  # Measured in [MARKET-PIPE] from Indodax epoch
+
+# Binance Lead-Lag: rolling (timestamp_ms, price) buffer per symbol
+_BINANCE_DASH_HISTORY: dict = {}   # {symbol: deque(maxlen=60)}
+_BINANCE_DASH_MAXLEN = 60
+_TIER1_PAIRS = {"btcidr", "ethidr", "solidr", "xrpidr", "dogeidr", "adaidr", "suiidr"}
+_TIER2_PAIRS = {
+    "nearidr", "avaxidr", "opidr", "arbidr", "filidr", "dotidr", "linkidr", "maticidr",
+    "bnbidr", "trxidr", "ltcidr", "atomidr", "ftmidr",
+}
+
+
+def _indodax_to_binance(pair_lower: str) -> str:
+    """Map Indodax pair → Binance symbol. Sama persis dengan entry_gates.py."""
+    _overrides = {"rndridr": "renderusdt", "wbtcidr": "wbtcusdt", "kndyidr": ""}
+    if pair_lower in _overrides:
+        return _overrides[pair_lower]
+    if pair_lower.endswith("idr"):
+        return pair_lower[:-3] + "usdt"
+    return ""
+
+
+def _compute_latency_snapshot(window_ms: float = 400.0) -> list:
+    """Hitung per-pair Binance return untuk dashboard latency strip.
+    Returns list of dicts: {pair, base, b_return, tier, status, freeze_until}
+    """
+    result = []
+    now_ms = time.time() * 1000
+    # Tampilkan Tier 1 saja di latency strip (Tier 2 terlalu banyak)
+    for pair in sorted(_TIER1_PAIRS):
+        b_symbol = _indodax_to_binance(pair)
+        if not b_symbol:
+            continue
+        hist = list(_BINANCE_DASH_HISTORY.get(b_symbol, []))
+        b_return = 0.0
+        actual_ms = 0.0
+        b_last = 0.0
+        if len(hist) >= 2:
+            last_ts, b_last = hist[-1]
+            ref_ts, ref_price = hist[0]
+            for ts, price in hist:
+                if now_ms - ts <= window_ms:
+                    ref_ts, ref_price = ts, price
+                    break
+            actual_ms = last_ts - ref_ts
+            if ref_price > 0 and actual_ms >= 0:
+                b_return = (b_last - ref_price) / ref_price * 100.0
+
+        # Status badge
+        if b_return <= -0.50:
+            status = "TOXIC"
+        elif b_return >= 0.65:
+            status = "FAST-TRACK"
+        elif b_return >= 0.35:
+            status = "BREAKOUT"
+        elif b_return <= -0.25:
+            status = "DECLINING"
+        else:
+            status = "NEUTRAL"
+
+        # Check toxic freeze (stored in DB by entry_gates)
+        freeze_remaining = 0
+        try:
+            freeze_until = float(db.get_state(f"toxic_freeze_{pair}") or 0)
+            remaining = freeze_until - time.time()
+            if remaining > 0:
+                freeze_remaining = round(remaining, 1)
+                status = "FROZEN"
+        except Exception:
+            pass
+
+        tier = 1 if pair in _TIER1_PAIRS else (2 if pair in _TIER2_PAIRS else 3)
+        result.append({
+            "pair":            pair,
+            "base":            pair.replace("idr", "").upper(),
+            "b_return":        round(b_return, 4),
+            "actual_ms":       round(actual_ms, 0),
+            "b_last":          round(b_last, 4),
+            "tier":            tier,
+            "status":          status,
+            "freeze_remaining": freeze_remaining,
+        })
+    return result
 
 
 
@@ -1412,8 +1494,7 @@ def get_pnl_history_api(tf):
     """
     conn = get_db_connection()
     try:
-        import config as cfg
-        dr_val = 1 if _is_dry_run() else 0
+        dr_bool = _is_dry_run()  # True/False — langsung pakai boolean untuk PostgreSQL
         
         tf_map = {
             '1h': '-1 hours',
@@ -1423,14 +1504,14 @@ def get_pnl_history_api(tf):
         interval = tf_map.get(tf, '-24 hours')
         
         base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST'",
-            (interval, dr_val)
+            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = true) AND reason != 'BACKTEST'",
+            (interval, dr_bool)
         ).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
         trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' ORDER BY created_at ASC",
-            (interval, dr_val)
+            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = true) AND reason != 'BACKTEST' ORDER BY created_at ASC",
+            (interval, dr_bool)
         ).fetchall()
         
         results = []
@@ -1492,7 +1573,7 @@ def get_positions_summary():
                 status = "OTHER"
 
             status_counts[status] += 1
-            if int(pos['dry_run'] or 0) == 1:
+            if bool(pos['dry_run']):
                 mode_counts['dry_run'] += 1
             else:
                 mode_counts['live'] += 1
@@ -3316,7 +3397,11 @@ def _build_radar_payload():
         ).fetchall()
 
         db_by_pair = {str(r['pair']).lower(): r for r in rows if r['pair']}
-        all_pairs = set(db_by_pair.keys()) | {str(p).lower() for p in ws_tickers.keys()}
+        # Hanya tampilkan IDR pairs — filter non-IDR (USDT, BTC, ETH-based dari Indodax WS)
+        all_pairs = set(
+            p for p in (set(db_by_pair.keys()) | {str(p).lower() for p in ws_tickers.keys()})
+            if p.endswith('idr')
+        )
 
         def _clamp(v, lo, hi):
             return max(lo, min(hi, v))
@@ -3989,7 +4074,15 @@ def push_data_loop():
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
 
-            # Fast: regime update setiap 1s (low-latency)
+            # Fast: regime + latency pulse setiap 1s (low-latency)
+            try:
+                _latency_snap = _compute_latency_snapshot()
+                if _latency_snap:
+                    socketio.emit('latency_pulse', {"pairs": _latency_snap}, to='public')
+                    socketio.emit('latency_pulse', {"pairs": _latency_snap}, to='authenticated')
+            except Exception as _lpe:
+                logging.warning(f"[push_data_loop] latency_pulse error: {_lpe}")
+
             try:
                 _regime_now = db.get_state("market_regime") or "CHOPPY"
                 _sentiment_now = int(db.get_state("market_sentiment_index") or 50)
@@ -4338,6 +4431,17 @@ def _zmq_market_bridge():
                     tick = Tick()
                     tick.ParseFromString(raw)
                     pair = str(tick.symbol or '').lower()
+
+                    # Route Binance ticks ke buffer latency — JANGAN masuk ke mws._tickers
+                    if tick.exchange_id == ExchangeId.Value("EXCHANGE_BINANCE"):
+                        if pair not in _BINANCE_DASH_HISTORY:
+                            from collections import deque as _deque
+                            _BINANCE_DASH_HISTORY[pair] = _deque(maxlen=_BINANCE_DASH_MAXLEN)
+                        ts_ms = tick.timestamp if tick.timestamp else int(time.time() * 1000)
+                        _BINANCE_DASH_HISTORY[pair].append((ts_ms, tick.price))
+                        continue  # Jangan proses lebih lanjut sebagai Indodax ticker
+
+                    # Indodax ticks only from here
                     with mws._lock:
                         if pair not in mws._tickers:
                             mws._tickers[pair] = {

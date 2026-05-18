@@ -5,7 +5,7 @@ services:
     container_name: algovibe-timescaledb
     restart: always
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_USER=algovibe
       - POSTGRES_PASSWORD=secretpassword
@@ -163,8 +163,7 @@ services:
     cpu_shares: 2048               # 2× the default 1024 — highest priority among services
     command: ["python", "-m", "services.executive_core.main"]
     healthcheck:
-      test: ["CMD", "python3", "-c",
-             "import os; f=open('data/algovibe_bot.pid'); pid=int(f.read()); os.kill(pid,0)"]
+      test: ["CMD", "python3", "-c", "import os; os.kill(1, 0)"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -525,6 +525,48 @@ class ExitManager:
             # None: no indicator alignment
             return 'HOLD', 0.20
 
+    def _get_binance_return(self, pair: str, window_ms: float = 400.0) -> float:
+        """Hitung return Binance dalam window waktu aktual (default 400ms).
+        
+        Digunakan untuk Proactive SL / Proactive TP: deteksi arah pasar dari
+        Binance sebelum Indodax price catch-up.
+        Returns % change (misal -0.55 artinya turun 0.55%), atau 0.0 jika data tidak tersedia.
+        """
+        try:
+            bot = self.bot
+            if bot is None:
+                return 0.0
+            # Map Indodax pair → Binance symbol
+            pair_lower = pair.lower()
+            _overrides = {"rndridr": "renderusdt", "wbtcidr": "wbtcusdt", "kndyidr": ""}
+            if pair_lower in _overrides:
+                b_symbol = _overrides[pair_lower]
+            elif pair_lower.endswith("idr"):
+                b_symbol = pair_lower[:-3] + "usdt"
+            else:
+                return 0.0
+            if not b_symbol:
+                return 0.0
+
+            b_hist_raw = list(getattr(bot, "binance_history", {}).get(b_symbol, []))
+            if len(b_hist_raw) < 2:
+                return 0.0
+
+            now_ms = time.time() * 1000
+            b_last_ts, b_last = b_hist_raw[-1]
+            b_ref_ts, b_ref = b_hist_raw[0]
+            for ts, price in b_hist_raw:
+                if now_ms - ts <= window_ms:
+                    b_ref_ts, b_ref = ts, price
+                    break
+
+            actual_window_ms = b_last_ts - b_ref_ts
+            if b_ref > 0 and actual_window_ms >= 0:
+                return (b_last - b_ref) / b_ref * 100.0
+        except Exception:
+            pass
+        return 0.0
+
     def _evaluate_exit_signal(self, pair, price_history, entry_price, current_price, amount, amount_idr, current_rsi=50.0):
         """
         Evaluasi EXIT signal untuk OPEN position dengan fee protection.
@@ -2298,8 +2340,29 @@ class ExitManager:
                 tp_activation_price = entry_price * (1 + activation_pct)
                 trailing_stop_price = float(data.get('trailing_sl_price', 0) or 0)
                 
+                # --- [Binance Proactive TP] ---
+                # Jika Binance berbalik tajam (≥ -0.35% dalam 400ms) DAN posisi sudah profit,
+                # percepat TTP: anggap harga sudah turun menyentuh trailing stop meskipun
+                # Indodax belum reflect — tangkap profit sebelum Indodax price catch-down.
+                _b_return_tp = self._get_binance_return(pair)
+                _binance_reversal_threshold = -0.35
+                _binance_proactive_tp = (
+                    _b_return_tp <= _binance_reversal_threshold
+                    and current_profit_pct > 0.005          # Posisi minimal 0.5% profit
+                    and current_highest >= tp_activation_price  # TTP sudah aktif
+                    and trailing_stop_price > 0
+                )
+                if _binance_proactive_tp:
+                    log_message(
+                        f"[BINANCE-PROACTIVE-TP] {pair}: Binance reversal {_b_return_tp:+.3f}% "
+                        f"dalam 400ms | profit={current_profit_pct*100:.2f}% | "
+                        f"Akselerasi TTP exit sebelum Indodax catch-down."
+                    )
+
                 # Sinyal Exit TTP: Sudah pernah lewat aktivasi (1%), dan sekarang turun di bawah trailing stop
-                is_ttp_exit = (current_highest >= tp_activation_price) and (tp_eval_price <= trailing_stop_price)
+                is_ttp_exit = (
+                    (current_highest >= tp_activation_price) and (tp_eval_price <= trailing_stop_price)
+                ) or _binance_proactive_tp
 
                 log_message(
                     f"[EXIT-STATUS] [{pair}] PnL:{current_profit_pct*100:.2f}% | "
@@ -2389,6 +2452,26 @@ class ExitManager:
                                                entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
                     if order_id: mark_exit_requested(pair, order_id)
                     continue
+
+                else:
+                    # --- [Binance Proactive SL] ---
+                    # Jika Binance crash tajam (≥ -0.50% dalam 400ms) DAN posisi sudah merugi
+                    # (current_price < entry_price), jangan tunggu Indodax turun ke SL price.
+                    # Eksekusi SL sekarang sebelum slippage makin besar.
+                    if AUTO_SL_ENABLED and not harvest_only and current_profit_pct < -0.003:
+                        _b_return_sl = self._get_binance_return(pair)
+                        _binance_crash_threshold = -0.50
+                        if _b_return_sl <= _binance_crash_threshold:
+                            reason_sl = "BINANCE_PROACTIVE_SL"
+                            log_message(
+                                f"[LOSS] [BINANCE-PROACTIVE-SL] {pair}: Binance crash {_b_return_sl:+.3f}% "
+                                f"dalam 400ms | posisi rugi {pnl_pct:+.2f}% | "
+                                f"Eksekusi SL sebelum Indodax catch-down."
+                            )
+                            order_id = self.execute_exit(pair, amount, current_price, reason_sl,
+                                                       entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                            if order_id: mark_exit_requested(pair, order_id)
+                            continue
             except Exception as e:
                 log_message(f"[CRITICAL] Error in monitor loop: {e}")
                 import traceback

@@ -1896,8 +1896,11 @@ class Oracle:
         Returns: { 'verdict': 'BUY'/'AVOID', 'target_tp': 0.02, 'target_sl': -0.012, 'confidence': float }
         """
         import math
-        # 1. Fetch historical DNA from both Live and Backtest tables
-        history = db.get_all_closed_dnas(limit=2000)
+        # 1. Fetch historical DNA from both Live and Backtest tables (with 30-second memory cache)
+        if not hasattr(self, "_closed_dna_cache") or (datetime.now() - getattr(self, "_closed_dna_cache_time", datetime.now() - timedelta(days=1))).total_seconds() > 30:
+            self._closed_dna_cache = db.get_all_closed_dnas(limit=2000)
+            self._closed_dna_cache_time = datetime.now()
+        history = self._closed_dna_cache
         logger.info(f"[DEBUG-ORACLE] Loaded {len(history)} total DNAs for matching.")
         
         # [Fix Bug#3] Naikkan default confidence ke 75 agar melewati dynamic_threshold

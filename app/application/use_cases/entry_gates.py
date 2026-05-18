@@ -88,6 +88,33 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     return "HOLD", f"signal={signal_v} | {reason}"
 
 
+# Tabel override untuk koin yang nama basenya berbeda antara Indodax dan Binance.
+# Format: {indodax_pair_lower: binance_symbol_lower}
+_INDODAX_TO_BINANCE_OVERRIDE = {
+    "rndridr":  "renderusdt",   # Render Network: Indodax=RNDR, Binance=RENDER
+    "wbtcidr":  "wbtcusdt",     # Wrapped BTC: konsisten
+    "kndyidr":  "",             # Hanya listing lokal, tidak ada di Binance
+}
+
+
+def _get_binance_symbol(indodax_pair: str) -> str:
+    """Helper to dynamically map Indodax pair to lowercase Binance counterpart.
+    
+    Mendukung tabel override eksplisit untuk koin yang nama basenya berbeda
+    antara Indodax dan Binance (contoh: rndridr → renderusdt).
+    Jika pair tidak ada mapping Binance, kembalikan string kosong.
+    """
+    pair_lower = indodax_pair.lower()
+    # Cek override eksplisit lebih dulu
+    if pair_lower in _INDODAX_TO_BINANCE_OVERRIDE:
+        return _INDODAX_TO_BINANCE_OVERRIDE[pair_lower]
+    # Generic: strip akhiran 'idr', tambah 'usdt'
+    if pair_lower.endswith("idr"):
+        base = pair_lower[:-3]
+        return f"{base}usdt"
+    return ""
+
+
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     """
     Runs all pre-entry gate checks in sequence.
@@ -141,7 +168,159 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         f"[GATE] [TRACKING] {pair}: recommendation={radar_rec} | reason={radar_reason}"
     )
 
+    #  Binance Lead-Lag / Latency Arbitrage & Toxic-Flow Guard
+    binance_return = 0.0
+    try:
+        binance_symbol = _get_binance_symbol(pair)
+
+        # Determine dynamic Tier (baca dari config yang sudah diimport di module level)
+        pair_lower = pair.lower()
+
+        tier = 3
+        if pair_lower in getattr(config, 'TIER_1_PAIRS', set()):
+            tier = 1
+        elif pair_lower in getattr(config, 'TIER_2_PAIRS', set()):
+            tier = 2
+
+        # TIER 3 (Pure Technical / Domestik): Bypass latency gate completely to save resources!
+        if tier == 3:
+            binance_symbol = ""  # Disables further Binance checks
+
+        if binance_symbol and hasattr(bot, "binance_history") and hasattr(bot, "binance_tickers"):
+            b_hist_raw = list(bot.binance_history.get(binance_symbol, []))
+
+            # _binance_history menyimpan (timestamp_ms, price) tuples.
+            # Kita hitung return berdasarkan window WAKTU AKTUAL 400ms,
+            # bukan jumlah ticks (yang variasinya sangat lebar antar koin).
+            if len(b_hist_raw) >= 2:
+                now_ms = time.time() * 1000
+                b_last_ts, b_last = b_hist_raw[-1]
+
+                # Cari tick paling lama yang masih dalam window 400ms
+                window_ms = 400.0
+                b_ref_ts, b_ref = b_hist_raw[0]  # fallback ke tick tertua
+                for entry_ts, entry_price in b_hist_raw:
+                    if now_ms - entry_ts <= window_ms:
+                        b_ref_ts, b_ref = entry_ts, entry_price
+                        break  # paling lama yang masih dalam window
+
+                # Inisialisasi dulu agar tidak UnboundLocalError di blok bawah
+                actual_window_ms = b_last_ts - b_ref_ts
+                if b_ref > 0 and actual_window_ms >= 0:
+                    binance_return = (b_last - b_ref) / b_ref * 100.0
+
+                # Calculate Indodax last, implied rate, and spread percentage
+                indodax_price = float(p.get('last', 0.0) or 0.0)
+                if indodax_price > 0 and b_last > 0:
+                    implied_rate = indodax_price / b_last
+                    # Read actual USDT/IDR price from ticker (live, bukan hardcode)
+                    _usdt_fallback = 17630.0
+                    usdt_price = _usdt_fallback
+                    if hasattr(bot, "_tickers") and "usdtidr" in bot._tickers:
+                        usdt_price = float(bot._tickers["usdtidr"].get("last", _usdt_fallback) or _usdt_fallback)
+                    elif hasattr(bot, "tickers") and "usdtidr" in bot.tickers:
+                        usdt_price = float(bot.tickers["usdtidr"].get("last", _usdt_fallback) or _usdt_fallback)
+                    else:
+                        log_message(f"[GATE-WARN] usdtidr not in tickers for {pair}, using fallback rate {_usdt_fallback}")
+
+                    spread_pct = (implied_rate - usdt_price) / usdt_price * 100.0
+
+                    # TIER 1 (High-Priority): Print latency arbitrage log on every cycle
+                    # TIER 2 (Volatility Opportunist): Print ONLY if there is significant micro-volatility
+                    should_log = False
+                    if tier == 1:
+                        should_log = True
+                    elif tier == 2 and abs(binance_return) >= 0.05:
+                        should_log = True
+
+                    if should_log:
+                        log_message(
+                            f"[LATENCY-EVAL] Pair={pair} (Tier {tier}) | Indodax={indodax_price:,.0f} IDR | "
+                            f"Binance={b_last:,.2f} USDT | Implied={implied_rate:,.2f} | USDT={usdt_price:,.0f} | "
+                            f"Spread={spread_pct:+.2f}% | B-{actual_window_ms:.0f}ms={binance_return:+.3f}%"
+                        )
+
+                # 1. Toxic-Flow Guard (Flash Crash Protection)
+                if binance_return <= -0.50:
+                    # Freeze order entry for this pair for 3 seconds
+                    db.save_state(f"toxic_freeze_{pair}", time.time() + 3.0)
+                    msg = f"[GATE] {pair} REJECTED: Binance Toxic-Flow Guard active (crashed {binance_return:.2f}% in {actual_window_ms:.0f}ms)"
+                    log_message(msg)
+                    save_gate_state(msg)
+                    return None
+
+                # Check active freeze
+                freeze_until = float(db.get_state(f"toxic_freeze_{pair}", "0") or 0.0)
+                if time.time() < freeze_until:
+                    msg = f"[GATE] {pair} REJECTED: Binance Toxic-Flow Freeze active"
+                    log_message(msg)
+                    save_gate_state(msg)
+                    return None
+
+                # 2. Fast-Track Entry Gate (Breakout Bypass)
+                # Tier-specific thresholds — Tier 1 lebih agresif, Tier 2 lebih konservatif
+                fast_track_threshold = 0.65 if tier == 1 else 0.80
+
+                if binance_return >= fast_track_threshold:
+                    # Guard 1: Indodax spread harus wajar — tolak jika spread terlalu lebar
+                    # (spread lebar = kita beli di harga ask yang jauh, langsung rugi)
+                    indodax_bid = float(p.get('bid', 0.0) or 0.0)
+                    indodax_ask = float(p.get('ask', 0.0) or 0.0)
+                    if indodax_ask > 0 and indodax_bid > 0 and indodax_price > 0:
+                        indodax_spread_pct = (indodax_ask - indodax_bid) / indodax_price * 100.0
+                        max_allowed_spread = getattr(config, f'TIER_{tier}_MAX_SPREAD', 1.5)
+                        if indodax_spread_pct > max_allowed_spread:
+                            log_message(
+                                f"[GATE] {pair} FAST-TRACK BLOCKED: Indodax spread too wide "
+                                f"({indodax_spread_pct:.2f}% > {max_allowed_spread:.2f}%)"
+                            )
+                            # Jangan return None — lanjutkan ke gate teknikal biasa
+                        else:
+                            # Guard 2: Indodax data tidak boleh stale (> 30 detik tidak ada tick)
+                            indodax_ts = float(bot._tickers.get(pair_lower, {}).get('timestamp', 0) or 0) \
+                                         if hasattr(bot, '_tickers') else 0.0
+                            data_age_sec = (time.time() * 1000 - indodax_ts) / 1000.0 if indodax_ts > 0 else 999.0
+                            if data_age_sec > 30.0:
+                                log_message(
+                                    f"[GATE] {pair} FAST-TRACK BLOCKED: Indodax data stale "
+                                    f"({data_age_sec:.1f}s old)"
+                                )
+                                # Jangan return None — lanjutkan ke gate teknikal biasa
+                            else:
+                                # SEMUA GUARD LOLOS — Eksekusi Fast-Track!
+                                log_message(
+                                    f"[GATE] {pair} [SPECIAL]: Binance Fast-Track breakout! "
+                                    f"Return={binance_return:+.2f}% in {actual_window_ms:.0f}ms "
+                                    f"(Tier {tier}, threshold={fast_track_threshold}%). "
+                                    f"Spread OK ({indodax_spread_pct:.2f}%), data fresh ({data_age_sec:.1f}s)."
+                                )
+
+                                _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
+                                dummy_tech = get_technical_summary(
+                                    history, _candle_vols if len(_candle_vols) == len(history) else None
+                                )
+
+                                # Fast-Track confidence: makin besar return, makin tinggi confidence
+                                # Clamp antara 75% - 95%
+                                ft_confidence = min(95.0, 75.0 + (binance_return - fast_track_threshold) * 20.0)
+
+                                res = {
+                                    "mode": "SHADOW" if (int(db.get_state("consecutive_losses", 0)) >= config.MAX_CONSECUTIVE_LOSSES) else "LIVE",
+                                    "radar_rec": "BUY",
+                                    "radar_reason": f"Binance Fast-Track Breakout ({binance_return:+.2f}% in {actual_window_ms:.0f}ms)",
+                                    "rsi_val": dummy_tech.get('rsi', 50.0),
+                                    "total_confidence": ft_confidence,
+                                    "tq_prob": ft_confidence / 100.0,  # Fix: brain-inference pakai tq_prob untuk sig.confidence
+                                    "dynamic_threshold": 50.0,
+                                    "knn_decision": {"verdict": "CONFIRM", "confidence": ft_confidence},
+                                }
+                                log_message(f"[GATE] {pair} FAST-TRACK PASSED! conf={ft_confidence:.1f}%")
+                                return res
+    except Exception as e:
+        log_message(f"[GATE-WARN] Error in Binance Lead-Lag Gate for {pair}: {e}")
+
     #  4. Multi-Confluence Technical Gate 
+
     _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
     tech = get_technical_summary(history, _candle_vols if len(_candle_vols) == len(history) else None)
     depth_data = db.get_market_depth(pair)
@@ -214,6 +393,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             f"[GATE] {pair} [SPECIAL]: Momentum/Explosion detected (Vel={tech.get('velocity'):.2f}%, "
             f"VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50."
         )
+
+    #  (Binance Lead-Lag / Toxic-Flow Guard moved to top of check_entry_gates for high-priority evaluation)
 
     #  4d. Vertical Spike / RSI Ceiling Filter 
     _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0

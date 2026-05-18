@@ -40,6 +40,8 @@
       </div>
     </div>
 
+    <LatencyPulse />
+
     <main class="main-grid" :style="{ '--left-width': leftPanelWidth + 'px' }">
       <section class="left-panel" :class="{ 'mobile-hidden': mobileTab !== 'activity' }">
         <ActivityFeed />
@@ -87,6 +89,7 @@ import ProfitChart from '../components/ProfitChart.vue'
 import RiskGuardPopup from '../components/RiskGuardPopup.vue'
 import BracketExitConfirmModal from '../components/BracketExitConfirmModal.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
+import LatencyPulse from '../components/LatencyPulse.vue'
 
 const store = useTradeStore()
 const router = useRouter()

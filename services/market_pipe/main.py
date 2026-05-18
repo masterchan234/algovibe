@@ -31,6 +31,7 @@ if _REPO_ROOT not in sys.path:
 
 from shared.transport import ZMQPublisher, IPC_MARKET, install_uvloop
 from services.market_pipe.providers.indodax import IndodaxProvider
+from services.market_pipe.providers.binance import BinanceProvider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,12 +60,21 @@ def main() -> None:
     )
     provider.start()
 
-    # Wait until the first tick arrives before logging "ready"
+    binance_provider = BinanceProvider(
+        on_tick=publisher.send
+    )
+    binance_provider.start()
+
+    # Wait until the first ticks arrive before logging "ready"
     if not provider.wait_ready(timeout=60):
-        logger.error("[market-pipe] Provider did not become ready within 60s. Exiting.")
+        logger.error("[market-pipe] Indodax Provider did not become ready within 60s. Exiting.")
         provider.stop()
+        binance_provider.stop()
         publisher.stop()
         sys.exit(1)
+
+    if not binance_provider.wait_ready(timeout=20):
+        logger.warning("[market-pipe] Binance Provider did not become ready within 20s. Continuing anyway.")
 
     logger.info("[MARKET-PIPE] Live - publishing ticks to %s", IPC_MARKET)
 
@@ -84,10 +94,13 @@ def main() -> None:
         while not _shutdown:
             time.sleep(1)
             if not provider.is_connected():
-                logger.warning("[market-pipe] Provider disconnected — reconnect handled internally.")
+                logger.warning("[market-pipe] Indodax Provider disconnected — reconnect handled internally.")
+            if not binance_provider.is_connected():
+                logger.warning("[market-pipe] Binance Provider disconnected — reconnect handled internally.")
     finally:
         logger.info("[market-pipe] Stopping…")
         provider.stop()
+        binance_provider.stop()
         publisher.stop()
         logger.info("[market-pipe] Stopped.")
 

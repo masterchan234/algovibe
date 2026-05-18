@@ -37,6 +37,34 @@ MAX_TRACKED_PAIRS      = 200
 MIN_VOLUME_FILTER      = 500000000  # IDR per 24h (Global Minimum: 500 Juta)
 LIQUIDITY_MULTIPLIER   = 25.0   # [Konservatif] Volume 24h harus minimal 25x besar modal per trade
 
+# ==============================================================================
+# --- [Tiered Arbitrage Universe Configurations] ---
+# ==============================================================================
+# Tier 1: High-Frequency Alpha
+# High liquidity, tight spread overlay pairs mapped to Binance. High-priority arbitrage.
+TIER_1_PAIRS = {"btcidr", "ethidr", "solidr", "xrpidr", "dogeidr", "adaidr", "suiidr"}
+
+# Tier 2: Volatility Opportunist
+# Medium-liquidity pairs mapped to Binance. Evaluated dynamically when Binance volatility spikes.
+# CATATAN: subscription Binance WS sekarang dilakukan DINAMIS — daftar ini hanya
+# menentukan perilaku gerbang entry (logging aktif hanya saat terjadi micro-volatility).
+# Semua koin lain yang tersedia di Binance tetap mendapatkan Toxic-Flow & Fast-Track protection.
+TIER_2_PAIRS = {
+    "nearidr", "avaxidr", "opidr", "arbidr", "filidr", "dotidr", "linkidr", "maticidr",
+    "aptidr", "ldoidr", "rndridr", "fetidr", "grtidr", "injidr", "galaidr",
+    "bnbidr", "trxidr", "ltcidr", "atomidr", "uniswpidr", "aaveidr",
+    "sandboxidr", "manaidr", "axsidr", "ftmidr", "eigenidr", "jupiteridr",
+}
+
+# Volume and Spread overrides per Tier
+TIER_1_MIN_VOLUME = 1000000000    # 1 Billion IDR (Requires high liquidity)
+TIER_2_MIN_VOLUME = 500000000     # 500 Million IDR
+TIER_3_MIN_VOLUME = 200000000     # 200 Million IDR (Lowest allowed volume for pure technicals)
+
+TIER_1_MAX_SPREAD = 0.35          # Tight spread limit for HFT
+TIER_2_MAX_SPREAD = 0.75          # Medium spread allowed
+TIER_3_MAX_SPREAD = 1.50          # High spread allowed for pure technical confirmers
+
 # --- [Timeframe Policy] ---
 # Default reverted to 1m for fast scalp execution.
 SIGNAL_CANDLE_TIMEFRAME = os.getenv("SIGNAL_CANDLE_TIMEFRAME", "1m")

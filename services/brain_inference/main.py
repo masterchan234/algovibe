@@ -34,7 +34,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from shared.transport import ZMQPublisher, ZMQSubscriber, IPC_MARKET, IPC_SIGNAL, install_uvloop
-from shared.algovibe_pb2 import Tick, Signal, SignalAction, SignalSource  # type: ignore[attr-defined]
+from shared.algovibe_pb2 import Tick, Signal, SignalAction, SignalSource, ExchangeId  # type: ignore[attr-defined]
 
 # Bot domain/infrastructure imports
 from app.application.oracle import Oracle
@@ -87,6 +87,11 @@ class BrainInferenceService:
         # Buffers for realtime analysis
         self._tickers = {}  # {symbol: {last, bid, ask, high, low, vol_idr, change_24h}}
         self._history = {}  # {symbol: deque([prices], maxlen=200)}
+        
+        # Buffers for Binance lead-lag and momentum calculations
+        self._binance_tickers = {}
+        self._binance_history = {}
+        
         # Monolith parity: keep exactly the same rolling history depth.
         self._history_maxlen = 100
         self._pre_load_history()
@@ -181,6 +186,31 @@ class BrainInferenceService:
                 symbol = tick.symbol.lower()
                 price = float(tick.price)
                 
+                if not hasattr(self, "_binance_tick_count"):
+                    self._binance_tick_count = 0
+                if not hasattr(self, "_indodax_tick_count"):
+                    self._indodax_tick_count = 0
+
+                # Route Binance ticks to separate lead-lag buffers
+                if tick.exchange_id == ExchangeId.Value("EXCHANGE_BINANCE"):
+                    self._binance_tick_count += 1
+                    if symbol not in self._binance_history:
+                        self._binance_history[symbol] = deque(maxlen=self._history_maxlen)
+                    # Simpan (timestamp_ms, price) agar Fast-Track bisa hitung window waktu aktual
+                    ts_ms = tick.timestamp if tick.timestamp else int(time.time() * 1000)
+                    self._binance_history[symbol].append((ts_ms, price))
+                    
+                    self._binance_tickers[symbol] = {
+                        'pair': symbol,
+                        'last': price,
+                        'bid': float(tick.bid) if tick.bid else price,
+                        'ask': float(tick.ask) if tick.ask else price,
+                        'timestamp': ts_ms
+                    }
+                    continue
+                
+                self._indodax_tick_count += 1
+
                 # Update rolling price history (was created but never appended — bug fix)
                 if symbol not in self._history:
                     self._history[symbol] = deque(maxlen=self._history_maxlen)
@@ -199,12 +229,12 @@ class BrainInferenceService:
                 # Gunakan nilai dari summaries API jika history WS masih pendek (<60 candle),
                 # karena summaries menggunakan harga 24 jam lalu yang akurat.
                 hist = self._history[symbol]
+                existing = self._tickers.get(symbol, {})
                 if len(hist) >= 60:
                     oldest = float(hist[0] or price)
                     change_24h = ((price - oldest) / oldest * 100.0) if oldest > 0 else 0.0
                 else:
                     # Pertahankan nilai dari summaries (di-set oleh _refresh_market_movers) jika ada
-                    existing = self._tickers.get(symbol, {})
                     change_24h = existing.get("change_24h", 0.0)
 
                 # Update Tickers
@@ -215,7 +245,7 @@ class BrainInferenceService:
                     'ask': float(tick.ask) if tick.ask else price,
                     'high': float(tick.high_24h) if tick.high_24h else price,
                     'low': float(tick.low_24h) if tick.low_24h else price,
-                    'vol_idr': float(tick.vol_idr) if tick.vol_idr else 0,
+                    'vol_idr': float(tick.vol_idr) if tick.vol_idr else existing.get("vol_idr", 0.0),
                     'change_24h': change_24h,
                 }
                 
@@ -247,6 +277,10 @@ class BrainInferenceService:
             try:
                 time.sleep(1)  # Run analysis every 1 second
                 
+                # 0. Refresh market movers (top gainer/loser/trending) setiap 5 menit
+                # Di-call di awal agar self._tickers terisi summary REST API saat cold-start
+                self._refresh_market_movers()
+                
                 if not self._tickers:
                     continue
                 
@@ -264,8 +298,9 @@ class BrainInferenceService:
                 
                 ranked.sort(key=lambda x: x['score'], reverse=True)
 
-                # 2.5 Refresh market movers (top gainer/loser/trending) setiap 5 menit
-                self._refresh_market_movers()
+                if time.time() - getattr(self, "_last_keys_debug", 0) > 15:
+                    logger.info(f"[TICKERS-KEYS] Count={len(self._tickers)} | Keys={sorted(list(self._tickers.keys()))[:15]}")
+                    self._last_keys_debug = time.time()
 
                 # 3. AI Insights
                 # Request periodic analysis for top movers
@@ -383,6 +418,9 @@ class BrainInferenceService:
         if now - self._movers_last_refresh < 300:
             return
         try:
+            # 1. Fetch complete ticker data to seed accurate high, low, bid, ask, and volumes
+            all_tickers = self._adapter.fetch_ticker_all()
+            
             movers = self._adapter.fetch_market_movers(top_n=30)
             if not movers:
                 return
@@ -397,15 +435,23 @@ class BrainInferenceService:
             }
             seeded = 0
             for pair_norm, m in all_mover_pairs.items():
-                if pair_norm not in self._tickers and m["last"] > 0:
+                t_detail = all_tickers.get(pair_norm, {})
+                last_val = t_detail.get("last", m["last"])
+                bid_val = t_detail.get("bid", last_val)
+                ask_val = t_detail.get("ask", last_val)
+                high_val = t_detail.get("high", last_val)
+                low_val = t_detail.get("low", last_val)
+                vol_val = t_detail.get("vol_idr", m["vol_idr"])
+
+                if pair_norm not in self._tickers and last_val > 0:
                     self._tickers[pair_norm] = {
                         "pair":       pair_norm,
-                        "last":       m["last"],
-                        "bid":        m["last"],
-                        "ask":        m["last"],
-                        "high":       m["last"],
-                        "low":        m["last"],
-                        "vol_idr":    m["vol_idr"],
+                        "last":       last_val,
+                        "bid":        bid_val,
+                        "ask":        ask_val,
+                        "high":       high_val,
+                        "low":        low_val,
+                        "vol_idr":    vol_val,
                         "change_24h": m["change_24h"],
                     }
                     seeded += 1
@@ -546,7 +592,7 @@ class BrainInferenceService:
         
         # Mocking bot-like interface for entry_gates use case
         class BotMock:
-            def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols):
+            def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols, binance_tickers, binance_history, tickers):
                 self.oracle = oracle
                 self.blacklist = blacklist
                 self.price_history = history # Shared reference to self._history
@@ -554,6 +600,9 @@ class BrainInferenceService:
                 self.ohlc_highs = ohlc_highs  # {pair: deque([highs])} — untuk ATR akurat
                 self.ohlc_lows  = ohlc_lows   # {pair: deque([lows])}
                 self.ohlc_vols  = ohlc_vols   # {pair: deque([volumes])} — untuk OBV aktif
+                self.binance_tickers = binance_tickers
+                self.binance_history = binance_history
+                self._tickers = tickers       # Indodax live tickers — untuk lookup usdtidr aktual
 
             def update_history_and_trend(self, pair, price):
                 history_deque = self.price_history.get(pair)
@@ -575,7 +624,8 @@ class BrainInferenceService:
                 return "UP" if is_uptrend else "SIDEWAYS", is_pullback, history
 
         bot_mock = BotMock(self.oracle, self.blacklist, self._history, self._history_maxlen,
-                           self._ohlc_highs, self._ohlc_lows, self._ohlc_vols)
+                           self._ohlc_highs, self._ohlc_lows, self._ohlc_vols,
+                           self._binance_tickers, self._binance_history, self._tickers)
         
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
