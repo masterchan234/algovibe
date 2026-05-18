@@ -326,7 +326,13 @@ def execute_trade(
         # kecil yang secara matematis sudah menghasilkan profit bersih setelah fee.
         _fee_rt = ROUND_TRIP_FEE_PCT
         _max_net_profit = amount_idr * (final_tp - _fee_rt)
-        _min_viable_net = amount_idr * 0.005  # 0.5% dari trade size, proporsional
+        
+        # Jika mode micro profit aktif, turunkan batas profit kelayakan menjadi 0.1%
+        _min_viable_pct = 0.005
+        if bot.exit_manager and bot.exit_manager._is_micro_profit_mode_active():
+            _min_viable_pct = 0.001
+            
+        _min_viable_net = amount_idr * _min_viable_pct
         if _max_net_profit < _min_viable_net:
             log_message(
                 f"[WARN] SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "

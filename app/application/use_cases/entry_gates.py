@@ -295,9 +295,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             return None
 
     #  7. Radar recommendation guard 
-    if radar_rec == "SELL":
-        msg = f"[BLOCK] RADAR BLOCK: rekomendasi SELL ({radar_reason})"
-        print(f"[DEBUG-GATE] {pair} REJECTED: RADAR SELL ({radar_reason})", flush=True)
+    if radar_rec != "BUY":
+        msg = f"[BLOCK] RADAR BLOCK: rekomendasi {radar_rec} ({radar_reason})"
+        print(f"[DEBUG-GATE] {pair} REJECTED: RADAR {radar_rec} ({radar_reason})", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
         return None

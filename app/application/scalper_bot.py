@@ -114,7 +114,7 @@ class ScalperBot:
         self.oracle._load_lessons_from_db()
         self.exit_manager.reconcile_with_exchange()
 
-        # Initial balance fetch for LIVE mode
+        # Initial balance fetch (mode-aware)
         self.cached_balance = 0
         if not config.DRY_RUN:
             try:
@@ -123,6 +123,21 @@ class ScalperBot:
                 db.save_state("cached_idr_balance", str(self.cached_balance))
             except Exception as e:
                 log_message(f"[WARN] Initial Balance Fetch Failed: {e}")
+        else:
+            try:
+                dry_stats = db.get_daily_stats()
+                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
+                open_pos = db.get_open_positions()
+                pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
+                used_idr = sum(
+                    float(p.get("amount_idr", 0))
+                    for p in pos_iter
+                    if int(p.get("dry_run", 0)) == 1
+                )
+                self.cached_balance = config.INITIAL_CAPITAL + realized_pnl_dry - used_idr
+                db.save_state("cached_idr_balance", str(self.cached_balance))
+            except Exception as e:
+                log_message(f"[WARN] Initial Dry Balance Setup Failed: {e}")
 
             # Crash Recovery: resume management of any existing live positions
             self._resume_live_positions()
@@ -298,6 +313,20 @@ class ScalperBot:
     def _sync_balances_to_db(self):
         """[Senior Logic] Sync real exchange balances to DB for Dashboard visibility."""
         if config.DRY_RUN:
+            try:
+                dry_stats = db.get_daily_stats()
+                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
+                open_pos = db.get_open_positions()
+                pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
+                used_idr = sum(
+                    float(p.get("amount_idr", 0))
+                    for p in pos_iter
+                    if int(p.get("dry_run", 0)) == 1
+                )
+                self.cached_balance = config.INITIAL_CAPITAL + realized_pnl_dry - used_idr
+                db.save_state("cached_idr_balance", str(self.cached_balance))
+            except Exception as e:
+                log_message(f"[WARN] Dry Balance Sync Failed: {e}")
             return
         try:
             bal = self.exchange.fetch_balance()
