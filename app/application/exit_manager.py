@@ -3336,9 +3336,14 @@ class ExitManager:
                         amount_crypto = qty
                         amount_idr = amount_crypto * entry_price
                         
-                        # Fee Estimation (0.11%)
-                        fee_buy = amount_idr * 0.0011 
-                        fee_sell = (qty * exit_price) * 0.0011 
+                        # --- [Senior Quant Fee Precision] ---
+                        # Entry (buy) is normally a maker limit order.
+                        fee_buy = amount_idr * FEE_BUY_MAKER
+                        
+                        # Exit (sell) fee rate is based on whether it was a maker or taker fill on the exchange.
+                        is_sell_maker = bool(t.get('isMaker'))
+                        fee_sell_rate = FEE_SELL_MAKER if is_sell_maker else FEE_SELL_TAKER
+                        fee_sell = (qty * exit_price) * fee_sell_rate
                         
                         gross_pnl = (exit_price - entry_price) * amount_crypto
                         net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
