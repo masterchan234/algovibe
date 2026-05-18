@@ -139,6 +139,14 @@ class BrainInferenceService:
             "errors": 0,
         }
 
+        # Binance Lead-Lag τ* kalibrasi periodik (Formula 2: cross-correlation)
+        # Hasil disimpan di _lead_lag_tau dan _lead_lag_corr, dibaca oleh BotMock
+        # yang di-pass ke entry_gates (via bot._lead_lag_tau[b_symbol]).
+        self._lead_lag_tau: dict = {}   # {b_symbol: tau_star_ms}
+        self._lead_lag_corr: dict = {}  # {b_symbol: peak_corr}
+        self._lead_lag_last_calib: float = 0.0
+        self._LEAD_LAG_CALIB_INTERVAL_SEC: float = 60.0  # Kalibrasi tiap 60 detik
+
     async def start(self) -> None:
         self._running = True
         self._tick_sub.start()
@@ -154,6 +162,10 @@ class BrainInferenceService:
         # Start the analysis loop in a separate thread to not block tick consumption
         self._analysis_thread = threading.Thread(target=self._analysis_loop, daemon=True)
         self._analysis_thread.start()
+
+        # Start periodic τ* cross-correlation calibration thread
+        self._lead_lag_thread = threading.Thread(target=self._lead_lag_calibration_loop, daemon=True)
+        self._lead_lag_thread.start()
         
         await asyncio.gather(
             self._consume_ticks(),
@@ -267,6 +279,83 @@ class BrainInferenceService:
             logger.info("[brain-inference] Pre-loaded %d pairs.", len(self._history))
         except Exception as e:
             logger.error("[brain-inference] Pre-load error: %s", e)
+
+    def _lead_lag_calibration_loop(self):
+        """
+        Background thread: kalibrasi periodik τ* (optimal lag) via Formula 2.
+        Menggunakan compute_cross_correlation dari app.domain.lead_lag.
+        Interval: setiap _LEAD_LAG_CALIB_INTERVAL_SEC detik (default 60s).
+
+        Hasil disimpan di self._lead_lag_tau[b_symbol] dan self._lead_lag_corr[b_symbol],
+        yang dibaca oleh BotMock → entry_gates.evaluate_lead_lag().
+        """
+        from app.domain.lead_lag import compute_cross_correlation
+
+        logger.info("[brain-inference] Lead-Lag τ* calibration loop started.")
+        while self._running:
+            try:
+                time.sleep(self._LEAD_LAG_CALIB_INTERVAL_SEC)
+                if not self._running:
+                    break
+
+                # Iterasi semua simbol yang ada di kedua buffer
+                b_symbols = list(self._binance_history.keys())
+                calibrated = 0
+                for b_symbol in b_symbols:
+                    # Map b_symbol (e.g. "btcusdt") → indodax pair (e.g. "btcidr")
+                    if b_symbol.endswith("usdt"):
+                        i_symbol = b_symbol[:-4] + "idr"
+                    else:
+                        continue
+
+                    b_buf = list(self._binance_history.get(b_symbol, []))
+                    i_buf = list(self._history.get(i_symbol, []))
+
+                    if len(b_buf) < 30 or len(i_buf) < 30:
+                        continue
+
+                    # Indodax history hanya menyimpan harga (float), bukan (ts, price).
+                    # Rekonstruksi timestamps estimasi: gunakan spacing seragam mundur dari now.
+                    now_ms = time.time() * 1000
+                    spacing_ms = 1000.0  # asumsi ~1 tick/detik untuk Indodax
+                    i_ticks = [
+                        (now_ms - (len(i_buf) - 1 - idx) * spacing_ms, float(p))
+                        for idx, p in enumerate(i_buf)
+                    ]
+
+                    result = compute_cross_correlation(
+                        b_ticks=b_buf,
+                        i_ticks=i_ticks,
+                        max_lag_ms=2000,
+                        grid_ms=50,
+                    )
+
+                    if result["is_valid"]:
+                        self._lead_lag_tau[b_symbol] = result["tau_star_ms"]
+                        self._lead_lag_corr[b_symbol] = result["peak_corr"]
+                        calibrated += 1
+                        logger.info(
+                            "[LEAD-LAG] %s: τ*=%dms ρ=%.3f [VALID]",
+                            b_symbol, result["tau_star_ms"], result["peak_corr"],
+                        )
+                        try:
+                            import json as _json
+                            self._signal_pub.send(
+                                _json.dumps({"symbol": b_symbol, "tau_ms": int(result["tau_star_ms"])}).encode(),
+                                topic="tau",
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        # Hapus entry lama jika kalibrasi tidak valid
+                        self._lead_lag_tau.pop(b_symbol, None)
+                        self._lead_lag_corr.pop(b_symbol, None)
+
+                if calibrated > 0:
+                    logger.info("[LEAD-LAG] Calibration complete: %d/%d symbols valid.", calibrated, len(b_symbols))
+
+            except Exception as e:
+                logger.warning("[LEAD-LAG] Calibration loop error: %s", e)
 
     def _analysis_loop(self):
         """Background thread for high-level market analysis and AI insights."""
@@ -592,7 +681,7 @@ class BrainInferenceService:
         
         # Mocking bot-like interface for entry_gates use case
         class BotMock:
-            def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols, binance_tickers, binance_history, tickers):
+            def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols, binance_tickers, binance_history, tickers, lead_lag_tau, lead_lag_corr):
                 self.oracle = oracle
                 self.blacklist = blacklist
                 self.price_history = history # Shared reference to self._history
@@ -603,6 +692,8 @@ class BrainInferenceService:
                 self.binance_tickers = binance_tickers
                 self.binance_history = binance_history
                 self._tickers = tickers       # Indodax live tickers — untuk lookup usdtidr aktual
+                self._lead_lag_tau = lead_lag_tau   # {b_symbol: tau_star_ms} dari kalibrasi τ*
+                self._lead_lag_corr = lead_lag_corr  # {b_symbol: peak_corr} dari kalibrasi τ*
 
             def update_history_and_trend(self, pair, price):
                 history_deque = self.price_history.get(pair)
@@ -625,7 +716,8 @@ class BrainInferenceService:
 
         bot_mock = BotMock(self.oracle, self.blacklist, self._history, self._history_maxlen,
                            self._ohlc_highs, self._ohlc_lows, self._ohlc_vols,
-                           self._binance_tickers, self._binance_history, self._tickers)
+                           self._binance_tickers, self._binance_history, self._tickers,
+                           self._lead_lag_tau, self._lead_lag_corr)
         
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']

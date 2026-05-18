@@ -10,34 +10,28 @@
         v-for="p in pairs"
         :key="p.pair"
         class="pair-card"
-        :class="[`status-${p.status.toLowerCase()}`, { 'is-frozen': p.freeze_remaining > 0 }]"
-        :title="`${p.base}: Binance ${p.b_return >= 0 ? '+' : ''}${p.b_return.toFixed(3)}% / ${p.actual_ms}ms`"
+        :class="`status-${p.status.toLowerCase()}`"
+        :title="`${p.base}: ${p.b_return >= 0 ? '+' : ''}${p.b_return.toFixed(3)}% dalam 5s | window=${p.actual_ms}ms`"
       >
-        <!-- Pair label -->
+        <!-- Arah panah -->
+        <span class="arrow" :class="arrowClass(p.b_return)">{{ arrowIcon(p.b_return, p.status) }}</span>
+
+        <!-- Nama coin -->
         <span class="pair-name">{{ p.base }}</span>
 
-        <!-- Return bar (symmetric, center = 0) -->
-        <div class="bar-track">
-          <div
-            class="bar-fill"
-            :class="p.b_return >= 0 ? 'bar-up' : 'bar-down'"
-            :style="barStyle(p.b_return)"
-          ></div>
-          <div class="bar-zero"></div>
-        </div>
-
-        <!-- Return value -->
+        <!-- Persentase -->
         <span class="return-val" :class="returnClass(p.b_return)">
           {{ p.b_return >= 0 ? '+' : '' }}{{ p.b_return.toFixed(2) }}%
         </span>
 
-        <!-- Status badge -->
-        <span class="status-badge" :class="`badge-${p.status.toLowerCase()}`">
-          <template v-if="p.status === 'FROZEN'">
-            FROZEN {{ p.freeze_remaining.toFixed(0) }}s
-          </template>
-          <template v-else>{{ p.status }}</template>
+        <!-- Label status simpel -->
+        <span class="status-label" :class="`label-${p.status.toLowerCase()}`">
+          <template v-if="p.status === 'FROZEN'">❄ {{ p.freeze_remaining.toFixed(0) }}s</template>
+          <template v-else>{{ statusLabel(p.status) }}</template>
         </span>
+
+        <!-- Lag info -->
+        <span v-if="p.tau_ms > 0" class="tau-badge">{{ p.tau_ms }}ms</span>
       </div>
     </div>
   </div>
@@ -50,28 +44,49 @@ import { useTradeStore } from '../stores/trade'
 const store = useTradeStore()
 const pairs = ref([])
 
-// Maximum % range for bar width (clip at ±1%)
-const MAX_PCT = 1.0
+function arrowIcon(b_return, status) {
+  if (status === 'FAST-TRACK') return '⚡'
+  if (status === 'TOXIC')      return '☠'
+  if (status === 'FROZEN')     return '❄'
+  if (b_return >= 0.20)  return '▲▲'
+  if (b_return >= 0.07)  return '▲'
+  if (b_return <= -0.20) return '▼▼'
+  if (b_return <= -0.07) return '▼'
+  return '—'
+}
 
-function barStyle(b_return) {
-  const pct = Math.min(Math.abs(b_return) / MAX_PCT, 1.0) * 50  // max 50% of half-track
-  if (b_return >= 0) {
-    return { left: '50%', width: pct + '%' }
-  } else {
-    return { right: '50%', width: pct + '%' }
-  }
+function arrowClass(b_return) {
+  if (b_return >= 0.20)  return 'arrow-strong-up'
+  if (b_return >= 0.07)  return 'arrow-up'
+  if (b_return <= -0.20) return 'arrow-strong-down'
+  if (b_return <= -0.07) return 'arrow-down'
+  return 'arrow-flat'
 }
 
 function returnClass(b_return) {
-  if (b_return >= 0.35) return 'val-strong-up'
-  if (b_return >= 0.10) return 'val-up'
-  if (b_return <= -0.50) return 'val-toxic'
-  if (b_return <= -0.25) return 'val-down'
+  if (b_return >= 0.20)  return 'val-strong-up'
+  if (b_return >= 0.07)  return 'val-up'
+  if (b_return <= -0.20) return 'val-strong-down'
+  if (b_return <= -0.07) return 'val-down'
   return 'val-neutral'
 }
 
+// Label bahasa manusia
+function statusLabel(status) {
+  const map = {
+    'FAST-TRACK': 'PUMP!',
+    'BREAKOUT':   'Naik',
+    'RISING':     'Naik',
+    'NEUTRAL':    'Flat',
+    'FADING':     'Turun',
+    'DECLINING':  'Turun',
+    'TOXIC':      'CRASH!',
+  }
+  return map[status] ?? status
+}
+
 const anyActive = computed(() =>
-  pairs.value.some(p => p.status === 'FAST-TRACK' || p.status === 'BREAKOUT' || p.status === 'TOXIC')
+  pairs.value.some(p => ['FAST-TRACK', 'BREAKOUT', 'TOXIC'].includes(p.status))
 )
 
 function handleLatencyPulse(data) {
@@ -80,20 +95,13 @@ function handleLatencyPulse(data) {
   }
 }
 
-// Daftarkan listener saat socket tersedia (bisa mount sebelum koneksi)
 watch(() => store.socket, (newSocket, oldSocket) => {
-  if (oldSocket) {
-    oldSocket.off('latency_pulse', handleLatencyPulse)
-  }
-  if (newSocket) {
-    newSocket.on('latency_pulse', handleLatencyPulse)
-  }
+  if (oldSocket) oldSocket.off('latency_pulse', handleLatencyPulse)
+  if (newSocket) newSocket.on('latency_pulse', handleLatencyPulse)
 }, { immediate: true })
 
 onUnmounted(() => {
-  if (store.socket) {
-    store.socket.off('latency_pulse', handleLatencyPulse)
-  }
+  if (store.socket) store.socket.off('latency_pulse', handleLatencyPulse)
 })
 </script>
 
@@ -106,12 +114,16 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   overflow-x: auto;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.18) transparent;
   flex-shrink: 0;
 }
-.latency-strip::-webkit-scrollbar { display: none; }
+.latency-strip::-webkit-scrollbar { height: 4px; }
+.latency-strip::-webkit-scrollbar-track { background: transparent; }
+.latency-strip::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 2px; }
+.latency-strip::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.35); }
 
-/* Label */
+/* Label strip */
 .strip-label {
   display: flex;
   align-items: center;
@@ -124,11 +136,8 @@ onUnmounted(() => {
   text-transform: uppercase;
   flex-shrink: 0;
 }
-
 .label-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  width: 6px; height: 6px; border-radius: 50%;
   background: rgba(255, 255, 255, 0.2);
 }
 .dot-active {
@@ -136,9 +145,7 @@ onUnmounted(() => {
   box-shadow: 0 0 6px #00ff88;
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
-.dot-idle {
-  background: rgba(255, 255, 255, 0.2);
-}
+.dot-idle { background: rgba(255, 255, 255, 0.2); }
 
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -148,15 +155,15 @@ onUnmounted(() => {
 /* Pairs row */
 .pairs-row {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   align-items: center;
 }
 
-/* Individual pair card */
+/* Card */
 .pair-card {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   padding: 3px 8px 3px 6px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
@@ -164,98 +171,111 @@ onUnmounted(() => {
   transition: border-color 0.3s, background 0.3s;
   white-space: nowrap;
   cursor: default;
-  min-width: 140px;
 }
 
-/* Status-specific card styling */
+/* Status card colors */
 .status-fast-track {
-  border-color: rgba(0, 255, 136, 0.4) !important;
-  background: rgba(0, 255, 136, 0.05) !important;
+  border-color: rgba(0, 255, 136, 0.45) !important;
+  background: rgba(0, 255, 136, 0.07) !important;
   animation: glow-green 1.5s ease-in-out infinite;
 }
-.status-toxic, .status-frozen {
-  border-color: rgba(255, 51, 102, 0.4) !important;
-  background: rgba(255, 51, 102, 0.05) !important;
+.status-toxic {
+  border-color: rgba(255, 51, 102, 0.45) !important;
+  background: rgba(255, 51, 102, 0.07) !important;
   animation: glow-red 1.2s ease-in-out infinite;
 }
 .status-breakout {
   border-color: rgba(0, 200, 255, 0.3) !important;
-  background: rgba(0, 200, 255, 0.04) !important;
+  background: rgba(0, 200, 255, 0.05) !important;
+}
+.status-rising {
+  border-color: rgba(0, 255, 136, 0.18) !important;
+  background: rgba(0, 255, 136, 0.03) !important;
+}
+.status-fading {
+  border-color: rgba(255, 160, 0, 0.18) !important;
+  background: rgba(255, 160, 0, 0.03) !important;
+}
+.status-declining {
+  border-color: rgba(255, 80, 80, 0.28) !important;
+  background: rgba(255, 80, 80, 0.04) !important;
+}
+.status-frozen {
+  border-color: rgba(100, 160, 255, 0.35) !important;
+  background: rgba(100, 160, 255, 0.05) !important;
 }
 
 @keyframes glow-green {
-  0%, 100% { box-shadow: 0 0 0px rgba(0, 255, 136, 0); }
-  50%       { box-shadow: 0 0 8px rgba(0, 255, 136, 0.4); }
+  0%, 100% { box-shadow: none; }
+  50%       { box-shadow: 0 0 8px rgba(0, 255, 136, 0.45); }
 }
 @keyframes glow-red {
-  0%, 100% { box-shadow: 0 0 0px rgba(255, 51, 102, 0); }
+  0%, 100% { box-shadow: none; }
   50%       { box-shadow: 0 0 8px rgba(255, 51, 102, 0.5); }
 }
 
-/* Pair name */
+/* Arrow */
+.arrow {
+  font-size: 12px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.arrow-strong-up   { color: #00ff88; }
+.arrow-up          { color: #66ffb2; }
+.arrow-flat        { color: rgba(255,255,255,0.25); font-size: 10px; }
+.arrow-down        { color: #ffb866; }
+.arrow-strong-down { color: #ff5555; }
+
+/* Coin name */
 .pair-name {
   font-size: 10px;
   font-weight: 700;
-  color: rgba(255, 255, 255, 0.7);
-  letter-spacing: 0.04em;
-  min-width: 28px;
+  color: rgba(255, 255, 255, 0.75);
+  letter-spacing: 0.03em;
+  min-width: 26px;
 }
 
-/* Bar track */
-.bar-track {
-  position: relative;
-  width: 52px;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 2px;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.bar-fill {
-  position: absolute;
-  top: 0;
-  height: 100%;
-  border-radius: 2px;
-  transition: width 0.4s ease, left 0.4s ease, right 0.4s ease;
-}
-.bar-up   { background: #00ff88; }
-.bar-down { background: #ff3366; }
-.bar-zero {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  width: 1px;
-  height: 100%;
-  background: rgba(255, 255, 255, 0.25);
-}
-
-/* Return value */
+/* Percentage */
 .return-val {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  min-width: 40px;
+  min-width: 44px;
   text-align: right;
 }
-.val-strong-up { color: #00ff88; }
-.val-up        { color: #66ffb2; }
-.val-neutral   { color: rgba(255, 255, 255, 0.4); }
-.val-down      { color: #ff8866; }
-.val-toxic     { color: #ff3366; font-weight: 800; }
+.val-strong-up   { color: #00ff88; }
+.val-up          { color: #66ffb2; }
+.val-neutral     { color: rgba(255,255,255,0.35); }
+.val-down        { color: #ffb866; }
+.val-strong-down { color: #ff5555; }
 
-/* Status badge */
-.status-badge {
+/* Human-readable status label */
+.status-label {
   font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 1px 4px;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
   border-radius: 3px;
   text-transform: uppercase;
+  opacity: 0.85;
 }
-.badge-fast-track { background: rgba(0, 255, 136, 0.18); color: #00ff88; }
-.badge-breakout   { background: rgba(0, 200, 255, 0.15); color: #00c8ff; }
-.badge-neutral    { background: rgba(255, 255, 255, 0.07); color: rgba(255,255,255,0.35); }
-.badge-declining  { background: rgba(255, 136, 50, 0.15); color: #ff8832; }
-.badge-toxic      { background: rgba(255, 51, 102, 0.2); color: #ff3366; font-weight: 900; }
-.badge-frozen     { background: rgba(255, 51, 102, 0.12); color: #ff6688; }
+.label-fast-track { background: rgba(0,255,136,0.18); color: #00ff88; }
+.label-breakout   { background: rgba(0,200,255,0.15); color: #00c8ff; }
+.label-rising     { background: rgba(0,255,136,0.10); color: #66ffb2; }
+.label-neutral    { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.3); }
+.label-fading     { background: rgba(255,160,0,0.12); color: #ffa000; }
+.label-declining  { background: rgba(255,80,80,0.15); color: #ff5555; }
+.label-toxic      { background: rgba(255,51,102,0.22); color: #ff3366; font-weight: 900; }
+.label-frozen     { background: rgba(100,160,255,0.15); color: #80aaff; }
+
+/* Lag badge */
+.tau-badge {
+  font-size: 8px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  margin-left: 1px;
+}
 </style>

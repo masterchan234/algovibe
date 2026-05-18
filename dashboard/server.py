@@ -32,7 +32,7 @@ from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
-from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
+from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND, IPC_SIGNAL
 from shared.algovibe_pb2 import EquityUpdate, Tick, Trade, ExchangeId  # type: ignore[attr-defined]
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -624,8 +624,9 @@ _last_market_brief_payload_hash = ""
 _latest_exchange_latency = 0.0  # Measured in [MARKET-PIPE] from Indodax epoch
 
 # Binance Lead-Lag: rolling (timestamp_ms, price) buffer per symbol
-_BINANCE_DASH_HISTORY: dict = {}   # {symbol: deque(maxlen=60)}
-_BINANCE_DASH_MAXLEN = 60
+_BINANCE_DASH_HISTORY: dict = {}   # {symbol: deque(maxlen=500)}
+_BINANCE_DASH_MAXLEN = 500          # Naik dari 60 → 500 agar window 5s tersedia
+_LEAD_LAG_TAU: dict = {}            # {b_symbol: tau_ms} — realtime dari brain-inference via ZMQ
 _TIER1_PAIRS = {"btcidr", "ethidr", "solidr", "xrpidr", "dogeidr", "adaidr", "suiidr"}
 _TIER2_PAIRS = {
     "nearidr", "avaxidr", "opidr", "arbidr", "filidr", "dotidr", "linkidr", "maticidr",
@@ -643,18 +644,31 @@ def _indodax_to_binance(pair_lower: str) -> str:
     return ""
 
 
-def _compute_latency_snapshot(window_ms: float = 400.0) -> list:
+def _compute_latency_snapshot(window_ms: float = 5000.0) -> list:
     """Hitung per-pair Binance return untuk dashboard latency strip.
-    Returns list of dicts: {pair, base, b_return, tier, status, freeze_until}
+
+    Window default 5000ms (5 detik) — lebih panjang dari signal gate (400ms) agar
+    pergerakan harga terlihat nyata di dashboard. Urutan: Tier1 dulu, lalu Tier2,
+    keduanya diurutkan by |b_return| descending (paling aktif tampil pertama).
+    Hanya pair yang memiliki data di _BINANCE_DASH_HISTORY yang ditampilkan.
+
+    Returns list of dicts: {pair, base, b_return, actual_ms, b_last, tier, status, freeze_remaining}
     """
     result = []
     now_ms = time.time() * 1000
-    # Tampilkan Tier 1 saja di latency strip (Tier 2 terlalu banyak)
-    for pair in sorted(_TIER1_PAIRS):
+
+    # Kandidat: Tier1 + Tier2, hanya yang sudah ada data Binance
+    all_candidates = [(p, 1) for p in sorted(_TIER1_PAIRS)] + \
+                     [(p, 2) for p in sorted(_TIER2_PAIRS)]
+
+    for pair, tier in all_candidates:
         b_symbol = _indodax_to_binance(pair)
         if not b_symbol:
             continue
         hist = list(_BINANCE_DASH_HISTORY.get(b_symbol, []))
+        if not hist:
+            continue  # Jangan tampilkan pair yang belum ada data Binance
+
         b_return = 0.0
         actual_ms = 0.0
         b_last = 0.0
@@ -668,16 +682,22 @@ def _compute_latency_snapshot(window_ms: float = 400.0) -> list:
             actual_ms = last_ts - ref_ts
             if ref_price > 0 and actual_ms >= 0:
                 b_return = (b_last - ref_price) / ref_price * 100.0
+        elif len(hist) == 1:
+            b_last = hist[0][1]
 
-        # Status badge
+        # Status badge — threshold dikalibrasi untuk window 5s (bukan 400ms gate)
         if b_return <= -0.50:
             status = "TOXIC"
         elif b_return >= 0.65:
             status = "FAST-TRACK"
-        elif b_return >= 0.35:
+        elif b_return >= 0.20:
             status = "BREAKOUT"
-        elif b_return <= -0.25:
+        elif b_return >= 0.07:
+            status = "RISING"
+        elif b_return <= -0.20:
             status = "DECLINING"
+        elif b_return <= -0.07:
+            status = "FADING"
         else:
             status = "NEUTRAL"
 
@@ -692,18 +712,29 @@ def _compute_latency_snapshot(window_ms: float = 400.0) -> list:
         except Exception:
             pass
 
-        tier = 1 if pair in _TIER1_PAIRS else (2 if pair in _TIER2_PAIRS else 3)
+        tau_ms = _LEAD_LAG_TAU.get(b_symbol, 0)
+
         result.append({
-            "pair":            pair,
-            "base":            pair.replace("idr", "").upper(),
-            "b_return":        round(b_return, 4),
-            "actual_ms":       round(actual_ms, 0),
-            "b_last":          round(b_last, 4),
-            "tier":            tier,
-            "status":          status,
+            "pair":             pair,
+            "base":             pair.replace("idr", "").upper(),
+            "b_return":         round(b_return, 4),
+            "actual_ms":        round(actual_ms, 0),
+            "b_last":           round(b_last, 4),
+            "tier":             tier,
+            "status":           status,
             "freeze_remaining": freeze_remaining,
+            "tau_ms":           tau_ms,
         })
-    return result
+
+    # Sort global (semua tier) — paling aktif kiri, NEUTRAL paling kanan
+    _STATUS_PRIORITY = {
+        "FAST-TRACK": 0, "TOXIC": 1, "BREAKOUT": 2,
+        "RISING": 3, "FADING": 4, "DECLINING": 5, "FROZEN": 6, "NEUTRAL": 7,
+    }
+    def _sort_key(r):
+        return (_STATUS_PRIORITY.get(r["status"], 9), -abs(r["b_return"]))
+
+    return sorted(result, key=_sort_key)
 
 
 
@@ -4492,6 +4523,29 @@ def _zmq_market_bridge():
         sub.close(linger=0)
 
 socketio.start_background_task(_zmq_market_bridge)
+
+def _zmq_tau_bridge():
+    """Subscribe ke IPC_SIGNAL, cache tau updates dari brain-inference."""
+    import json as _json
+    ctx = zmq_eventlet.Context.instance()
+    sub = ctx.socket(zmq_eventlet.SUB)
+    sub.setsockopt(zmq_eventlet.SUBSCRIBE, b"tau")
+    sub.connect(IPC_SIGNAL)
+    logging.info(f"[ZMQ] Tau bridge connected to {IPC_SIGNAL}")
+    while True:
+        try:
+            parts = sub.recv_multipart()
+            if len(parts) >= 2:
+                data = _json.loads(parts[1].decode())
+                sym = data.get("symbol")
+                tau = data.get("tau_ms")
+                if sym and tau is not None:
+                    _LEAD_LAG_TAU[sym] = int(tau)
+        except Exception as _e:
+            logging.warning(f"[ZMQ] Tau bridge error: {_e}")
+            eventlet.sleep(1)
+
+socketio.start_background_task(_zmq_tau_bridge)
 
 #  Inject SocketIO emit into the shared EmergencyNotifier 
 try:

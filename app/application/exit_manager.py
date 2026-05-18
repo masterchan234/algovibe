@@ -38,6 +38,7 @@ from app.domain.technicals import (
     get_technical_summary, derive_trade_signal,
     calculate_macd, calculate_stochastic_rsi,
 )
+from app.domain.lead_lag import compute_binance_return, evaluate_lead_lag, USDT_IDR_FALLBACK
 from utils.logger import log_message, send_telegram_message
 
 class ExitManager:
@@ -531,6 +532,7 @@ class ExitManager:
         Digunakan untuk Proactive SL / Proactive TP: deteksi arah pasar dari
         Binance sebelum Indodax price catch-up.
         Returns % change (misal -0.55 artinya turun 0.55%), atau 0.0 jika data tidak tersedia.
+        Menggunakan compute_binance_return dari app.domain.lead_lag (Formula 1).
         """
         try:
             bot = self.bot
@@ -549,20 +551,9 @@ class ExitManager:
                 return 0.0
 
             b_hist_raw = list(getattr(bot, "binance_history", {}).get(b_symbol, []))
-            if len(b_hist_raw) < 2:
-                return 0.0
-
-            now_ms = time.time() * 1000
-            b_last_ts, b_last = b_hist_raw[-1]
-            b_ref_ts, b_ref = b_hist_raw[0]
-            for ts, price in b_hist_raw:
-                if now_ms - ts <= window_ms:
-                    b_ref_ts, b_ref = ts, price
-                    break
-
-            actual_window_ms = b_last_ts - b_ref_ts
-            if b_ref > 0 and actual_window_ms >= 0:
-                return (b_last - b_ref) / b_ref * 100.0
+            # Formula 1: compute_binance_return(b_hist_raw, window_ms)
+            r_b, _ = compute_binance_return(b_hist_raw, window_ms)
+            return r_b
         except Exception:
             pass
         return 0.0
