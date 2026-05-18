@@ -47,6 +47,113 @@ else:
 
 _COIN_MODELS_CACHE = {}  # {pair: (model, P_train_mean, mtime)}
 
+#  Per-coin indicator weight cache (derived from feature_importances_) 
+_COIN_WEIGHTS_CACHE: dict = {}  # {pair: (weights_dict, mtime)}
+
+# Flexible feature name → signal component mapping (case-insensitive).
+# Covers common naming conventions from various Colab training scripts.
+_FEATURE_SIGNAL_MAP = {
+    'rsi': 'rsi', 'rsi_change': 'rsi', 'rsi_slope': 'rsi',
+    'macd_hist': 'macd', 'macd': 'macd', 'macd_histogram': 'macd', 'macd_signal': 'macd',
+    'bb_pct': 'bb', 'bb': 'bb', 'bb_position': 'bb', 'bollinger_pct': 'bb',
+    'bb_pos': 'bb', 'bollinger_b': 'bb', 'pct_b': 'bb',
+    'stoch_k': 'stoch', 'stochastic': 'stoch', 'stoch': 'stoch', 'stochrsi': 'stoch',
+    'stoch_rsi': 'stoch', 'stoch_rsi_k': 'stoch', 'stoch_d': 'stoch',
+    'volume': 'volume', 'vol': 'volume', 'volume_ratio': 'volume',
+    'vol_change': 'volume', 'volume_change': 'volume', 'vol_ratio': 'volume',
+}
+
+_WEIGHTS_DEFAULT = {'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'volume': 1.0}
+
+
+def get_coin_indicator_weights(pair: str) -> dict:
+    """
+    Derive per-coin indicator weight multipliers from model feature_importances_.
+
+    Returns dict dengan multiplier [0.5, 2.0] untuk setiap komponen signal:
+      {'rsi': float, 'macd': float, 'bb': float, 'stoch': float, 'volume': float}
+
+    Multiplier > 1.0 = indikator ini lebih penting untuk koin ini dari rata-rata.
+    Multiplier < 1.0 = indikator ini kurang relevan untuk koin ini.
+
+    Fallback ke semua 1.0 jika:
+    - Model tidak ditemukan
+    - Model tidak memiliki feature_names_in_
+    - Total importance indikator < 5% (model masih price-dominated)
+    """
+    global _COIN_WEIGHTS_CACHE
+
+    if not pair:
+        return dict(_WEIGHTS_DEFAULT)
+
+    pair_key = pair.replace("/", "").replace("_", "").lower()
+
+    # Check cache: valid selama mtime model tidak berubah.
+    # Prioritas: _classifier.pkl (model baru, indicator-based) > _model.pkl (lama)
+    current_mtime = 0.0
+    model_path = None
+    for suffix in (f"{pair_key}_1m_90d_classifier.pkl", f"{pair_key}_1m_90d_model.pkl"):
+        candidate = os.path.join(COIN_MODELS_DIR, suffix)
+        if os.path.exists(candidate):
+            try:
+                current_mtime = os.path.getmtime(candidate)
+                model_path = candidate
+            except OSError:
+                pass
+            break
+
+    cached = _COIN_WEIGHTS_CACHE.get(pair_key)
+    if cached and cached[1] == current_mtime and current_mtime > 0:
+        return cached[0]
+
+    if not model_path or current_mtime == 0:
+        return dict(_WEIGHTS_DEFAULT)
+
+    try:
+        import joblib as _jl
+        model = _jl.load(model_path)
+
+        if not hasattr(model, 'feature_importances_') or not hasattr(model, 'feature_names_in_'):
+            _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
+            return dict(_WEIGHTS_DEFAULT)
+
+        names = [n.lower() for n in model.feature_names_in_]
+        importances = model.feature_importances_
+
+        # Aggregate importances per signal component
+        component_imp: dict = {}
+        for name, imp in zip(names, importances):
+            component = _FEATURE_SIGNAL_MAP.get(name)
+            if component:
+                component_imp[component] = component_imp.get(component, 0.0) + float(imp)
+
+        # Guard: jika total importance indikator < 5%, model masih dominated by price
+        total_ind_imp = sum(component_imp.values())
+        if total_ind_imp < 0.05:
+            _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
+            return dict(_WEIGHTS_DEFAULT)
+
+        # Normalize: weight = component_importance / mean_importance, clamped [0.5, 2.0]
+        n_comp = len(component_imp)
+        mean_imp = total_ind_imp / n_comp if n_comp > 0 else 1.0
+        weights = dict(_WEIGHTS_DEFAULT)
+        for comp, imp in component_imp.items():
+            multiplier = imp / mean_imp if mean_imp > 0 else 1.0
+            weights[comp] = max(0.5, min(2.0, round(multiplier, 3)))
+
+        log_message(
+            f"[Predictor] [OK] Coin weights {pair.upper()}: "
+            f"RSI={weights['rsi']:.2f} MACD={weights['macd']:.2f} "
+            f"BB={weights['bb']:.2f} Stoch={weights['stoch']:.2f} Vol={weights['volume']:.2f}"
+        )
+        _COIN_WEIGHTS_CACHE[pair_key] = (weights, current_mtime)
+        return weights
+
+    except Exception as e:
+        log_message(f"[WARN] [Predictor] get_coin_indicator_weights({pair}) failed: {e}")
+        _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
+        return dict(_WEIGHTS_DEFAULT)
+
 
 def _load_coin_model(pair: str):
     global _COIN_MODELS_CACHE

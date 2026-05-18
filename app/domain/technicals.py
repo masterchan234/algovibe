@@ -438,31 +438,46 @@ def get_technical_summary(prices, volumes=None):
         "obv_slope":    round(obv_slope, 4),
     }
 
-def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h=None):
+def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h=None, coin_weights=None):
     """
-    Simplified Momentum Signal Engine (v3.0)
-    Fokus hanya pada 3 Indikator Utama:
-    1. Velocity (Price Action Speed) - w=3.5
-    2. Volume Ratio (Breakout fuel) - w=3.5
-    3. Order Book Pressure (Market Intent) - w=3.0
-    
-    Total Max Score: 10.0
-    Threshold BUY: 6.5 (Minimal 2 sinyal kuat agree)
+    Multi-Confluence Momentum Signal Engine (v4.0)
+
+    5 konfirmasi aktif (sebelumnya hanya 3 — velocity/vol/OB bisa BUY tanpa RSI/MACD):
+    1. Velocity (Price Action Speed)  - max 3.5  — momentum impulse
+    2. Volume Ratio (Breakout fuel)   - max 3.5  — volume confirmation (scaled by coin_weights['volume'])
+    3. Order Book Pressure            - max 3.0  — market intent
+    4. MACD Histogram (normalized)    - max 2.0  — trend direction (scaled by coin_weights['macd'])
+    5. RSI Guard                      - ±2.5     — overbought penalty / oversold bounce (scaled by coin_weights['rsi'])
+
+    coin_weights: dict dari get_coin_indicator_weights(pair) — multiplier per komponen [0.5, 2.0].
+    Jika None atau semua 1.0, perilaku identik dengan v4.0 tanpa per-coin adaptation.
+
+    Max BUY score teoritis ~12.5  |  BUY threshold: 8.0
+    Minimal 3 sinyal harus setuju — tidak bisa BUY dari velocity+volume saja (loophole lama).
     """
     _at = adaptive_thresholds or {}
-    BUY_THRESHOLD  = float(_at.get('buy_score_threshold', 6.5))
-    SELL_THRESHOLD = float(_at.get('sell_score_threshold', 7.0))
-    
+    BUY_THRESHOLD  = float(_at.get('buy_score_threshold', 8.0))
+    SELL_THRESHOLD = float(_at.get('sell_score_threshold', 8.5))
+
+    # Per-coin multipliers — default 1.0 jika tidak tersedia
+    _cw = coin_weights or {}
+    _w_rsi    = float(_cw.get('rsi',    1.0))
+    _w_macd   = float(_cw.get('macd',   1.0))
+    _w_volume = float(_cw.get('volume', 1.0))
+
     # Extract core metrics
-    velocity = float(tech.get('velocity', 0.0))
-    vr       = float(tech.get('volume_ratio', 1.0))
-    bp       = float(tech.get('buy_pressure', 50))
-    
+    velocity  = float(tech.get('velocity', 0.0))
+    vr        = float(tech.get('volume_ratio', 1.0))
+    bp        = float(tech.get('buy_pressure', 50))
+    rsi       = float(tech.get('rsi', 50.0))
+    macd_hist = float(tech.get('macd_hist', 0.0))
+    last      = float(tech.get('last_price', 1.0)) or 1.0
+
     buy_score  = 0.0
     sell_score = 0.0
     signals    = []
 
-    # 1. Price Velocity (3.5)
+    # 1. Price Velocity (max 3.5) — tidak di-scale: price action universal
     if velocity > 0.4:
         buy_score += 3.5
         signals.append(f"Velocity Spike({velocity:+.2f}%)")
@@ -472,19 +487,21 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     elif velocity < -0.4:
         sell_score += 3.5
         signals.append(f"Velocity Drop({velocity:+.2f}%)")
+    elif velocity < -0.15:
+        sell_score += 1.5
 
-    # 2. Volume Ratio (3.5)
+    # 2. Volume Ratio (max 3.5 × volume_weight)
     if vr >= 2.0:
-        buy_score += 3.5
+        buy_score += 3.5 * _w_volume
         signals.append(f"Vol Spike({vr:.1f}x)")
     elif vr >= 1.4:
-        buy_score += 1.5
+        buy_score += 1.5 * _w_volume
         signals.append(f"Vol High({vr:.1f}x)")
     elif vr <= 0.4:
-        sell_score += 2.0
+        sell_score += 2.0 * _w_volume
         signals.append(f"Vol Dry({vr:.1f}x)")
 
-    # 3. Order Book Pressure (3.0)
+    # 3. Order Book Pressure (max 3.0) — tidak di-scale: OB bukan fitur model
     if bp >= 65:
         buy_score += 3.0
         signals.append(f"OB Strong-Bid({bp:.0f}%)")
@@ -494,6 +511,43 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
     elif bp <= 35:
         sell_score += 3.0
         signals.append(f"OB Strong-Ask({100-bp:.0f}%)")
+    elif bp <= 45:
+        sell_score += 1.5
+
+    # 4. MACD Histogram — normalisasi terhadap harga (max 2.0 × macd_weight)
+    macd_norm = (macd_hist / last * _MACD_NORM_FACTOR) if last > 0 else 0.0
+    if macd_norm > 0.3:
+        buy_score += 2.0 * _w_macd
+        signals.append(f"MACD-Bull({macd_norm:+.2f})")
+    elif macd_norm > 0.08:
+        buy_score += 1.0 * _w_macd
+        signals.append(f"MACD-Pos({macd_norm:+.2f})")
+    elif macd_norm < -0.3:
+        sell_score += 2.0 * _w_macd
+        signals.append(f"MACD-Bear({macd_norm:+.2f})")
+    elif macd_norm < -0.08:
+        sell_score += 1.0 * _w_macd
+
+    # 5. RSI Guard — penalti overbought / bonus oversold bounce (scaled by rsi_weight)
+    # RSI > 73: membeli di top = kerugian probabilistik. Penalti keras.
+    # RSI < 32: potensi bounce kuat jika dikonfirmasi velocity dan volume.
+    if rsi > 73:
+        buy_score = max(0.0, buy_score - 2.5 * _w_rsi)
+        signals.append(f"RSI-OB({rsi:.0f})")
+    elif rsi > 67:
+        buy_score = max(0.0, buy_score - 1.0 * _w_rsi)
+        signals.append(f"RSI-High({rsi:.0f})")
+    elif rsi < 32:
+        buy_score += 1.5 * _w_rsi
+        signals.append(f"RSI-OS({rsi:.0f})")
+    elif rsi < 42:
+        buy_score += 0.5 * _w_rsi
+
+    # RSI konfirmasi SELL
+    if rsi > 75:
+        sell_score += 1.5 * _w_rsi
+    elif rsi < 28:
+        sell_score = max(0.0, sell_score - 1.0 * _w_rsi)
 
     verdict = 'HOLD'
     if buy_score >= BUY_THRESHOLD:
@@ -503,7 +557,7 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
 
     return {
         'verdict': verdict,
-        'confidence': int(min(95, 50 + (buy_score if verdict == 'BUY' else sell_score) * 4.5)),
+        'confidence': int(min(95, 50 + (buy_score if verdict == 'BUY' else sell_score) * 3.5)),
         'reason': f"Momentum: {', '.join(signals)} | Score: {buy_score:.1f}/{sell_score:.1f}",
         'buy_score': round(buy_score, 2),
         'sell_score': round(sell_score, 2),

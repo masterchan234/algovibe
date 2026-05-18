@@ -32,6 +32,7 @@ from app.domain.technicals import (
     calculate_atr, compute_adaptive_thresholds,
     _MACD_NORM_FACTOR,
 )
+from app.domain.predictor import get_coin_indicator_weights
 from utils.logger import log_message
 from app.domain.lead_lag import (
     evaluate_lead_lag,
@@ -311,7 +312,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     _sector_eg = config.SECTOR_MAP.get(pair.lower())
     _adaptive_eg = db.get_coin_indicator_setup(pair) or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
-    tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg)
+    _coin_weights_eg = get_coin_indicator_weights(pair)
+    tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg, coin_weights=_coin_weights_eg)
 
     if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
         msg = (

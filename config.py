@@ -77,8 +77,8 @@ TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 6
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.12    # Modal 100k: default sizing ~12k/trade (tetap tunduk pada MIN_TRADE_IDR)
-MAX_OPEN_POSITIONS = 9999          # Modal 100k: batasi eksposur agar tidak over-fragmented
-MIN_BALANCE_THRESHOLD = 12000   # Jangan trading jika saldo < 12rb
+MAX_OPEN_POSITIONS = 8             # Batas posisi terbuka: floor(capital / trade_size). 12% per trade → max 8 posisi.
+MIN_BALANCE_THRESHOLD = 5000    # Floor IDR minimum — proporsional untuk small account (12000 memblokir akun <30k)
 MIN_TRADE_IDR = int(os.getenv("MIN_TRADE_IDR", 12000)) # Minimum order Indodax (12rb)
 
 # Small-account sizing clamp (configurable via env)
@@ -299,7 +299,7 @@ NET_ZERO_MIN_POSITIONS = 2              # need at least 2 open positions
 # Seconds after the guard fires before buys can be auto-re-enabled, provided the
 # combined Net PnL has recovered above NET_ZERO_PNL_FLOOR_IDR.
 # Set to 0 to require manual re-enable via the dashboard (old behaviour).
-NET_ZERO_AUTO_RESET_SEC = 10 #1800          # 30-minute auto-recovery cooldown
+NET_ZERO_AUTO_RESET_SEC = 1800          # 30-minute auto-recovery cooldown setelah emergency basket exit
 # ==========================================
 PENDING_BUY_TIMEOUT_MINUTES = 3
 PENDING_BUY_MAX_SPREAD_PCT = 0.002
