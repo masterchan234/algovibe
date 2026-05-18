@@ -1940,7 +1940,6 @@ class Oracle:
                 # Pola yang terjadi baru-baru ini lebih relevan untuk scalping.
                 # Berikan diskon jarak 25% jika data terjadi kurang dari 10 jam lalu.
                 try:
-                    from datetime import datetime, timedelta
                     created_at = h.get('created_at') # DNA usually has this from DB
                     if created_at:
                         if isinstance(created_at, str):

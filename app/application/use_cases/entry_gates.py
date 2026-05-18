@@ -66,23 +66,31 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     current_vol = float(p.get('volatility', 0) or 0)
     base_thresh = 55.0
     if current_vol > 2.0:
-        base_thresh = 65.0
+        base_thresh = 62.0
     elif current_vol < 0.6:
-        base_thresh = 50.0
+        base_thresh = 48.0
     if trend != "UP":
-        base_thresh += 4.0
+        base_thresh += 3.0
     if is_loose:
-        base_thresh -= 8.0
-    base_thresh = max(35.0, min(75.0, base_thresh))
+        base_thresh -= 13.0
+    base_thresh = max(30.0, min(70.0, base_thresh))
     
     # tq_prob is 0.0-1.0, threshold is 0-100
     is_prob_ok = (tq_prob * 100) >= base_thresh
 
-    if signal_v == 'BUY' and is_trend_ok and is_prob_ok:
-        return "BUY", (
-            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
-            f"vol={current_vol:.2f}%"
-        )
+    if is_loose:
+        # Mode longgar: izinkan sinyal HOLD/BUY asalkan trend OK, prob OK, dan tidak aktif SELL
+        if is_trend_ok and is_prob_ok and signal_v != 'SELL':
+            return "BUY", (
+                f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
+                f"vol={current_vol:.2f}% [LOOSE]"
+            )
+    else:
+        if signal_v == 'BUY' and is_trend_ok and is_prob_ok:
+            return "BUY", (
+                f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
+                f"vol={current_vol:.2f}%"
+            )
 
     #  3. Fallback to HOLD 
     reason = "HOLD"
@@ -335,7 +343,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
                 _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
             _last = float(p.get('last', 1.0)) or 1.0
             _atr_pct = (_atr / _last) * 100.0
-            _atr_limit = 4.5 if config.DRY_RUN_LOOSE_GATES else 3.0
+            _atr_limit = 6.0 if config.DRY_RUN_LOOSE_GATES else 3.0
             if _atr_pct > _atr_limit:
                 msg = f"[GATE] {pair} REJECTED: ATR Volatility {_atr_pct:.2f}% > {_atr_limit:.1f}% limit"
                 log_message(msg)
@@ -384,8 +392,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     _ema9 = tech.get('ema9', 0.0)
     _last = float(p.get('last', 0.0))
     
-    # Bypass Ceiling jika momentum murni (Velocity + Volume) sangat kuat
-    _is_pump_momentum = _velocity > 0.3 and _vol_ratio > 1.6
+    # Bypass Ceiling jika momentum murni (Velocity + Volume) kuat
+    _is_pump_momentum = _velocity > 0.15 and _vol_ratio > 1.3
     
     if _rsi_now > _rsi_ceiling and not _is_pump_momentum:
         msg = f"[GATE] {pair} REJECTED: RSI Ceiling {_rsi_now:.1f} > {_rsi_ceiling:.1f}"
@@ -444,11 +452,15 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         _vol_ratio = tech.get('volume_ratio', 1.0)
         
         # Izinkan SIDEWAYS jika ada tanda-tanda awal ledakan (Velocity + Volume)
-        sideway_relaxed_ok = (
-            (is_loose or (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3))
-            and tq_prob >= max(tech_gate_threshold, 0.45)
-            and imbalance_ratio >= 1.05
-        )
+        # Di LOOSE mode: cukup prob >= 0.40, tanpa syarat imbalance ketat
+        if is_loose:
+            sideway_relaxed_ok = tq_prob >= max(tech_gate_threshold, 0.40)
+        else:
+            sideway_relaxed_ok = (
+                (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3)
+                and tq_prob >= max(tech_gate_threshold, 0.45)
+                and imbalance_ratio >= 1.05
+            )
         if not sideway_relaxed_ok:
             msg = f"[GATE] {pair} REJECTED: No trend/breakout support (trend={trend})"
             log_message(msg)
@@ -470,13 +482,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # OFF: ideal (lebih ketat), ON: lebih longgar tapi tetap terkontrol.
     dynamic_threshold = 55.0
     if current_vol > 2.0:
-        dynamic_threshold = 65.0
+        dynamic_threshold = 62.0
     elif current_vol < 0.6:
-        dynamic_threshold = 50.0
+        dynamic_threshold = 48.0
     if trend != "UP":
         dynamic_threshold += 3.0
     if is_loose:
-        dynamic_threshold -= 8.0
+        dynamic_threshold -= 13.0
 
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
