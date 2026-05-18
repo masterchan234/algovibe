@@ -53,14 +53,28 @@ _COIN_WEIGHTS_CACHE: dict = {}  # {pair: (weights_dict, mtime)}
 # Flexible feature name → signal component mapping (case-insensitive).
 # Covers common naming conventions from various Colab training scripts.
 _FEATURE_SIGNAL_MAP = {
+    # RSI family
     'rsi': 'rsi', 'rsi_change': 'rsi', 'rsi_slope': 'rsi',
+    # MACD family
     'macd_hist': 'macd', 'macd': 'macd', 'macd_histogram': 'macd', 'macd_signal': 'macd',
+    'macd_signal_cross': 'macd',
+    # Bollinger family
     'bb_pct': 'bb', 'bb': 'bb', 'bb_position': 'bb', 'bollinger_pct': 'bb',
-    'bb_pos': 'bb', 'bollinger_b': 'bb', 'pct_b': 'bb',
-    'stoch_k': 'stoch', 'stochastic': 'stoch', 'stoch': 'stoch', 'stochrsi': 'stoch',
-    'stoch_rsi': 'stoch', 'stoch_rsi_k': 'stoch', 'stoch_d': 'stoch',
+    'bb_pos': 'bb', 'bb_width': 'bb', 'bollinger_b': 'bb', 'pct_b': 'bb',
+    # Stochastic family
+    'stoch_k': 'stoch', 'stoch_d': 'stoch', 'stoch_cross': 'stoch',
+    'stochastic': 'stoch', 'stoch': 'stoch', 'stochrsi': 'stoch',
+    'stoch_rsi': 'stoch', 'stoch_rsi_k': 'stoch',
+    # Volume family
     'volume': 'volume', 'vol': 'volume', 'volume_ratio': 'volume',
     'vol_change': 'volume', 'volume_change': 'volume', 'vol_ratio': 'volume',
+    'obv_slope': 'volume',
+    # EMA / trend — mapped ke macd (trend component)
+    'ema_9_21_diff': 'macd', 'ema_above_50': 'macd',
+    'williams_r': 'rsi',       # oscillator, karakter mirip RSI
+    'atr_pct': 'bb',           # volatility, karakter mirip BB width
+    # Price momentum — mapped ke macd (momentum component)
+    'price_change_1m': 'macd', 'price_change_3m': 'macd', 'price_change_5m': 'macd',
 }
 
 _WEIGHTS_DEFAULT = {'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'volume': 1.0}
@@ -92,7 +106,7 @@ def get_coin_indicator_weights(pair: str) -> dict:
     # Prioritas: _classifier.pkl (model baru, indicator-based) > _model.pkl (lama)
     current_mtime = 0.0
     model_path = None
-    for suffix in (f"{pair_key}_1m_90d_classifier.pkl", f"{pair_key}_1m_90d_model.pkl"):
+    for suffix in (f"{pair_key}_1m_90d_1m_scalp_classifier.pkl", f"{pair_key}_1m_90d_classifier.pkl", f"{pair_key}_1m_90d_model.pkl"):
         candidate = os.path.join(COIN_MODELS_DIR, suffix)
         if os.path.exists(candidate):
             try:
