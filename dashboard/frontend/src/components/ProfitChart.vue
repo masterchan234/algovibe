@@ -14,13 +14,13 @@
           {{ formatIdr(stats.daily_pnl) }}
         </div>
       </div>
-      <div class="kpi-item momentum-kpi" :class="`momentum-${momentumStateClass}`" :title="`Velocity: ${stats.net_pnl_velocity >= 0 ? '+' : ''}${(stats.net_pnl_velocity || 0).toFixed(1)} ${velocitySuffix}`">
+      <div class="kpi-item momentum-kpi" :class="`momentum-${momentumStateClass}`" :title="`Velocity: ${formattedVelocity} ${velocitySuffix} (raw: ${(stats.net_pnl_velocity||0).toFixed(4)} USDT/s)`">
         <div class="kpi-label">Momentum</div>
         <div class="kpi-value momentum-value" :class="`momentum-${momentumStateClass}`">
           <span class="momentum-arrow">{{ momentumIcon }}</span>
           <span class="momentum-label">{{ stats.momentum_state || 'STALLING' }}</span>
         </div>
-        <div class="momentum-velocity">{{ stats.net_pnl_velocity >= 0 ? '+' : '' }}{{ (stats.net_pnl_velocity || 0).toFixed(1) }} {{ velocitySuffix }}</div>
+        <div class="momentum-velocity">{{ formattedVelocity }} {{ velocitySuffix }}</div>
         <button
           v-if="stats.consecutive_losses >= 3"
           class="unblock-btn"
@@ -33,6 +33,9 @@
         <div class="kpi-label">Unrealized</div>
         <div class="kpi-value" :class="stats.unrealized_pnl >= 0 ? 'positive' : 'negative'">
           {{ formatIdr(stats.unrealized_pnl) }}
+        </div>
+        <div class="kpi-sub" :class="stats.unrealized_pnl >= 0 ? 'positive' : 'negative'" v-if="stats.idr_used > 0">
+          {{ stats.idr_used > 0 ? ((stats.unrealized_pnl / stats.idr_used) * 100).toFixed(2) + '%' : '' }}
         </div>
       </div>
       <div class="kpi-item">
@@ -496,7 +499,17 @@ const momentumIcon = computed(() => {
 
 const velocitySuffix = computed(() => {
   const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
-  return isUsdt ? 'USDT/s' : 'IDR/s'
+  return isUsdt ? 'USDT/min' : 'IDR/s'
+})
+
+const formattedVelocity = computed(() => {
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  const v = stats.value?.net_pnl_velocity || 0
+  if (isUsdt) {
+    const perMin = v * 60
+    return (perMin >= 0 ? '+' : '') + perMin.toFixed(3)
+  }
+  return (v >= 0 ? '+' : '') + v.toFixed(1)
 })
 
 const isUnblocking = ref(false)
@@ -1069,6 +1082,15 @@ onUnmounted(() => {
 }
 .kpi-value.positive { color: #3fb950; text-shadow: 0 0 10px rgba(63, 185, 80, 0.3); }
 .kpi-value.negative { color: #f85149; text-shadow: 0 0 10px rgba(248, 81, 73, 0.3); }
+.kpi-sub {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-sub.positive { color: #3fb950; }
+.kpi-sub.negative { color: #f85149; }
 
 /* Momentum Indicator */
 .momentum-kpi {

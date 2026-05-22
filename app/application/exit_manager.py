@@ -797,7 +797,7 @@ class ExitManager:
 
         try:
             db.save_state("momentum_state", self._momentum_state)
-            db.save_state("net_pnl_velocity", str(round(avg_velocity, 2)))
+            db.save_state("net_pnl_velocity", str(round(avg_velocity, 6)))
         except Exception:
             pass
 
