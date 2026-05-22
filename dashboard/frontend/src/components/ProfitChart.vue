@@ -141,7 +141,7 @@
               @click="onRadarClick(asset)"
             >
               <span class="tile-label">{{ formatPair(asset.pair) }}</span>
-              <span class="tile-pnl">{{ asset.pnl > 0 ? '+' : '' }}{{ (asset.pnl / 1000).toFixed(0) }}k</span>
+              <span class="tile-pnl">{{ formatIdr(asset.pnl) }}</span>
             </div>
           </div>
         </div>

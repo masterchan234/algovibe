@@ -397,14 +397,20 @@ const filteredStream = computed(() => {
     }
   })
 
-  if (activeStreamTab.value === 'market') return marketItems
-  if (activeStreamTab.value === 'llm') return openCoinLogItems
-  
-  // Overview: show everything except dense market data
-  return items.filter((item) => {
+  const _sortDesc = (arr) => [...arr].sort((a, b) => {
+    const tA = a.created_at ? new Date(a.created_at).getTime() : 0
+    const tB = b.created_at ? new Date(b.created_at).getTime() : 0
+    return tB - tA
+  })
+
+  if (activeStreamTab.value === 'market') return _sortDesc(marketItems)
+  if (activeStreamTab.value === 'llm') return _sortDesc(openCoinLogItems)
+
+  // Overview: show everything except dense market data, newest first
+  return _sortDesc(items.filter((item) => {
     const src = String(item?.source || '').toUpperCase()
     return src !== 'MARKET_WS'
-  })
+  }))
 })
 
 const llmExitCount = computed(() => activeCoinPositions.value.length)

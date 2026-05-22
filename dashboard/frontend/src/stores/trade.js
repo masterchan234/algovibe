@@ -338,6 +338,7 @@ export const useTradeStore = defineStore('trade', () => {
           btc_weakening: data.btc_weakening ?? false,
           btc_crash: data.btc_crash ?? false,
           momentum_state: data.momentum_state ?? 'STALLING',
+          net_pnl: data.net_pnl ?? ((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0)),
           net_pnl_velocity: data.net_pnl_velocity ?? 0,
           consecutive_losses: data.consecutive_losses ?? 0,
           entry_gate_state: data.entry_gate_state ?? '',

@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,7 +29,7 @@ from config import (
 )
 
 def format_currency(val, is_price=False):
-    is_usdt = getattr(config, 'EXCHANGE', 'indodax') == 'binance'
+    is_usdt = os.getenv("EXCHANGE", "indodax").lower() == 'binance'
     prefix = "$" if is_usdt else "Rp "
     val_float = float(val or 0.0)
     if is_usdt:
