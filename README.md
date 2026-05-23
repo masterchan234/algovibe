@@ -14,7 +14,8 @@
 - **Binance Spot Ready:** Kalkulasi PnL akurat yang memperhitungkan fee round-trip exchange secara tepat.
 - **Interactive Dashboard:** Monitoring realtime via Vue.js & SocketIO dengan visualisasi radar market dan eksekusi manual.
 - **K-NN Worker:** Background service yang mengklasifikasikan pola DNA harga historis ke dalam Redis secara real-time.
-- **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange.
+- **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange. Auto-reconcile dilengkapi guard terhadap ticker stale (harga=0) — posisi tidak akan dihapus kecuali harga valid tersedia, mencegah false-delete pada saat feed WebSocket terputus sementara.
+- **Safe Exit Timeout Override:** Saat limit sell gagal fill, bot membatalkan order lama dan melakukan market sell pengganti — dengan verifikasi cancel terkonfirmasi terlebih dahulu sebelum order baru dikirim, mencegah double-fill.
 - **Multi-Tier Capital Protection:** Sistem berlapis — Basket Harvest, Momentum Equity Protection, Net-Zero Survival Guard — melindungi modal dari drawdown beruntun.
 - **Dynamic TP/SL/Profit Scaling:** Target TP, SL, dan minimum profit menyesuaikan otomatis dengan pertumbuhan modal (2.0%–3.5% TP).
 - **Session Awareness Engine:** Evaluator kondisi bot terpadu yang mengklasifikasikan sesi trading ke dalam 7 state strategi (`HALT` → `RECOVERY_CRISIS` → `RECOVERY_DAILY` → `RECOVERY_ALLTIME` → `CAUTIOUS` → `NORMAL` → `MOMENTUM_CHASE`). Setiap state mendefinisikan threshold teknikal, ukuran posisi, dan batas pair secara otomatis sesuai kondisi PnL dan regime market.
@@ -118,6 +119,10 @@ Evaluator kondisi bot terpadu yang berjalan setiap siklus scan. Mengklasifikasik
 Untuk mencegah erosi keuntungan akibat whipsaw pada timeframe 1m, Exit Manager menerapkan pengamanan berlapis secara dinamis:
 
 *   **TTP Target Floor Lock (Anti Profit Erosion):** Jika puncak harga melampaui target Take Profit (`tp_price`), batas trailing stop otomatis **dikunci minimal setara `tp_price`**. Posisi dijamin tidak akan keluar di bawah profit target awal meskipun harga berbalik arah.
+*   **Dynamic Trailing Stop (Adaptive Delta):** Delta trailing stop menyesuaikan otomatis dengan level profit:
+    *   Profit < 1% dari entry: trail **0.5%** dari puncak — lebih longgar untuk menghindari false exit akibat spread bid-ask.
+    *   Profit ≥ 1% dari entry: trail diperketat ke **0.4%** dari puncak untuk mengunci gain secara agresif.
+    *   `highest_price` di-inisialisasi dari `entry_price` saat service restart, mencegah trailing stop aktif di harga 0.
 *   **Dynamic Breakeven & Hyper-Tight Trailing SL:**
     *   Menggeser Stop Loss (SL) ke level breakeven (+ 0.02% cushion biaya transaksi) segera setelah profit mencapai $\ge +0.3\%$ gross.
     *   Menggeser SL ke trailing stop ketat **0.2% dari puncak harga** jika profit mencapai $\ge +0.5\%$ dan posisi telah berjalan $\ge 2$ menit (Slow Trade).
@@ -134,12 +139,14 @@ Untuk mencegah erosi keuntungan akibat whipsaw pada timeframe 1m, Exit Manager m
 *   **Basket Harvest (Guaranteed Profit Harvester):** Trigger close semua posisi secara bersamaan ketika combined net PnL mencapai ~5% modal (min $20 USDT), bahkan jika semua posisi masih profit.
 *   **HWM Pullback Trigger:** Jika combined PnL turun > 30% dari peak session, eksekusi basket exit otomatis.
 *   **BTC Crash Kill Switch:** Drop BTC > 2% dalam 5 menit memicu emergency basket exit tanpa menunggu gate profit.
+*   **Guaranteed Profit Harvest (BTC Correlation):** Trigger BTC-weakening hanya aktif jika penurunan portofolio dari HWM sudah mencapai **> 20%** (bukan sekadar 1 tick di bawah puncak), mencegah harvest terlalu dini saat posisi masih tumbuh.
 *   **HARVEST_ONLY Selective Re-entry:** Setelah harvest tercapai, bot hanya mengizinkan 1 posisi baru dengan kriteria sangat ketat (confidence ≥ 78–82%, tq_prob ≥ 0.68–0.72).
 
 ### 🛑 Net-Zero Survival Guard
 
 Guard darurat yang mencegah sesi trading berakhir rugi parah akibat correlated drawdown:
-*   Aktif saat PnL portfolio jatuh di bawah floor ($-15\%$ modal, min −$15) DAN velocity PnL < $-0.5$ USDT/detik.
+*   Aktif saat PnL portfolio jatuh di bawah floor DAN velocity PnL < $-0.5$ USDT/detik.
+*   Floor dihitung dari **realized PnL harian (24 jam terakhir)** + unrealized saat ini — bukan all-time PnL. Ini mencegah guard terlalu sensitif di sesi baru jika bot sudah punya profit histori besar sebelumnya.
 *   Memiliki hysteresis 3 detik untuk mencegah false trigger. Bypass langsung jika velocity < $-1.2$ USDT/detik (collapse).
 *   Auto-reset setelah 10 detik jika PnL pulih di atas floor.
 

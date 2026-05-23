@@ -28,6 +28,8 @@ try:
 except ImportError:
     pass
 
+_backup_no_tools_warned = False
+
 logger = logging.getLogger(__name__)
 
 #  DB Backup Configuration 
@@ -1331,10 +1333,10 @@ class Database:
                     subprocess.run(cmd, stdout=f, check=True)
             else:
                 # No backup tools available in this container
-                static_warn = "[DB] Backup skipped: neither 'pg_dump' nor 'docker' found in path."
-                if not hasattr(self, "_backup_warned"):
-                    logging.warning(static_warn)
-                    self._backup_warned = True
+                global _backup_no_tools_warned
+                if not _backup_no_tools_warned:
+                    logging.warning("[DB] Backup skipped: neither 'pg_dump' nor 'docker' found in path.")
+                    _backup_no_tools_warned = True
                 return None
             
             # Prune old snapshots

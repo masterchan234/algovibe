@@ -528,9 +528,11 @@ class ExitManager:
 
         hist = list(price_history)[-180:]  # Last 180 candles
         
-        # [1] RSI check: oversold recovery (RSI naik dari 30-40 area)
+        # [1] RSI check: oversold recovery — selaraskan dengan main signal threshold (RSI < 30)
+        # Sebelumnya menggunakan RSI < 45 yang jauh lebih longgar dari main signal (RSI < 30),
+        # menyebabkan dust top-up saat sinyal utama masih HOLD.
         rsi = float(current_rsi or 50.0)
-        rsi_confirm = rsi < 45  # Masih oversold area, tapi mulai recovery path
+        rsi_confirm = rsi < 35  # Selaraskan dengan zona oversold main signal
         
         # [2] MACD check: histogram positif atau mulai positive
         macd_hist = 0.0
@@ -1018,13 +1020,29 @@ class ExitManager:
                         # Jangan adopsi aset debu (di bawah Rp 10.000 / minimum trade)
                         if price > 0 and value_idr < 10000:
                             continue
-                            
-                        log_message(f"[DISCOVERY] Adopting asset: {coin} ({amount}) - Value: {format_currency(value_idr, signed=False)}")
+
+                        # Coba dapatkan harga beli yang lebih akurat dari trade history terbaru.
+                        # Cari entry terakhir untuk pair ini dari trade_history.
+                        # Fallback ke harga pasar saat ini jika tidak tersedia.
+                        actual_entry_price = price
+                        try:
+                            _all_recent = db.get_recent_trades(limit=50)
+                            _pair_trades = [t for t in _all_recent if t.get('pair') == pair and float(t.get('entry_price') or 0) > 0]
+                            if _pair_trades:
+                                actual_entry_price = float(_pair_trades[0]['entry_price'])
+                        except Exception:
+                            pass
+
+                        log_message(
+                            f"[DISCOVERY] Adopting asset: {coin} ({amount}) - "
+                            f"Value: {format_currency(value_idr, signed=False)} | "
+                            f"Entry est: {format_currency(actual_entry_price, is_price=True)}"
+                        )
                         recovery_data = {
                             "pair": pair,
-                            "entry_price": price if price > 0 else 0,
+                            "entry_price": actual_entry_price,
                             "amount_crypto": amount,
-                            "amount_idr": amount * price if price > 0 else 0,
+                            "amount_idr": amount * actual_entry_price if actual_entry_price > 0 else value_idr,
                             "status": "OPEN",
                             "entry_order_id": f"RECOVERED-{int(time.time())}",
                             "exit_order_id": None,
@@ -1072,8 +1090,10 @@ class ExitManager:
                             ghosts_removed.append(pair)
                         continue
 
-                    # OPEN: hapus jika saldo sangat kecil/nol atau nilai di bawah Rp 5.000
-                    if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000):
+                    # OPEN: hapus jika saldo sangat kecil/nol ATAU nilai di bawah Rp 5.000.
+                    # Guard: hanya evaluasi nilai IDR jika price valid (> 0), hindari false-delete
+                    # saat ticker stale (price=0 -> value_idr=0 < 5000 bisa hapus posisi aktif).
+                    if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000 and amount_on_exchange > 0):
                         log_message(f"[AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value: {format_currency(value_idr, signed=False)})")
                         db.delete_position(pair)
                         positions.pop(pair, None)
@@ -1239,8 +1259,19 @@ class ExitManager:
                             continue
 
                         old_exit_order_id = data.get('exit_order_id')
+                        cancel_confirmed = False
                         if old_exit_order_id:
-                            self._cancel_open_sell_orders_for_pair(pair, old_exit_order_id)
+                            cancel_confirmed = self._cancel_open_sell_orders_for_pair(pair, old_exit_order_id)
+                            # Tunggu konfirmasi cancel sebelum submit market order baru.
+                            # Mencegah double-fill jika cancel belum diproses exchange.
+                            if cancel_confirmed:
+                                time.sleep(0.5)
+                            else:
+                                log_message(
+                                    f"[WARN] [EXIT-TIMEOUT] {pair}: cancel tidak terkonfirmasi, "
+                                    f"skip market sell untuk menghindari double-fill."
+                                )
+                                continue
 
                         log_message(
                             f"[EXIT-TIMEOUT-OVERRIDE] {pair}: market-only mode, "
@@ -1372,11 +1403,14 @@ class ExitManager:
                 #   • Avg velocity + hysteresis remain to filter noise.
                 if NET_ZERO_SURVIVAL_ENABLED:
                     try:
-                        # Get all-time realized PnL for accurate KPI display
+                        # Gunakan realized PnL harian (24h) untuk floor guard — bukan all-time.
+                        # All-time PnL menyebabkan floor terlalu tinggi di sesi berikutnya jika
+                        # bot sudah profit besar sebelumnya, sehingga guard terlalu mudah aktif.
+                        _daily_stats = db.get_daily_stats()
                         realized_pnl_alltime = db.get_all_time_stats()['total_pnl_idr']
-                        # For net_total_pnl calculation, use all-time not daily
-                        net_total_pnl = realized_pnl_alltime + total_net_pnl
-                        # Save all-time realized PnL snapshot for the dashboard gauge (not just 24h)
+                        realized_pnl_today = float(_daily_stats.get('total_pnl_idr') or 0.0)
+                        net_total_pnl = realized_pnl_today + total_net_pnl
+                        # Simpan all-time ke dashboard gauge, tapi guard pakai daily.
                         try:
                             db.save_state("net_pnl_realized", str(round(realized_pnl_alltime, 2)))
                         except Exception:
@@ -1698,9 +1732,13 @@ class ExitManager:
                     #   • _equity_impacted: our portfolio equity has already begun to pull back from its
                     #     session High-Water-Mark, confirming the BTC move is affecting us — not just noise.
                     # If BTC dips but equity has NOT moved yet, do NOT harvest (wait for real confirmation).
+                    # _equity_impacted: konfirmasi bahwa penurunan BTC sudah berdampak ke portofolio kita.
+                    # Syarat yang lebih ketat: harus ada penurunan signifikan dari HWM (minimal 20%),
+                    # bukan sekadar 1 tick di bawah puncak (yang hampir selalu True).
+                    _hwm_decline_threshold = self._portfolio_hwm * 0.80  # penurunan > 20% dari HWM
                     _equity_impacted = (
                         self._portfolio_hwm > 0             # HWM must be established (≥1 tick of data)
-                        and total_net_pnl < self._portfolio_hwm  # any decline from peak = equity is feeling it
+                        and total_net_pnl < _hwm_decline_threshold  # decline >20% dari peak = confirmed impact
                     )
                     trigger_harvest_pct = (
                         n >= 1
@@ -2386,11 +2424,20 @@ class ExitManager:
 
                 # --- [TRAILING TAKE PROFIT LOGIC] ---
                 current_highest = float(data.get('highest_price', 0) or 0)
+                # Init highest_price dari entry_price jika belum ada (service restart / posisi baru).
+                # Mencegah trailing stop aktif di harga 0 yang akan langsung trigger exit.
+                if current_highest <= 0 and entry_price > 0:
+                    current_highest = entry_price
+                    data['highest_price'] = current_highest
                 if tp_eval_price > current_highest:
                     current_highest = tp_eval_price
                     data['highest_price'] = current_highest
-                    # Trailing delta: 0.4% dari peak (dioptimalkan dari 0.7% untuk penguncian profit cepat)
-                    raw_trail_price = current_highest * (1 - 0.004)
+                    # Trailing delta: dinamis berdasarkan profit level.
+                    # Saat profit kecil (<1%): trail lebih longgar (0.8%) agar tidak false-exit karena spread.
+                    # Saat profit besar (>=1%): trail diperketat (0.5%) untuk mengunci gain.
+                    _profit_from_entry = (current_highest / entry_price) - 1.0 if entry_price > 0 else 0.0
+                    _trail_delta = 0.005 if _profit_from_entry < 0.01 else 0.004
+                    raw_trail_price = current_highest * (1 - _trail_delta)
                     
                     # Target Floor Lock: Jika puncak harga sudah melampaui target TP,
                     # kunci trailing stop minimal setara dengan target TP (tp_price) agar profit tidak longsor ke bawah target!
@@ -4002,17 +4049,17 @@ class ExitManager:
             print(f"Jaring Manager Error: {e}")
 
     def place_jaring(self, pair, amount, price):
-        """Place a market buy order for jaring allocation."""
+        """Place a limit buy order for jaring (grid) allocation at the target depth price."""
         try:
-            log_message(f"Jaring: Placing Market Buy on {pair} (ref Rp {price:,.2f})")
+            log_message(f"Jaring: Placing Limit Buy on {pair} at Rp {price:,.2f}")
             if self.dry_run:
                 order_id = f"JARING-{int(time.time())}"
                 order = {"id": order_id, "status": "open", "price": price, "amount": amount}
             else:
-                # Market-only entry mode: jaring juga pakai market buy.
+                # Gunakan limit order agar jaring hanya terisi saat harga turun ke level target.
                 order = self.exchange.create_order(
                     to_ccxt_symbol(pair),
-                    'market',
+                    'limit',
                     'buy',
                     amount,
                     max(float(price or 1), 1.0),
