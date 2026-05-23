@@ -510,4 +510,30 @@ def derive_trade_signal(tech, sector=None, adaptive_thresholds=None, vol_idr_24h
         'signals': signals
     }
 def compute_adaptive_thresholds(price_history, n_candles=50):
-    return {'rsi_oversold': 35.0, 'rsi_overbought': 70.0}
+    """
+    Adaptive thresholds berdasarkan volatilitas pasar.
+    Keys yang dipakai derive_trade_signal: buy_score_threshold, sell_score_threshold.
+    Keys yang dipakai predictor/entry_gates: rsi_oversold, rsi_overbought, tech_threshold.
+    """
+    result = {
+        'rsi_oversold': 35.0,
+        'rsi_overbought': 70.0,
+        'buy_score_threshold': 6.5,
+        'sell_score_threshold': 7.0,
+        'tech_threshold': 0.52,
+    }
+    if not price_history or len(price_history) < 10:
+        return result
+
+    # Naikkan threshold saat volatilitas tinggi (hindari false breakout)
+    vol = calculate_volatility(price_history, window=min(20, len(price_history)))
+    if vol > 2.5:
+        result['buy_score_threshold'] = 7.5
+        result['sell_score_threshold'] = 7.5
+        result['tech_threshold'] = 0.60
+        result['rsi_oversold'] = 30.0
+    elif vol > 1.5:
+        result['buy_score_threshold'] = 7.0
+        result['sell_score_threshold'] = 7.0
+        result['tech_threshold'] = 0.55
+    return result

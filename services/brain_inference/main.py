@@ -691,12 +691,21 @@ class BrainInferenceService:
                     if _adaptive_bi is not None:
                         self._adaptive_cache[pair] = (_now_at, _adaptive_bi)
                 _vol_idr_bi = (self._tickers.get(pair) or {}).get('vol_idr')
+                # Inject buy_pressure dari imbalance ratio (sudah tersedia dari scored pair)
+                # Konversi dari ratio (0-1) ke persentase (0-100) agar sesuai threshold OB di derive_trade_signal
+                _imbalance_r = float(r.get('imbalance', 0.5) or 0.5)
+                tech['buy_pressure'] = round(_imbalance_r * 100.0, 1)
                 signal_info = derive_trade_signal(tech, sector=_sector_bi, adaptive_thresholds=_adaptive_bi, vol_idr_24h=_vol_idr_bi)
 
                 # Hitung trend dari history (avg_20 vs avg_50)
                 avg_20 = sum(hist[-20:]) / 20 if len(hist) >= 20 else hist[-1]
                 avg_50 = sum(hist[-50:]) / 50 if len(hist) >= 50 else avg_20
-                trend = "UP" if avg_20 > avg_50 * 1.001 else "SIDEWAYS"
+                if avg_20 > avg_50 * 1.001:
+                    trend = "UP"
+                elif avg_20 < avg_50 * 0.999:
+                    trend = "DOWN"
+                else:
+                    trend = "SIDEWAYS"
 
                 # Hitung perubahan harga berdasarkan history in-memory (LIVE)
                 last = float(hist[-1])
