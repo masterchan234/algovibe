@@ -2883,6 +2883,30 @@ def _derive_trend_from_history(history):
     except Exception:
         return "N/A"
 
+def _parse_awareness(raw):
+    """Parse session_awareness JSON dari bot_state. Kembalikan dict aman untuk frontend."""
+    _default = {
+        "state": "UNKNOWN",
+        "reason": "",
+        "description": "Waiting for first evaluation cycle...",
+        "params": {},
+        "context": {},
+    }
+    if not raw:
+        return _default
+    try:
+        import json as _json
+        d = _json.loads(raw)
+        return {
+            "state":       d.get("state", "UNKNOWN"),
+            "reason":      d.get("reason", ""),
+            "description": d.get("description", ""),
+            "params":      d.get("params", {}),
+            "context":     d.get("context", {}),
+        }
+    except Exception:
+        return _default
+
 def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
     import config as cfg
@@ -3325,6 +3349,7 @@ def _build_stats_payload(force_dry=None):
             "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "momentum_state": db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
+            "session_awareness": _parse_awareness(stats_dict.get("session_awareness")),
             
             # --- BTC Condition — used by Signal Radar UX ---
             "btc_price":      round(btc_price, 0),

@@ -26,6 +26,7 @@ from config import (
 import config
 from app.infrastructure.database import db
 from utils.logger import log_message, send_telegram_message
+from app.application.session_awareness import compute_session_awareness
 
 from .candidate_enrichment import enrich_pair
 from .entry_dispatch import dispatch_entry
@@ -118,30 +119,38 @@ def build_high_speed_candidates(bot, ranked, tickers):
 def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg):
     open_positions = db.get_open_positions()
 
+    #  [SESSION AWARENESS GATE] 
+    # Evaluasi kondisi bot secara menyeluruh: all-time PnL, daily PnL, regime, consecutive losses.
+    # Hasilkan strategy params yang tepat untuk kondisi saat ini.
+    _regime_pp = getattr(bot.oracle, '_last_regime_str', 'RANGING') if hasattr(bot.oracle, '_last_regime_str') else str(getattr(bot.oracle, 'last_regime', 'RANGING') or 'RANGING')
+    _cons_losses = int(db.get_state("consecutive_losses") or 0)
+    awareness = compute_session_awareness(bot.oracle, _regime_pp, _cons_losses)
+
+    # HALT: tidak boleh ada entry sama sekali
+    if awareness["state"] == "HALT":
+        log_message(f"[FAST] [AWARENESS] {awareness['state']}: {awareness['reason']}")
+        return
+
+    # Inject awareness params ke adaptive_cfg
+    adaptive_cfg["tech_threshold"]      = awareness["tech_threshold"]
+    adaptive_cfg["buy_score_threshold"] = awareness["buy_score_threshold"]
+
+    # Terapkan size factor ke bot agar trade_execution bisa membacanya
+    bot._recovery_size_factor = awareness["position_size_factor"]
+
+    recovery_mode = awareness["state"] in ("RECOVERY_CRISIS", "RECOVERY_DAILY", "RECOVERY_ALLTIME")
+    _max_new_positions = awareness["max_new_positions"]
+
+    # Counter posisi baru per siklus ini
+    recovery_new_positions = 0
+    harvest_reentry_new_positions = 0
+
     #  [DAILY TARGET & LOSS LIMIT GATE] 
     # Cek status progress target profit harian sebelum membuka posisi baru.
     target_status = bot.oracle.get_daily_target_status()
     target_idr = target_status["target_idr"]
     current_pnl = target_status["current_pnl"]
     progress_pct = target_status["progress_pct"]
-
-    # Counter posisi baru yang berhasil dibuka dalam siklus recovery ini
-    recovery_new_positions = 0
-    harvest_reentry_new_positions = 0
-
-    if target_status["loss_limit_hit"]:
-        # [RECOVERY MODE] Jangan buta total — tetap scan market dengan filter ultra-ketat.
-        # Kondisi wajib: confidence teknikal tinggi, max 1 posisi baru,
-        # ukuran posisi diperkecil 50%.
-        adaptive_cfg["tech_threshold"] = 0.80
-        adaptive_cfg["recovery_mode"] = True
-        # Simpan faktor sizing 50% ke bot agar trade_execution bisa membacanya
-        bot._recovery_size_factor = 0.5
-        log_message(
-            f"[FAST] [RECOVERY MODE] Loss harian Rp {current_pnl:,.0f} melampaui batas. "
-            f"Threshold ultra-ketat (80%), max 1 posisi baru, ukuran -50%. "
-            f"Tetap scan peluang — tidak buta terhadap market."
-        )
 
     # Evaluate Smart Trailing & STOP BUY protocol
     # Snapshot session mode BEFORE evaluation so we can detect the HARVEST_ONLY transition.
@@ -169,13 +178,13 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
                 )
             return
 
-    # Jika sudah 80%+ menuju target, naikkan threshold entry secara signifikan
+    # Jika sudah 80%+ menuju target, naikkan threshold lebih jauh di atas awareness threshold
     if target_status["near"]:
-        original_threshold = adaptive_cfg.get("tech_threshold", 0.35)
-        adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
+        _near_thresh = min(0.90, awareness["tech_threshold"] + 0.12)
+        adaptive_cfg["tech_threshold"] = _near_thresh
         log_message(
             f"[WARN] [NEAR TARGET] Progress {progress_pct:.0f}% (Rp {current_pnl:,.0f} / Rp {target_idr:,.0f}). "
-            f"Threshold entry dinaikkan {original_threshold*100:.0f}% → {adaptive_cfg['tech_threshold']*100:.0f}% untuk menjaga cuan."
+            f"Threshold entry dinaikkan → {_near_thresh*100:.0f}% untuk menjaga cuan."
         )
     #  END GATE 
 
@@ -190,20 +199,19 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             if gate == _BREAK:
                 break
 
-            # [RECOVERY MODE] Gate tambahan: hanya entri dengan confidence teknikal sangat tinggi (≥75%),
-            # dan maksimal 1 posisi baru selama sesi recovery ini.
-            if adaptive_cfg.get("recovery_mode"):
+            # [AWARENESS GATE] Recovery mode: confidence ≥75% + batas posisi baru dari awareness
+            if recovery_mode:
                 total_conf = float(gate.get("total_confidence", 0))
                 if total_conf < 75.0:
                     log_message(
-                        f" [RECOVERY GATE] {pair} ditolak — butuh confidence teknikal ≥75%, "
-                        f"dapat: {total_conf:.0f}%"
+                        f"[AWARENESS] [RECOVERY GATE] {pair} ditolak — "
+                        f"butuh confidence ≥75%, dapat: {total_conf:.0f}%"
                     )
                     continue
-                # Batasi ke 1 posisi baru dalam siklus recovery ini
-                if recovery_new_positions >= 1:
+                if recovery_new_positions >= _max_new_positions:
                     log_message(
-                        f" [RECOVERY GATE] {pair} ditolak — sudah ada posisi baru di sesi recovery."
+                        f"[AWARENESS] [RECOVERY GATE] {pair} ditolak — "
+                        f"sudah {recovery_new_positions}/{_max_new_positions} posisi baru di sesi ini."
                     )
                     continue
 
@@ -262,7 +270,7 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             if dispatch_entry(bot, p, enriched, gate, target):
                 bot.daily_trades += 1
                 db.save_state("daily_trades", bot.daily_trades)
-                if adaptive_cfg.get("recovery_mode"):
+                if recovery_mode:
                     recovery_new_positions += 1
                 if harvest_reentry_mode:
                     harvest_reentry_new_positions += 1
@@ -271,7 +279,6 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             log_message(f"[WARN] [Pair Loop Error] {pair}: {e}")
             continue
 
-    # Bersihkan recovery flag agar tidak bocor ke siklus berikutnya
+    # Bersihkan size factor agar tidak bocor ke siklus berikutnya
     if hasattr(bot, '_recovery_size_factor'):
         del bot._recovery_size_factor
-    adaptive_cfg.pop("recovery_mode", None)

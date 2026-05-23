@@ -43,6 +43,7 @@ from app.domain.scoring import calculate_score
 from app.domain.technicals import get_technical_summary, derive_trade_signal, compute_adaptive_thresholds
 from app.application.use_cases.candidate_enrichment import enrich_pair
 from app.application.use_cases.entry_gates import check_entry_gates
+from app.application.session_awareness import compute_session_awareness
 import config
 
 logging.basicConfig(
@@ -533,6 +534,10 @@ class BrainInferenceService:
         regime = self.oracle.get_market_regime()
         open_positions = db.get_open_positions()
 
+        # ── Session Awareness: satu titik evaluasi kondisi bot ────────────
+        consecutive_losses = int(db.get_state("consecutive_losses") or 0)
+        awareness = compute_session_awareness(self.oracle, regime, consecutive_losses)
+
         # Monolith parity: run target/loss gates before evaluating entries.
         adaptive_cfg = dict(self._adaptive_cfg)
         target_status = self.oracle.get_daily_target_status()
@@ -540,16 +545,19 @@ class BrainInferenceService:
         if not session_info.get("buy_enabled", True):
             return
 
-        if target_status.get("near"):
-            original_threshold = adaptive_cfg.get("tech_threshold", config.TECH_CONFIDENCE_THRESHOLD)
-            adaptive_cfg["tech_threshold"] = min(0.85, original_threshold + 0.15)
+        # Inject awareness params ke adaptive_cfg (override param standar)
+        adaptive_cfg["tech_threshold"]      = awareness["tech_threshold"]
+        adaptive_cfg["buy_score_threshold"] = awareness["buy_score_threshold"]
+        adaptive_cfg["focus_top_n"]         = awareness["focus_top_n"]
 
-        recovery_mode = False
+        # Near-target: naikkan threshold lebih jauh di atas awareness threshold
+        if target_status.get("near"):
+            adaptive_cfg["tech_threshold"] = min(0.90, awareness["tech_threshold"] + 0.12)
+
+        recovery_mode = awareness["state"] in ("RECOVERY_CRISIS", "RECOVERY_DAILY", "RECOVERY_ALLTIME")
         recovery_new_positions = 0
-        if target_status.get("loss_limit_hit"):
-            adaptive_cfg["tech_threshold"] = 0.80
-            recovery_mode = True
-        
+        _max_new = awareness["max_new_positions"]
+
         # Mocking bot-like interface for entry_gates use case
         class BotMock:
             def __init__(self, oracle, blacklist, history, history_maxlen, ohlc_highs, ohlc_lows, ohlc_vols):
@@ -608,9 +616,11 @@ class BrainInferenceService:
 
                 if recovery_mode:
                     total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0
+                    # Recovery: butuh confidence minimum 75% agar masuk
                     if total_conf < 75.0:
                         continue
-                    if recovery_new_positions >= 1:
+                    # Batasi posisi baru sesuai max_new_positions dari awareness
+                    if recovery_new_positions >= _max_new:
                         continue
                 
                 if isinstance(gate, dict) and gate.get("mode") == "LIVE":

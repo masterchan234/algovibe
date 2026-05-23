@@ -17,6 +17,7 @@
 - **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange.
 - **Multi-Tier Capital Protection:** Sistem berlapis — Basket Harvest, Momentum Equity Protection, Net-Zero Survival Guard — melindungi modal dari drawdown beruntun.
 - **Dynamic TP/SL/Profit Scaling:** Target TP, SL, dan minimum profit menyesuaikan otomatis dengan pertumbuhan modal (2.0%–3.5% TP).
+- **Session Awareness Engine:** Evaluator kondisi bot terpadu yang mengklasifikasikan sesi trading ke dalam 7 state strategi (`HALT` → `RECOVERY_CRISIS` → `RECOVERY_DAILY` → `RECOVERY_ALLTIME` → `CAUTIOUS` → `NORMAL` → `MOMENTUM_CHASE`). Setiap state mendefinisikan threshold teknikal, ukuran posisi, dan batas pair secara otomatis sesuai kondisi PnL dan regime market.
 - **Automated News Engine:** News Maker menghasilkan artikel analisis pasar otomatis (Morning Briefing, Trending Review, Evening Review, Breaking Headlines) dengan dukungan LLM lokal maupun cloud provider.
 
 ---
@@ -89,6 +90,26 @@ Gerbang dievaluasi secara **Asinkron** untuk menghemat CPU dan menurunkan latens
 10. **K-NN Isolated pattern scoring** (Mengambil keputusan pola dari Redis dengan fallback synchronous).
 11. **Final confidence threshold**
 12. **5s Wick Delay & Retrace Abort Guard:** Menunda eksekusi order selama 5 detik pada lonjakan momentum (`velocity > 0.3%`), membatalkan order jika harga memantul turun (retracement $> 30\%$) dari puncak breakout.
+
+---
+
+## 🧭 Session Awareness Engine (`session_awareness.py`)
+
+Evaluator kondisi bot terpadu yang berjalan setiap siklus scan. Mengklasifikasikan sesi ke dalam **7 state strategi** secara otomatis berdasarkan PnL harian, PnL all-time, regime market, dan consecutive losses. Setiap state meng-inject parameter risiko langsung ke `brain-inference` dan `pair-pipeline`.
+
+| State | Ukuran Posisi | Max Pair | Score Threshold | Kondisi Trigger |
+|---|---|---|---|---|
+| `HALT` | 0% | 0 | — | Consecutive losses mencapai batas maksimum |
+| `RECOVERY_CRISIS` | 25% | 1 | 8.0 | All-time loss > 3× daily limit (~$90) |
+| `RECOVERY_DAILY` | 40% | 1 | 7.5 | Daily loss limit terpenuhi |
+| `RECOVERY_ALLTIME` | 65% | 2 | 7.0 | All-time PnL negatif |
+| `CAUTIOUS` | 80% | 3 | 6.8 | Regime BEARISH/CHOPPY atau daily loss > 50% |
+| `NORMAL` | 100% | 5 | 6.5 | Kondisi default |
+| `MOMENTUM_CHASE` | 115% | 6 | 6.2 | Regime BULLISH + sesi profitable |
+
+*   State disimpan ke `bot_state` (PostgreSQL) dan dipublikasikan ke Redis (TTL 30s) untuk konsumsi lintas service.
+*   Dashboard menampilkan **badge warna** real-time sesuai severity state (hijau → merah berkedip untuk HALT).
+*   Transisi ke state kritis (`HALT`, `RECOVERY_CRISIS`, `RECOVERY_DAILY`) mengirimkan notifikasi Telegram otomatis.
 
 ---
 
@@ -172,6 +193,7 @@ services/
 app/
 ├── application/
 │   ├── entry_gates.py          # Asynchronous Entry Gates, MTFA, Wick Delay
+│   ├── session_awareness.py    # 7-state strategy ladder: HALT → MOMENTUM_CHASE; injects risk params ke brain-inference & pair-pipeline
 │   ├── use_cases/
 │   │   ├── trade_execution.py  # BUY execution, fee-trap pure-% guard
 │   │   └── candidate_enrichment.py

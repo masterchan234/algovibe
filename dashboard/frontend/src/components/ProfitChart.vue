@@ -101,6 +101,10 @@
           <div class="intel-chip" :class="stats.net_pnl >= 0 ? 'bullish' : 'bearish'">
             {{ stats.net_pnl >= 0 ? 'NET GAIN' : 'NET RECOVERY' }}
           </div>
+          <!-- Session Awareness Badge -->
+          <div v-if="stats.session_awareness?.state" class="awareness-badge" :class="'awareness-' + (stats.session_awareness.state || 'UNKNOWN').toLowerCase().replace(/_/g,'-')" :title="stats.session_awareness.description + ' | ' + stats.session_awareness.reason">
+            {{ stats.session_awareness.state.replace(/_/g, ' ') }}
+          </div>
         </div>
       </div>
 
@@ -1406,6 +1410,30 @@ onUnmounted(() => {
   background: rgba(248, 81, 73, 0.1); 
   color: #f85149; 
   border-color: rgba(248, 81, 73, 0.3);
+}
+
+/* Session Awareness Badge */
+.awareness-badge {
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  cursor: default;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #8b949e;
+}
+.awareness-normal           { background: rgba(56,139,253,0.1); color:#58a6ff; border-color:rgba(56,139,253,0.3); }
+.awareness-momentum-chase   { background: rgba(63,185,80,0.15); color:#3fb950; border-color:rgba(63,185,80,0.4); }
+.awareness-cautious         { background: rgba(210,153,34,0.1); color:#e3b341; border-color:rgba(210,153,34,0.3); }
+.awareness-recovery-alltime { background: rgba(248,81,73,0.1);  color:#f85149; border-color:rgba(248,81,73,0.3); }
+.awareness-recovery-daily   { background: rgba(248,81,73,0.15); color:#ff6b6b; border-color:rgba(248,81,73,0.4); }
+.awareness-recovery-crisis  { background: rgba(248,81,73,0.25); color:#ff3333; border-color:rgba(248,81,73,0.6); }
+.awareness-halt             { background: rgba(139,49,49,0.4);  color:#ff0000; border-color:#ff0000; animation: pulse-halt 1s infinite; }
+@keyframes pulse-halt {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
 }
 
 .intel-body {

@@ -349,6 +349,7 @@ export const useTradeStore = defineStore('trade', () => {
           daily_target_hit: data.daily_target_hit ?? false,
           session_buy_enabled: data.session_buy_enabled ?? true,
           exchange: data.exchange ?? 'binance',
+          session_awareness: data.session_awareness ?? null,
         })
         _recordPnl((data.daily_pnl ?? 0) + (data.unrealized_pnl ?? 0))
       })
