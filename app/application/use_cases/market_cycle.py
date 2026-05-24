@@ -129,15 +129,16 @@ def run_market_cycle(bot):
             _net = target_status['current_pnl']
             _t = target_status['target_idr']
             target_str = (
-                f"Net PnL: Rp{_net:+,.0f} "
-                f"(Realized: Rp{_r:+,.0f}, Unrealized: Rp{_u:+,.0f}) | "
-                f"Target: Rp{_t:,.0f} | Status: HARVEST_ONLY"
+                f"Net PnL: ${_net:+.2f} "
+                f"(R:${_r:+.2f}, U:${_u:+.2f}) | "
+                f"Target: ${_t:.2f} | Status: HARVEST_ONLY"
             )
         elif target_status['target_idr'] > 0:
+            _pnl = target_status['current_pnl']
+            _tgt = target_status['target_idr']
+            _prog = target_status['progress_pct']
             target_str = (
-                f"Target: Rp{target_status['target_idr']/1000:.0f}k | "
-                f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k "
-                f"({target_status['progress_pct']:.0f}%)"
+                f"Target: ${_tgt:.2f} | PnL: ${_pnl:+.2f} ({_prog:.0f}%)"
             )
             if session_mode == "TRAILING":
                 target_str += " | TRAILING"

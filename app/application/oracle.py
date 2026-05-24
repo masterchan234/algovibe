@@ -932,30 +932,36 @@ class Oracle:
             else:
                 wr_mult = 1.0
 
-            # 4. Session multiplier (Indodax peak liquidity windows)
+            # 4. Session multiplier (Binance Spot liquidity windows — waktu WIB/UTC+7)
+            # Binance volume profile: US session paling liquid, Asia paling sepi
             hour = datetime.now().hour
-            if 0 <= hour < 8:       # Asia Session (Indodax peak, termasuk jam 0)
-                session_mult = 1.2
-            elif 16 <= hour < 24:   # US Session (high global volatility, termasuk jam 23)
+            if 20 <= hour < 24:     # US Session peak (jam 20-24 WIB = 13-17 UTC)
+                session_mult = 1.3
+            elif 15 <= hour < 20:   # Europe peak / pre-US (jam 15-20 WIB = 08-13 UTC)
                 session_mult = 1.1
-            else:                   # Europe Session (jam 8-15)
+            elif 8 <= hour < 15:    # Europe morning / Asia close (jam 08-15 WIB)
                 session_mult = 1.0
+            else:                   # Asia session sepi (jam 00-08 WIB = 17-01 UTC)
+                session_mult = 0.8
 
             target = base_target * regime_mult * wr_mult * session_mult
 
-            # Clamp: minimum Rp 50.000, maksimum 5% dari saldo
-            target = max(50_000.0, min(effective_balance * 0.05, target))
+            # Clamp: min 1% saldo, max 5% saldo — keduanya berbasis balance aktual
+            target_min = max(5.0, effective_balance * 0.010)  # 1% balance, floor $5
+            target_max = effective_balance * 0.05              # 5% balance
+            target = max(target_min, min(target_max, target))
 
             logger.info(
-                f"[Oracle] Daily Target Calc: balance=Rp{effective_balance:,.0f}, "
+                f"[Oracle] Daily Target Calc: balance=${effective_balance:,.2f}, "
                 f"regime={regime}(x{regime_mult}), WR={win_rate*100:.0f}%(x{wr_mult}), "
-                f"session=h{hour}(x{session_mult}) → Target=Rp{target:,.0f}"
+                f"session=h{hour}(x{session_mult}) → Target=${target:.2f} "
+                f"[min=${target_min:.2f}, max=${target_max:.2f}]"
             )
             return target
 
         except Exception as e:
             logger.error(f"[Oracle] calculate_daily_profit_target error: {e}")
-            return 100_000.0  # safe fallback
+            return max(5.0, (balance if balance > 0 else INITIAL_CAPITAL) * 0.015)  # fallback 1.5% saldo
 
     def refresh_daily_profit_target(self, balance: float = 0.0) -> float:
         """
@@ -1500,20 +1506,45 @@ class Oracle:
             
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
-            stats = db.get_daily_stats(dry_run=config.DRY_RUN) # Ambil statistik 24 jam terakhir
-            daily_pnl = stats.get('total_pnl_idr', 0)
-            
-            # 1. Profit-Pause (Proteksi Cuan)
-            # Jika sudah profit > 5% dari modal harian (misal > 5jt), naikkan threshold sangat tinggi
-            if daily_pnl > 5_000_000:
-                logger.info(f"[Oracle] Equity-Shield: Profit Harian Tinggi (Rp {daily_pnl:,.0f}). Mengetatkan entry.")
-                overrides["tech_threshold"] += 0.20 # Sangat selektif
-            
-            # 2. Recovery-Mode (Balikkan Keadaan)
-            # Jika sedang merugi (red), turunkan threshold sedikit agar lebih agresif mencari peluang rebound
-            elif daily_pnl < -2_000_000:
-                logger.info(f"[Oracle] Recovery-Mode: Drawdown terdeteksi (Rp {daily_pnl:,.0f}). Melonggarkan entry.")
-                overrides["tech_threshold"] -= 0.05 # Lebih agresif
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
+            daily_pnl = float(stats.get('total_pnl_idr', 0))
+
+            # 1. Profit-Pause: jika profit harian > target → naikkan threshold (jarang masuk)
+            target_idr = float(db.get_state("daily_profit_target") or 0.0)
+            if target_idr > 0 and daily_pnl >= target_idr:
+                logger.info(f"[Oracle] Equity-Shield: Daily target tercapai (${daily_pnl:+.2f}). Mengetatkan entry.")
+                overrides["tech_threshold"] += 0.20  # Sangat selektif
+
+            # 2. Recovery-Mode: jika merugi > $20 USDT, turunkan sedikit threshold untuk rebound
+            elif daily_pnl < -20.0:
+                logger.info(f"[Oracle] Recovery-Mode: Drawdown ${daily_pnl:.2f}. Melonggarkan entry.")
+                overrides["tech_threshold"] -= 0.05
+
+            # --- [Target Pursuit Phase] ---
+            # Sesuaikan threshold berdasarkan progress target DAN sisa waktu hari ini.
+            if target_idr > 0:
+                progress_pct = (daily_pnl / target_idr * 100)
+                now = datetime.now()
+                seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+                time_remaining_pct = max(0.0, (1 - seconds_since_midnight / 86400) * 100)
+
+                if progress_pct < 30 and time_remaining_pct < 25:
+                    # Terlambat & waktu hampir habis → PROTEKSI modal yang ada, jangan kejar rugi
+                    overrides["tech_threshold"] = min(0.85, overrides["tech_threshold"] + 0.10)
+                    logger.info(
+                        f"[Oracle] [TARGET-PHASE: PROTECT] Progress {progress_pct:.0f}%, "
+                        f"sisa {time_remaining_pct:.0f}% hari → threshold naik, hindari entry berisiko."
+                    )
+                elif progress_pct < 50 and time_remaining_pct > 50:
+                    # Masih ada banyak waktu dan masih di bawah 50% target → sedikit lebih agresif
+                    overrides["tech_threshold"] = max(0.45, overrides["tech_threshold"] - 0.03)
+                    logger.info(
+                        f"[Oracle] [TARGET-PHASE: PURSUE] Progress {progress_pct:.0f}%, "
+                        f"sisa {time_remaining_pct:.0f}% hari → threshold diturunkan sedikit."
+                    )
+                # 50-80% progress: threshold normal (tidak ada adjustment)
+                # >80% progress: ditangani oleh NEAR_TARGET gate di pair_pipeline.py
+
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
 

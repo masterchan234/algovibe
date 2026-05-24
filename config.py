@@ -48,7 +48,7 @@ TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 6
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
 CAPITAL_PER_TRADE_PCT = 0.12    # Sizing ~12% per trade
-MAX_OPEN_POSITIONS = 9999          # Unlimited positions
+MAX_OPEN_POSITIONS = 6             # Maksimal 6 posisi bersamaan — jaga sizing tetap besar
 MIN_BALANCE_THRESHOLD = 10.0   # Jangan trading jika saldo < 10 USDT
 MIN_TRADE_IDR = 10.0   # Legacy mapping compatibility (USDT)
 MIN_TRADE_USDT = 10.0  # Minimum order Binance Spot (10 USDT)
@@ -84,8 +84,8 @@ TIER3_PROFIT_IDR_PCT = float(os.getenv("TIER3_PROFIT_IDR_PCT", 0.05))  # 5% of M
 # --- [Micro Profit Exit] ---
 # Auto-enable micro TP behavior when effective balance drops below threshold.
 MICRO_PROFIT_EXIT_AUTO = os.getenv("MICRO_PROFIT_EXIT_AUTO", "true").lower() in ("1", "true", "yes", "on")
-MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 1000.0))
-MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.008))
+MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 300.0))   # Dari 1000 → hanya aktif saat balance benar-benar kecil
+MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.015))                          # Dari 0.008 → TP ceiling 1.5%
 # Net floor for micro mode (after-fee estimate). Keep > 0 to avoid pseudo-profit exits.
 MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
 
@@ -173,7 +173,7 @@ def get_dynamic_sl_pct(current_balance: float = None) -> float:
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,
 # bahkan jika semua posisi masih profit (tidak perlu tunggu ada yang rugi).
 # Set ke 0 untuk nonaktifkan.
-BASKET_HARVEST_TARGET_IDR = max(20.0, INITIAL_CAPITAL * 0.05)  # ~5% modal (min 20 USDT)
+BASKET_HARVEST_TARGET_IDR = max(15.0, INITIAL_CAPITAL * 0.015)  # Target harian $15 (~1.5% modal) — dari 5%
 
 # Jika combined PnL turun lebih dari X% dari high-water-mark (peak), trigger basket exit.
 # Contoh: 0.30 = jika PnL peak Rp 80k dan sekarang sudah < Rp 56k (30% drop), exit.
@@ -281,7 +281,7 @@ STRONG_IMBALANCE_RATIO  = 1.4
 
 # --- Technical Probability ---
 # Default ideal profile (Loose Gates OFF): lebih ketat untuk kualitas entry.
-TECH_CONFIDENCE_THRESHOLD = 0.45
+TECH_CONFIDENCE_THRESHOLD = 0.50  # Dinaikkan dari 0.45 → sinyal lemah diblokir
 TECH_SL_OVERRIDE_THRESHOLD = 0.70 # Tahan SL jika probabilitas bounce >= 70%
 TECH_MIN_HISTORY_POINTS   = 30   
 
