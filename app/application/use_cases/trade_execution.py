@@ -13,6 +13,7 @@ from config import (
     MIN_BALANCE_THRESHOLD,
     MIN_TRADE_IDR,
     CAPITAL_PER_TRADE_PCT,
+    CAPITAL_PER_TRADE_PCT_HIGH_OPP,
     MAX_OPEN_POSITIONS,
     MIN_VOLUME_FILTER,
     LIQUIDITY_MULTIPLIER,
@@ -262,7 +263,8 @@ def execute_trade(
                 _mark_gate("Dry usable capital exhausted after reserve buffer")
                 return False
 
-            target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
+            active_pct = CAPITAL_PER_TRADE_PCT_HIGH_OPP if is_high_opportunity_fast else CAPITAL_PER_TRADE_PCT
+            target_amount = dry_balance * active_pct * multiplier
             amount_idr = min(target_amount, usable_capital)
         else:
             balance = getattr(bot, 'cached_balance', 0)
@@ -271,7 +273,8 @@ def execute_trade(
                 _mark_gate(f"Live balance below threshold ({balance:.0f})")
                 return False
             # Use real balance as the basis for sizing in LIVE mode
-            target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
+            active_pct = CAPITAL_PER_TRADE_PCT_HIGH_OPP if is_high_opportunity_fast else CAPITAL_PER_TRADE_PCT
+            target_amount = balance * active_pct * multiplier
 
             # [Small Account Optimization]
             # If the calculated size is too small for the exchange but the account can afford it,
