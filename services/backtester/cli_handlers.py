@@ -11,7 +11,7 @@ from services.backtester.advisor import (
 from services.backtester.db_backtest import transaction
 from services.backtester.pipeline import _persist_results, run_backtest
 from services.backtester.reporting import _print_comparison_table, _print_run_report
-from services.backtester.runtime import DEFAULT_DAILY_TARGET_PNL_IDR, _load_active_profiles
+from services.backtester.runtime import DEFAULT_DAILY_TARGET_PNL_USDT, _load_active_profiles
 
 
 def handle_restore_command() -> None:
@@ -33,12 +33,12 @@ def handle_restore_command() -> None:
 
 def handle_analyze_command(args) -> None:
     analysis_result = analyze_ohlcv_target_setup(
-        target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR),
-        balance_idr=float(args.balance),
+        target_daily_pnl=float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_USDT),
+        balance_usdt=float(args.balance),
         days=int(args.days),
         pairs_filter=args.pairs,
-        min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
-        min_price_idr=float(args.min_price_idr),
+        min_liquidity_24h_usdt=float(args.min_liquidity_24h_usdt),
+        min_price_usdt=float(args.min_price_usdt),
     )
 
     if not args.create_profile_from_analysis:
@@ -47,7 +47,7 @@ def handle_analyze_command(args) -> None:
         print(" Tidak bisa membuat profile: hasil analisis kosong.")
         return
 
-    target_daily_pnl = float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_IDR)
+    target_daily_pnl = float(args.target_daily_pnl or DEFAULT_DAILY_TARGET_PNL_USDT)
     if int(args.auto_select_top) > 0:
         ranked_candidates = _sort_auto_selection_candidates(list(analysis_result["per_coin"]))
         selected_rows = ranked_candidates[: int(args.auto_select_top)]
@@ -78,7 +78,7 @@ def handle_analyze_command(args) -> None:
             if args.backtest_optimized:
                 recommendation_for_profile = _apply_backtest_optimized_overrides(
                     recommendation_for_profile,
-                    balance_idr=float(args.balance),
+                    balance_usdt=float(args.balance),
                     target_daily_pnl=target_daily_pnl,
                 )
 
@@ -120,8 +120,8 @@ def handle_analyze_command(args) -> None:
                 pairs_filter=pairs_for_run if pairs_for_run else None,
                 profiles_override=created_profiles,
                 strict_per_coin=(not args.allow_global_fallback),
-                min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
-                min_price_idr=float(args.min_price_idr),
+                min_liquidity_24h_usdt=float(args.min_liquidity_24h_usdt),
+                min_price_usdt=float(args.min_price_usdt),
             )
             for profile in created_profiles:
                 _print_run_report(profile["id"], profile["profile_name"])
@@ -147,7 +147,7 @@ def handle_analyze_command(args) -> None:
     if args.backtest_optimized:
         recommendation_for_profile = _apply_backtest_optimized_overrides(
             recommendation_for_profile,
-            balance_idr=float(args.balance),
+            balance_usdt=float(args.balance),
             target_daily_pnl=target_daily_pnl,
         )
 
@@ -171,8 +171,8 @@ def handle_analyze_command(args) -> None:
             pairs_filter=str(selected["pair"]),
             profiles_override=[new_profile],
             strict_per_coin=(not args.allow_global_fallback),
-            min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
-            min_price_idr=float(args.min_price_idr),
+            min_liquidity_24h_usdt=float(args.min_liquidity_24h_usdt),
+            min_price_usdt=float(args.min_price_usdt),
         )
         _print_run_report(new_profile["id"], new_profile["profile_name"])
 
@@ -184,8 +184,8 @@ def handle_optimize_command(args) -> None:
             args.days,
             args.pairs,
             strict_per_coin=(not args.allow_global_fallback),
-            min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
-            min_price_idr=float(args.min_price_idr),
+            min_liquidity_24h_usdt=float(args.min_liquidity_24h_usdt),
+            min_price_usdt=float(args.min_price_usdt),
         )
         active = _load_active_profiles()
         for p in active:

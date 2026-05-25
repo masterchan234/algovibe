@@ -7,7 +7,7 @@ import pandas as pd
 
 from app.domain.technicals import derive_trade_signal
 from services.backtester.db_backtest import get_connection, transaction
-from services.backtester.runtime import MIN_TRADE_IDR
+from services.backtester.runtime import MIN_TRADE_USDT
 
 
 def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: datetime, end_time: datetime) -> dict:
@@ -16,16 +16,16 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
 
     strat_mode = p.get("strategy_mode", "scalping")
     tf_min = int(p.get("timeframe_minutes", 1))
-    pos_idr = float(pair_cfg.get("max_position_idr", p.get("max_position_idr", 100000)))
+    pos_idr = float(pair_cfg.get("max_position_idr", p.get("max_position_idr", 120.0)))
     min_candles = 50
 
-    fee_buy = float(p.get("fee_buy_taker", 0.002111))
-    fee_sell = float(p.get("fee_sell_taker", 0.004211))
-    slippage = float(p.get("fee_slippage_buffer", 0.001))
+    fee_buy = float(p.get("fee_buy_taker", 0.001))   # Binance Spot taker 0.1%
+    fee_sell = float(p.get("fee_sell_taker", 0.001))  # Binance Spot taker 0.1%
+    slippage = float(p.get("fee_slippage_buffer", 0.0005))  # 0.05% market impact
 
-    buy_threshold = float(pair_cfg.get("buy_score_threshold", p.get("buy_threshold", 6.0)))
+    buy_threshold = float(pair_cfg.get("buy_score_threshold", p.get("buy_threshold", 6.5)))
     sell_block = float(pair_cfg.get("sell_block_threshold", p.get("sell_block_threshold", 5.0)))
-    opp_max = float(pair_cfg.get("opposing_max", 4.0))
+    opp_max = float(pair_cfg.get("opposing_max", 5.0))  # Entry block: sell_score >= 5.0
 
     tp_pct = float(pair_cfg.get("target_tp_pct", p.get("target_tp_pct", 0.035)))
     sl_pct = float(pair_cfg.get("target_sl_pct", p.get("target_sl_pct", -0.035)))
@@ -37,7 +37,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     ema_trend_f = pair_cfg.get("ema_trend_filter_enabled", p.get("ema_trend_filter_enabled", True))
     max_hold_m = int(pair_cfg.get("max_hold_minutes", p.get("max_hold_minutes", 1440)))
     cooldown_sec = int(pair_cfg.get("cooldown_seconds", p.get("cooldown_seconds", 300)))
-    min_position_idr = float(pair_cfg.get("min_position_idr", p.get("min_position_idr", MIN_TRADE_IDR)))
+    min_position_idr = float(pair_cfg.get("min_position_idr", p.get("min_position_idr", MIN_TRADE_USDT)))
 
     df = pd.DataFrame(candles)
     if len(df) < min_candles:
@@ -74,11 +74,13 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     if not history or len(history) != len(candles):
         return {"trades": [], "stats": {}}
 
-    current_cap = float(p.get("initial_capital_idr", 1000000.0))
+    current_cap = float(p.get("initial_capital_idr", 1000.0))
     position = None
     cooldown_until = 0
 
     close_arr = df["close"].values
+    high_arr = df["high"].values
+    low_arr = df["low"].values
     ts_epochs = _np.array([c["ts"].timestamp() for c in candles])
     ema50_arr = df["close"].ewm(span=50, adjust=False).mean().values
 
@@ -86,6 +88,8 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         ts_epoch = ts_epochs[i]
         ts = candles[i]["ts"]
         close = close_arr[i]
+        high = high_arr[i]
+        low = low_arr[i]
         sig = history[i]
 
         if position:
@@ -93,31 +97,69 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             entry_idr = position["amount_idr"]
             crypto = position["amount_crypto"]
 
-            if trail_enabled and close > position["highest_price"]:
-                position["highest_price"] = close
-                if (close - entry_px) / entry_px >= trail_trigger:
-                    new_sl = close * (1.0 - trail_dist)
+            # Track highest_price menggunakan HIGH intra-candle (bukan hanya close)
+            # Ini mencerminkan live bot yang memantau harga tick-by-tick
+            if high > position["highest_price"]:
+                position["highest_price"] = high
+
+            # Profile trailing SL (hanya jika trail_enabled di profil)
+            if trail_enabled:
+                highest = position["highest_price"]
+                if (highest - entry_px) / entry_px >= trail_trigger:
+                    new_sl = highest * (1.0 - trail_dist)
                     if new_sl > position["trailing_sl_price"]:
                         position["trailing_sl_price"] = new_sl
+
+            # Dynamic Breakeven SL — mirrors exit_manager.py, SELALU aktif
+            # +0.3% gross peak → SL ke entry + 0.02% (fee cushion)
+            # +0.5% gross peak, umur >=2m → trailing SL 0.2% dari peak
+            # Menggunakan highest_price yang sudah di-update dari high intra-candle
+            current_highest = position["highest_price"]
+            gross_peak_pct = (current_highest - entry_px) / entry_px if entry_px > 0 else 0.0
+            duration_m = (ts_epoch - position["entry_ts"]) / 60.0
+            if gross_peak_pct >= 0.003:
+                be_sl = entry_px * 1.0002  # breakeven + 0.02% fee cushion
+                if be_sl > position["dynamic_sl"]:
+                    position["dynamic_sl"] = be_sl
+            if gross_peak_pct >= 0.005:
+                trail_dist_dyn = 0.002 if duration_m >= 2.0 else 0.003
+                dyn_trail = current_highest * (1.0 - trail_dist_dyn)
+                if dyn_trail > position["dynamic_sl"]:
+                    position["dynamic_sl"] = dyn_trail
 
             exit_reason = None
             exit_price = 0.0
 
-            if close >= entry_px * (1.0 + tp_pct):
-                exit_reason = "TP"
-                exit_price = entry_px * (1.0 + tp_pct) * (1.0 - slippage)
-            elif position["trailing_sl_price"] > 0 and close <= position["trailing_sl_price"]:
+            # Exit checks: SL dulu (low), lalu TP (high), lalu close-based exits
+            # Urutan ini konservatif — jika satu candle hit both SL dan TP, SL menang
+            static_sl_px = entry_px * (1.0 + sl_pct)
+            if position["dynamic_sl"] > 0 and low <= position["dynamic_sl"]:
+                exit_reason = "DYNAMIC_SL"
+                exit_price = position["dynamic_sl"] * (1.0 - slippage)
+            elif position["trailing_sl_price"] > 0 and low <= position["trailing_sl_price"]:
                 exit_reason = "TRAILING_SL"
                 exit_price = position["trailing_sl_price"] * (1.0 - slippage)
-            elif close <= entry_px * (1.0 + sl_pct):
+            elif low <= static_sl_px:
                 exit_reason = "SL"
-                exit_price = entry_px * (1.0 + sl_pct) * (1.0 - slippage)
+                exit_price = static_sl_px * (1.0 - slippage)
+            elif high >= entry_px * (1.0 + tp_pct):
+                exit_reason = "TP"
+                exit_price = entry_px * (1.0 + tp_pct) * (1.0 - slippage)
             elif (ts_epoch - position["entry_ts"]) > max_hold_m * 60:
                 exit_reason = "MAX_HOLD"
                 exit_price = close * (1.0 - slippage)
-            elif sig["verdict"] == "SELL" and sig["sell_score"] >= sell_block:
-                exit_reason = "SIGNAL_REVERSE"
-                exit_price = close * (1.0 - slippage)
+            elif sig["verdict"] != "BUY":
+                # Momentum Fading Profit Lock — mirrors exit_manager.py
+                # Jika profit >=+0.3% gross DAN sinyal melemah, amankan profit
+                cur_gross_pct = (close - entry_px) / entry_px if entry_px > 0 else 0.0
+                if cur_gross_pct >= 0.003 and (
+                    (duration_m >= 2.0) or sig["verdict"] == "SELL"
+                ):
+                    exit_reason = "MOMENTUM_FADE"
+                    exit_price = close * (1.0 - slippage)
+                elif sig["verdict"] == "SELL" and sig["sell_score"] >= sell_block:
+                    exit_reason = "SIGNAL_REVERSE"
+                    exit_price = close * (1.0 - slippage)
 
             if exit_reason:
                 gross_pnl = (exit_price - entry_px) * crypto
@@ -174,6 +216,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             "entry_ts": ts_epoch,
             "highest_price": close,
             "trailing_sl_price": 0.0,
+            "dynamic_sl": 0.0,  # dynamic breakeven/trailing SL (selalu aktif)
             "buy_score": sig["buy_score"],
             "dca_tier": 0,
         }
@@ -266,6 +309,38 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict, pair_cfg: dict 
     obv_prev = obv.shift(5).abs().replace(0, _np.nan)
     df["obv_slope"] = (((obv - obv.shift(5)) / obv_prev) * 100.0).fillna(0.0)
 
+    # velocity: identik dengan get_technical_summary() di live bot
+    # (close[-1] - close[-4]) / close[-4] * 100
+    df["velocity"] = (close.pct_change(4) * 100.0).fillna(0.0)
+
+    # buy_pressure: rolling candle close position dalam range (20 candle, shifted 1)
+    # Proxy terbaik dari order book imbalance yang tersedia dari OHLCV.
+    # (close-low)/(high-low) = 1.0 saat candle bullish penuh, 0.0 saat bearish penuh.
+    # Rolling mean over 20 candle = persistensi buying pressure (mirip imbalance ratio live bot).
+    # Shift(1) agar candle saat ini tidak self-referencing.
+    hl_range = (high - low).replace(0, _np.nan)
+    candle_pos = ((close - low) / hl_range * 100.0).fillna(50.0)
+    df["buy_pressure"] = candle_pos.rolling(20, min_periods=5).mean().shift(1).fillna(50.0)
+
+    # Adaptive volatility — sama seperti live bot: naikkan threshold saat vol tinggi
+    # compute_adaptive_thresholds() menggunakan std(returns) * 100 atas 20 candle terakhir
+    pct_returns = close.pct_change().fillna(0.0)
+    rolling_vol = pct_returns.rolling(20, min_periods=10).std() * 100.0
+    # Map volatility ke threshold: sama persis dengan compute_adaptive_thresholds()
+    # Buy: 6.5 → 7.0 → 7.5 | Sell: 7.0 → 7.0 → 7.5
+    def _vol_to_buy_threshold(v):
+        if v > 2.5:
+            return 7.5
+        elif v > 1.5:
+            return 7.0
+        return 6.5
+    def _vol_to_sell_threshold(v):
+        if v > 2.5:
+            return 7.5
+        return 7.0
+    df["adaptive_buy_threshold"] = rolling_vol.apply(_vol_to_buy_threshold).fillna(6.5)
+    df["adaptive_sell_threshold"] = rolling_vol.apply(_vol_to_sell_threshold).fillna(7.0)
+
     history = []
     for row in df.to_dict("records"):
         cfg = pair_cfg or {}
@@ -290,9 +365,17 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict, pair_cfg: dict 
             "slope": row["slope"],
             "volume_ratio": row["volume_ratio"],
             "obv_slope": row["obv_slope"],
+            "velocity": row["velocity"],
+            "buy_pressure": row["buy_pressure"],
         }
 
-        sig = derive_trade_signal(tech, adaptive_thresholds=cfg)
+        # Adaptive thresholds: override threshold dari profil berdasarkan volatilitas
+        # — persis seperti live bot di brain_inference/main.py (compute_adaptive_thresholds)
+        adaptive_cfg = dict(cfg)
+        adaptive_cfg["buy_score_threshold"] = row["adaptive_buy_threshold"]
+        adaptive_cfg["sell_score_threshold"] = row["adaptive_sell_threshold"]
+
+        sig = derive_trade_signal(tech, adaptive_thresholds=adaptive_cfg)
         if sig["verdict"] == "BUY":
             if not is_uptrend:
                 sig["verdict"] = "HOLD"

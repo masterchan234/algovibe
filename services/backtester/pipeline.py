@@ -15,8 +15,8 @@ from services.backtester.core import (
 )
 from services.backtester.db_backtest import get_connection
 from services.backtester.runtime import (
-    DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    DEFAULT_MIN_PRICE_IDR,
+    DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    DEFAULT_MIN_PRICE_USDT,
     OHLCV_DAYS,
     _get_latest_ohlcv_ts,
     _load_active_profiles,
@@ -142,8 +142,8 @@ def run_backtest(
     pairs_filter=None,
     profiles_override: list[dict] | None = None,
     strict_per_coin: bool = True,
-    min_liquidity_24h_idr: float = DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    min_price_idr: float = DEFAULT_MIN_PRICE_IDR,
+    min_liquidity_24h_usdt: float = DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    min_price_usdt: float = DEFAULT_MIN_PRICE_USDT,
 ):
     profiles = profiles_override if profiles_override is not None else _load_active_profiles()
     if not profiles:
@@ -161,7 +161,7 @@ def run_backtest(
         logger.warning("[run] No pairs selected in requested time window.")
         return
 
-    if float(min_liquidity_24h_idr) > 0 or float(min_price_idr) > 0:
+    if float(min_liquidity_24h_usdt) > 0 or float(min_price_usdt) > 0:
         print("ℹ Catatan: filter likuiditas/harga diabaikan pada mode strict per-koin ini.")
 
     pair_setup_map = _load_latest_coin_setup(pairs)

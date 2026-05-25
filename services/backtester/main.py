@@ -10,8 +10,8 @@ from services.backtester.core import _get_signal_history, _process_pair_worker, 
 from services.backtester.pipeline import run_backtest
 from services.backtester.reporting import _print_comparison_table, _print_run_report
 from services.backtester.runtime import (
-    DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    DEFAULT_MIN_PRICE_IDR,
+    DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    DEFAULT_MIN_PRICE_USDT,
     OHLCV_DAYS,
     _ensure_container_runtime,
     _ensure_schema_upgraded,
@@ -29,7 +29,7 @@ def _build_container_command(args) -> str:
         cmd_parts.extend(["--generations", str(args.generations)])
     if args.target_daily_pnl is not None:
         cmd_parts.extend(["--target-daily-pnl", str(args.target_daily_pnl)])
-    if args.balance != 100000.0:
+    if args.balance != 1000.0:
         cmd_parts.extend(["--balance", str(args.balance)])
     if args.create_profile_from_analysis:
         cmd_parts.append("--create-profile-from-analysis")
@@ -55,10 +55,10 @@ def _build_container_command(args) -> str:
         cmd_parts.append("--allow-negative-edge-profile")
     if args.backtest_optimized:
         cmd_parts.append("--backtest-optimized")
-    if float(args.min_liquidity_24h_idr) != DEFAULT_MIN_LIQUIDITY_24H_IDR:
-        cmd_parts.extend(["--min-liquidity-24h-idr", str(args.min_liquidity_24h_idr)])
-    if float(args.min_price_idr) != DEFAULT_MIN_PRICE_IDR:
-        cmd_parts.extend(["--min-price-idr", str(args.min_price_idr)])
+    if float(args.min_liquidity_24h_usdt) != DEFAULT_MIN_LIQUIDITY_24H_USDT:
+        cmd_parts.extend(["--min-liquidity-24h-usdt", str(args.min_liquidity_24h_usdt)])
+    if float(args.min_price_usdt) != DEFAULT_MIN_PRICE_USDT:
+        cmd_parts.extend(["--min-price-usdt", str(args.min_price_usdt)])
     if int(args.auto_select_top) > 0:
         cmd_parts.extend(["--auto-select-top", str(int(args.auto_select_top))])
     return " ".join(cmd_parts)
@@ -66,12 +66,12 @@ def _build_container_command(args) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["fetch", "run", "report", "tune", "optimize", "restore", "analyze", "sync-coin-analysis"])
+    parser.add_argument("command", choices=["fetch", "fetch-binance", "run", "report", "tune", "optimize", "restore", "analyze", "sync-coin-analysis"])
     parser.add_argument("--days", type=int, default=OHLCV_DAYS)
     parser.add_argument("--pairs", type=str)
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--target-daily-pnl", type=float, default=None)
-    parser.add_argument("--balance", type=float, default=100000.0)
+    parser.add_argument("--balance", type=float, default=1000.0)
     parser.add_argument("--create-profile-from-analysis", action="store_true")
     parser.add_argument("--analysis-pair", type=str, default=None)
     parser.add_argument("--new-profile-name", type=str, default=None)
@@ -84,23 +84,33 @@ def main():
     parser.add_argument("--allow-global-fallback", action="store_true")
     parser.add_argument("--allow-negative-edge-profile", action="store_true")
     parser.add_argument("--backtest-optimized", action="store_true")
-    parser.add_argument("--min-liquidity-24h-idr", type=float, default=DEFAULT_MIN_LIQUIDITY_24H_IDR)
-    parser.add_argument("--min-price-idr", type=float, default=DEFAULT_MIN_PRICE_IDR)
+    parser.add_argument("--min-liquidity-24h-usdt", type=float, default=DEFAULT_MIN_LIQUIDITY_24H_USDT)
+    parser.add_argument("--min-price-usdt", type=float, default=DEFAULT_MIN_PRICE_USDT)
     parser.add_argument("--auto-select-top", type=int, default=0)
+    parser.add_argument("--top", type=int, default=0, help="fetch-binance: ambil top N liquid pairs otomatis")
     args = parser.parse_args()
 
     _ensure_container_runtime(_build_container_command(args))
     _ensure_schema_upgraded()
 
     if args.command == "fetch":
-        print("ℹ No standalone fetch step is required. Backtest reads from table ohlcv_1m.")
+        print("[INFO] No standalone fetch step is required. Backtest reads from table ohlcv_1m.")
+        print("[INFO] Untuk fetch data Binance, gunakan: fetch-binance")
+    elif args.command == "fetch-binance":
+        try:
+            from services.backtester.fetch_binance import run_fetch
+            run_fetch(days=args.days, pairs_arg=args.pairs or "", top=args.top)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            raise SystemExit(1) from exc
     elif args.command == "run":
         run_backtest(
             args.days,
             args.pairs,
             strict_per_coin=(not args.allow_global_fallback),
-            min_liquidity_24h_idr=float(args.min_liquidity_24h_idr),
-            min_price_idr=float(args.min_price_idr),
+            min_liquidity_24h_usdt=float(args.min_liquidity_24h_usdt),
+            min_price_usdt=float(args.min_price_usdt),
         )
     elif args.command == "report":
         for p in _load_active_profiles():

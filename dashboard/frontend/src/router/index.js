@@ -5,6 +5,7 @@ import { useMode } from '../composables/useMode'
 // Lazy-loaded components
 const LoginView       = () => import('../views/Login.vue')
 const AboutView       = () => import('../views/About.vue')
+const BacktestReport  = () => import('../views/BacktestReport.vue')
 const ModeSelector    = () => import('../views/ModeSelector.vue')
 const Dashboard       = () => import('../App.vue')
 const LiveDashboard   = () => import('../views/LiveDashboard.vue')
@@ -27,6 +28,12 @@ const routes = [
     path: '/about-us',
     name: 'about',
     component: AboutView,
+    meta: { requiresAuth: false },
+  },
+  {
+    path: '/backtest-report',
+    name: 'backtest-report',
+    component: BacktestReport,
     meta: { requiresAuth: false },
   },
   {

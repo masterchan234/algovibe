@@ -26,8 +26,8 @@ def show_results():
         print(f"Total Wins:   {total_wins}")
         print(f"Total Losses: {total_losses}")
         print(f"Winrate:      {winrate:.2f}%")
-        print(f"Total PnL:    {total_pnl:,.2f} IDR")
-        print(f"Avg PnL/Trade:{avg_pnl:,.2f} IDR\n")
+        print(f"Total PnL:    {total_pnl:,.2f} USDT")
+        print(f"Avg PnL/Trade:{avg_pnl:,.2f} USDT\n")
         
         print("=== TOP 5 PAIRS (BY PnL) ===")
         print(df.head(5).to_string(index=False))

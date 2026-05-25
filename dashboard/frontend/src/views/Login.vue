@@ -1,20 +1,6 @@
 <template>
   <div class="blog-portal">
-    <header class="portal-header">
-      <div class="header-container">
-        <div class="portal-branding">
-          <p class="brand-kicker">ALGORITHMIC JOURNAL</p>
-          <h1>ALGOVIBE <span class="sub">INTELLIGENCE</span></h1>
-        </div>
-        <nav class="portal-nav" aria-label="Primary Navigation">
-          <router-link to="/about-us">About Us</router-link>
-          <a href="#hero-2" @click.prevent="scrollToSection('hero-2')">Featured Story</a>
-          <a href="#articles" @click.prevent="scrollToSection('articles')">Articles</a>
-          <a href="#signals" @click.prevent="scrollToSection('signals')">Live Signals</a>
-          <button @click="activeTab = 'auth'" class="login-trigger">login</button>
-        </nav>
-      </div>
-    </header>
+    <PortalHeader />
 
     <div v-if="selectedArticle" class="article-overlay" @click.self="closeArticle()">
       <div class="article-modal">
@@ -312,6 +298,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
 import MarkdownIt from 'markdown-it'
+import PortalHeader from '../components/PortalHeader.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -598,16 +585,6 @@ function goArticles() {
     const section = document.getElementById('articles')
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' })
   })
-}
-
-function scrollToSection(id) {
-  closeArticle()
-  if (route.name !== 'login') {
-    router.push({ name: 'login', hash: `#${id}` })
-  } else {
-    const el = document.getElementById(id)
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
 }
 
 function syncArticleFromRoute() {
@@ -1006,81 +983,11 @@ function stripMarkdown(text) {
   flex-direction: column;
 }
 
-.header-container, .content-container, .footer-container {
+.content-container, .footer-container {
   max-width: 1160px;
   margin: 0 auto;
   width: 100%;
   padding: 0 28px;
-}
-
-.portal-header {
-  border-bottom: 1px solid rgba(133, 168, 192, 0.2);
-  background: rgba(8, 15, 24, 0.9);
-  backdrop-filter: blur(8px);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header-container {
-  min-height: 84px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.brand-kicker {
-  margin: 0 0 4px;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: #7ea3c1;
-  font-weight: 700;
-}
-
-.portal-branding h1 {
-  font-size: 20px;
-  font-weight: 900;
-  letter-spacing: 3px;
-  color: #f4f8fb;
-  margin: 0;
-}
-
-.portal-branding h1 .sub {
-  color: #5dc6e7;
-  font-weight: 500;
-  font-size: 13px;
-}
-
-.portal-nav {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-}
-
-.portal-nav a {
-  color: #b6c8d7;
-  font-size: 11px;
-  text-decoration: none;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-}
-
-.login-trigger {
-  background: linear-gradient(120deg, #79d1ee, #5fc4a4);
-  color: #051018;
-  border: 1px solid rgba(178, 236, 255, 0.35);
-  padding: 8px 18px;
-  font-size: 11px;
-  font-weight: 800;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
-}
-
-.login-trigger:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 18px rgba(80, 177, 214, 0.35);
 }
 
 .portal-main {

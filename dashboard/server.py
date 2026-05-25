@@ -1954,6 +1954,100 @@ def get_backtest_result_detail(result_id):
 # 
 
 
+@app.route('/api/backtest/public-summary', methods=['GET'])
+def get_backtest_public_summary():
+    """Public endpoint — aggregate backtest metrics for landing page. No auth required."""
+    try:
+        conn = get_backtest_db_connection()
+        cur = conn.cursor()
+
+        # Aggregate across all profiles (latest run per profile)
+        cur.execute("""
+            WITH latest AS (
+                SELECT DISTINCT ON (profile_id)
+                    r.profile_id, r.id AS result_id, r.window_start, r.window_end,
+                    p.profile_name
+                FROM backtest_results r
+                JOIN backtest_profiles p ON r.profile_id = p.id
+                WHERE r.pair IS NULL
+                ORDER BY profile_id, r.created_at DESC
+            )
+            SELECT
+                l.profile_name,
+                l.window_start,
+                l.window_end,
+                r.total_trades,
+                r.winning_trades,
+                r.losing_trades,
+                r.win_rate,
+                r.total_pnl_idr,
+                r.total_pnl_pct,
+                r.profit_factor,
+                r.sharpe_ratio,
+                r.max_drawdown_pct,
+                r.avg_trade_duration_sec,
+                r.initial_capital_idr,
+                r.final_capital_idr,
+                r.max_consecutive_wins,
+                r.max_consecutive_losses,
+                l.result_id
+            FROM latest l
+            JOIN backtest_results r ON r.id = l.result_id
+            ORDER BY r.total_pnl_pct DESC
+        """)
+        profiles = [dict(row) for row in cur.fetchall()]
+
+        # Top pairs by win_rate (across all profiles, pair-level results)
+        cur.execute("""
+            SELECT pair, 
+                   AVG(win_rate) AS avg_win_rate,
+                   SUM(total_trades) AS trades,
+                   SUM(total_pnl_pct) AS total_pnl_pct
+            FROM backtest_results
+            WHERE pair IS NOT NULL AND total_trades >= 2
+            GROUP BY pair
+            ORDER BY avg_win_rate DESC, trades DESC
+            LIMIT 10
+        """)
+        top_pairs = [dict(row) for row in cur.fetchall()]
+
+        # Exit reason breakdown
+        cur.execute("""
+            SELECT exit_reason, COUNT(*) AS cnt
+            FROM backtest_trades
+            GROUP BY exit_reason
+            ORDER BY cnt DESC
+        """)
+        exit_reasons = [dict(row) for row in cur.fetchall()]
+
+        # Monthly equity curve (approximate from trade PnL cumsum)
+        cur.execute("""
+            SELECT DATE_TRUNC('day', entry_time) AS day,
+                   SUM(pnl_pct) AS daily_pnl_pct,
+                   COUNT(*) AS trades
+            FROM backtest_trades
+            WHERE pnl_pct IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1
+        """)
+        equity_curve = [dict(row) for row in cur.fetchall()]
+        for row in equity_curve:
+            if row.get('day'):
+                row['day'] = row['day'].isoformat()
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "profiles": profiles,
+            "top_pairs": top_pairs,
+            "exit_reasons": exit_reasons,
+            "equity_curve": equity_curve,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/market-context/<pair>')
 @login_required
 def get_market_context(pair):

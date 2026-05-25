@@ -165,23 +165,42 @@ Algovibe dilengkapi dengan mesin backtesting performa tinggi untuk memvalidasi s
     - **Slippage & Spread Simulation:** Mensimulasikan harga eksekusi di *bid/ask* spread untuk estimasi profit yang realistis.
     - **Portfolio Layer:** Mensimulasikan batasan modal riil dengan parameter `max_open_positions` global lintas pair.
 - **Advanced Quantitative Metrics:** Sortino Ratio, Recovery Factor, Calmar Ratio, Kelly Criterion, dan Expectancy.
+- **USDT-Native:** Semua parameter (balance, PnL, position sizing) berbasis USDT. Default `--balance 1000` USDT, `--target-daily-pnl 5` USDT.
+- **Binance Spot Data:** Fetch OHLCV 1m langsung dari Binance via ccxt. Default fetch semua ~435 pair USDT aktif; gunakan `--top N` untuk membatasi.
 
-### Operasional Backtest:
+### Operasional Backtest (Pipeline Lengkap):
 
 ```bash
-# 1. Fetch data historis (default 90 hari terakhir)
-docker compose run --rm backtester fetch
+# 1. Fetch data historis semua pair USDT di Binance Spot (default: semua ~435 pair, 30 hari)
+docker compose run --rm backtester fetch-binance --days 30
 
-# 2. Jalankan backtest untuk semua profil aktif
+# Atau fetch top 50 pair by volume
+docker compose run --rm backtester fetch-binance --days 30 --top 50
+
+# Atau pair spesifik
+docker compose run --rm backtester fetch-binance --days 30 --pairs btcusdt,ethusdt,solusdt
+
+# 2. Analisis statistik OHLCV per coin, generate per-coin setup ke DB
+docker compose run --rm backtester analyze --days 30
+
+# 3. Jalankan backtest untuk semua profil aktif (strict per-coin setup)
 docker compose run --rm backtester run
 
-# 3. Jalankan backtest dengan filter pair tertentu
-docker compose run --rm backtester run --days 30 --pairs BTC-USDT,ETH-USDT
+# Atau dengan global fallback jika coin belum punya setup
+docker compose run --rm backtester run --allow-global-fallback
 
 # 4. Lihat laporan ringkasan terakhir
 docker compose run --rm backtester report
 
-# 5. Rekursif Optimasi (Auto-Tuning) — Loop 5 generasi
+# 5. Analisis + buat profil otomatis dari top kandidat + langsung backtest
+docker compose run --rm backtester analyze --days 30 \
+  --create-profile-from-analysis \
+  --auto-select-top 5 \
+  --backtest-optimized \
+  --activate-new-profile \
+  --run-after-create
+
+# 6. Rekursif Optimasi (Auto-Tuning) — Loop 5 generasi
 docker compose run --rm backtester optimize --generations 5
 ```
 

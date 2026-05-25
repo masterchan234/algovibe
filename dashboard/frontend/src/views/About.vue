@@ -1,21 +1,7 @@
 <template>
   <div class="about-portal">
     <!-- Consistent Global Header -->
-    <header class="portal-header">
-      <div class="header-container">
-        <div class="portal-branding" @click="goToHomeSection('')" style="cursor: pointer;">
-          <p class="brand-kicker">ALGORITHMIC JOURNAL</p>
-          <h1>ALGOVIBE <span class="sub">INTELLIGENCE</span></h1>
-        </div>
-        <nav class="portal-nav" aria-label="Primary Navigation">
-          <router-link to="/about-us" class="nav-link active">About Us</router-link>
-          <a href="/login#hero-2" @click.prevent="goToHomeSection('hero-2')">Featured Story</a>
-          <a href="/login#articles" @click.prevent="goToHomeSection('articles')">Articles</a>
-          <a href="/login#signals" @click.prevent="goToHomeSection('signals')">Live Signals</a>
-          <button @click="triggerHomeLogin" class="login-trigger">login</button>
-        </nav>
-      </div>
-    </header>
+    <PortalHeader />
 
     <main class="portal-main">
       <div class="content-container">
@@ -35,7 +21,7 @@
             </div>
             <div class="stat-badge">
               <span class="label">ACTIVE INDICATORS</span>
-              <span class="value green">11 MATHEMATICAL METRICS</span>
+              <span class="value green">11 TECHNICAL METRICS</span>
             </div>
             <div class="stat-badge">
               <span class="label">ENGINE LATENCY</span>
@@ -129,79 +115,85 @@
         <!-- Tab Content: Technical Indicators -->
         <div v-else-if="activeTab === 'indicators'" class="tab-content animate-fade">
           <div class="section-header">
-            <h2>11 Technical Indicators Confluence</h2>
+            <h2>Signal Engine v3.0 — Momentum Breakout</h2>
             <p>
-              The scoring engine calculates a total confluence score up to a maximum of ~19.5 from 11 active indicators. 
-              A BUY/SELL signal is triggered in real-time if the total score exceeds the threshold boundaries (BUY >= 6.0, opposing SELL < 4.0).
+              The scoring engine computes 11 technical metrics, of which <strong>3 primary indicators</strong>
+              form the exclusive momentum-breakout scoring model (total max score: <strong>10.0</strong>).
+              A BUY signal fires when score &ge; <strong>6.5 / 10.0</strong>; a SELL signal fires when
+              score &ge; <strong>7.0 / 10.0</strong>. The remaining 8 metrics serve as
+              contextual filters (ATR stability, trend direction, EMA confirmation) applied in the
+              entry gate sequence before any order is dispatched.
             </p>
           </div>
 
           <div class="indicators-grid">
-            <div class="indicator-card">
+            <!-- PRIMARY SCORING INDICATORS (v3.0) -->
+            <div class="indicator-card" style="border-color: #00e5ff33">
               <div class="ind-badge text-cyan">01</div>
-              <h4>RSI-14 (Wilder Smoothing)</h4>
-              <p>Detects overbought/oversold regions using the precise Wilder smoothing method.</p>
-              <div class="ind-weight">Weight: 3.0</div>
+              <h4>Price Velocity</h4>
+              <p>Rate of price change over the last 4 candles. Captures momentum breakout acceleration above a 0.15%–0.4% threshold in real-time.</p>
+              <div class="ind-weight" style="color: #00e5ff">PRIMARY SCORE: 3.5 pts</div>
             </div>
-            <div class="indicator-card">
+            <div class="indicator-card" style="border-color: #00e5ff33">
               <div class="ind-badge text-cyan">02</div>
-              <h4>Price-Normalized MACD</h4>
-              <p>Calculates a price-normalized (x1000) MACD histogram to detect early momentum shifts without nominal price bias.</p>
-              <div class="ind-weight">Weight: 2.5</div>
+              <h4>Volume Ratio</h4>
+              <p>Current candle volume vs. 20-candle moving average. A ratio &ge; 1.4× confirms the move is backed by real participation, not noise.</p>
+              <div class="ind-weight" style="color: #00e5ff">PRIMARY SCORE: 3.5 pts</div>
             </div>
-            <div class="indicator-card">
+            <div class="indicator-card" style="border-color: #00e5ff33">
               <div class="ind-badge text-cyan">03</div>
-              <h4>Bollinger %B</h4>
-              <p>Measures the relative position of the price against upper and lower standard deviation bands.</p>
-              <div class="ind-weight">Weight: 2.0</div>
+              <h4>Order Book Pressure</h4>
+              <p>Real-time bid/ask depth imbalance ratio from the live order book. Measures where limit buyers are positioned <em>before</em> the move — the primary forward-looking edge of the system.</p>
+              <div class="ind-weight" style="color: #00e5ff">PRIMARY SCORE: 3.0 pts</div>
             </div>
+            <!-- SUPPORTING TECHNICAL FILTERS -->
             <div class="indicator-card">
               <div class="ind-badge text-cyan">04</div>
-              <h4>Stochastic RSI</h4>
-              <p>Combines Stochastics and RSI to map ultra-fast momentum exhaustion along with K/D crossover tracking.</p>
-              <div class="ind-weight">Weight: 2.0</div>
+              <h4>RSI-14 (Wilder Smoothing)</h4>
+              <p>Detects overbought/oversold extremes. Used in gate 4c Bottom-Explosion bypass: RSI &lt; 26 triggers EMA-50 exception for extreme mean-reversion entries.</p>
+              <div class="ind-weight">Filter / Gate 4c</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">05</div>
-              <h4>EMA 9/21 Crossover</h4>
-              <p>Determines medium-term trend shifts via dynamic exponential moving average crossovers.</p>
-              <div class="ind-weight">Weight: 1.5</div>
+              <h4>ATR-14 (Volatility Filter)</h4>
+              <p>Average True Range as percentage of price. Entry is blocked (Gate 4b) if ATR &gt; 3% to prevent execution during artificial price spikes.</p>
+              <div class="ind-weight">Filter / Gate 4b</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">06</div>
-              <h4>Williams %R</h4>
-              <p>An independent momentum indicator to detect the strength of extreme market swings.</p>
-              <div class="ind-weight">Weight: 1.5</div>
+              <h4>EMA-50 Trend Guard</h4>
+              <p>Blocks entries below the 50-period exponential moving average to ensure alignment with the dominant trend direction.</p>
+              <div class="ind-weight">Filter / Gate 4c</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">07</div>
-              <h4>Linear Regression Slope</h4>
-              <p>Measures the acceleration of trend momentum through the slope of the latest linear regression line.</p>
-              <div class="ind-weight">Weight: 1.0</div>
+              <h4>MACD Histogram</h4>
+              <p>Price-normalized MACD histogram detects early momentum shifts. Used as a supporting confluence metric in the scoring context.</p>
+              <div class="ind-weight">Supporting Metric</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">08</div>
-              <h4>ROC-10 (Rate of Change)</h4>
-              <p>Measures the percentage change in price to identify potential mean-reversion opportunities.</p>
-              <div class="ind-weight">Weight: 1.0</div>
+              <h4>Stochastic RSI</h4>
+              <p>K/D crossover for momentum exhaustion detection at micro-timeframe resolution.</p>
+              <div class="ind-weight">Supporting Metric</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">09</div>
-              <h4>Order Book Pressure</h4>
-              <p>Analyzes real-time bid/ask depth pressure (falls back to Volume Ratio if order book depth is unavailable).</p>
-              <div class="ind-weight">Weight: 2.0</div>
+              <h4>Bollinger %B</h4>
+              <p>Relative price position within standard deviation bands. Identifies overextension and compression zones.</p>
+              <div class="ind-weight">Supporting Metric</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">10</div>
-              <h4>Volume Ratio</h4>
-              <p>The ratio of current trading volume against its 20-candle moving average. Volume spikes validate trend breakouts.</p>
-              <div class="ind-weight">Weight: 1.5</div>
+              <h4>Williams %R</h4>
+              <p>Independent momentum oscillator for extreme swing detection, cross-validated against RSI divergence.</p>
+              <div class="ind-weight">Supporting Metric</div>
             </div>
             <div class="indicator-card">
               <div class="ind-badge text-cyan">11</div>
               <h4>OBV Slope</h4>
-              <p>Tracks discrete volume accumulation and distribution before nominal price movement occurs.</p>
-              <div class="ind-weight">Weight: 1.5</div>
+              <p>On-Balance Volume trend tracks discrete accumulation and distribution cycles before nominal price movement occurs.</p>
+              <div class="ind-weight">Supporting Metric</div>
             </div>
           </div>
         </div>
@@ -341,9 +333,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-
-const router = useRouter()
+import PortalHeader from '../components/PortalHeader.vue'
 
 const tabs = [
   { id: 'architecture', label: 'SYSTEM ARCHITECTURE' },
@@ -353,14 +343,6 @@ const tabs = [
 ]
 
 const activeTab = ref('architecture')
-
-function goToHomeSection(id) {
-  router.push({ name: 'login', hash: id ? `#${id}` : '' })
-}
-
-function triggerHomeLogin() {
-  router.push({ name: 'login', query: { showAuth: 'true' } })
-}
 
 onMounted(() => {
   document.title = 'System Profile | Algovibe Intelligence'
@@ -383,88 +365,11 @@ onMounted(() => {
   flex-direction: column;
 }
 
-.content-container, .header-container, .footer-container {
+.content-container, .footer-container {
   max-width: 1160px;
   margin: 0 auto;
   width: 100%;
   padding: 0 28px;
-}
-
-/* Header style identical to Login.vue */
-.portal-header {
-  border-bottom: 1px solid rgba(133, 168, 192, 0.2);
-  background: rgba(8, 15, 24, 0.9);
-  backdrop-filter: blur(8px);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header-container {
-  min-height: 84px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.brand-kicker {
-  margin: 0 0 4px;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: #7ea3c1;
-  font-weight: 700;
-}
-
-.portal-branding h1 {
-  font-size: 20px;
-  font-weight: 900;
-  letter-spacing: 3px;
-  color: #f4f8fb;
-  margin: 0;
-}
-
-.portal-branding h1 .sub {
-  color: #5dc6e7;
-  font-weight: 500;
-  font-size: 13px;
-}
-
-.portal-nav {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-}
-
-.portal-nav a {
-  color: #b6c8d7;
-  font-size: 11px;
-  text-decoration: none;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  transition: color 0.2s ease;
-}
-
-.portal-nav a:hover,
-.portal-nav a.active {
-  color: #5dc6e7;
-}
-
-.login-trigger {
-  background: linear-gradient(120deg, #79d1ee, #5fc4a4);
-  color: #051018;
-  border: 1px solid rgba(178, 236, 255, 0.35);
-  padding: 8px 18px;
-  font-size: 11px;
-  font-weight: 800;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
-}
-
-.login-trigger:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 18px rgba(80, 177, 214, 0.35);
 }
 
 .portal-main {
