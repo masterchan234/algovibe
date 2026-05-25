@@ -117,13 +117,12 @@
           </div>
         </section>
 
-        <section id="signals" class="section-block" aria-labelledby="live-signals-title">
+        <section id="performance" class="section-block" aria-labelledby="performance-title">
           <div class="section-headline">
-            <h2 id="live-signals-title">Live Market Signals</h2>
-            <p>Real-time trend strength snapshots and momentum scoring based on active market streams.</p>
+            <h2 id="performance-title">Bot Performance</h2>
+            <p>Aggregated trading statistics from live autonomous execution, updated every refresh.</p>
           </div>
 
-          <!-- 7-Day Performance Stats -->
           <div class="perf-bar">
             <div class="perf-bar-header">
               <span class="perf-label">{{ landingData.performance.window_days }}-DAY PERFORMANCE</span>
@@ -174,6 +173,13 @@
                 <span class="coin-pill-wr" :class="c.attr_pct > 0 ? 'green' : c.attr_pct < 0 ? 'red' : 'amber'">{{ c.attr_pct > 0 ? '+' : '' }}{{ c.attr_pct }}%</span>
               </div>
             </div>
+          </div>
+        </section>
+
+        <section id="signals" class="section-block" aria-labelledby="live-signals-title">
+          <div class="section-headline">
+            <h2 id="live-signals-title">Live Market Signals</h2>
+            <p>Real-time trend strength snapshots and momentum scoring based on active market streams.</p>
           </div>
 
           <div class="signals-grid">
@@ -1251,7 +1257,7 @@ function stripMarkdown(text) {
   border: 1px solid rgba(0, 216, 122, 0.18);
   border-radius: 14px;
   padding: 16px 24px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .perf-bar-header {
@@ -1328,7 +1334,6 @@ function stripMarkdown(text) {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 20px;
   flex-wrap: wrap;
 }
 
