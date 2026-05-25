@@ -17,7 +17,9 @@
 - **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange. Auto-reconcile dilengkapi guard terhadap ticker stale (harga=0) — posisi tidak akan dihapus kecuali harga valid tersedia, mencegah false-delete pada saat feed WebSocket terputus sementara.
 - **Safe Exit Timeout Override:** Saat limit sell gagal fill, bot membatalkan order lama dan melakukan market sell pengganti — dengan verifikasi cancel terkonfirmasi terlebih dahulu sebelum order baru dikirim, mencegah double-fill.
 - **Multi-Tier Capital Protection:** Sistem berlapis — Basket Harvest, Momentum Equity Protection, Net-Zero Survival Guard — melindungi modal dari drawdown beruntun.
-- **Dynamic TP/SL/Profit Scaling:** Target TP, SL, dan minimum profit menyesuaikan otomatis dengan pertumbuhan modal (2.0%–3.5% TP).
+- **Dynamic TP/SL/Profit Scaling:** Target TP, SL, dan minimum profit menyesuaikan otomatis dengan pertumbuhan modal (2.0%–3.5% TP). Maksimum 6 posisi terbuka serentak (`MAX_OPEN_POSITIONS = 6`).
+- **Daily Profit Target System:** Oracle menghitung target profit harian secara dinamis berdasarkan saldo aktif (1%–5% balance, floor $5). Session multiplier menyesuaikan target berdasarkan sesi Binance WIB (US session peak 20–24 WIB: ×1.3, Europe peak 15–20 WIB: ×1.1, Asia quiet 00–08 WIB: ×0.8). Setelah target tercapai, bot masuk mode `HARVEST_ONLY`.
+- **Target Pursuit Phase:** Adaptive config oracle memantau progres harian secara real-time. Jika bot tertinggal jauh dari target dan waktu hampir habis (`PROTECT`), threshold entry dinaikkan. Jika masih banyak waktu tersisa (`PURSUE`), threshold sedikit diturunkan untuk mengejar target.
 - **Session Awareness Engine:** Evaluator kondisi bot terpadu yang mengklasifikasikan sesi trading ke dalam 7 state strategi (`HALT` → `RECOVERY_CRISIS` → `RECOVERY_DAILY` → `RECOVERY_ALLTIME` → `CAUTIOUS` → `NORMAL` → `MOMENTUM_CHASE`). Setiap state mendefinisikan threshold teknikal, ukuran posisi, dan batas pair secara otomatis sesuai kondisi PnL dan regime market.
 - **Automated News Engine:** News Maker menghasilkan artikel analisis pasar otomatis (Morning Briefing, Trending Review, Evening Review, Breaking Headlines) dengan dukungan LLM lokal maupun cloud provider.
 
@@ -127,7 +129,7 @@ Untuk mencegah erosi keuntungan akibat whipsaw pada timeframe 1m, Exit Manager m
     *   Menggeser Stop Loss (SL) ke level breakeven (+ 0.02% cushion biaya transaksi) segera setelah profit mencapai $\ge +0.3\%$ gross.
     *   Menggeser SL ke trailing stop ketat **0.2% dari puncak harga** jika profit mencapai $\ge +0.5\%$ dan posisi telah berjalan $\ge 2$ menit (Slow Trade).
 *   **Momentum Fading Profit Lock (Exit Pasar Agresif):** Jika posisi sudah net-profit ($\ge +0.3\%$ gross) dan durasi posisi mencapai $\ge 2$ menit, bot akan langsung mengeksekusi **Market Sell** jika momentum melemah (verdict != `BUY`, atau sinyal `SELL`, atau keyakinan/confidence < 0.40).
-*   **Micro Profit Exit:** Evaluasi exit pada harga `bid` riil (bukan harga terakhir `last`) untuk memastikan profit bersih aman setelah dipotong spread pasar. Auto-aktif jika balance di bawah threshold (`MICRO_PROFIT_BALANCE_THRESHOLD`).
+*   **Micro Profit Exit:** Evaluasi exit pada harga `bid` riil (bukan harga terakhir `last`) untuk memastikan profit bersih aman setelah dipotong spread pasar. Auto-aktif jika balance di bawah threshold (`MICRO_PROFIT_BALANCE_THRESHOLD = $300`). TP ceiling saat micro profit mode: 1.5% (`MICRO_PROFIT_TP_PCT`).
 *   **Dynamic TP/SL/Min-Profit Tiers:** Target TP dan minimum profit bersih menyesuaikan otomatis dengan saldo aktif:
     *   Balance ≤ $100: TP 2.0%, min profit 0.01%
     *   Balance $100–$250: TP 2.2%, min profit 0.05%
@@ -136,7 +138,7 @@ Untuk mencegah erosi keuntungan akibat whipsaw pada timeframe 1m, Exit Manager m
 
 ### 💰 Basket Harvest & Portfolio Protection
 
-*   **Basket Harvest (Guaranteed Profit Harvester):** Trigger close semua posisi secara bersamaan ketika combined net PnL mencapai ~5% modal (min $20 USDT), bahkan jika semua posisi masih profit.
+*   **Basket Harvest (Guaranteed Profit Harvester):** Trigger close semua posisi secara bersamaan ketika combined net PnL mencapai ~1.5% modal (min $15 USDT), bahkan jika semua posisi masih profit.
 *   **HWM Pullback Trigger:** Jika combined PnL turun > 30% dari peak session, eksekusi basket exit otomatis.
 *   **BTC Crash Kill Switch:** Drop BTC > 2% dalam 5 menit memicu emergency basket exit tanpa menunggu gate profit.
 *   **Guaranteed Profit Harvest (BTC Correlation):** Trigger BTC-weakening hanya aktif jika penurunan portofolio dari HWM sudah mencapai **> 20%** (bukan sekadar 1 tick di bawah puncak), mencegah harvest terlalu dini saat posisi masih tumbuh.
@@ -204,7 +206,7 @@ app/
 │   ├── use_cases/
 │   │   ├── trade_execution.py  # BUY execution, fee-trap pure-% guard
 │   │   └── candidate_enrichment.py
-│   ├── oracle.py               # Market regime & K-NN pattern scoring
+│   ├── oracle.py               # Market regime, K-NN scoring, daily profit target & adaptive config (Target Pursuit Phase)
 │   └── exit_manager.py         # TP/SL/Trailing, Dynamic Breakeven, Basket Harvest, Net-Zero Guard
 ├── domain/
 │   ├── technicals.py   # 3 indikator v3.0 (Velocity, Volume Ratio, OB Pressure) + 15 helper indicators
@@ -304,6 +306,22 @@ docker compose -f docker-compose-prod.yml logs -f executive-core dashboard-api
 # 4. Menghentikan stack production
 docker compose -f docker-compose-prod.yml down
 ```
+
+### 🗄️ Sinkronisasi Database Local → Production
+
+Untuk mendorong semua data dari lokal ke server production (full overwrite — termasuk `algovibe`, `algovibe_dryrun`, `algovibe_live`):
+
+```bash
+# Preview tanpa eksekusi:
+./scripts/sync_db_to_prod.sh --dry-run
+
+# Full sync (akan meminta konfirmasi sebelum dijalankan):
+./scripts/sync_db_to_prod.sh
+```
+
+Script ini otomatis: dump → SCP → `docker cp` ke container → stop bot services production → drop/recreate DB dengan prosedur TimescaleDB (`pre_restore` → `pg_restore` → `post_restore`) → restart services → verifikasi row count.
+
+> **PERINGATAN:** Operasi ini menimpa semua data di production. Gunakan hanya bila yakin. SSH alias target: `wiraworks-srv`, project path: `/root/algovibe`.
 
 ---
 
