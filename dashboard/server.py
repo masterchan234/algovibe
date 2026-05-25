@@ -3572,11 +3572,9 @@ def _build_trades_payload():
                 stored_sl_pct = float(p.get('target_sl_pct') or 0)
                 
                 # SL dynamic calculation
-                trailing_sl_price = float(p.get('trailing_sl_price') or 0)
-                if trailing_sl_price > 0 and entry_price > 0:
-                    current_sl_pct = (trailing_sl_price - entry_price) / entry_price
-                else:
-                    current_sl_pct = stored_sl_pct
+                # Gunakan target_sl_pct (hard SL aktual yang ditegakkan bot) untuk display.
+                # trailing_sl_price adalah field untuk TTP mechanism, bukan hard SL — jangan dipakai di sini.
+                current_sl_pct = stored_sl_pct
 
                 # Dynamic TP: Hitung dari harga tertinggi yang pernah dicapai (Trailing TP)
                 highest_price = float(p.get('highest_price') or 0)
