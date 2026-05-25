@@ -122,6 +122,60 @@
             <h2 id="live-signals-title">Live Market Signals</h2>
             <p>Real-time trend strength snapshots and momentum scoring based on active market streams.</p>
           </div>
+
+          <!-- 7-Day Performance Stats -->
+          <div class="perf-bar">
+            <div class="perf-bar-header">
+              <span class="perf-label">{{ landingData.performance.window_days }}-DAY PERFORMANCE</span>
+              <span class="perf-window">rolling {{ landingData.performance.window_days }} days</span>
+            </div>
+            <div class="perf-stats">
+              <div class="perf-stat perf-stat--main">
+                <span class="perf-val" :class="landingData.performance.win_rate >= 60 ? 'green' : landingData.performance.win_rate >= 45 ? 'amber' : 'red'">
+                  {{ landingData.performance.win_rate.toFixed(1) }}%
+                </span>
+                <span class="perf-key">WIN RATE</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat">
+                <span class="perf-val green">{{ landingData.performance.wins }}</span>
+                <span class="perf-key">WINS</span>
+              </div>
+              <div class="perf-stat">
+                <span class="perf-val red">{{ landingData.performance.losses }}</span>
+                <span class="perf-key">LOSSES</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat">
+                <span class="perf-val green">+{{ landingData.performance.avg_win_pct.toFixed(2) }}%</span>
+                <span class="perf-key">AVG WIN</span>
+              </div>
+              <div class="perf-stat">
+                <span class="perf-val red">{{ landingData.performance.avg_loss_pct.toFixed(2) }}%</span>
+                <span class="perf-key">AVG LOSS</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat perf-stat--main">
+                <span class="perf-val" :class="landingData.performance.net_avg_pct >= 0 ? 'green' : 'red'">
+                  {{ landingData.performance.net_avg_pct >= 0 ? '+' : '' }}{{ landingData.performance.net_avg_pct.toFixed(2) }}%
+                </span>
+                <span class="perf-key">NET AVG / TRADE</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Coin Attribution -->
+          <div v-if="landingData.performance.coin_attribution.length" class="coin-attr">
+            <span class="coin-attr-label">COIN ATTRIBUTION</span>
+            <div class="coin-attr-list">
+              <div v-for="c in landingData.performance.coin_attribution" :key="c.coin" class="coin-pill">
+                <span class="coin-pill-name">{{ c.coin }}</span>
+                <span class="coin-pill-trades">{{ c.trades }}x</span>
+                <span class="coin-pill-wr" :class="c.attr_pct > 0 ? 'green' : c.attr_pct < 0 ? 'red' : 'amber'">{{ c.attr_pct > 0 ? '+' : '' }}{{ c.attr_pct }}%</span>
+              </div>
+            </div>
+          </div>
+
           <div class="signals-grid">
             <div v-for="sig in landingData.signals" :key="sig.pair" class="sig-brief">
               <!-- Header: pair + verdict badge -->
@@ -281,7 +335,8 @@ const landingData = reactive({
   insights: [],
   signals: [],
   articles: [],
-  market: { sentiment: 50, btc_price: 0, regime: 'SCANNING' }
+  market: { sentiment: 50, btc_price: 0, regime: 'SCANNING' },
+  performance: { wins: 0, losses: 0, win_rate: 0, avg_win_pct: 0, avg_loss_pct: 0, net_avg_pct: 0, window_days: 7, coin_attribution: [] }
 })
 
 const currentInsightIdx = ref(0)
@@ -444,6 +499,9 @@ async function fetchLandingData() {
         signal: s.signal || 'NEUTRAL',
       }))
       landingData.market = data.market
+      if (data.performance) {
+        landingData.performance = data.performance
+      }
       publicLogs.value = (data.public_logs || []).map((log) => ({
         time: formatLogTime(log.time),
         message: String(log.message || '')
@@ -1187,6 +1245,142 @@ function stripMarkdown(text) {
   font-weight: 700;
   color: #7391a4;
 }
+
+.perf-bar {
+  background: rgba(0, 216, 122, 0.05);
+  border: 1px solid rgba(0, 216, 122, 0.18);
+  border-radius: 14px;
+  padding: 16px 24px;
+  margin-bottom: 24px;
+}
+
+.perf-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.perf-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #00d87a;
+  text-transform: uppercase;
+}
+
+.perf-window {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  color: #4a6272;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.perf-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  width: 100%;
+}
+
+.perf-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+
+.perf-stat--main .perf-val {
+  font-size: 20px;
+}
+
+.perf-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.perf-val.green { color: #00d87a; }
+.perf-val.red   { color: #ff4466; }
+.perf-val.amber { color: #f0b429; }
+
+.perf-key {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.10em;
+  color: #7391a4;
+  text-transform: uppercase;
+}
+
+.perf-divider {
+  width: 1px;
+  height: 36px;
+  background: rgba(125, 173, 198, 0.20);
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+.coin-attr {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.coin-attr-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #4a6272;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.coin-attr-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.coin-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(8, 23, 33, 0.70);
+  border: 1px solid rgba(125, 173, 198, 0.18);
+  border-radius: 20px;
+  padding: 4px 12px;
+}
+
+.coin-pill-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #c8dde8;
+  letter-spacing: 0.05em;
+}
+
+.coin-pill-trades {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: #4a6272;
+}
+
+.coin-pill-wr {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.coin-pill-wr.green { color: #00d87a; }
+.coin-pill-wr.amber { color: #f0b429; }
+.coin-pill-wr.red   { color: #ff4466; }
 
 .signals-grid {
   display: grid;

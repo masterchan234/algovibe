@@ -1058,7 +1058,71 @@ def public_landing_data():
                 }
             ]
         
-        # 4. Intelligence Reports
+        # 4. Performance Stats (7-day window) — untuk landing page public
+        perf_stats = {"wins": 0, "losses": 0, "win_rate": 0.0, "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "net_avg_pct": 0.0, "window_days": 7, "coin_attribution": []}
+        try:
+            dry_val = bool(cfg.DRY_RUN)
+            exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
+            perf_row = conn.execute(f"""
+                SELECT
+                    COUNT(*) FILTER (WHERE pnl_idr > 0) AS wins,
+                    COUNT(*) FILTER (WHERE pnl_idr <= 0) AS losses,
+                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_idr > 0)::numeric, 2) AS avg_win_pct,
+                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_idr <= 0)::numeric, 2) AS avg_loss_pct,
+                    ROUND(AVG(pnl_pct)::numeric, 2) AS net_avg_pct,
+                    MIN(created_at) AS first_trade
+                FROM trade_history
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+                AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
+            """, (bool(dry_val),)).fetchone()
+            coin_rows = conn.execute(f"""
+                SELECT
+                    UPPER(REPLACE(REPLACE(pair, 'usdt', ''), 'idr', '')) AS coin,
+                    COUNT(*) AS trades,
+                    ROUND(
+                        (SUM(pnl_idr) / NULLIF(SUM(SUM(pnl_idr)) OVER (), 0) * 100)::numeric
+                    , 0) AS attr_pct
+                FROM trade_history
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+                AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
+                GROUP BY coin
+                ORDER BY SUM(pnl_idr) DESC LIMIT 6
+            """, (bool(dry_val),)).fetchall()
+            if perf_row:
+                wins = int(perf_row['wins'] or 0)
+                losses = int(perf_row['losses'] or 0)
+                total = wins + losses
+                # Hitung window aktual dari trade pertama, bukan hardcode 7 hari
+                window_days = 7
+                if perf_row['first_trade'] and total > 0:
+                    import datetime as _dt
+                    first = perf_row['first_trade']
+                    if hasattr(first, 'tzinfo') and first.tzinfo is None:
+                        first = first.replace(tzinfo=_dt.timezone.utc)
+                    now_utc = _dt.datetime.now(_dt.timezone.utc)
+                    delta_days = max(1, round((now_utc - first).total_seconds() / 86400))
+                    window_days = min(delta_days, 7)
+                perf_stats = {
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                    "avg_win_pct": float(perf_row['avg_win_pct'] or 0),
+                    "avg_loss_pct": float(perf_row['avg_loss_pct'] or 0),
+                    "net_avg_pct": float(perf_row['net_avg_pct'] or 0),
+                    "window_days": window_days,
+                    "coin_attribution": [
+                        {
+                            "coin": r['coin'],
+                            "trades": int(r['trades']),
+                            "attr_pct": int(r['attr_pct'] or 0),
+                        }
+                        for r in coin_rows
+                    ],
+                }
+        except Exception:
+            pass
+
+        # 5. Intelligence Reports
         art_rows = conn.execute(
             "SELECT title, excerpt, content, category, created_at FROM intelligence_reports "
             "ORDER BY created_at DESC LIMIT 5"
@@ -1102,6 +1166,7 @@ def public_landing_data():
             "insights": insights,
             "articles": articles,
             "public_logs": public_logs,
+            "performance": perf_stats,
             "market": {
                 "sentiment": int(sentiment),
                 "btc_price": float(btc_price),
