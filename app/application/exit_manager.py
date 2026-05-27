@@ -192,9 +192,16 @@ class ExitManager:
         return float(pair_min) if pair_min > 0 else float(_MIN_TRADE_IDR)
 
     def _parse_iso_date(self, val):
-        """Safely parse ISO date string, fallback to now() if missing or invalid."""
-        if not val or not isinstance(val, str):
+        """Safely parse ISO date string or datetime object, fallback to now() if missing."""
+        if not val:
             return datetime.now()
+        if isinstance(val, datetime):
+            return val
+        if not isinstance(val, str):
+            try:
+                return datetime.fromisoformat(str(val))
+            except Exception:
+                return datetime.now()
         try:
             return datetime.fromisoformat(val)
         except Exception:
@@ -1038,6 +1045,11 @@ class ExitManager:
                             f"Value: {format_currency(value_idr, signed=False)} | "
                             f"Entry est: {format_currency(actual_entry_price, is_price=True)}"
                         )
+                        from config import SL_PCT as _DISCOVERY_SL_PCT, TP_PCT as _DISCOVERY_TP_PCT, get_dynamic_sl_pct as _get_dyn_sl
+                        try:
+                            _discovery_sl = _get_dyn_sl(self.cached_balance if hasattr(self, 'cached_balance') else 0)
+                        except Exception:
+                            _discovery_sl = _DISCOVERY_SL_PCT
                         recovery_data = {
                             "pair": pair,
                             "entry_price": actual_entry_price,
@@ -1048,7 +1060,9 @@ class ExitManager:
                             "exit_order_id": None,
                             "timestamp": datetime.now().isoformat(),
                             "dry_run": False,
-                            "reason_backup": "DISCOVERY"
+                            "reason_backup": "DISCOVERY",
+                            "target_sl_pct": _discovery_sl,
+                            "target_tp_pct": _DISCOVERY_TP_PCT,
                         }
                         db.upsert_position(pair, recovery_data)
                         all_positions[pair] = recovery_data

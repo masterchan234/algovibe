@@ -4,6 +4,9 @@ services/knn_worker/main.py
 Background microservice for isolated, asynchronous K-NN pattern classification.
 Fetches active pairs, calculates their DNA patterns, compares against historical
 trade DNAs, and caches the SAFE/AVOID flags in Redis for O(1) access by the bot.
+
+v2: Integrates per-pair pre-trained RandomForestClassifier (pkl) as primary
+    signal source; K-NN weighted Manhattan falls back when no model exists.
 """
 
 import asyncio
@@ -11,9 +14,10 @@ import logging
 import json
 import os
 import sys
-import time
+import warnings
 from datetime import datetime
 import numpy as np
+import joblib
 import redis
 
 # Add repository root to system path
@@ -27,6 +31,8 @@ from app.domain.technicals import (
     calculate_macd,
     calculate_bollinger_bands,
     calculate_ema,
+    calculate_stochastic_rsi,
+    calculate_williams_r,
     get_technical_summary,
     _MACD_NORM_FACTOR,
 )
@@ -37,6 +43,121 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] knn-worker — %(message)s",
 )
 logger = logging.getLogger("knn-worker")
+
+# Directory containing per-pair pkl classifiers.
+# Override via MODEL_DIR env var; default = /app/models inside container.
+MODEL_DIR = os.getenv("MODEL_DIR", "/app/models")
+
+# Lazy-load cache: pair -> model object | None (None = no model found/loadable)
+_model_cache: dict = {}
+
+
+def load_model_for_pair(pair: str):
+    """Lazy-load and cache the pre-trained scalp_classifier for a pair."""
+    if pair in _model_cache:
+        return _model_cache[pair]
+    path = os.path.join(MODEL_DIR, f"{pair}_1m_90d_1m_scalp_classifier.pkl")
+    if not os.path.exists(path):
+        _model_cache[pair] = None
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = joblib.load(path)
+        _model_cache[pair] = model
+        return model
+    except Exception as e:
+        logger.warning(f"[MODEL] Failed to load {pair}: {e}")
+        _model_cache[pair] = None
+        return None
+
+
+def compute_model_features(prices: list, imbalance: float = 1.0) -> list:
+    """
+    Build the 20-feature vector expected by the scalp_classifier models.
+
+    Features (in order):
+        RSI, RSI_Change, RSI_Slope, MACD_Hist, MACD_Signal_Cross,
+        BB_Pos, BB_Width, Stoch_K, Stoch_D, Stoch_Cross,
+        Williams_R, EMA_9_21_Diff, EMA_Above_50, Vol_Ratio, Vol_Change,
+        Price_Change_1m, Price_Change_3m, Price_Change_5m, ATR_Pct, OBV_Slope
+    """
+    if len(prices) < 30:
+        return []
+
+    prices_arr = np.array(prices, dtype=float)
+    p_last = float(prices_arr[-1])
+
+    # 1. RSI
+    rsi = calculate_rsi(prices)
+
+    # 2-3. RSI_Change, RSI_Slope (over last 3 candles)
+    rsi_prev = calculate_rsi(list(prices_arr[:-3])) if len(prices) > 17 else rsi
+    rsi_change = rsi - rsi_prev
+    rsi_slope = rsi_change / 3.0
+
+    # 4. MACD_Hist
+    _, _, macd_hist = calculate_macd(prices)
+
+    # 5. MACD_Signal_Cross: +1 crossed bullish, -1 crossed bearish, 0 no cross
+    if len(prices) > 36:
+        _, _, macd_hist_prev = calculate_macd(list(prices_arr[:-1]))
+    else:
+        macd_hist_prev = macd_hist
+    if macd_hist > 0 and macd_hist_prev <= 0:
+        macd_signal_cross = 1.0
+    elif macd_hist < 0 and macd_hist_prev >= 0:
+        macd_signal_cross = -1.0
+    else:
+        macd_signal_cross = 0.0
+
+    # 6-7. BB_Pos (bb_pct), BB_Width
+    upper, middle, lower, bb_pct = calculate_bollinger_bands(prices)
+    bb_width = (upper - lower) / middle if middle > 0 else 0.0
+
+    # 8-9. Stoch_K, Stoch_D
+    stoch_k, stoch_d = calculate_stochastic_rsi(prices)
+
+    # 10. Stoch_Cross: 1 if K > D (bullish), 0 otherwise
+    stoch_cross = 1.0 if stoch_k > stoch_d else 0.0
+
+    # 11. Williams_R
+    williams_r = calculate_williams_r(prices)
+
+    # 12. EMA_9_21_Diff (normalised % diff)
+    ema9  = calculate_ema(prices, 9)
+    ema21 = calculate_ema(prices, 21)
+    ema_9_21_diff = (ema9 - ema21) / ema21 * 100.0 if ema21 > 0 else 0.0
+
+    # 13. EMA_Above_50
+    ema50 = calculate_ema(prices, min(50, len(prices)))
+    ema_above_50 = 1.0 if p_last > ema50 else 0.0
+
+    # 14. Vol_Ratio — use order-book imbalance as best available proxy
+    vol_ratio = float(imbalance)
+
+    # 15. Vol_Change — no per-pair volume history stored; default 0
+    vol_change = 0.0
+
+    # 16-18. Price changes (%)
+    price_change_1m = (p_last / float(prices_arr[-2]) - 1.0) * 100.0 if len(prices) >= 2 else 0.0
+    price_change_3m = (p_last / float(prices_arr[-4]) - 1.0) * 100.0 if len(prices) >= 4 else 0.0
+    price_change_5m = (p_last / float(prices_arr[-6]) - 1.0) * 100.0 if len(prices) >= 6 else 0.0
+
+    # 19. ATR_Pct — approximate via rolling std of abs price diffs (no OHLCV available)
+    window = prices_arr[-15:] if len(prices_arr) >= 15 else prices_arr
+    atr_approx = float(np.std(np.abs(np.diff(window)))) if len(window) > 1 else 0.0
+    atr_pct = atr_approx / p_last * 100.0 if p_last > 0 else 0.0
+
+    # 20. OBV_Slope — no tick-level volume history; default 0
+    obv_slope = 0.0
+
+    return [
+        rsi, rsi_change, rsi_slope, macd_hist, macd_signal_cross,
+        bb_pct, bb_width, stoch_k, stoch_d, stoch_cross,
+        williams_r, ema_9_21_diff, ema_above_50, vol_ratio, vol_change,
+        price_change_1m, price_change_3m, price_change_5m, atr_pct, obv_slope,
+    ]
 
 
 def compute_current_dna(pair: str, history: list, volatility: float, imbalance: float, tq_prob: float) -> dict:
@@ -202,13 +323,36 @@ class KNNWorkerService:
                     imbalance_raw = self.redis.get(f"imbalance:{pair}")
                     imbalance = float(imbalance_raw) if imbalance_raw else 1.0
 
-                    # Compute current pair DNA
+                    # Compute current pair DNA (still used by K-NN fallback)
                     current_dna = compute_current_dna(pair, history, volatility, imbalance, tq_prob)
                     if not current_dna:
                         continue
 
-                    # Match K-NN winning pattern
-                    knn_decision = find_winning_pattern(pair, current_dna, history_dnas)
+                    # --- Primary: per-pair pre-trained RF classifier ---
+                    model = load_model_for_pair(pair)
+                    if model is not None:
+                        features = compute_model_features(history, imbalance)
+                        if features:
+                            try:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter("ignore")
+                                    proba = model.predict_proba([features])[0]
+                                buy_prob = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                                knn_decision = {
+                                    "verdict": "BUY",
+                                    "confidence": round(buy_prob * 100.0, 2),
+                                    "reason": f"ScalpClassifier P(buy)={buy_prob:.3f}",
+                                    "target_tp": 0.04,
+                                    "target_sl": -0.02,
+                                }
+                            except Exception as e:
+                                logger.warning(f"[MODEL] Inference error {pair}: {e}")
+                                knn_decision = find_winning_pattern(pair, current_dna, history_dnas)
+                        else:
+                            knn_decision = find_winning_pattern(pair, current_dna, history_dnas)
+                    else:
+                        # --- Fallback: K-NN weighted Manhattan ---
+                        knn_decision = find_winning_pattern(pair, current_dna, history_dnas)
 
                     # Save decision verdict back to Redis (O(1) retrieval)
                     redis_key = f"knn_verdict:{pair}"

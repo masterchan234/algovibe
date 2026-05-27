@@ -72,7 +72,7 @@ HIGH_OPPORTUNITY_TQ_PROB = float(os.getenv("HIGH_OPPORTUNITY_TQ_PROB", 0.75))
 
 # --- [Scalping Targets] ---
 TP_PCT = 0.035                  # Target TP 3.5%
-SL_PCT = -0.035                 # [SL/DCA SYNC] -3.5%
+SL_PCT = -0.015                 # [HFT SCALPING] -1.5% tight SL (was -3.5%)
 AUTO_SL_ENABLED = True          # [MOMENTUM FOCUS] Auto-SL
 MAX_HOLD_MINUTES = 10           # Anti-Zombie
 
@@ -164,11 +164,29 @@ def get_dynamic_tp_pct(current_balance: float = None) -> float:
         return 0.035  # 3.5% untuk large account
 
 def get_dynamic_sl_pct(current_balance: float = None) -> float:
-    """Calculate SL_PCT dynamically. Matching TP tightening to maintain R:R.
-    - Balance ≤ 250 USDT: -3.5% (DCA target at -1.5%)
-    - Balance > 250 USDT: -3.5%
+    """Calculate SL_PCT dynamically. Tight SL for HFT scalping to maintain positive R:R.
+    R:R target: TP(2.0-2.5%) / SL(1.5-2.0%) >= 1.33 → profitable at 55% win rate.
+    - Balance ≤ 500 USDT: -1.5% SL (strict capital protection)
+    - Balance ≤ 1000 USDT: -1.8% SL
+    - Balance > 1000 USDT: -2.0% SL
     """
-    return -0.035  # Tetap -3.5% sesuai kebijakan DCA Sync, tapi disiapkan fungsinya agar konsisten.
+    if current_balance is None:
+        try:
+            from app.infrastructure.database import db
+            stats = db.get_daily_stats()
+            opening_balance = float(stats.get('opening_balance', INITIAL_CAPITAL))
+            current_balance = opening_balance + float(stats.get('total_pnl_idr', 0))
+        except Exception:
+            current_balance = INITIAL_CAPITAL
+
+    current_balance = max(current_balance, INITIAL_CAPITAL)
+
+    if current_balance <= 500.0:
+        return -0.015  # -1.5% untuk small account (scalping HFT)
+    elif current_balance <= 1000.0:
+        return -0.018  # -1.8% untuk medium account
+    else:
+        return -0.020  # -2.0% untuk large account
 
 # --- [Basket Exit: Guaranteed Profit Harvester] ---
 # Trigger basket harvest segera ketika combined net PnL mencapai target ini,

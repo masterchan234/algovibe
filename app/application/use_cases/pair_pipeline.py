@@ -7,6 +7,7 @@ Candidate-pair pipeline orchestrator:
      gates → targeting → dispatch sub-use-cases
 """
 
+import os
 import time
 
 from config import (
@@ -66,22 +67,26 @@ def build_high_speed_candidates(bot, ranked, tickers):
 
     high_speed = high_speed_tickers
 
-    btc_data = tickers.get('btcidr')
+    _exchange = os.getenv("EXCHANGE", "binance").lower()
+    _btc_ticker_key  = 'btcusdt' if _exchange == 'binance' else 'btcidr'
+    _btc_history_key = 'btcusdt' if _exchange == 'binance' else 'btcidr'
+
+    btc_data = tickers.get(_btc_ticker_key)
     if btc_data:
         btc_last = float(btc_data['last'])
     else:
-        btc_history = db.get_ticker_history("BTC/IDR", limit=1)
-        btc_last = btc_history[0]['last'] if btc_history else 0
+        _btc_fb = db.get_ticker_history(_btc_history_key, limit=1)
+        btc_last = _btc_fb[0]['last'] if _btc_fb else 0
         if btc_last == 0:
             log_message("[WARN] Data BTC tidak tersedia di WS/DB. Melewati filter regime.")
             btc_last = 999_999_999
 
-    btc_history = db.get_ticker_history("BTC/IDR", limit=20)
+    btc_history = db.get_ticker_history(_btc_history_key, limit=20)
     if btc_history and len(btc_history) >= 20 and not config.DRY_RUN_LOOSE_GATES:
         btc_prices = [h['last'] for h in btc_history]
         btc_sma = sum(btc_prices) / 20
         if btc_last < btc_sma:
-            log_message(f"[WARN] [BTC Filter] BTC sedang bearish ({btc_last} < {btc_sma:.0f}). Bot stand-by.")
+            log_message(f"[WARN] [BTC Filter] BTC sedang bearish ({btc_last:.2f} < SMA-20 {btc_sma:.2f}). Bot stand-by.")
             time.sleep(30)
             return None
 

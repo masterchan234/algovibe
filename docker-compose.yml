@@ -484,6 +484,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - algovibe_data:/app/data
+      - ./models:/app/models
       - ./services:/app/services
       - ./app:/app/app
       - ./shared:/app/shared

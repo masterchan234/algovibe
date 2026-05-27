@@ -244,7 +244,7 @@ class Database:
                     "opposing_max": float(row.get("opposing_max") or 4.0),
                     "sell_block_threshold": float(row.get("sell_block_threshold") or 5.0),
                     "target_tp_pct": float(row.get("target_tp_pct") or 0.02),
-                    "target_sl_pct": float(row.get("target_sl_pct") or -0.02),
+                    "target_sl_pct": float(row.get("target_sl_pct") or -0.015),
                     "cooldown_seconds": int(row.get("cooldown_seconds") or 300),
                     "max_hold_minutes": int(row.get("max_hold_minutes") or 1440),
                     "ema_trend_filter_enabled": bool(row.get("ema_trend_filter_enabled")),

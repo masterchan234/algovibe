@@ -58,7 +58,7 @@
             </div>
             
             <div class="col-size">
-              <div class="val-idr">{{ formatIdr(pos.amount_idr, false) }}</div>
+              <div class="val-idr">{{ formatIdr(pos.amount_quote, false) }}</div>
               <div class="val-coin">{{ formatCoin(pos.amount_crypto ?? pos.amount_coin) }} units</div>
             </div>
 
@@ -98,7 +98,7 @@
 
             <div class="col-exit">
               <button
-                v-if="(pos.status || '').toUpperCase() === 'OPEN' && (pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
+                v-if="(pos.status || '').toUpperCase() === 'OPEN' && (pos.pnl_net_idr / (pos.amount_quote || 1)) < manualExitMaxNetPct"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
@@ -128,7 +128,7 @@
             v-for="trade in sortedRecentTrades"
             :key="trade.created_at"
             class="history-item"
-            :class="trade.pnl_idr >= 0 ? 'green' : 'red'"
+            :class="trade.pnl_quote >= 0 ? 'green' : 'red'"
           >
             <div class="history-row">
               <div class="col-pair">
@@ -137,14 +137,14 @@
                 <div class="exit-reason" v-if="trade.reason">{{ trade.reason }}</div>
               </div>
               <div class="col-size">
-                <div class="val-idr">{{ formatIdr(trade.amount_idr || 0) }}</div>
+                <div class="val-idr">{{ formatIdr(trade.amount_quote || 0) }}</div>
               </div>
               <div class="col-price">
                 <div class="entry">{{ formatNumber(trade.entry_price) }}</div>
                 <div class="exit">{{ formatNumber(trade.exit_price) }}</div>
               </div>
               <div class="col-pnl">
-                <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
+                <div class="pnl-val">{{ formatIdr(trade.pnl_quote) }}</div>
                 <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
               </div>
             </div>
