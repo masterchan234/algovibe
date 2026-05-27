@@ -35,7 +35,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
             print(f"   [WARN] [NO DATA] {p['profile_name']} has no backtest_result row yet; skip tuning.")
             return "no_data"
 
-        total_pnl = res["total_pnl_idr"]
+        total_pnl = res["total_pnl_quote"]
         total_roi = res["total_pnl_pct"]
         w_start = res["window_start"]
         w_end = res["window_end"]
@@ -106,10 +106,10 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
             _set_if_changed("cooldown_seconds", int(min(1800, max(300, int(float(p.get("cooldown_seconds", 300))) + 120))), "Recovery mode: increase cooldown to reduce overtrading")
         elif target_gap > 0 and win_rate >= 0.5 and pf >= 1.2:
             current_cap = float(p.get("initial_capital_idr", 1000.0) or 1000.0)
-            current_pos = float(p.get("max_position_idr", 120.0) or 120.0)
+            current_pos = float(p.get("max_position_quote", 120.0) or 120.0)
             cap_limit = current_cap * 0.35
             bumped_pos = round(min(cap_limit, max(current_pos + MIN_TRADE_USDT, current_pos * 1.2)), 2)
-            _set_if_changed("max_position_idr", bumped_pos, "Growth mode: increase position sizing toward daily target")
+            _set_if_changed("max_position_quote", bumped_pos, "Growth mode: increase position sizing toward daily target")
             _set_if_changed("buy_threshold", round(max(4.0, float(p["buy_threshold"]) - 0.1), 2), "Growth mode: slightly loosen threshold for more valid entries")
             _set_if_changed("target_tp_pct", round(min(0.06, float(p["target_tp_pct"]) + 0.003), 4), "Growth mode: modestly increase TP to lift payoff ratio")
 
@@ -228,7 +228,7 @@ def _build_coin_recommendation(
     return {
         "initial_capital_idr": float(balance_usdt),
         "min_position_idr": float(MIN_TRADE_USDT),
-        "max_position_idr": round(max_position_usdt, 2),
+        "max_position_quote": round(max_position_usdt, 2),
         "max_open_positions": int(max_open_positions),
         "buy_threshold": round(buy_threshold, 2),
         "sell_block_threshold": round(sell_block_threshold, 3),
@@ -295,8 +295,8 @@ def _apply_backtest_optimized_overrides(recommendation: dict, balance_usdt: floa
     rec["atr_max_pct"] = round(_clamp(float(rec.get("atr_max_pct", 3.0)) + 0.7, 2.5, 5.0), 3)
     est_trades = max(2, min(12, int(round(target_daily_pnl / max(1.0, balance_usdt * 0.0035)))))
     pos_target = target_daily_pnl / max(1e-9, est_trades * 0.0035)
-    rec["max_position_idr"] = round(_clamp(pos_target, MIN_TRADE_USDT, balance_usdt * 0.30), 2)
-    rec["max_open_positions"] = 2 if rec["max_position_idr"] <= (0.2 * balance_usdt) else 1
+    rec["max_position_quote"] = round(_clamp(pos_target, MIN_TRADE_USDT, balance_usdt * 0.30), 2)
+    rec["max_open_positions"] = 2 if rec["max_position_quote"] <= (0.2 * balance_usdt) else 1
     rec["dca_enabled"] = False
     rec["dca_max_tiers"] = 1
     return rec
@@ -319,7 +319,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     window_start, window_end, pair, n_candles, n_days,
                     mu_1m, sigma_1m, mad_1m, up_ratio, jump_1pct_ratio, acf1,
                     avg_day_range, sigma_day, mu_day, sharpe_day_like, momentum_quality,
-                    target_daily_pnl, balance_idr,
+                    target_daily_pnl, balance_quote,
                     fee_rt, p_hat, breakeven_p, win_net, loss_net, edge_trade, trades_needed_full_cap,
                     edge_trade_raw, edge_trade_effective,
                     rec_buy_threshold, rec_sell_block_threshold, rec_target_tp_pct, rec_target_sl_pct,
@@ -358,7 +358,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     %s,%s,%s,%s,
                     NOW()
                 )
-                ON CONFLICT (pair, window_start, window_end, target_daily_pnl, balance_idr)
+                ON CONFLICT (pair, window_start, window_end, target_daily_pnl, balance_quote)
                 DO UPDATE SET
                     n_candles = EXCLUDED.n_candles,
                     n_days = EXCLUDED.n_days,
@@ -472,7 +472,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     _py(r["recommendation"]["max_hold_minutes"]),
                     _py(r["recommendation"]["ema_trend_filter_enabled"]),
                     _py(r["recommendation"]["atr_max_pct"]),
-                    _py(r["recommendation"]["max_position_idr"]),
+                    _py(r["recommendation"]["max_position_quote"]),
                     _py(r["recommendation"]["max_open_positions"]),
                     _py(r["recommendation"]["dca_enabled"]),
                     _py(r["recommendation"]["dca_max_tiers"]),
@@ -533,7 +533,7 @@ def _create_profile_from_analysis(
         "profile_name": effective_name,
         "initial_capital_idr": float(recommendation["initial_capital_idr"]),
         "min_position_idr": float(recommendation["min_position_idr"]),
-        "max_position_idr": float(recommendation["max_position_idr"]),
+        "max_position_quote": float(recommendation["max_position_quote"]),
         "max_open_positions": int(recommendation["max_open_positions"]),
         "timeframe_minutes": int(max(1, timeframe_minutes)),
         "strategy_mode": "backtest_optimized" if backtest_optimized else str(strategy_mode),

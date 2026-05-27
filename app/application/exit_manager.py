@@ -116,7 +116,7 @@ class ExitManager:
         # any other caller (e.g. a manual reconcile triggered from the main cycle).
         self._monitor_lock = threading.Lock()
         #  Momentum Equity Protection 
-        # Last PnL sample for velocity calculation: (unix_timestamp, pnl_idr).
+        # Last PnL sample for velocity calculation: (unix_timestamp, pnl_quote).
         self._last_pnl_sample: tuple = (0.0, 0.0)
         # Rolling buffer of the last 5 velocity readings (IDR / second).
         self._velocity_readings: list = []
@@ -233,11 +233,11 @@ class ExitManager:
         bids.sort(key=lambda x: float(x.get('price') or 0), reverse=True)
         return bids[:depth_limit]
 
-    def _estimate_market_sell_net_from_orderbook(self, pair, amount, entry_price, amount_idr, depth_limit=20):
+    def _estimate_market_sell_net_from_orderbook(self, pair, amount, entry_price, amount_quote, depth_limit=20):
         """Estimate full-fill market sell net PnL using current bid depth."""
         amount = float(amount or 0)
         entry_price = float(entry_price or 0)
-        amount_idr = float(amount_idr or 0)
+        amount_quote = float(amount_quote or 0)
         if amount <= 0 or entry_price <= 0:
             return {
                 'ok': False,
@@ -245,7 +245,7 @@ class ExitManager:
                 'filled_amount': 0.0,
                 'avg_price': 0.0,
                 'sell_value': 0.0,
-                'net_pnl_idr': 0.0,
+                'net_pnl_quote': 0.0,
                 'fee_buy': 0.0,
                 'fee_sell': 0.0,
             }
@@ -258,8 +258,8 @@ class ExitManager:
                 'filled_amount': 0.0,
                 'avg_price': 0.0,
                 'sell_value': 0.0,
-                'net_pnl_idr': 0.0,
-                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'net_pnl_quote': 0.0,
+                'fee_buy': amount_quote * FEE_BUY_TAKER,
                 'fee_sell': 0.0,
             }
 
@@ -285,8 +285,8 @@ class ExitManager:
                 'filled_amount': 0.0,
                 'avg_price': 0.0,
                 'sell_value': 0.0,
-                'net_pnl_idr': 0.0,
-                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'net_pnl_quote': 0.0,
+                'fee_buy': amount_quote * FEE_BUY_TAKER,
                 'fee_sell': 0.0,
             }
 
@@ -297,16 +297,16 @@ class ExitManager:
                 'filled_amount': filled,
                 'avg_price': sell_value / filled,
                 'sell_value': sell_value,
-                'net_pnl_idr': 0.0,
-                'fee_buy': amount_idr * FEE_BUY_TAKER,
+                'net_pnl_quote': 0.0,
+                'fee_buy': amount_quote * FEE_BUY_TAKER,
                 'fee_sell': sell_value * FEE_SELL_TAKER,
             }
 
         avg_price = sell_value / filled
-        fee_buy = amount_idr * FEE_BUY_TAKER
+        fee_buy = amount_quote * FEE_BUY_TAKER
         fee_sell = sell_value * FEE_SELL_TAKER
         gross_pnl = (avg_price - entry_price) * filled
-        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+        net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
 
         return {
             'ok': True,
@@ -314,16 +314,16 @@ class ExitManager:
             'filled_amount': filled,
             'avg_price': avg_price,
             'sell_value': sell_value,
-            'net_pnl_idr': net_pnl_idr,
+            'net_pnl_quote': net_pnl_quote,
             'fee_buy': fee_buy,
             'fee_sell': fee_sell,
         }
 
-    def _check_tp_market_sell_guard(self, pair, amount, entry_price, amount_idr, market_price=None, depth_limit=20):
+    def _check_tp_market_sell_guard(self, pair, amount, entry_price, amount_quote, market_price=None, depth_limit=20):
         """Central guard for TP exits using fee-only net PnL estimation."""
         amount = float(amount or 0)
         entry_price = float(entry_price or 0)
-        amount_idr = float(amount_idr or 0)
+        amount_quote = float(amount_quote or 0)
         market_price = float(market_price or 0)
 
         if amount <= 0 or entry_price <= 0:
@@ -335,7 +335,7 @@ class ExitManager:
                     'ok': False,
                     'reason': 'invalid_input',
                     'avg_price': 0.0,
-                    'net_pnl_idr': 0.0,
+                    'net_pnl_quote': 0.0,
                     'fee_buy': 0.0,
                     'fee_sell': 0.0,
                 },
@@ -346,7 +346,7 @@ class ExitManager:
         # depth_limit dipertahankan di signature untuk kompatibilitas pemanggil lama.
         ref_exit_price = market_price if market_price > 0 else entry_price
         sell_value = amount * ref_exit_price
-        fee_buy = amount_idr * FEE_BUY_TAKER
+        fee_buy = amount_quote * FEE_BUY_TAKER
         fee_sell = sell_value * FEE_SELL_TAKER
         gross_pnl = (ref_exit_price - entry_price) * amount
         estimate = {
@@ -355,20 +355,20 @@ class ExitManager:
             'filled_amount': amount,
             'avg_price': ref_exit_price,
             'sell_value': sell_value,
-            'net_pnl_idr': gross_pnl - (fee_buy + fee_sell),
+            'net_pnl_quote': gross_pnl - (fee_buy + fee_sell),
             'fee_buy': fee_buy,
             'fee_sell': fee_sell,
         }
 
         dynamic_min_profit = get_dynamic_min_net_profit()
-        required_profit_idr = min(dynamic_min_profit, amount_idr * SMART_BREAK_EVEN_PCT)
+        required_profit_idr = min(dynamic_min_profit, amount_quote * SMART_BREAK_EVEN_PCT)
 
         # MICRO_PROFIT_EXIT: use a lighter net floor (still net-positive) to avoid
         # holding small winners too long on low-balance accounts.
         if self._is_micro_profit_mode_active():
-            required_profit_idr = max(1.0, amount_idr * float(MICRO_PROFIT_MIN_NET_PCT))
+            required_profit_idr = max(1.0, amount_quote * float(MICRO_PROFIT_MIN_NET_PCT))
 
-        est_net = float(estimate.get('net_pnl_idr') or 0)
+        est_net = float(estimate.get('net_pnl_quote') or 0)
         if est_net < required_profit_idr:
             return {
                 'ok': False,
@@ -394,7 +394,7 @@ class ExitManager:
         amount_on_exchange = float(amount_on_exchange or 0)
         entry_price = float((position_data or {}).get('entry_price') or 0)
         return float(
-            (position_data or {}).get('amount_idr')
+            (position_data or {}).get('amount_quote')
             or (amount_on_exchange * entry_price)
             or 0
         )
@@ -409,7 +409,7 @@ class ExitManager:
         Priority:
         1) Live exchange free IDR (cached short TTL)
         2) cached_idr_balance in bot_state (updated from live balance sync)
-        3) opening_balance + total_pnl_idr from daily stats
+        3) opening_balance + total_pnl_quote from daily stats
         """
         now_ts = time.time()
         if self._cached_effective_balance_idr > 0 and (now_ts - self._cached_effective_balance_ts) < 60:
@@ -442,7 +442,7 @@ class ExitManager:
         try:
             stats = db.get_daily_stats()
             opening_balance = float((stats or {}).get('opening_balance') or INITIAL_CAPITAL)
-            total_pnl = float((stats or {}).get('total_pnl_idr') or 0.0)
+            total_pnl = float((stats or {}).get('total_pnl_quote') or 0.0)
             est = opening_balance + total_pnl
             if est > 0:
                 self._cached_effective_balance_idr = est
@@ -498,7 +498,7 @@ class ExitManager:
         if last_ts > 0 and (now_ts - last_ts) < float(DUST_RECOVERY_COOLDOWN_SEC):
             return False, "cooldown_active", 0.0
 
-        current_dust_idr = float(data.get('amount_idr', 0) or 0)
+        current_dust_idr = float(data.get('amount_quote', 0) or 0)
         target_notional_idr = max(float(MIN_TRADE_IDR) * 1.02, float(MIN_TRADE_IDR) + 100.0)
         topup_idr = max(0.0, target_notional_idr - current_dust_idr)
         if topup_idr <= 0:
@@ -579,7 +579,7 @@ class ExitManager:
             # None: no indicator alignment
             return 'HOLD', 0.20
 
-    def _evaluate_exit_signal(self, pair, price_history, entry_price, current_price, amount, amount_idr, current_rsi=50.0):
+    def _evaluate_exit_signal(self, pair, price_history, entry_price, current_price, amount, amount_quote, current_rsi=50.0):
         """
         Evaluasi EXIT signal untuk OPEN position dengan fee protection.
         Hanya suggest exit jika net profit after fees positif.
@@ -601,23 +601,23 @@ class ExitManager:
         entry_price = float(entry_price or 0)
         current_price = float(current_price or 0)
         amount = float(amount or 0)
-        amount_idr = float(amount_idr or 0)
+        amount_quote = float(amount_quote or 0)
         
         if entry_price <= 0 or amount <= 0:
             return 'HOLD', 0.0, 0.0, 0.0
         
         sell_value_est = amount * current_price
-        fee_buy_est = amount_idr * FEE_BUY_TAKER
+        fee_buy_est = amount_quote * FEE_BUY_TAKER
         fee_sell_est = sell_value_est * FEE_SELL_TAKER
-        net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
+        net_pnl_quote = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
         
         # Total fee round-trip %
         total_fee_idr = fee_buy_est + fee_sell_est
-        fee_pct_roundtrip = (total_fee_idr / amount_idr * 100) if amount_idr > 0 else 0.0
+        fee_pct_roundtrip = (total_fee_idr / amount_quote * 100) if amount_quote > 0 else 0.0
         
         # [PROTECTION] Jika net profit negatif, jangan suggest SELL signal
-        if net_pnl_idr <= 0:
-            return 'HOLD', 0.0, net_pnl_idr, fee_pct_roundtrip
+        if net_pnl_quote <= 0:
+            return 'HOLD', 0.0, net_pnl_quote, fee_pct_roundtrip
         
         hist = list(price_history)[-180:]
         
@@ -658,17 +658,17 @@ class ExitManager:
         if confirm_count >= 3:
             # Strong SELL convergence: 3+ indicators align
             confidence = 0.82 + (confirm_count - 3) * 0.05
-            return 'SELL_CONFIRMED', min(0.95, confidence), net_pnl_idr, fee_pct_roundtrip
+            return 'SELL_CONFIRMED', min(0.95, confidence), net_pnl_quote, fee_pct_roundtrip
         elif confirm_count == 2:
             # Moderate SELL: 2 indicators, consider timing
             confidence = 0.68
-            return 'CONSIDER', confidence, net_pnl_idr, fee_pct_roundtrip
+            return 'CONSIDER', confidence, net_pnl_quote, fee_pct_roundtrip
         elif confirm_count == 1:
             # Weak: only 1 indicator
-            return 'HOLD', 0.40, net_pnl_idr, fee_pct_roundtrip
+            return 'HOLD', 0.40, net_pnl_quote, fee_pct_roundtrip
         else:
             # No alignment: market still bullish
-            return 'HOLD', 0.20, net_pnl_idr, fee_pct_roundtrip
+            return 'HOLD', 0.20, net_pnl_quote, fee_pct_roundtrip
 
     def _get_repost_limit_price_from_orderbook(self, pair, current_price):
         """Pick a passive sell price just above the live best bid."""
@@ -744,10 +744,10 @@ class ExitManager:
             db.upsert_position(pair, positions[pair])
 
     def _set_pair_cooldown(self, pair, minutes=20, reason="LOSS"):
-        """Set cooldown per pair setelah trade loss agar tidak re-entry di market chop."""
+        """Set cooldown per pair setelah trade loss. Writes to pair_runtime_state."""
         try:
             cooldown_until = time.time() + (minutes * 60)
-            db.save_state(f"pair_cooldown_until_{pair}", str(cooldown_until))
+            db.upsert_pair_runtime_state(pair.lower(), cooldown_until=cooldown_until)
             log_message(f"[PAIR-COOLDOWN] {pair}: {minutes}m ({reason})")
         except Exception as e:
             log_message(f"[WARN] Failed set cooldown {pair}: {e}")
@@ -900,7 +900,7 @@ class ExitManager:
             order_id = self.execute_exit(
                 pair, amount, current_price, reason,
                 entry_price=data.get('entry_price', 0),
-                amount_idr=data.get('amount_idr', 0),
+                amount_quote=data.get('amount_quote', 0),
                 position_data=data,
             )
             if order_id:
@@ -1042,7 +1042,7 @@ class ExitManager:
                             "pair": pair,
                             "entry_price": actual_entry_price,
                             "amount_crypto": amount,
-                            "amount_idr": amount * actual_entry_price if actual_entry_price > 0 else value_idr,
+                            "amount_quote": amount * actual_entry_price if actual_entry_price > 0 else value_idr,
                             "status": "OPEN",
                             "entry_order_id": f"RECOVERED-{int(time.time())}",
                             "exit_order_id": None,
@@ -1136,7 +1136,7 @@ class ExitManager:
                 if price > 0:
                     order_id = self.execute_exit(
                         manual_exit_pair, data.get('amount_crypto', 0), price, "MANUAL_DASHBOARD_EXIT",
-                        entry_price=data.get('entry_price', 0), amount_idr=data.get('amount_idr', 0),
+                        entry_price=data.get('entry_price', 0), amount_quote=data.get('amount_quote', 0),
                         position_data=data
                     )
                     if order_id:
@@ -1284,7 +1284,7 @@ class ExitManager:
                             current_price,
                             "EXIT_TIMEOUT",
                             entry_price=entry_price,
-                            amount_idr=data.get('amount_idr', 0),
+                            amount_quote=data.get('amount_quote', 0),
                             position_data=data
                         )
                         if new_order_id:
@@ -1324,31 +1324,31 @@ class ExitManager:
 
                 entry_price = data.get('entry_price', 0)
                 amount = data.get('amount_crypto', 0)
-                amount_idr = data.get('amount_idr', 0)
+                amount_quote = data.get('amount_quote', 0)
 
                 sell_value = amount * current_price
                 fee_sell = sell_value * FEE_SELL_TAKER
-                fee_buy = amount_idr * FEE_BUY_TAKER
+                fee_buy = amount_quote * FEE_BUY_TAKER
 
                 gross_pnl = (current_price - entry_price) * amount
-                net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+                net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
 
-                if net_pnl_idr < 0:
+                if net_pnl_quote < 0:
                     has_losers = True
 
                 # Deteksi posisi stagnant: mandek lama & masih merugi
                 try:
                     _pos_ts = self._parse_iso_date(data.get('timestamp'))
                     _pos_age = (datetime.now() - _pos_ts).total_seconds() / 60.0
-                    if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_idr < 0:
+                    if _pos_age >= STAGNANT_RESCUE_MINUTES and net_pnl_quote < 0:
                         has_stagnant = True
                 except Exception:
                     pass
 
                 total_gross_pnl  += gross_pnl
                 total_fees_idr   += fee_buy + fee_sell
-                total_net_pnl    += net_pnl_idr
-                total_amount_idr += amount_idr
+                total_net_pnl    += net_pnl_quote
+                total_amount_idr += amount_quote
                 # Only include in basket if we have a usable live price for execution
                 if pair in current_tickers and current_price > 0:
                     open_pairs_for_basket.append((pair, data, current_price, amount))
@@ -1407,8 +1407,8 @@ class ExitManager:
                         # All-time PnL menyebabkan floor terlalu tinggi di sesi berikutnya jika
                         # bot sudah profit besar sebelumnya, sehingga guard terlalu mudah aktif.
                         _daily_stats = db.get_daily_stats()
-                        realized_pnl_alltime = db.get_all_time_stats()['total_pnl_idr']
-                        realized_pnl_today = float(_daily_stats.get('total_pnl_idr') or 0.0)
+                        realized_pnl_alltime = db.get_all_time_stats()['total_pnl_quote']
+                        realized_pnl_today = float(_daily_stats.get('total_pnl_quote') or 0.0)
                         net_total_pnl = realized_pnl_today + total_net_pnl
                         # Simpan all-time ke dashboard gauge, tapi guard pakai daily.
                         try:
@@ -1895,7 +1895,7 @@ class ExitManager:
                         order_id = self.execute_exit(
                             pair, amount, current_price, reason,
                             entry_price=data.get('entry_price', 0),
-                            amount_idr=data.get('amount_idr', 0),
+                            amount_quote=data.get('amount_quote', 0),
                             position_data=data
                         )
                         if order_id:
@@ -2023,7 +2023,7 @@ class ExitManager:
                             pair,
                             amount,
                             entry_price,
-                            data.get('amount_idr', 0) or 0,
+                            data.get('amount_quote', 0) or 0,
                             market_price=current_price,
                         )
                         if not tp_guard.get('ok'):
@@ -2043,7 +2043,7 @@ class ExitManager:
                             current_price,
                             "EXIT_TIMEOUT",
                             entry_price=entry_price,
-                            amount_idr=data.get('amount_idr', 0),
+                            amount_quote=data.get('amount_quote', 0),
                             position_data=data
                         )
                         if new_order_id:
@@ -2102,7 +2102,7 @@ class ExitManager:
                     if not order_id:
                         continue
                         
-                    entry_time = self._parse_iso_date(data.get('timestamp'))
+                    entry_time = self._parse_iso_date(data.get('created_at') or data.get('timestamp'))
                     time_elapsed = (datetime.now() - entry_time).total_seconds() / 60.0
                     
                     # Cek jarak harga: Jika harga sekarang sudah lebih tinggi X% dari harga antri kita
@@ -2178,7 +2178,7 @@ class ExitManager:
                 from config import FEE_SLIPPAGE_BUFFER
                 tp_slippage = FEE_SLIPPAGE_BUFFER * 0.5
                 denom_tp = amount * max(0.01, (1 - FEE_SELL_TAKER - tp_slippage))
-                amount_idr_pos = float(data.get('amount_idr', 0))
+                amount_idr_pos = float(data.get('amount_quote', 0))
                 dynamic_min_profit = get_dynamic_min_net_profit()
                 dynamic_min_net = min(dynamic_min_profit, amount_idr_pos * SMART_BREAK_EVEN_PCT)
                 if micro_mode_active:
@@ -2294,7 +2294,7 @@ class ExitManager:
                                 modified_pairs.add(pair)
                         elif dust_reason == 'already_tradeable':
                             log_message(
-                                f"[DUST-PROMOTE] {pair}: amount_idr sudah >= target "
+                                f"[DUST-PROMOTE] {pair}: amount_quote sudah >= target "
                                 f"(dust_sig={dust_signal} {dust_signal_conf:.0%}). Promoting to OPEN."
                             )
                             positions[pair]['status'] = 'OPEN'
@@ -2310,23 +2310,23 @@ class ExitManager:
                 # --- [Aggressive] Rapid Take Profit ---
                 try:
                     sell_value_est = amount * current_price
-                    fee_buy_est = data.get('amount_idr', 0) * FEE_BUY_TAKER
+                    fee_buy_est = data.get('amount_quote', 0) * FEE_BUY_TAKER
                     fee_sell_est = sell_value_est * FEE_SELL_TAKER
-                    net_pnl_idr = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
+                    net_pnl_quote = (current_price - entry_price) * amount - (fee_buy_est + fee_sell_est)
 
-                    amount_idr_pos = float(data.get('amount_idr', 0))
+                    amount_idr_pos = float(data.get('amount_quote', 0))
                     dynamic_min_profit = get_dynamic_min_net_profit()
                     tier2_idr_threshold = max(dynamic_min_profit, amount_idr_pos * TIER2_PROFIT_IDR_PCT)
                     tier3_idr_threshold = max(dynamic_min_profit * 2, amount_idr_pos * TIER3_PROFIT_IDR_PCT)
-                    is_tier2_good_profit = net_pnl_idr >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
-                    is_tier3_high_profit = net_pnl_idr >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
+                    is_tier2_good_profit = net_pnl_quote >= tier2_idr_threshold or current_profit_pct >= TIER2_PROFIT_PCT
+                    is_tier3_high_profit = net_pnl_quote >= tier3_idr_threshold or current_profit_pct >= TIER3_PROFIT_PCT
 
                     # Tier 3: FORCE EXIT
                     if is_tier3_high_profit:
                         reason_tp = "FORCE_PROFIT_HIGH_TIER"
                         log_message(f"[GOD-MODE-EXIT] {pair}: High Profit {current_profit_pct*100:.2f}% secured instantly!")
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
-                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                                                   entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
@@ -2343,13 +2343,13 @@ class ExitManager:
 
                     if is_tier2_good_profit and exit_signal in ('SELL_CONFIRMED', 'CONSIDER'):
                         MIN_NET_PROFIT_FLOOR_PCT = 0.012  # 1.2% net minimum
-                        current_net_pct = net_pnl_idr / amount_idr_pos if amount_idr_pos > 0 else 0.0
+                        current_net_pct = net_pnl_quote / amount_idr_pos if amount_idr_pos > 0 else 0.0
                         
                         if current_net_pct < MIN_NET_PROFIT_FLOOR_PCT:
                             log_message(
                                 f"[PROFIT-FLOOR] {pair}: TIER2 exit blocked | "
                                 f"net {current_net_pct*100:.2f}% < floor {MIN_NET_PROFIT_FLOOR_PCT*100:.1f}% | "
-                                f"Hold until 1.2%+ net (current: {net_pnl_idr:,.0f} IDR)"
+                                f"Hold until 1.2%+ net (current: {net_pnl_quote:,.0f} IDR)"
                             )
                             continue
                         
@@ -2360,7 +2360,7 @@ class ExitManager:
                             f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%)"
                         )
                         order_id = self.execute_exit(pair, amount, current_price, reason_tp,
-                                                   entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                                                   entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
                         if order_id: mark_exit_requested(pair, order_id)
                         continue
 
@@ -2399,7 +2399,7 @@ class ExitManager:
                             modified_pairs.add(pair)
                     elif dust_reason == 'already_tradeable':
                         log_message(
-                            f"[DUST-PROMOTE] {pair}: amount_idr sudah >= target "
+                            f"[DUST-PROMOTE] {pair}: amount_quote sudah >= target "
                             f"(conf={technical_confidence:.2f}). Promoting to OPEN."
                         )
                         positions[pair]['status'] = 'OPEN'
@@ -2484,10 +2484,10 @@ class ExitManager:
                             pair,
                             amount,
                             entry_price,
-                            data.get('amount_idr', 0) or 0,
+                            data.get('amount_quote', 0) or 0,
                             market_price=tp_eval_price,
                         )
-                        est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
+                        est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_quote') or 0.0)
                         if (not tp_guard.get('ok')) or est_net <= 0:
                             log_message(
                                 f"[REJECT] [MICRO_PROFIT_EXIT] {pair}: TP ditahan, net belum positif "
@@ -2496,7 +2496,7 @@ class ExitManager:
                             continue
 
                     order_id = self.execute_exit(pair, amount, tp_eval_price, "TAKE_PROFIT",
-                                      entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                                      entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
                     if order_id:
                         msg = (
                             f"[TARGET] *TAKE PROFIT* [TARGET]\n"
@@ -2552,7 +2552,7 @@ class ExitManager:
                         f"({pnl_pct:+.2f}%). Protecting capital."
                     )
                     order_id = self.execute_exit(pair, amount, current_price, reason_sl,
-                                               entry_price=entry_price, amount_idr=data.get('amount_idr', 0), position_data=data)
+                                               entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
                     if order_id: mark_exit_requested(pair, order_id)
                     continue
             except Exception as e:
@@ -2726,7 +2726,7 @@ class ExitManager:
         db.save_state("pending_approval", "")
         return default_approve
 
-    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_idr=0, position_data=None, limit_price=None):
+    def execute_exit(self, pair, amount, price, reason, entry_price=None, amount_quote=0, position_data=None, limit_price=None):
         try:
             # Catat waktu exit koin untuk menghindari balapan data di Active Discovery
             self._recently_exited_pairs[pair] = time.time()
@@ -2738,9 +2738,9 @@ class ExitManager:
             symbol = to_ccxt_symbol(pair)
 
             if is_tp_exit and not self.dry_run:
-                amount_idr_effective = float(amount_idr or 0)
+                amount_idr_effective = float(amount_quote or 0)
                 if amount_idr_effective <= 0 and position_data:
-                    amount_idr_effective = float(position_data.get('amount_idr', 0) or 0)
+                    amount_idr_effective = float(position_data.get('amount_quote', 0) or 0)
                 tp_guard = self._check_tp_market_sell_guard(
                     pair,
                     amount,
@@ -2750,7 +2750,7 @@ class ExitManager:
                 )
                 # MICRO_PROFIT_EXIT safety: TAKE_PROFIT wajib net positif after fees.
                 if reason == "TAKE_PROFIT" and self._is_micro_profit_mode_active():
-                    est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_idr') or 0.0)
+                    est_net = float((tp_guard.get('estimate') or {}).get('net_pnl_quote') or 0.0)
                     if (not tp_guard.get('ok')) or est_net <= 0:
                         log_message(
                             f"[REJECT] [MICRO_PROFIT_EXIT] {pair}: cancel TAKE_PROFIT, net belum positif "
@@ -2936,31 +2936,31 @@ class ExitManager:
             fee_sell_rate = FEE_SELL_TAKER
             
             # Entry fee sekarang Taker (karena bot hajar kanan/market buy)
-            fee_buy = amount_idr * FEE_BUY_TAKER
+            fee_buy = amount_quote * FEE_BUY_TAKER
             
             # Gunakan exit_price (harga limit order) bukan price (ticker mentah) untuk akurasi PnL
             sell_value = amount * exit_price
             fee_sell = sell_value * fee_sell_rate
             gross_pnl = (exit_price - entry_price) * amount
-            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+            net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
 
             # Catat ke system_events agar muncul di Activity Feed dashboard
-            pnl_label = format_currency(net_pnl_idr, signed=True)
+            pnl_label = format_currency(net_pnl_quote, signed=True)
             db.log_system_event(
                 pair,
                 "SELL",
                 f"{reason} | {format_currency(exit_price, is_price=True, signed=False)} | PnL:{pnl_label}",
-                'SUCCESS' if net_pnl_idr >= 0 else 'WARN'
+                'SUCCESS' if net_pnl_quote >= 0 else 'WARN'
             )
 
             if order_status in ['closed', 'canceled', 'done', 'fill'] or self.dry_run:
                 db.delete_position(pair)
                 
-                pnl_idr = net_pnl_idr
-                pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                pnl_quote = net_pnl_quote
+                pnl_pct = (net_pnl_quote / amount_quote) * 100 if amount_quote > 0 else 0
                 
                 # Use provided position_data for timestamp, fallback to now
-                timestamp_str = position_data.get('timestamp') if (position_data and position_data.get('timestamp')) else datetime.now().isoformat()
+                timestamp_str = (position_data.get('created_at') or position_data.get('timestamp')) if position_data else datetime.now().isoformat()
                 entry_time = self._parse_iso_date(timestamp_str)
                 duration_sec = (datetime.now() - entry_time).total_seconds()
                 
@@ -2970,8 +2970,8 @@ class ExitManager:
                         entry_price=entry_price,
                         exit_price=exit_price,
                         amount_crypto=amount,
-                        amount_idr=amount_idr,
-                        pnl_idr=pnl_idr,
+                        amount_quote=amount_quote,
+                        pnl_quote=pnl_quote,
                         pnl_pct=pnl_pct,
                         reason=reason,
                         exec_type=exec_type,
@@ -2983,16 +2983,16 @@ class ExitManager:
                     
                     # Update Consecutive Losses state
                     current_cl = int(db.get_state("consecutive_losses", 0))
-                    if pnl_idr > 0:
+                    if pnl_quote > 0:
                         db.save_state("consecutive_losses", 0)
                     else:
                         db.save_state("consecutive_losses", current_cl + 1)
                         self._set_pair_cooldown(pair, minutes=20, reason=reason)
 
                     #  Project Evolution: Learning Loop 
-                    db.update_trade_outcome(pair, pnl_idr)
+                    db.update_trade_outcome(pair, pnl_quote)
                     if self.oracle:
-                        self.oracle.learn_from_trade(pair, pnl_idr)
+                        self.oracle.learn_from_trade(pair, pnl_quote)
 
                 except Exception as db_err:
                     print(f"Failed to save trade history/state for {pair}: {db_err}")
@@ -3036,7 +3036,7 @@ class ExitManager:
         try:
             old_entry_price = float(data['entry_price'])
             old_amount_crypto = float(data['amount_crypto'])
-            old_amount_idr = float(data['amount_idr'])
+            old_amount_idr = float(data['amount_quote'])
             
             # 1. Tentukan nominal penambahan muatan
             # Default: Tambahkan nominal yang sama dengan muatan sebelumnya
@@ -3181,7 +3181,7 @@ class ExitManager:
                         "entry_price": float(order.get('price', jaring['price'])),
                         "amount":      float(order.get('executedQty', jaring['amount'])),
                         "amount_crypto": float(order.get('executedQty', jaring['amount'])),
-                        "amount_idr":  float(order.get('price', jaring['price'])) * float(order.get('executedQty', jaring['amount'])),
+                        "amount_quote":  float(order.get('price', jaring['price'])) * float(order.get('executedQty', jaring['amount'])),
                         "timestamp":   datetime.now().isoformat(),
                         "dry_run":     self.dry_run,
                         "status":      "OPEN",
@@ -3214,14 +3214,14 @@ class ExitManager:
                         p_data['status'] = "OPEN"
                         p_data['entry_price'] = fill_price
                         p_data['amount_crypto'] = fill_amount
-                        p_data['amount_idr'] = fill_price * fill_amount
+                        p_data['amount_quote'] = fill_price * fill_amount
                         db.upsert_position(p_pair, p_data)
                         send_telegram_message(f"[OK] *BUY FILLED* [OK]\nPair: `{p_pair}`\nPrice: Rp {fill_price:,.2f}\nStatus: `OPEN`")
                     else:
                         # Partial buy fill: pertahankan PENDING_BUY sampai benar-benar selesai.
                         p_data['entry_price'] = fill_price
                         p_data['amount_crypto'] = max(fill_amount, float(p_data.get('amount_crypto', 0)))
-                        p_data['amount_idr'] = fill_price * p_data['amount_crypto']
+                        p_data['amount_quote'] = fill_price * p_data['amount_crypto']
                         db.upsert_position(p_pair, p_data)
                         log_message(
                             f" BUY PARTIAL {p_pair} ({order_id}): exec={fill_amount:.8f}, unfilled={unfilled_qty:.8f}"
@@ -3255,7 +3255,7 @@ class ExitManager:
                         
                         amount_crypto = executed_qty if executed_qty > 0 else float(p_data.get('amount_crypto', 0))
                         entry_price = float(p_data.get('entry_price', 0))
-                        amount_idr = float(p_data.get('amount_idr', 0))
+                        amount_quote = float(p_data.get('amount_quote', 0))
                         
                         # --- [Senior Fix] Real Fee Extraction dari fillInformation ---
                         fill_info = order.get('fillInformation', {})
@@ -3277,23 +3277,23 @@ class ExitManager:
                             fee_sell = real_fee + real_tax + real_clearing
                         
                         # Entry fee (selalu maker kecuali koin nyangkut/orphans yang diadopsi)
-                        fee_buy = amount_idr * FEE_BUY_MAKER
+                        fee_buy = amount_quote * FEE_BUY_MAKER
                         
                         gross_pnl = (exit_price - entry_price) * amount_crypto
-                        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-                        pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                        net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
+                        pnl_pct = (net_pnl_quote / amount_quote) * 100 if amount_quote > 0 else 0
                         
                         # Reason determination
-                        reason = p_data.get('reason_backup', "TAKE_PROFIT" if net_pnl_idr > 0 else "STOP_LOSS")
+                        reason = p_data.get('reason_backup', "TAKE_PROFIT" if net_pnl_quote > 0 else "STOP_LOSS")
                         ws_trade_id = str(order.get('tradeId', '') or '') or None
                         
-                        timestamp_str = p_data.get('timestamp') or datetime.now().isoformat()
+                        timestamp_str = p_data.get('created_at') or p_data.get('timestamp') or datetime.now().isoformat()
                         duration_sec = (datetime.now() - self._parse_iso_date(timestamp_str)).total_seconds()
                         
                         db.insert_trade_history(
                             pair=p_pair, entry_price=entry_price, exit_price=exit_price,
-                            amount_crypto=amount_crypto, amount_idr=amount_idr,
-                            pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
+                            amount_crypto=amount_crypto, amount_quote=amount_quote,
+                            pnl_quote=net_pnl_quote, pnl_pct=pnl_pct, reason=reason,
                             duration_seconds=int(duration_sec), dry_run=p_data.get('dry_run'),
                             trade_id=ws_trade_id,
                             exit_order_id=order_id,
@@ -3301,17 +3301,17 @@ class ExitManager:
                         )
                         
                         current_cl = int(db.get_state("consecutive_losses", 0))
-                        if net_pnl_idr > 0:
+                        if net_pnl_quote > 0:
                             db.save_state("consecutive_losses", 0)
                         else:
                             db.save_state("consecutive_losses", current_cl + 1)
                             self._set_pair_cooldown(p_pair, minutes=20, reason=reason)
                         
-                        db.update_trade_outcome(p_pair, net_pnl_idr)
-                        if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_idr)
+                        db.update_trade_outcome(p_pair, net_pnl_quote)
+                        if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_quote)
                         
                         db.delete_position(p_pair)
-                        send_telegram_message(f" *EXIT FILLED* \nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_idr:,.2f}")
+                        send_telegram_message(f" *EXIT FILLED* \nPair: `{p_pair}`\nReason: `{reason}`\nPnL: Rp {net_pnl_quote:,.2f}")
 
                         # [Manual Exit Post-Processing] Re-evaluate session status with post-exit PnL
                         if reason == "MANUAL_DASHBOARD_EXIT" and self.oracle:
@@ -3504,15 +3504,15 @@ class ExitManager:
                         entry_price = last_buy_price if last_buy_price > 0 else exit_price
                         
                         amount_crypto = qty
-                        amount_idr = amount_crypto * entry_price
+                        amount_quote = amount_crypto * entry_price
                         
                         # Fee Estimation (0.11%)
-                        fee_buy = amount_idr * 0.0011 
+                        fee_buy = amount_quote * 0.0011 
                         fee_sell = (qty * exit_price) * 0.0011 
                         
                         gross_pnl = (exit_price - entry_price) * amount_crypto
-                        net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-                        pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                        net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
+                        pnl_pct = (net_pnl_quote / amount_quote) * 100 if amount_quote > 0 else 0
                         
                         # Format timestamp
                         raw_time = t.get('time', 0)
@@ -3524,8 +3524,8 @@ class ExitManager:
                             entry_price=entry_price, 
                             exit_price=exit_price,
                             amount_crypto=amount_crypto, 
-                            amount_idr=amount_idr,
-                            pnl_idr=net_pnl_idr, 
+                            amount_quote=amount_quote,
+                            pnl_quote=net_pnl_quote, 
                             pnl_pct=pnl_pct, 
                             reason="MANUAL_SYNC",
                             exec_type="MAKER" if t.get('isMaker') else "TAKER",
@@ -3651,7 +3651,7 @@ class ExitManager:
                     if pos.get('status') != 'DUST' or abs(float(pos.get('amount_crypto', 0) or 0) - amount_on_exchange) > 1e-12:
                         pos['status'] = 'DUST'
                         pos['amount_crypto'] = amount_on_exchange
-                        # amount_idr adalah cost basis asli pembelian — JANGAN dioverwrite.
+                        # amount_quote adalah cost basis asli pembelian — JANGAN dioverwrite.
                         db.upsert_position(pair, pos)
                         log_message(
                             f" Reality Sync: {pair} converted to DUST "
@@ -3662,11 +3662,11 @@ class ExitManager:
                 if pos.get('status') == 'DUST' and position_idr_value > pair_min_idr and amount_on_exchange > 0:
                     pos['status'] = 'OPEN'
                     pos['amount_crypto'] = amount_on_exchange
-                    # amount_idr: update hanya jika cost basis sebelumnya sangat kecil (hasil adoption)
+                    # amount_quote: update hanya jika cost basis sebelumnya sangat kecil (hasil adoption)
                     # atau jika tidak ada cost basis sama sekali.
-                    old_cost = float(pos.get('amount_idr', 0))
+                    old_cost = float(pos.get('amount_quote', 0))
                     if old_cost < 100:
-                        pos['amount_idr'] = position_idr_value
+                        pos['amount_quote'] = position_idr_value
                     db.upsert_position(pair, pos)
                     log_message(
                         f" Reality Sync: {pair} promoted from DUST to OPEN "
@@ -3675,13 +3675,13 @@ class ExitManager:
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan (fee/rounding/manual trade)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 1e-12 and amount_on_exchange > 0:
                     old_crypto = pos['amount_crypto']
-                    old_idr = pos.get('amount_idr', 0)
+                    old_idr = pos.get('amount_quote', 0)
                     entry_price = pos.get('entry_price', 0)
                     
                     # Update crypto amount
                     pos['amount_crypto'] = amount_on_exchange
                     
-                    # [Senior Fix] Update amount_idr (Cost Basis) proportionally or via entry_price
+                    # [Senior Fix] Update amount_quote (Cost Basis) proportionally or via entry_price
                     # Ini mencegah 'modal halusinasi' saat saldo di bursa berubah tapi modal di DB tetap.
                     if old_crypto > 0 and old_idr > 0:
                         # Proporsional: jika koin naik 2x, modal dianggap naik 2x (cost basis adjustment)
@@ -3699,7 +3699,7 @@ class ExitManager:
                         if abs(new_idr - expected_idr) > (expected_idr * 0.15):
                             new_idr = expected_idr
                             
-                    pos['amount_idr'] = new_idr
+                    pos['amount_quote'] = new_idr
                     db.upsert_position(pair, pos)
                     log_message(
                         f" [RECONCILE] {pair} amount synced: {old_crypto:.6f} -> {amount_on_exchange:.6f} | "
@@ -3746,28 +3746,28 @@ class ExitManager:
                             
                             entry_price = float(pos.get('entry_price', 0))
                             amount_crypto = float(t.get('qty', pos.get('amount_crypto', 0)))
-                            amount_idr = float(pos.get('amount_idr', 0))
+                            amount_quote = float(pos.get('amount_quote', 0))
                             
                             # Hitung PnL dengan fee aktual v2
-                            fee_buy = amount_idr * FEE_BUY_MAKER
+                            fee_buy = amount_quote * FEE_BUY_MAKER
                             fee_sell = real_fee # v2 commission sudah mencakup segalanya
                             
                             gross_pnl = (exit_price - entry_price) * amount_crypto
-                            net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
-                            pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0
+                            net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
+                            pnl_pct = (net_pnl_quote / amount_quote) * 100 if amount_quote > 0 else 0
 
                             # Metadata untuk dedup history dengan sync_all_history.
                             ws_trade_id = str(t.get('tradeId', '') or '') or None
                             reason = pos.get('reason_backup', 'RECONCILE_EXIT_FILL')
                             participant = exec_type
                             try:
-                                duration_sec = int((datetime.now() - self._parse_iso_date(pos.get('timestamp'))).total_seconds())
+                                duration_sec = int((datetime.now() - self._parse_iso_date(pos.get('created_at') or pos.get('timestamp'))).total_seconds())
                             except Exception:
                                 duration_sec = 300
                             db.insert_trade_history(
                                 pair=pair, entry_price=entry_price, exit_price=exit_price,
-                                amount_crypto=amount_crypto, amount_idr=amount_idr,
-                                pnl_idr=net_pnl_idr, pnl_pct=pnl_pct, reason=reason,
+                                amount_crypto=amount_crypto, amount_quote=amount_quote,
+                                pnl_quote=net_pnl_quote, pnl_pct=pnl_pct, reason=reason,
                                 exec_type=participant,
                                 duration_seconds=int(duration_sec), dry_run=False,
                                 trade_id=ws_trade_id,
@@ -3783,7 +3783,7 @@ class ExitManager:
                         _exit_oid = pos.get('exit_order_id')
                         _entry_price = float(pos.get('entry_price', 0))
                         _amount_crypto = float(pos.get('amount_crypto', 0))
-                        _amount_idr = float(pos.get('amount_idr', 0))
+                        _amount_idr = float(pos.get('amount_quote', 0))
                         _symbol = to_ccxt_symbol(pair)
                         _reconcile_exit_price = None
                         _reconcile_exec_type = "MAKER"
@@ -3811,8 +3811,8 @@ class ExitManager:
                         _pct = (_net / _amount_idr * 100) if _amount_idr > 0 else 0
                         db.insert_trade_history(
                             pair=pair, entry_price=_entry_price, exit_price=_reconcile_exit_price,
-                            amount_crypto=_amount_crypto, amount_idr=_amount_idr,
-                            pnl_idr=_net, pnl_pct=_pct,
+                            amount_crypto=_amount_crypto, amount_quote=_amount_idr,
+                            pnl_quote=_net, pnl_pct=_pct,
                             reason=pos.get('reason_backup', 'RECONCILE_GHOST'),
                             exec_type=_reconcile_exec_type,
                             duration_seconds=300,
@@ -3859,7 +3859,7 @@ class ExitManager:
                                 "entry_price": current_price,
                                 "amount":      coin_amount,
                                 "amount_crypto": coin_amount,
-                                "amount_idr":  value_idr,
+                                "amount_quote":  value_idr,
                                 "timestamp":   datetime.now().isoformat(),
                                 "dry_run":     False,
                                 "status":      adopt_status,
@@ -3955,7 +3955,7 @@ class ExitManager:
                                             "entry_price": o_price,
                                             "amount": amount_crypto_est,
                                             "amount_crypto": amount_crypto_est,
-                                            "amount_idr": remain_idr,
+                                            "amount_quote": remain_idr,
                                             "timestamp": datetime.now().isoformat(),
                                             "dry_run": False,
                                             "status": "PENDING_BUY",
@@ -3978,7 +3978,7 @@ class ExitManager:
                                             "entry_price": o_price * 0.95,
                                             "amount": remain_coin,
                                             "amount_crypto": remain_coin,
-                                            "amount_idr": remain_coin * o_price,
+                                            "amount_quote": remain_coin * o_price,
                                             "timestamp": datetime.now().isoformat(),
                                             "dry_run": False,
                                             "status": "EXITING",
@@ -4041,8 +4041,8 @@ class ExitManager:
                     jaring_price = c['last'] * (1 + JARING_DEPTH_PCT)
                     # Use provided balance if in live mode, fallback to INITIAL_CAPITAL for dry run
                     effective_capital = balance if not self.dry_run else INITIAL_CAPITAL
-                    amount_idr = effective_capital * JARING_ALLOCATION_PCT
-                    amount_crypto = amount_idr / jaring_price
+                    amount_quote = effective_capital * JARING_ALLOCATION_PCT
+                    amount_crypto = amount_quote / jaring_price
                     self.place_jaring(pair, amount_crypto, jaring_price)
                     
         except Exception as e:

@@ -387,7 +387,7 @@ class LiteRTLmDecisionService:
         current_price = float(ticker.get("last") or 0)
         entry_price = float(pos.get("entry_price") or 0)
         amount = float(pos.get("amount_crypto") or 0)
-        amount_idr = float(pos.get("amount_idr") or 0)
+        amount_quote = float(pos.get("amount_quote") or 0)
         prices = list(self._history.get(pair, []))
 
         if current_price <= 0 or entry_price <= 0 or amount <= 0:
@@ -395,12 +395,12 @@ class LiteRTLmDecisionService:
         if len(prices) < 20:
             return None
 
-        gross_pnl_idr = (current_price - entry_price) * amount
-        fee_buy = amount_idr * FEE_BUY_TAKER
+        gross_pnl_quote = (current_price - entry_price) * amount
+        fee_buy = amount_quote * FEE_BUY_TAKER
         fee_sell = (amount * current_price) * FEE_SELL_TAKER
-        net_pnl_idr = gross_pnl_idr - fee_buy - fee_sell
+        net_pnl_quote = gross_pnl_quote - fee_buy - fee_sell
         gross_pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
-        net_pnl_pct = (net_pnl_idr / amount_idr) * 100 if amount_idr > 0 else 0.0
+        net_pnl_pct = (net_pnl_quote / amount_quote) * 100 if amount_quote > 0 else 0.0
 
         tech = get_technical_summary(prices)
         tech_sig = derive_trade_signal(tech)
@@ -429,7 +429,7 @@ class LiteRTLmDecisionService:
             "current_price": current_price,
             "entry_price": entry_price,
             "gross_pnl_pct": gross_pnl_pct,
-            "net_pnl_idr": net_pnl_idr,
+            "net_pnl_quote": net_pnl_quote,
             "net_pnl_pct": net_pnl_pct,
             "round_trip_fee_pct": ROUND_TRIP_FEE_PCT * 100.0,
             "break_even_pct": SMART_BREAK_EVEN_PCT * 100.0,
@@ -495,7 +495,7 @@ class LiteRTLmDecisionService:
             f"PAIR={ctx['pair']}\n"
             f"PRICE={ctx['current_price']:.8f}\n"
             f"GROSS_PNL_PCT={ctx['gross_pnl_pct']:.4f}\n"
-            f"NET_PNL_IDR={ctx['net_pnl_idr']:.2f}\n"
+            f"NET_PNL_IDR={ctx['net_pnl_quote']:.2f}\n"
             f"NET_PNL_PCT={ctx['net_pnl_pct']:.4f}\n"
             f"ROUND_TRIP_FEE_PCT={ctx['round_trip_fee_pct']:.4f}\n"
             f"SMART_BREAK_EVEN_PCT={ctx['break_even_pct']:.4f}\n"

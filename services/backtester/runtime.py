@@ -143,7 +143,7 @@ def _ensure_schema_upgraded() -> None:
                 sharpe_day_like DOUBLE PRECISION,
                 momentum_quality DOUBLE PRECISION,
                 target_daily_pnl DOUBLE PRECISION NOT NULL,
-                balance_idr DOUBLE PRECISION NOT NULL,
+                balance_quote DOUBLE PRECISION NOT NULL,
                 fee_rt DOUBLE PRECISION,
                 p_hat DOUBLE PRECISION,
                 breakeven_p DOUBLE PRECISION,
@@ -202,7 +202,7 @@ def _ensure_schema_upgraded() -> None:
                 rec_obv_rising DOUBLE PRECISION,
                 rec_obv_falling DOUBLE PRECISION,
                 rec_obv_distribute DOUBLE PRECISION,
-                UNIQUE (pair, window_start, window_end, target_daily_pnl, balance_idr)
+                UNIQUE (pair, window_start, window_end, target_daily_pnl, balance_quote)
             )
             """
         )
@@ -325,7 +325,7 @@ def _ensure_schema_upgraded() -> None:
             cur.execute(
                 """
                 INSERT INTO backtest_profiles (
-                    profile_name, initial_capital_idr, max_position_idr, max_open_positions,
+                    profile_name, initial_capital_idr, max_position_quote, max_open_positions,
                     timeframe_minutes, strategy_mode, buy_threshold, target_tp_pct, target_sl_pct,
                     use_loose_gates, target_roi_pct, dca_enabled, dca_max_tiers
                 ) VALUES ('jokobodo', 5000000, 200000, 10, 1, 'scalping', 5.5, 0.015, -0.04, true, 10.0, true, 3)
@@ -334,7 +334,7 @@ def _ensure_schema_upgraded() -> None:
             cur.execute(
                 """
                 INSERT INTO backtest_profiles (
-                    profile_name, initial_capital_idr, max_position_idr, min_position_idr, max_open_positions,
+                    profile_name, initial_capital_idr, max_position_quote, min_position_idr, max_open_positions,
                     timeframe_minutes, strategy_mode, buy_threshold, target_tp_pct, target_sl_pct,
                     target_pnl_idr, use_loose_gates, max_hold_minutes
                 ) VALUES ('anglingdharma', 100000, 10000, 10000, 5, 15, 'scalping', 4.5, 0.035, -0.02, 10000, true, 2880)

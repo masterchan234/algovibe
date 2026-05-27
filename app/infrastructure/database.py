@@ -151,7 +151,7 @@ class Database:
                     window_start TIMESTAMPTZ,
                     window_end TIMESTAMPTZ,
                     source_target_daily_pnl DOUBLE PRECISION,
-                    source_balance_idr DOUBLE PRECISION,
+                    source_balance_quote DOUBLE PRECISION,
                     buy_score_threshold DOUBLE PRECISION,
                     sell_score_threshold DOUBLE PRECISION,
                     opposing_max DOUBLE PRECISION,
@@ -162,7 +162,7 @@ class Database:
                     max_hold_minutes INTEGER,
                     ema_trend_filter_enabled BOOLEAN,
                     atr_max_pct DOUBLE PRECISION,
-                    max_position_idr DOUBLE PRECISION,
+                    max_position_quote DOUBLE PRECISION,
                     dca_enabled BOOLEAN,
                     dca_max_tiers INTEGER,
                     rsi_oversold DOUBLE PRECISION,
@@ -249,7 +249,7 @@ class Database:
                     "max_hold_minutes": int(row.get("max_hold_minutes") or 1440),
                     "ema_trend_filter_enabled": bool(row.get("ema_trend_filter_enabled")),
                     "atr_max_pct": float(row.get("atr_max_pct") or 3.0),
-                    "max_position_idr": float(row.get("max_position_idr") or 100000.0),
+                    "max_position_quote": float(row.get("max_position_quote") or 100000.0),
                     "dca_enabled": bool(row.get("dca_enabled")),
                     "dca_max_tiers": int(row.get("dca_max_tiers") or 1),
                     "rsi_oversold": float(row.get("rsi_oversold") or 35.0),
@@ -304,10 +304,10 @@ class Database:
                     """
                     INSERT INTO coin_analysis (
                         pair, analysis_ts, window_start, window_end,
-                        source_target_daily_pnl, source_balance_idr,
+                        source_target_daily_pnl, source_balance_quote,
                         buy_score_threshold, sell_score_threshold, opposing_max, sell_block_threshold,
                         target_tp_pct, target_sl_pct, cooldown_seconds, max_hold_minutes,
-                        ema_trend_filter_enabled, atr_max_pct, max_position_idr, dca_enabled, dca_max_tiers,
+                        ema_trend_filter_enabled, atr_max_pct, max_position_quote, dca_enabled, dca_max_tiers,
                         rsi_oversold, rsi_overbought,
                         bb_extreme_low, bb_low, bb_high, bb_extreme_high,
                         stoch_k_oversold, stoch_d_oversold, stoch_k_overbought, stoch_d_overbought,
@@ -341,7 +341,7 @@ class Database:
                         window_start = EXCLUDED.window_start,
                         window_end = EXCLUDED.window_end,
                         source_target_daily_pnl = EXCLUDED.source_target_daily_pnl,
-                        source_balance_idr = EXCLUDED.source_balance_idr,
+                        source_balance_quote = EXCLUDED.source_balance_quote,
                         buy_score_threshold = EXCLUDED.buy_score_threshold,
                         sell_score_threshold = EXCLUDED.sell_score_threshold,
                         opposing_max = EXCLUDED.opposing_max,
@@ -352,7 +352,7 @@ class Database:
                         max_hold_minutes = EXCLUDED.max_hold_minutes,
                         ema_trend_filter_enabled = EXCLUDED.ema_trend_filter_enabled,
                         atr_max_pct = EXCLUDED.atr_max_pct,
-                        max_position_idr = EXCLUDED.max_position_idr,
+                        max_position_quote = EXCLUDED.max_position_quote,
                         dca_enabled = EXCLUDED.dca_enabled,
                         dca_max_tiers = EXCLUDED.dca_max_tiers,
                         rsi_oversold = EXCLUDED.rsi_oversold,
@@ -397,7 +397,7 @@ class Database:
                         r.get("window_start"),
                         r.get("window_end"),
                         r.get("target_daily_pnl"),
-                        r.get("balance_idr"),
+                        r.get("balance_quote"),
                         r.get("buy_score_threshold"),
                         r.get("sell_score_threshold"),
                         r.get("opposing_max"),
@@ -408,7 +408,7 @@ class Database:
                         r.get("max_hold_minutes"),
                         r.get("ema_trend_filter_enabled"),
                         r.get("atr_max_pct"),
-                        r.get("max_position_idr"),
+                        r.get("max_position_quote"),
                         r.get("dca_enabled"),
                         r.get("dca_max_tiers"),
                         r.get("rsi_oversold"),
@@ -472,7 +472,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE positions 
-                SET entry_price = %s, amount_crypto = %s, amount_idr = %s, dca_tier = %s, timestamp = CURRENT_TIMESTAMP
+                SET entry_price = %s, amount_crypto = %s, amount_quote = %s, dca_tier = %s, timestamp = CURRENT_TIMESTAMP
                 WHERE pair = %s
             ''', (new_price, new_amount_crypto, new_amount_idr, new_tier, pair))
 
@@ -486,22 +486,20 @@ class Database:
     def upsert_position(self, pair, data: dict):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Ubah boolean jadi integer untuk SQLite
             dry_run = bool(data.get('dry_run'))
             trailing_sl_price = data.get('trailing_sl_price')
             highest_price = data.get('highest_price')
-            
+
             cursor.execute('''
                 INSERT INTO positions (
-                    pair, entry_price, amount_crypto, amount_idr, status, 
+                    pair, entry_price, amount_crypto, amount_quote, status,
                     entry_order_id, exit_order_id, timestamp, dry_run, target_tp_pct, target_sl_pct,
-                    trailing_sl_price, highest_price, reason_backup, ai_confidence
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 0.0), COALESCE(%s, 0.0), %s, %s)
+                    trailing_sl_price, highest_price, reason_backup, ai_confidence, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 0.0), COALESCE(%s, 0.0), %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT(pair) DO UPDATE SET
                     entry_price=excluded.entry_price,
                     amount_crypto=excluded.amount_crypto,
-                    amount_idr=excluded.amount_idr,
+                    amount_quote=excluded.amount_quote,
                     status=excluded.status,
                     entry_order_id=excluded.entry_order_id,
                     exit_order_id=excluded.exit_order_id,
@@ -513,11 +511,12 @@ class Database:
                     highest_price=COALESCE(excluded.highest_price, positions.highest_price),
                     reason_backup=excluded.reason_backup,
                     ai_confidence=COALESCE(excluded.ai_confidence, positions.ai_confidence)
+                    -- NOTE: created_at is NOT in the UPDATE list; preserved from initial INSERT
             ''', (
                 pair,
                 data.get('entry_price'),
                 data.get('amount_crypto') or data.get('amount', 0),
-                data.get('amount_idr'),
+                data.get('amount_quote'),
                 data.get('status'),
                 data.get('entry_order_id'),
                 data.get('exit_order_id'),
@@ -546,17 +545,17 @@ class Database:
 
     #  METODE UNTUK TRADE HISTORY 
     
-    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
+    def insert_trade_history(self, pair, entry_price, exit_price, amount_crypto, amount_quote, pnl_quote, pnl_pct, reason, duration_seconds, dry_run, exec_type='MAKER', trade_id=None, is_manual=0, created_at=None, exit_order_id=None, ai_confidence=0.0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             dry_run_bool = bool(dry_run)
             
             sql = '''
                 INSERT INTO trade_history (
-                    pair, entry_price, exit_price, amount_crypto, amount_idr,
-                    pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id, ai_confidence
+                    pair, entry_price, exit_price, amount_crypto, amount_quote,
+                    pnl_quote, pnl_pct, reason, exec_type, duration_seconds, dry_run, trade_id, is_manual, exit_order_id, ai_confidence
                 '''
-            params = [pair, entry_price, exit_price, amount_crypto, amount_idr, pnl_idr, pnl_pct, reason, exec_type, duration_seconds, dry_run_bool, trade_id, is_manual, exit_order_id, ai_confidence]
+            params = [pair, entry_price, exit_price, amount_crypto, amount_quote, pnl_quote, pnl_pct, reason, exec_type, duration_seconds, dry_run_bool, trade_id, is_manual, exit_order_id, ai_confidence]
             
             if created_at:
                 sql += ", created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
@@ -571,12 +570,12 @@ class Database:
                 if "no column named trade_id" in str(e).lower():
                     legacy_sql = '''
                         INSERT INTO trade_history (
-                            pair, entry_price, exit_price, amount_crypto, amount_idr,
-                            pnl_idr, pnl_pct, reason, duration_seconds, dry_run
+                            pair, entry_price, exit_price, amount_crypto, amount_quote,
+                            pnl_quote, pnl_pct, reason, duration_seconds, dry_run
                     '''
                     legacy_params = [
-                        pair, entry_price, exit_price, amount_crypto, amount_idr,
-                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run_bool,
+                        pair, entry_price, exit_price, amount_crypto, amount_quote,
+                        pnl_quote, pnl_pct, reason, duration_seconds, dry_run_bool,
                     ]
 
                     if created_at:
@@ -589,7 +588,7 @@ class Database:
                 else:
                     raise
 
-    def insert_backtest_data(self, pair, dna, pnl_idr, pnl_pct, entry_price, exit_price, amount_idr, duration_seconds):
+    def insert_backtest_data(self, pair, dna, pnl_quote, pnl_pct, entry_price, exit_price, amount_quote, duration_seconds):
         """Metode khusus untuk menyuntikkan hasil simulasi masa lalu ke database memori AI."""
         try:
             # Cast numpy types to native Python types to avoid "schema np does not exist" errors
@@ -602,25 +601,25 @@ class Database:
                 conn.execute('''
                     INSERT INTO backtest_analytics (
                         pair, entry_timestamp, ai_prob, whale_boost, 
-                        sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status
+                        sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_quote, status
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'CLOSED')
                     ON CONFLICT (pair, entry_timestamp) DO NOTHING
                 ''', (
                     pair, dna.get('timestamp'), _c(dna.get('ai_prob')), _c(dna.get('whale_boost')),
                     _c(dna.get('sector_sentiment')), _c(dna.get('imbalance')), _c(dna.get('volatility')),
-                    _c(dna.get('rsi')), _c(dna.get('ema_dist')), _c(pnl_idr)
+                    _c(dna.get('rsi')), _c(dna.get('ema_dist')), _c(pnl_quote)
                 ))
                 
                 # 2. Simpan ke backtest_history (Outcome)
                 conn.execute('''
                     INSERT INTO backtest_history (
-                        pair, entry_price, exit_price, amount_crypto, amount_idr,
-                        pnl_idr, pnl_pct, reason, duration_seconds, dry_run
+                        pair, entry_price, exit_price, amount_crypto, amount_quote,
+                        pnl_quote, pnl_pct, reason, duration_seconds, dry_run
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-                    ON CONFLICT (pair, entry_price, exit_price, pnl_idr, created_at) DO NOTHING
+                    ON CONFLICT (pair, entry_price, exit_price, pnl_quote, created_at) DO NOTHING
                 ''', (
-                    pair, _c(entry_price), _c(exit_price), _c(amount_idr/entry_price), _c(amount_idr),
-                    _c(pnl_idr), _c(pnl_pct), 'BACKTEST', _c(duration_seconds)
+                    pair, _c(entry_price), _c(exit_price), _c(amount_quote/entry_price), _c(amount_quote),
+                    _c(pnl_quote), _c(pnl_pct), 'BACKTEST', _c(duration_seconds)
                 ))
         except Exception as e:
             print(f"DB Error (insert_backtest_data): {e}")
@@ -649,13 +648,13 @@ class Database:
             query = f'''
                 SELECT 
                     COUNT(*) as total_trades,
-                    SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
-                    SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as loss_count,
-                    SUM(pnl_idr) as total_pnl_idr,
+                    SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN pnl_quote <= 0 THEN 1 ELSE 0 END) as loss_count,
+                    SUM(pnl_quote) as total_pnl_quote,
                     AVG(pnl_pct) as avg_pnl_pct,
-                    SUM(CASE WHEN pnl_idr > 0 THEN pnl_idr ELSE 0 END) as gross_profit,
-                    SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
-                    SUM(amount_idr) as total_volume_idr
+                    SUM(CASE WHEN pnl_quote > 0 THEN pnl_quote ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl_quote < 0 THEN pnl_quote ELSE 0 END) as gross_loss,
+                    SUM(amount_quote) as total_volume_quote
                 FROM trade_history
                 WHERE {date_filter} AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             '''
@@ -667,11 +666,11 @@ class Database:
             stats['total_trades'] = stats.get('total_trades') or 0
             stats['win_count'] = stats.get('win_count') or 0
             stats['loss_count'] = stats.get('loss_count') or 0
-            stats['total_pnl_idr'] = stats.get('total_pnl_idr') or 0.0
+            stats['total_pnl_quote'] = stats.get('total_pnl_quote') or 0.0
             stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
             stats['gross_profit'] = stats.get('gross_profit') or 0.0
             stats['gross_loss'] = stats.get('gross_loss') or 0.0
-            stats['total_volume_idr'] = stats.get('total_volume_idr') or 0.0
+            stats['total_volume_quote'] = stats.get('total_volume_quote') or 0.0
             
             return stats
 
@@ -689,13 +688,13 @@ class Database:
             query = f'''
                 SELECT 
                     COUNT(*) as total_trades,
-                    SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as win_count,
-                    SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as loss_count,
-                    SUM(pnl_idr) as total_pnl_idr,
+                    SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN pnl_quote <= 0 THEN 1 ELSE 0 END) as loss_count,
+                    SUM(pnl_quote) as total_pnl_quote,
                     AVG(pnl_pct) as avg_pnl_pct,
-                    SUM(CASE WHEN pnl_idr > 0 THEN pnl_idr ELSE 0 END) as gross_profit,
-                    SUM(CASE WHEN pnl_idr < 0 THEN pnl_idr ELSE 0 END) as gross_loss,
-                    SUM(amount_idr) as total_volume_idr
+                    SUM(CASE WHEN pnl_quote > 0 THEN pnl_quote ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl_quote < 0 THEN pnl_quote ELSE 0 END) as gross_loss,
+                    SUM(amount_quote) as total_volume_quote
                 FROM trade_history
                 WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             '''
@@ -706,11 +705,11 @@ class Database:
             stats['total_trades'] = stats.get('total_trades') or 0
             stats['win_count'] = stats.get('win_count') or 0
             stats['loss_count'] = stats.get('loss_count') or 0
-            stats['total_pnl_idr'] = stats.get('total_pnl_idr') or 0.0
+            stats['total_pnl_quote'] = stats.get('total_pnl_quote') or 0.0
             stats['avg_pnl_pct'] = stats.get('avg_pnl_pct') or 0.0
             stats['gross_profit'] = stats.get('gross_profit') or 0.0
             stats['gross_loss'] = stats.get('gross_loss') or 0.0
-            stats['total_volume_idr'] = stats.get('total_volume_idr') or 0.0
+            stats['total_volume_quote'] = stats.get('total_volume_quote') or 0.0
             
             return stats
 
@@ -719,6 +718,121 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trade_history WHERE reason != 'BACKTEST' ORDER BY created_at DESC LIMIT %s", (limit,))
             return [dict(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    #  PAIR RUNTIME STATE (replaces gate_ts_* / gate_skip_* in bot_state)
+    # =========================================================================
+
+    def upsert_pair_runtime_state(self, pair: str, exchange: str = 'binance', **kwargs):
+        """Upsert per-pair runtime state. kwargs: consecutive_losses, cooldown_until,
+        gate_ts, gate_skip_reason, last_sl_at, last_entry_at, sl_count_session."""
+        if not kwargs:
+            return
+        allowed = {
+            'consecutive_losses', 'sl_count_session', 'last_sl_at',
+            'last_entry_at', 'cooldown_until', 'gate_ts', 'gate_skip_reason'
+        }
+        cols = {k: v for k, v in kwargs.items() if k in allowed}
+        if not cols:
+            return
+        set_clause = ', '.join(f"{k} = %s" for k in cols)
+        set_clause += ', updated_at = CURRENT_TIMESTAMP'
+        col_names = ', '.join(cols.keys())
+        placeholders = ', '.join(['%s'] * len(cols))
+        values = list(cols.values())
+        with self.get_connection() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO pair_runtime_state (pair, exchange, {col_names}, updated_at)
+                VALUES (%s, %s, {placeholders}, CURRENT_TIMESTAMP)
+                ON CONFLICT (pair, exchange) DO UPDATE SET {set_clause}
+                """,
+                [pair, exchange] + values + values
+            )
+
+    def get_pair_runtime_state(self, pair: str, exchange: str = 'binance') -> dict:
+        """Return runtime state row for a pair, or defaults if not found."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM pair_runtime_state WHERE pair = %s AND exchange = %s",
+                (pair, exchange)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return {
+            'pair': pair, 'exchange': exchange,
+            'consecutive_losses': 0, 'sl_count_session': 0,
+            'last_sl_at': None, 'last_entry_at': None,
+            'cooldown_until': 0.0, 'gate_ts': None, 'gate_skip_reason': None,
+        }
+
+    # =========================================================================
+    #  SIGNALS LOG (audit trail of every signal generated)
+    # =========================================================================
+
+    def insert_signal_log(self, pair: str, signal: str, buy_score: float = 0.0,
+                          sell_score: float = 0.0, confidence: float = 0.0,
+                          price: float = None, volume_ratio: float = 0.0,
+                          rsi: float = 0.0, regime: str = 'UNKNOWN',
+                          executed: bool = False, trade_id: str = None,
+                          dry_run: bool = True, exchange: str = 'binance'):
+        """Log a generated signal. Call unconditionally from brain_inference."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO signals_log
+                        (pair, exchange, signal, buy_score, sell_score, confidence,
+                         price, volume_ratio, rsi, regime, executed, trade_id, dry_run)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (pair, exchange, signal, buy_score, sell_score, confidence,
+                     price, volume_ratio, rsi, regime, executed, trade_id, dry_run)
+                )
+        except Exception as e:
+            logger.warning("[DB] insert_signal_log error: %s", e)
+
+    # =========================================================================
+    #  TRADING SESSIONS
+    # =========================================================================
+
+    def start_trading_session(self, exchange: str = 'binance', dry_run: bool = True) -> int:
+        """Insert a new session row and return its id."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO trading_sessions (exchange, dry_run, status) "
+                    "VALUES (%s, %s, 'ACTIVE') RETURNING id",
+                    (exchange, dry_run)
+                )
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.warning("[DB] start_trading_session error: %s", e)
+            return None
+
+    def update_trading_session(self, session_id: int, **kwargs):
+        """Update session stats. kwargs: total_trades, win_count, loss_count,
+        net_pnl_quote, peak_pnl_quote, status, ended_at."""
+        if not kwargs or not session_id:
+            return
+        allowed = {'total_trades', 'win_count', 'loss_count',
+                   'net_pnl_quote', 'peak_pnl_quote', 'status', 'ended_at'}
+        cols = {k: v for k, v in kwargs.items() if k in allowed}
+        if not cols:
+            return
+        set_clause = ', '.join(f"{k} = %s" for k in cols)
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    f"UPDATE trading_sessions SET {set_clause} WHERE id = %s",
+                    list(cols.values()) + [session_id]
+                )
+        except Exception as e:
+            logger.warning("[DB] update_trading_session error: %s", e)
 
     #  METODE UNTUK TICKER HISTORY 
 
@@ -1008,9 +1122,9 @@ class Database:
         """
         report = {
             "sample_trades": 0,
-            "expectancy_idr": 0.0,
-            "avg_win_idr": 0.0,
-            "avg_loss_idr": 0.0,
+            "expectancy_quote": 0.0,
+            "avg_win_quote": 0.0,
+            "avg_loss_quote": 0.0,
             "window_hours": int(window_hours),
             "fallback_used": False,
             "verdict_precision": {
@@ -1047,9 +1161,9 @@ class Database:
                     """
                     SELECT
                         COUNT(*) as total,
-                        AVG(pnl_idr) as expectancy,
-                        AVG(CASE WHEN pnl_idr > 0 THEN pnl_idr END) as avg_win,
-                        AVG(CASE WHEN pnl_idr < 0 THEN pnl_idr END) as avg_loss
+                        AVG(pnl_quote) as expectancy,
+                        AVG(CASE WHEN pnl_quote > 0 THEN pnl_quote END) as avg_win,
+                        AVG(CASE WHEN pnl_quote < 0 THEN pnl_quote END) as avg_loss
                     FROM trade_history
                     WHERE created_at >= NOW() + (%s)::interval AND dry_run = %s AND reason != 'BACKTEST'
                     """,
@@ -1057,9 +1171,9 @@ class Database:
                 ).fetchone()
 
                 report["sample_trades"] = int((stats['total'] if stats else 0) or 0)
-                report["expectancy_idr"] = float((stats['expectancy'] if stats else 0) or 0.0)
-                report["avg_win_idr"] = float((stats['avg_win'] if stats else 0) or 0.0)
-                report["avg_loss_idr"] = float((stats['avg_loss'] if stats else 0) or 0.0)
+                report["expectancy_quote"] = float((stats['expectancy'] if stats else 0) or 0.0)
+                report["avg_win_quote"] = float((stats['avg_win'] if stats else 0) or 0.0)
+                report["avg_loss_quote"] = float((stats['avg_loss'] if stats else 0) or 0.0)
 
                 # Precision per verdict dari trade_analytics yang sudah CLOSED
                 verdict_rows = conn.execute(
@@ -1067,7 +1181,7 @@ class Database:
                     SELECT
                         UPPER(COALESCE(llm_verdict, 'HOLD')) as verdict,
                         COUNT(*) as trades,
-                        SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins
+                        SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as wins
                     FROM trade_analytics
                     WHERE status = 'CLOSED'
                       AND entry_timestamp >= NOW() + (%s)::interval
@@ -1094,11 +1208,11 @@ class Database:
                     SELECT
                         reason,
                         COUNT(*) as cnt,
-                        AVG(pnl_idr) as avg_loss
+                        AVG(pnl_quote) as avg_loss
                     FROM trade_history
                     WHERE created_at >= NOW() + (%s)::interval
                       AND dry_run = %s
-                      AND pnl_idr < 0
+                      AND pnl_quote < 0
                       AND reason != 'BACKTEST'
                     GROUP BY reason
                     ORDER BY cnt DESC, avg_loss ASC
@@ -1111,7 +1225,7 @@ class Database:
                     {
                         "reason": row['reason'] or 'UNKNOWN',
                         "count": int(row['cnt'] or 0),
-                        "avg_loss_idr": float(row['avg_loss'] or 0.0)
+                        "avg_loss_quote": float(row['avg_loss'] or 0.0)
                     }
                     for row in loss_rows
                 ]
@@ -1132,13 +1246,13 @@ class Database:
         except Exception as e:
             print(f"DB Error (update_llm_reasoning): {e}")
 
-    def update_trade_outcome(self, pair, pnl_idr):
+    def update_trade_outcome(self, pair, pnl_quote):
         try:
             with self.get_connection() as conn:
                 # Update PnL untuk entri terbaru yang masih OPEN
                 conn.execute(
-                    "UPDATE trade_analytics SET pnl_idr = %s, status = 'CLOSED' WHERE pair = %s AND status = 'OPEN'",
-                    (pnl_idr, pair)
+                    "UPDATE trade_analytics SET pnl_quote = %s, status = 'CLOSED' WHERE pair = %s AND status = 'OPEN'",
+                    (pnl_quote, pair)
                 )
         except Exception as e:
             print(f"DB Error (update_trade_outcome): {e}")
@@ -1160,13 +1274,13 @@ class Database:
         try:
             with self.get_connection() as conn:
                 # [Fix] Hapus JOIN ke trade_history — JOIN tersebut hanya menghasilkan 5 record
-                # karena kondisi abs(pnl_idr) < 10 tidak cocok untuk trade dengan nilai berbeda.
-                # trade_analytics sudah memiliki pnl_idr sendiri dari update_trade_outcome().
+                # karena kondisi abs(pnl_quote) < 10 tidak cocok untuk trade dengan nilai berbeda.
+                # trade_analytics sudah memiliki pnl_quote sendiri dari update_trade_outcome().
                 # [Senior Fix] Ambil DNA dari data Live/Dry DAN data Backtest
                 query = """
-                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_quote, status FROM trade_analytics WHERE status = 'CLOSED' AND pnl_quote IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
                     UNION ALL
-                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_idr, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_idr IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
+                    (SELECT pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, pnl_quote, status FROM backtest_analytics WHERE status = 'CLOSED' AND pnl_quote IS NOT NULL AND rsi IS NOT NULL AND ema_dist IS NOT NULL)
                     ORDER BY entry_timestamp DESC LIMIT %s
                 """
                 cursor = conn.execute(query, (limit,))
@@ -1747,7 +1861,7 @@ class DatabaseRouter:
                             window_start,
                             window_end,
                             target_daily_pnl,
-                            balance_idr,
+                            balance_quote,
                             rec_buy_score_threshold AS buy_score_threshold,
                             rec_sell_score_threshold AS sell_score_threshold,
                             rec_opposing_max AS opposing_max,
@@ -1758,7 +1872,7 @@ class DatabaseRouter:
                             rec_max_hold_minutes AS max_hold_minutes,
                             rec_ema_trend_filter_enabled AS ema_trend_filter_enabled,
                             rec_atr_max_pct AS atr_max_pct,
-                            rec_max_position_idr AS max_position_idr,
+                            rec_max_position_idr AS max_position_quote,
                             rec_dca_enabled AS dca_enabled,
                             rec_dca_max_tiers AS dca_max_tiers,
                             rec_rsi_oversold AS rsi_oversold,
@@ -1810,7 +1924,7 @@ class DatabaseRouter:
                             window_start,
                             window_end,
                             target_daily_pnl,
-                            balance_idr,
+                            balance_quote,
                             rec_buy_score_threshold AS buy_score_threshold,
                             rec_sell_score_threshold AS sell_score_threshold,
                             rec_opposing_max AS opposing_max,
@@ -1821,7 +1935,7 @@ class DatabaseRouter:
                             rec_max_hold_minutes AS max_hold_minutes,
                             rec_ema_trend_filter_enabled AS ema_trend_filter_enabled,
                             rec_atr_max_pct AS atr_max_pct,
-                            rec_max_position_idr AS max_position_idr,
+                            rec_max_position_idr AS max_position_quote,
                             rec_dca_enabled AS dca_enabled,
                             rec_dca_max_tiers AS dca_max_tiers,
                             rec_rsi_oversold AS rsi_oversold,

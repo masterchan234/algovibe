@@ -16,7 +16,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
 
     strat_mode = p.get("strategy_mode", "scalping")
     tf_min = int(p.get("timeframe_minutes", 1))
-    pos_idr = float(pair_cfg.get("max_position_idr", p.get("max_position_idr", 120.0)))
+    pos_idr = float(pair_cfg.get("max_position_quote", p.get("max_position_quote", 120.0)))
     min_candles = 50
 
     fee_buy = float(p.get("fee_buy_taker", 0.001))   # Binance Spot taker 0.1%
@@ -104,7 +104,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             p_crypto_amt = (p_trade_idr - p_buy_fee) / open_fill_px
             position = {
                 "entry_price": open_fill_px,
-                "amount_idr": p_trade_idr,
+                "amount_quote": p_trade_idr,
                 "amount_crypto": p_crypto_amt,
                 "buy_fee": p_buy_fee,
                 "entry_ts": ts_epoch,
@@ -118,7 +118,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
 
         if position:
             entry_px = position["entry_price"]
-            entry_idr = position["amount_idr"]
+            entry_idr = position["amount_quote"]
             crypto = position["amount_crypto"]
 
             # Track highest_price menggunakan HIGH intra-candle (bukan hanya close)
@@ -199,9 +199,9 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
                         "exit_time": ts,
                         "entry_price": entry_px,
                         "exit_price": exit_price,
-                        "amount_idr": entry_idr,
+                        "amount_quote": entry_idr,
                         "amount_crypto": crypto,
-                        "pnl_idr": round(net_pnl, 2),
+                        "pnl_quote": round(net_pnl, 2),
                         "pnl_pct": round(pnl_pct, 4),
                         "exit_reason": exit_reason,
                         "buy_score": position.get("buy_score", 0),
@@ -240,7 +240,7 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         gross_pnl = (exit_px - position["entry_price"]) * position["amount_crypto"]
         sell_fee = exit_px * position["amount_crypto"] * fee_sell
         net_pnl = gross_pnl - position["buy_fee"] - sell_fee
-        current_cap += position["amount_idr"] + net_pnl
+        current_cap += position["amount_quote"] + net_pnl
         trades.append(
             {
                 "profile_id": p["id"],
@@ -249,10 +249,10 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
                 "exit_time": last_c["ts"],
                 "entry_price": position["entry_price"],
                 "exit_price": exit_px,
-                "amount_idr": position["amount_idr"],
+                "amount_quote": position["amount_quote"],
                 "amount_crypto": position["amount_crypto"],
-                "pnl_idr": round(net_pnl, 2),
-                "pnl_pct": round(net_pnl / position["amount_idr"] * 100, 4),
+                "pnl_quote": round(net_pnl, 2),
+                "pnl_pct": round(net_pnl / position["amount_quote"] * 100, 4),
                 "exit_reason": "END_OF_DATA",
                 "buy_score": position["buy_score"],
                 "sell_score_at_exit": None,
@@ -403,7 +403,7 @@ def _compute_stats(trades: list[dict], capital: float, start: datetime, end: dat
     if not trades:
         return {}
 
-    pnls = [t["pnl_idr"] for t in trades]
+    pnls = [t["pnl_quote"] for t in trades]
     total_pnl = sum(pnls)
     win_rate = len([p for p in pnls if p > 0]) / len(pnls)
     wins = [p for p in pnls if p > 0]
@@ -432,7 +432,7 @@ def _compute_stats(trades: list[dict], capital: float, start: datetime, end: dat
         "winning_trades": int(len(wins)),
         "losing_trades": int(len(losses)),
         "win_rate": float(round(win_rate, 4)),
-        "total_pnl_idr": float(round(total_pnl, 2)),
+        "total_pnl_quote": float(round(total_pnl, 2)),
         "total_pnl_pct": float(round(total_pnl / capital * 100, 4)),
         "max_drawdown_pct": float(round(max_dd_pct, 4)),
         "max_drawdown_idr": float(round(max_dd_idr, 2)),
@@ -448,7 +448,7 @@ def _compute_stats(trades: list[dict], capital: float, start: datetime, end: dat
         "sortino_ratio": 0.0,
         "recovery_factor": float(round(total_pnl / max_dd_idr, 4)) if max_dd_idr > 0 else 0.0,
         "calmar_ratio": 0.0,
-        "expectancy_idr": 0.0,
+        "expectancy_quote": 0.0,
     }
 
 
@@ -515,18 +515,18 @@ def _simulate_portfolio(all_trades: list[dict], profile: dict) -> list[dict]:
         still_open = []
         for a in active_trades:
             if a["exit_time"] <= until_ts:
-                available_cash += float(a.get("amount_idr", 0.0)) + float(a.get("pnl_idr", 0.0))
+                available_cash += float(a.get("amount_quote", 0.0)) + float(a.get("pnl_quote", 0.0))
             else:
                 still_open.append(a)
         active_trades = still_open
 
     for t in sorted_trades:
         _release_closed(t["entry_time"])
-        amount_idr = float(t.get("amount_idr", 0.0))
-        if len(active_trades) < max_pos and amount_idr <= available_cash:
+        amount_quote = float(t.get("amount_quote", 0.0))
+        if len(active_trades) < max_pos and amount_quote <= available_cash:
             active_trades.append(t)
             final_trades.append(t)
-            available_cash -= amount_idr
+            available_cash -= amount_quote
 
     _release_closed(datetime.max.replace(tzinfo=timezone.utc))
     return final_trades
@@ -543,7 +543,7 @@ def _save_result(pid, pair, stats, trades):
             """
             INSERT INTO backtest_results (
                 profile_id, window_start, window_end, pair, total_trades, winning_trades, losing_trades, win_rate,
-                total_pnl_idr, total_pnl_pct, max_drawdown_idr, max_drawdown_pct,
+                total_pnl_quote, total_pnl_pct, max_drawdown_idr, max_drawdown_pct,
                 profit_factor, sharpe_ratio, initial_capital_idr, final_capital_idr,
                 avg_trade_duration_sec, avg_pnl_per_trade_idr, avg_pnl_per_trade_pct
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
@@ -557,7 +557,7 @@ def _save_result(pid, pair, stats, trades):
                 int(_c(stats["winning_trades"])),
                 int(_c(stats["losing_trades"])),
                 float(_c(stats["win_rate"])),
-                float(_c(stats["total_pnl_idr"])),
+                float(_c(stats["total_pnl_quote"])),
                 float(_c(stats["total_pnl_pct"])),
                 float(_c(stats["max_drawdown_idr"])),
                 float(_c(stats["max_drawdown_pct"])),
@@ -576,7 +576,7 @@ def _save_result(pid, pair, stats, trades):
                 """
                 INSERT INTO backtest_trades (
                     result_id, pair, entry_time, exit_time, entry_price, exit_price,
-                    amount_idr, amount_crypto, pnl_idr, pnl_pct, exit_reason,
+                    amount_quote, amount_crypto, pnl_quote, pnl_pct, exit_reason,
                     buy_score, sell_score_at_exit, duration_seconds
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
@@ -587,9 +587,9 @@ def _save_result(pid, pair, stats, trades):
                     t["exit_time"],
                     float(_c(t["entry_price"])),
                     float(_c(t["exit_price"])),
-                    float(_c(t["amount_idr"])),
+                    float(_c(t["amount_quote"])),
                     float(_c(t["amount_crypto"])),
-                    float(_c(t["pnl_idr"])),
+                    float(_c(t["pnl_quote"])),
                     float(_c(t["pnl_pct"])),
                     t["exit_reason"],
                     float(_c(t["buy_score"])),
@@ -710,7 +710,7 @@ def _load_latest_coin_setup(pairs: list[str]) -> dict[str, dict]:
                 "max_hold_minutes": int(r["rec_max_hold_minutes"] or 1440),
                 "ema_trend_filter_enabled": bool(r["rec_ema_trend_filter_enabled"]),
                 "atr_max_pct": float(r["rec_atr_max_pct"] or 3.0),
-                "max_position_idr": float(r["rec_max_position_idr"] or 100000.0),
+                "max_position_quote": float(r["rec_max_position_idr"] or 100000.0),
                 "dca_enabled": bool(r["rec_dca_enabled"]),
                 "dca_max_tiers": int(r["rec_dca_max_tiers"] or 1),
                 "rsi_oversold": float(r["rec_rsi_oversold"] or 35.0),

@@ -608,7 +608,8 @@ class BrainInferenceService:
                     break
 
                 if gate is None:
-                    gate_reason = db.get_state(f"gate_skip_{pair}", "Gate rejected")
+                    prs = db.get_pair_runtime_state(pair.lower())
+                    gate_reason = prs.get('gate_skip_reason') or 'Gate rejected'
                     print(f"[DEBUG-BRAIN] {pair} Gate Rejected: {gate_reason}", flush=True)
                     continue
 

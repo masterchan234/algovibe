@@ -5,9 +5,9 @@ def show_results():
     conn = get_connection()
     try:
         query = """
-        SELECT pair, total_trades, winning_trades, losing_trades, win_rate, total_pnl_idr, total_pnl_pct, max_drawdown_pct 
+        SELECT pair, total_trades, winning_trades, losing_trades, win_rate, total_pnl_quote, total_pnl_pct, max_drawdown_pct 
         FROM backtest_results 
-        ORDER BY total_pnl_idr DESC;
+        ORDER BY total_pnl_quote DESC;
         """
         df = pd.read_sql(query, conn)
         if df.empty:
@@ -19,7 +19,7 @@ def show_results():
         total_wins = df['winning_trades'].sum()
         total_losses = df['losing_trades'].sum()
         winrate = (total_wins / total_trades * 100) if total_trades > 0 else 0
-        total_pnl = df['total_pnl_idr'].sum()
+        total_pnl = df['total_pnl_quote'].sum()
         avg_pnl = total_pnl / total_trades if total_trades > 0 else 0
         
         print(f"Total Trades: {total_trades}")

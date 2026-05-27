@@ -63,10 +63,10 @@ def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
         if cached and cached.get('minute') == now_min:
             return cached
 
-        # 1. Cooldown Guard (Query Postgres db once per minute)
-        cooldown_until_raw = db.get_state(f"pair_cooldown_until_{pair}", "0")
+        # 1. Cooldown Guard — read from pair_runtime_state (normalized table)
         try:
-            cooldown_until = float(cooldown_until_raw or 0)
+            prs = db.get_pair_runtime_state(pair_lower)
+            cooldown_until = float(prs.get('cooldown_until') or 0)
         except Exception:
             cooldown_until = 0.0
         now_ts = time.time()
@@ -190,8 +190,12 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     pair_lower = pair.lower()
 
     def save_gate_state(msg):
-        db.save_state(f"gate_skip_{pair}", msg)
-        db.save_state(f"gate_ts_{pair}", datetime.now().isoformat())
+        # Write to normalized pair_runtime_state (replaces KV bot_state entries)
+        db.upsert_pair_runtime_state(
+            pair_lower,
+            gate_skip_reason=msg,
+            gate_ts=datetime.now(),
+        )
 
     trend = enriched['trend']
     breakout = enriched['breakout']

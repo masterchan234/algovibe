@@ -12,7 +12,7 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
             print(f"\n[REPORT] Profile: {profile_name} — No data.")
             return
 
-        cur.execute("SELECT pair, pnl_idr, pnl_pct FROM backtest_trades WHERE result_id = %s", (row["id"],))
+        cur.execute("SELECT pair, pnl_quote, pnl_pct FROM backtest_trades WHERE result_id = %s", (row["id"],))
         trades = cur.fetchall()
         n_pairs = len(set(t["pair"] for t in trades))
 
@@ -20,7 +20,7 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
         print(f"  QUANTITATIVE PERFORMANCE REPORT: {profile_name:<28} ")
         print("" + "" * 68 + "")
         print(f"  Pairs Tested    : {n_pairs:<10} | Total Trades : {row['total_trades']:<10} ")
-        print(f"  Win Rate        : {row['win_rate']*100:6.2f}%    | Net PnL (USDT): $ {row['total_pnl_idr']:>12,.2f} ")
+        print(f"  Win Rate        : {row['win_rate']*100:6.2f}%    | Net PnL (USDT): $ {row['total_pnl_quote']:>12,.2f} ")
         print(f"  ROI             : {row['total_pnl_pct']:>+6.2f}%     | Profit Factor: {row['profit_factor']:>12.2f} ")
         print(f"  Max Drawdown    : $ {row['max_drawdown_idr']:>8,.2f} | Avg Duration : {row['avg_trade_duration_sec']/60:>10.1f} min ")
         print("" + "" * 68 + "")

@@ -587,13 +587,13 @@ def _get_trade_history_summary():
         row = conn.execute(f"""
             SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as losses,
-                ROUND(AVG(CASE WHEN pnl_idr > 0 THEN pnl_pct END), 3) as avg_win_pct,
-                ROUND(AVG(CASE WHEN pnl_idr <= 0 THEN pnl_pct END), 3) as avg_loss_pct,
-                ROUND(MAX(pnl_idr), 0) as best_trade,
-                ROUND(MIN(pnl_idr), 0) as worst_trade,
-                ROUND(SUM(pnl_idr), 0) as total_pnl,
+                SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_quote <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(AVG(CASE WHEN pnl_quote > 0 THEN pnl_pct END), 3) as avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl_quote <= 0 THEN pnl_pct END), 3) as avg_loss_pct,
+                ROUND(MAX(pnl_quote), 0) as best_trade,
+                ROUND(MIN(pnl_quote), 0) as worst_trade,
+                ROUND(SUM(pnl_quote), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
             FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
         """, (bool(dry_val),)).fetchone()
@@ -605,7 +605,7 @@ def _get_trade_history_summary():
         """, (bool(dry_val),)).fetchall()
 
         top_pairs = conn.execute(f"""
-            SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
+            SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_quote), 0) as total_pnl
             FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
         """, (bool(dry_val),)).fetchall()
@@ -1065,10 +1065,10 @@ def public_landing_data():
             exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
             perf_row = conn.execute(f"""
                 SELECT
-                    COUNT(*) FILTER (WHERE pnl_idr > 0) AS wins,
-                    COUNT(*) FILTER (WHERE pnl_idr <= 0) AS losses,
-                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_idr > 0)::numeric, 2) AS avg_win_pct,
-                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_idr <= 0)::numeric, 2) AS avg_loss_pct,
+                    COUNT(*) FILTER (WHERE pnl_quote > 0) AS wins,
+                    COUNT(*) FILTER (WHERE pnl_quote <= 0) AS losses,
+                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_quote > 0)::numeric, 2) AS avg_win_pct,
+                    ROUND(AVG(pnl_pct) FILTER (WHERE pnl_quote <= 0)::numeric, 2) AS avg_loss_pct,
                     ROUND(AVG(pnl_pct)::numeric, 2) AS net_avg_pct,
                     MIN(created_at) AS first_trade
                 FROM trade_history
@@ -1080,13 +1080,13 @@ def public_landing_data():
                     UPPER(REPLACE(REPLACE(pair, 'usdt', ''), 'idr', '')) AS coin,
                     COUNT(*) AS trades,
                     ROUND(
-                        (SUM(pnl_idr) / NULLIF(SUM(SUM(pnl_idr)) OVER (), 0) * 100)::numeric
+                        (SUM(pnl_quote) / NULLIF(SUM(SUM(pnl_quote)) OVER (), 0) * 100)::numeric
                     , 0) AS attr_pct
                 FROM trade_history
                 WHERE created_at >= NOW() - INTERVAL '7 days'
                 AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
                 GROUP BY coin
-                ORDER BY SUM(pnl_idr) DESC LIMIT 6
+                ORDER BY SUM(pnl_quote) DESC LIMIT 6
             """, (bool(dry_val),)).fetchall()
             if perf_row:
                 wins = int(perf_row['wins'] or 0)
@@ -1304,7 +1304,7 @@ def get_positions():
     conn = get_db_connection()
     try:
         positions = conn.execute(
-            "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp FROM positions"
+            "SELECT pair, entry_price, amount_crypto, amount_quote, status, timestamp FROM positions"
         ).fetchall()
 
         results = []
@@ -1313,12 +1313,12 @@ def get_positions():
             pair = pos['pair']
             entry_price = float(pos['entry_price'] or 0)
             amount_crypto = float(pos['amount_crypto'] or 0)
-            amount_idr = float(pos['amount_idr'] or 0)
+            amount_quote = float(pos['amount_quote'] or 0)
 
             # Harga live dari ticker_history
             last_price = entry_price
             bid_price = 0.0  # best bid — sama dengan yang dipakai bot untuk TP evaluation
-            pnl_idr = 0.0
+            pnl_quote = 0.0
             pnl_pct = 0.0
             try:
                 row = conn.execute(
@@ -1328,7 +1328,7 @@ def get_positions():
                     history = json.loads(row['history_json'])
                     if history and entry_price > 0:
                         last_price = float(history[-1])
-                        pnl_idr = (last_price - entry_price) * amount_crypto
+                        pnl_quote = (last_price - entry_price) * amount_crypto
                         pnl_pct = ((last_price - entry_price) / entry_price) * 100
             except Exception:
                 pass
@@ -1344,11 +1344,11 @@ def get_positions():
 
             # NET EXIT EST: hitung dari bid price (sama dengan bot), bukan orderbook depth simulation
             # Ini mencegah outlier bid di depth menggelembungkan estimasi P&L
-            fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
+            fee_buy  = amount_quote * cfg.FEE_BUY_TAKER
             fee_sell = (bid_price * amount_crypto) * cfg.FEE_SELL_TAKER
             pnl_net_idr = (bid_price - entry_price) * amount_crypto - fee_buy - fee_sell
             # Cost basis dari entry_price × amount agar % konsisten dengan pnl_pct
-            cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else amount_idr
+            cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else amount_quote
             pnl_net_pct = (pnl_net_idr / cost_basis * 100) if cost_basis > 0 else 0.0
 
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
@@ -1367,8 +1367,8 @@ def get_positions():
                 "last_price": last_price,
                 "bid_price": round(bid_price, 8),
                 "amount_crypto": amount_crypto,
-                "amount_idr": amount_idr,
-                "pnl_idr": round(pnl_idr, 4 if eid == 'binance' else 0),
+                "amount_quote": amount_quote,
+                "pnl_quote": round(pnl_quote, 4 if eid == 'binance' else 0),
                 "pnl_net_idr": round(pnl_net_idr, 4 if eid == 'binance' else 0),
                 "pnl_pct": round(pnl_pct, 3),
                 "pnl_net_pct": round(pnl_net_pct, 3),
@@ -1386,7 +1386,7 @@ def get_positions():
         conn.close()
 
 
-def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_idr, depth_limit=20):
+def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_quote, depth_limit=20):
     """Estimate full-fill market sell PnL from live bid depth.
 
     Mirrors the bot-side exit guard: consume the bid stack from best bid down,
@@ -1396,7 +1396,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
 
     amount = float(amount or 0)
     entry_price = float(entry_price or 0)
-    amount_idr = float(amount_idr or 0)
+    amount_quote = float(amount_quote or 0)
     if amount <= 0 or entry_price <= 0:
         return {
             "ok": False,
@@ -1404,7 +1404,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
+            "net_pnl_quote": 0.0,
             "fee_buy": 0.0,
             "fee_sell": 0.0,
         }
@@ -1430,8 +1430,8 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": 0.0,
         }
 
@@ -1457,8 +1457,8 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": 0.0,
         }
 
@@ -1469,16 +1469,16 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": filled,
             "avg_price": sell_value / filled,
             "sell_value": sell_value,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": sell_value * cfg.FEE_SELL_TAKER,
         }
 
     avg_price = sell_value / filled
-    fee_buy = amount_idr * cfg.FEE_BUY_TAKER
+    fee_buy = amount_quote * cfg.FEE_BUY_TAKER
     fee_sell = sell_value * cfg.FEE_SELL_TAKER
     gross_pnl = (avg_price - entry_price) * filled
-    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+    net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
 
     return {
         "ok": True,
@@ -1486,7 +1486,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
         "filled_amount": filled,
         "avg_price": avg_price,
         "sell_value": sell_value,
-        "net_pnl_idr": net_pnl_idr,
+        "net_pnl_quote": net_pnl_quote,
         "fee_buy": fee_buy,
         "fee_sell": fee_sell,
     }
@@ -1519,13 +1519,13 @@ def get_pnl_history_api(tf):
         interval = tf_map.get(tf, '-24 hours')
         
         base_row = conn.execute(f"""
-            SELECT SUM(pnl_idr) as total FROM trade_history 
+            SELECT SUM(pnl_quote) as total FROM trade_history 
             WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' {exchange_filter}
         """, (interval, dr_val)).fetchone()
         current_pnl = float(base_row['total'] or 0.0)
         
         trades = conn.execute(f"""
-            SELECT pnl_idr, created_at FROM trade_history 
+            SELECT pnl_quote, created_at FROM trade_history 
             WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = 1) AND reason != 'BACKTEST' {exchange_filter} 
             ORDER BY created_at ASC
         """, (interval, dr_val)).fetchall()
@@ -1537,7 +1537,7 @@ def get_pnl_history_api(tf):
         })
         
         for t in trades:
-            current_pnl += float(t['pnl_idr'] or 0.0)
+            current_pnl += float(t['pnl_quote'] or 0.0)
             ts = t['created_at']
             try:
                 dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
@@ -1697,14 +1697,14 @@ def get_orders():
             return jsonify(payload)
 
         position_rows = live_conn.execute(
-            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_idr, status, timestamp "
+            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_quote, status, timestamp "
             "FROM positions "
             "WHERE UPPER(COALESCE(status, '')) IN ('OPEN', 'EXITING', 'PENDING_BUY') "
             "ORDER BY timestamp DESC LIMIT 20"
         ).fetchall()
 
         trade_rows = live_conn.execute(
-            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_idr, reason, created_at "
+            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_quote, reason, created_at "
             "FROM trade_history "
             "WHERE COALESCE(exit_order_id, '') <> '' AND COALESCE(dry_run, false) = false "
             "ORDER BY created_at DESC LIMIT 20"
@@ -1718,7 +1718,7 @@ def get_orders():
                 "pair": row['pair'],
                 "side": "buy",
                 "price": row['entry_price'],
-                "amount": row['amount_crypto'] or row['amount_idr'],
+                "amount": row['amount_crypto'] or row['amount_quote'],
                 "status": row['status'] or 'OPEN',
                 "created_at": str(row['timestamp'] or ''),
                 "updated_at": str(row['timestamp'] or ''),
@@ -1731,7 +1731,7 @@ def get_orders():
                 "pair": row['pair'],
                 "side": "sell",
                 "price": row['exit_price'],
-                "amount": row['amount_crypto'] or row['amount_idr'],
+                "amount": row['amount_crypto'] or row['amount_quote'],
                 "status": row['reason'] or 'CLOSED',
                 "created_at": str(row['created_at'] or ''),
                 "updated_at": str(row['created_at'] or ''),
@@ -1980,7 +1980,7 @@ def get_backtest_public_summary():
                 r.winning_trades,
                 r.losing_trades,
                 r.win_rate,
-                r.total_pnl_idr,
+                r.total_pnl_quote,
                 r.total_pnl_pct,
                 r.profit_factor,
                 r.sharpe_ratio,
@@ -2219,7 +2219,7 @@ def trade_manual_exit():
     # --- Guard: hanya izinkan exit saat Net PnL < 0.1% ---
     entry_price  = float(pos.get('entry_price') or 0)
     amount_crypto = float(pos.get('amount_crypto') or 0)
-    amount_idr   = float(pos.get('amount_idr') or 0)
+    amount_quote   = float(pos.get('amount_quote') or 0)
 
     # Ambil harga terakhir: WS > ticker_history > entry_price
     last_price = float(mws.get_tickers().get(pair, {}).get('last', 0))
@@ -2240,13 +2240,13 @@ def trade_manual_exit():
         last_price = entry_price
 
     raw_pnl   = (last_price - entry_price) * amount_crypto
-    fee_buy   = amount_idr * cfg.FEE_BUY_TAKER
+    fee_buy   = amount_quote * cfg.FEE_BUY_TAKER
     fee_sell  = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
     pnl_net   = raw_pnl - fee_buy - fee_sell
 
     # Hanya izinkan manual exit jika Net PnL < MANUAL_EXIT_MAX_NET_PCT (0.1%).
     # Ini mencegah exit prematur di posisi yang masih menguntungkan.
-    pnl_net_pct = pnl_net / amount_idr if amount_idr > 0 else 0
+    pnl_net_pct = pnl_net / amount_quote if amount_quote > 0 else 0
     if pnl_net_pct >= cfg.MANUAL_EXIT_MAX_NET_PCT:
         return jsonify({
             "error": f"Manual exit hanya diizinkan saat Net PnL < {cfg.MANUAL_EXIT_MAX_NET_PCT*100:.1f}%. "
@@ -3098,13 +3098,13 @@ def _build_stats_payload(force_dry=None):
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_row = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_quote) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
         # Convert row to standard dict format for consistency
         dna_stats = {
             'total_trades': dna_row['trades'] if dna_row else 0,
             'win_count': dna_row['wins'] if dna_row else 0,
-            'total_pnl_idr': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
+            'total_pnl_quote': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
         } if dna_row else {}
 
         win_rate = (live_stats['win_count'] / live_stats['total_trades'] * 100) if (live_stats and live_stats['total_trades'] > 0) else 0
@@ -3120,10 +3120,10 @@ def _build_stats_payload(force_dry=None):
         total_used_idr = 0.0
         for pos in positions:
             if bool(pos['dry_run']) == dr_val:
-                total_used_idr += float(pos['amount_idr'] or 0)
+                total_used_idr += float(pos['amount_quote'] or 0)
 
-        realized_pnl_dry = float(dry_stats['total_pnl_idr'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl_idr'] or 0)
+        realized_pnl_dry = float(dry_stats['total_pnl_quote'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl_quote'] or 0)
 
         if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
@@ -3140,7 +3140,7 @@ def _build_stats_payload(force_dry=None):
                 # available_idr tetap menampilkan 'free' untuk info dana siap pakai di UI
                 available_idr = float(real_bal.get("free", 0) or 0)
                 idr_used = float(real_bal.get("used", 0) or 0)
-                idr_total = float(real_bal.get("total", 0) or 0)
+                quote_total = float(real_bal.get("total", 0) or 0)
                 
                 # Hitung nilai market semua koin non-IDR
                 coin_equity_idr = _get_coin_equity_idr(
@@ -3148,7 +3148,7 @@ def _build_stats_payload(force_dry=None):
                 )
                 
                 # [Senior Fix] Total Equity LIVE = Total IDR (Free+Used) + Nilai Koin saat ini.
-                total_equity_val = idr_total + coin_equity_idr
+                total_equity_val = quote_total + coin_equity_idr
                 
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
@@ -3156,11 +3156,11 @@ def _build_stats_payload(force_dry=None):
                 # Fallback jika cache kosong
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
                 idr_used = float(_REAL_BALANCE_CACHE.get("used") or 0)
-                idr_total = float(_REAL_BALANCE_CACHE.get("total") or 0)
+                quote_total = float(_REAL_BALANCE_CACHE.get("total") or 0)
                 coin_equity_idr = _get_coin_equity_idr(
                     _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
                 )
-                total_equity_val = idr_total + coin_equity_idr
+                total_equity_val = quote_total + coin_equity_idr
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
 
@@ -3194,7 +3194,7 @@ def _build_stats_payload(force_dry=None):
 
             if last_price > 0:
                 gross = (last_price - ep) * float(pos['amount_crypto'] or 0)
-                fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
+                fee_buy = float(pos['amount_quote'] or 0) * cfg.FEE_BUY_TAKER
                 fee_sell = float(pos['amount_crypto'] or 0) * last_price * cfg.FEE_SELL_TAKER
                 unrealized_pnl += gross - fee_buy - fee_sell
 
@@ -3248,10 +3248,10 @@ def _build_stats_payload(force_dry=None):
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if dr_val:
-            active_pnl = float(dry_stats['total_pnl_idr'] or 0) if dry_stats else 0
+            active_pnl = float(dry_stats['total_pnl_quote'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
-            active_pnl = float(live_stats['total_pnl_idr'] or 0) if live_stats else 0
+            active_pnl = float(live_stats['total_pnl_quote'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
         # Net PnL for dashboard headline should include open-position unrealized PnL.
@@ -3261,13 +3261,13 @@ def _build_stats_payload(force_dry=None):
         exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
         
         top_pair_row = conn.execute(f"""
-            SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history 
+            SELECT pair, SUM(pnl_quote) as total_pnl FROM trade_history 
             WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 1
         """, (dr_val,)).fetchone()
         
         contribution_rows = conn.execute(f"""
-            SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history 
+            SELECT pair, SUM(pnl_quote) as total_pnl, COUNT(*) as tx_count FROM trade_history 
             WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
             GROUP BY pair ORDER BY total_pnl DESC
         """, (dr_val,)).fetchall()
@@ -3281,7 +3281,7 @@ def _build_stats_payload(force_dry=None):
             })
 
         best_trade_row = conn.execute(f"""
-            SELECT MAX(pnl_idr) FROM trade_history 
+            SELECT MAX(pnl_quote) FROM trade_history 
             WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
         """, (bool(dr_val),)).fetchone()
         
@@ -3355,8 +3355,8 @@ def _build_stats_payload(force_dry=None):
         recent_trades = []
         try:
             recent_trades_rows = conn.execute(f"""
-                SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
-                       pnl_idr, pnl_pct, reason, duration_seconds, created_at, ai_confidence
+                SELECT pair, entry_price, exit_price, amount_crypto, amount_quote,
+                       pnl_quote, pnl_pct, reason, duration_seconds, created_at, ai_confidence
                 FROM trade_history
                 WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
                 ORDER BY created_at DESC LIMIT 20
@@ -3368,8 +3368,8 @@ def _build_stats_payload(force_dry=None):
                     "entry_price": float(r['entry_price'] or 0),
                     "exit_price":  float(r['exit_price'] or 0),
                     "amount":      float(r['amount_crypto'] or 0),
-                    "amount_idr":  float(r['amount_idr'] or 0),
-                    "pnl_idr":     float(r['pnl_idr'] or 0),
+                    "amount_quote":  float(r['amount_quote'] or 0),
+                    "pnl_quote":     float(r['pnl_quote'] or 0),
                     "pnl_pct":     float(r['pnl_pct'] or 0),
                     "reason":      r['reason'],
                     "created_at":  str(r['created_at'] or ''),
@@ -3473,10 +3473,10 @@ def _build_stats_payload(force_dry=None):
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['total_trades'] if dry_stats else 0,
             "total_trades_live": live_stats['total_trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl_idr'] or 0) if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl_quote'] or 0) if live_stats else 0,
             "live_win_rate": round(win_rate, 2),
             "live_trades_count": live_stats['total_trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats.get('total_pnl_idr') or 0) if dna_stats else 0,
+            "backtest_pnl": float(dna_stats.get('total_pnl_quote') or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats.get('total_trades', 0) if dna_stats else 0,
             "active_positions": open_count,
@@ -3723,7 +3723,7 @@ def _build_trades_payload():
 
                 if last_price <= 0: last_price = entry_price
 
-                pnl_idr = (last_price - entry_price) * amount_crypto
+                pnl_quote = (last_price - entry_price) * amount_crypto
                 pnl_pct = ((last_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
 
                 # Beri label reason yang jelas berdasarkan status nyata posisi
@@ -3750,7 +3750,7 @@ def _build_trades_payload():
                 else:
                     current_tp_pct = stored_tp_pct
 
-                _amount_idr = float(p.get('amount_idr') or 0)
+                _amount_idr = float(p.get('amount_quote') or 0)
 
                 # Bid price dari market WS (sama dengan logika bot untuk TP evaluation)
                 _bid_price = 0.0
@@ -3773,7 +3773,7 @@ def _build_trades_payload():
                     "id":           f"pos_{pair}",
                     "pair":         pair,
                     "reason":       display_reason,
-                    "pnl_idr":      round(pnl_idr, 4 if eid == 'binance' else 0),
+                    "pnl_quote":      round(pnl_quote, 4 if eid == 'binance' else 0),
                     "pnl_net_idr":  round(pnl_net_idr, 4 if eid == 'binance' else 0),
                     "pnl_pct":      round(pnl_pct, 2),
                     "pnl_net_pct":  round(pnl_net_pct, 2),
@@ -3782,7 +3782,7 @@ def _build_trades_payload():
                     "target_tp":    current_tp_pct * 100,
                     "target_sl":    current_sl_pct * 100,
                     "confidence":   int(p.get('ai_confidence') or 0),
-                    "amount_idr":   _amount_idr,
+                    "amount_quote":   _amount_idr,
                     "amount_coin":  amount_crypto,
                     "duration":     0,
                     "created_at":   str(p.get('timestamp') or ''),
@@ -4724,7 +4724,7 @@ def _background_wallet_sync_loop():
                     "entry_price": price,
                     "amount": amount_f,
                     "amount_crypto": amount_f,
-                    "amount_idr": value_idr,
+                    "amount_quote": value_idr,
                     "timestamp": datetime.datetime.now().isoformat(),
                     "dry_run": False,
                     "status": "OPEN",

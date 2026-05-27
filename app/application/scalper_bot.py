@@ -517,7 +517,7 @@ class ScalperBot:
             wins  = stats.get('win_count', 0)
             losses = stats.get('loss_count', 0)
             win_rate = (wins / total * 100) if total > 0 else 0.0
-            net_pnl  = stats.get('total_pnl_idr', 0.0)
+            net_pnl  = stats.get('total_pnl_quote', 0.0)
             eid = os.getenv("EXCHANGE", "binance").lower()
             currency_prefix = "$" if eid == "binance" else "Rp "
             net_profit_str = f"{currency_prefix}{net_pnl:,.2f}" if eid == "binance" else f"Rp {net_pnl:,.0f}"

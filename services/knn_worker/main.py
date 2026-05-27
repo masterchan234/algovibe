@@ -125,7 +125,7 @@ def find_winning_pattern(pair: str, current_dna: dict, history_dnas: list) -> di
     distances.sort(key=lambda x: x[0])
     top_matches = [item[1] for item in distances[:5]]
 
-    win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0.0) > 0.0)
+    win_count = sum(1 for t in top_matches if t.get('pnl_quote', 0.0) > 0.0)
     win_rate_knn = win_count / len(top_matches) if top_matches else 0.0
 
     is_strong_setup = current_rsi < 35 or current_ema_dist > 0.10

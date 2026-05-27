@@ -579,14 +579,14 @@ class IndodaxAdapter(BaseExchangeAdapter):
         balance_raw = raw.get("balance", {})
         free_raw = raw.get("balance_hold", {})
 
-        idr_free = float(balance_raw.get("idr", 0))
+        quote_free = float(balance_raw.get("idr", 0))
         idr_hold = float(free_raw.get("idr", 0))
 
         return {
             "asset": QUOTE_ASSET,
-            "free":  idr_free,
+            "free":  quote_free,
             "used":  idr_hold,
-            "total": idr_free + idr_hold,
+            "total": quote_free + idr_hold,
         }
 
     def get_all_balances(self) -> list[dict]:

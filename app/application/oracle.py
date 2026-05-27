@@ -105,27 +105,27 @@ class Oracle:
                     if ch_24h > 5.0:
                         rsi = float(random.randint(60, 80))
                         ema_dist = float(random.uniform(0.01, 0.08))
-                        pnl_idr = float(random.randint(50000, 250000)) # Profit
+                        pnl_quote = float(random.randint(50000, 250000)) # Profit
                     elif ch_24h < -5.0:
                         rsi = float(random.randint(20, 40))
                         ema_dist = float(random.uniform(-0.08, -0.01))
-                        pnl_idr = float(random.randint(-150000, -3000)) # Loss
+                        pnl_quote = float(random.randint(-150000, -3000)) # Loss
                     else:
                         rsi = float(random.randint(40, 60))
                         ema_dist = float(random.uniform(-0.01, 0.01))
-                        pnl_idr = float(random.randint(-10000, 15000))
+                        pnl_quote = float(random.randint(-10000, 15000))
                         
                     # Insert simulated backtest analytics row
                     entry_ts = datetime.now() - timedelta(minutes=random.randint(10, 1440))
                     conn.execute(
                         """INSERT INTO backtest_analytics 
-                        (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run, pnl_idr, status) 
+                        (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run, pnl_quote, status) 
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pair, entry_timestamp) DO NOTHING""",
                         (pair, entry_ts.isoformat(), float(random.uniform(50, 90)), 1.0,
                          0.0, float(random.uniform(-0.5, 0.5)), float(abs(ch_24h) * 0.4 + 0.5),
                          rsi, ema_dist, 15, "BUY" if ch_24h > 0 else "HOLD", float(random.uniform(60, 85)),
-                         "Simulated cold start pattern matching context", True, pnl_idr, "CLOSED")
+                         "Simulated cold start pattern matching context", True, pnl_quote, "CLOSED")
                     )
                     inserted += 1
             logger.info(f"[ORACLE] Successfully seeded {inserted} historical K-NN pattern records into backtest_analytics from summaries API!")
@@ -206,14 +206,14 @@ class Oracle:
             #  Tier 2a: Per-Pair Win/Loss History 
             try:
                 recent_pair_trades = conn.execute(
-                    "SELECT pnl_idr FROM trade_history WHERE pair = %s "
+                    "SELECT pnl_quote FROM trade_history WHERE pair = %s "
                     "AND reason != 'BACKTEST' ORDER BY id DESC LIMIT 5",
                     (pair,)
                 ).fetchall()
                 if recent_pair_trades:
-                    wins   = sum(1 for r in recent_pair_trades if float(r['pnl_idr'] or 0) > 0)
+                    wins   = sum(1 for r in recent_pair_trades if float(r['pnl_quote'] or 0) > 0)
                     losses = len(recent_pair_trades) - wins
-                    streak = " ".join("W" if float(r['pnl_idr'] or 0) > 0 else "L"
+                    streak = " ".join("W" if float(r['pnl_quote'] or 0) > 0 else "L"
                                       for r in recent_pair_trades)
                     ctx['pair_history'] = f"Last {len(recent_pair_trades)} trades: [{streak}] ({wins}W/{losses}L)"
                 else:
@@ -1001,7 +1001,7 @@ class Oracle:
             target_idr = float(target_raw) if target_raw else 0.0
 
             stats = db.get_daily_stats(dry_run=config.DRY_RUN)
-            realized_pnl = float(stats.get('total_pnl_idr', 0))
+            realized_pnl = float(stats.get('total_pnl_quote', 0))
 
             #  Unrealized PnL from open positions 
             # Compute unrealized PnL using current market prices so HARVEST_ONLY
@@ -1019,11 +1019,11 @@ class Oracle:
                     current_price = float(raw_price)
                     entry_price = float(pos_data.get('entry_price', 0))
                     amount = float(pos_data.get('amount_crypto', 0))
-                    amount_idr = float(pos_data.get('amount_idr', 0))
+                    amount_quote = float(pos_data.get('amount_quote', 0))
                     if entry_price <= 0 or amount <= 0:
                         continue
                     gross_pnl = (current_price - entry_price) * amount
-                    fee_buy = amount_idr * FEE_BUY_TAKER
+                    fee_buy = amount_quote * FEE_BUY_TAKER
                     fee_sell = current_price * amount * FEE_SELL_TAKER
                     unrealized_pnl += gross_pnl - (fee_buy + fee_sell)
             except Exception as _ue:
@@ -1235,7 +1235,7 @@ class Oracle:
             win_count       = stats.get('win_count', 0)
             gross_profit    = float(stats.get('gross_profit', 0))
             gross_loss      = float(stats.get('gross_loss', 0))      # negative value
-            total_volume    = float(stats.get('total_volume_idr', 0))
+            total_volume    = float(stats.get('total_volume_quote', 0))
 
             # Win Rate
             win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
@@ -1269,7 +1269,7 @@ class Oracle:
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
                 "estimated_fees": round(estimated_fees, 2),
-                "total_volume_idr": total_volume,
+                "total_volume_quote": total_volume,
                 "triggered_at": datetime.now(timezone.utc).isoformat(),
                 "status": "PENDING",  # PENDING → CONTINUE or STOP after user action
             }
@@ -1321,7 +1321,7 @@ class Oracle:
                 f"Regime: {regime} | Sentiment Index: {sentiment}/100 | Leader: {regime_leader}\n"
                 f"Performance 24h: {recent_stats.get('total_trades',0)} trades, "
                 f"Win Rate: {win_rate:.1f}%, "
-                f"Total PnL: Rp {recent_stats.get('total_pnl_idr',0):,.0f}\n"
+                f"Total PnL: Rp {recent_stats.get('total_pnl_quote',0):,.0f}\n"
                 f"Active Weights: {weights_text}"
                 f"{lessons_text}"
                 f"=== END UPDATE ==="
@@ -1507,7 +1507,7 @@ class Oracle:
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
             stats = db.get_daily_stats(dry_run=config.DRY_RUN)
-            daily_pnl = float(stats.get('total_pnl_idr', 0))
+            daily_pnl = float(stats.get('total_pnl_quote', 0))
 
             # 1. Profit-Pause: jika profit harian > target → naikkan threshold (jarang masuk)
             target_idr = float(db.get_state("daily_profit_target") or 0.0)
@@ -1860,7 +1860,7 @@ class Oracle:
 
     #  Self-Learning Engine (Project Evolution) 
 
-    def learn_from_trade(self, pair, pnl_idr):
+    def learn_from_trade(self, pair, pnl_quote):
         """
         [Revisi] Experience Replay: Tidak ada lagi if-else trauma/weights.
         Semua transaksi hanya di-log ke otak LLM untuk Post-Mortem. Otak matematis
@@ -1870,14 +1870,14 @@ class Oracle:
             dna = db.get_latest_trade_dna(pair)
             if not dna: return
             
-            is_profit = pnl_idr > 0
+            is_profit = pnl_quote > 0
             status = "PROFIT" if is_profit else "LOSS"
-            logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_idr}).")
+            logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_quote}).")
 
             if not config.TECHNICAL_ONLY_MODE:
                 # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
                 prompt = (
-                    f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
+                    f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_quote:,.0f}. "
                     f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
                     f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
                     f"vol={dna.get('volatility',0):.2f}%. "
@@ -1988,7 +1988,7 @@ class Oracle:
         distances.sort(key=lambda x: x[0])
         top_matches = [item[1] for item in distances[:5]]
         # Susun laporan historis mendalam untuk LiteRT-LM reasoning
-        win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
+        win_count = sum(1 for t in top_matches if t.get('pnl_quote', 0) > 0)
         win_rate = win_count / len(top_matches) if top_matches else 0
         win_rate_knn = win_rate
 
@@ -2001,7 +2001,7 @@ class Oracle:
 
         history_details = []
         for t in top_matches:
-            outcome = "WIN" if t.get('pnl_idr', 0) > 0 else "LOSS"
+            outcome = "WIN" if t.get('pnl_quote', 0) > 0 else "LOSS"
             _t_rsi = t['rsi'] if t.get('rsi') is not None else 50
             _t_ema = t['ema_dist'] if t.get('ema_dist') is not None else 0.0
             _t_vol = t['volatility'] if t.get('volatility') is not None else 0.0

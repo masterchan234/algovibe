@@ -82,9 +82,9 @@ def _load_training_data(db_path: str) -> pd.DataFrame:
     query = """
         SELECT
             ai_prob, whale_boost, sector_sentiment, imbalance,
-            volatility, rsi, ema_dist, entry_timestamp, pnl_idr
+            volatility, rsi, ema_dist, entry_timestamp, pnl_quote
         FROM trade_analytics
-        WHERE pnl_idr IS NOT NULL
+        WHERE pnl_quote IS NOT NULL
           AND status = 'CLOSED'
         ORDER BY entry_timestamp DESC
         LIMIT 5000
@@ -102,7 +102,7 @@ def _engineer_features(df: pd.DataFrame) -> tuple:
     df = df.copy()
     df["entry_timestamp"] = pd.to_datetime(df["entry_timestamp"])
     df["hour"] = df["entry_timestamp"].dt.hour
-    df["target"] = (df["pnl_idr"] > 0).astype(int)
+    df["target"] = (df["pnl_quote"] > 0).astype(int)
 
     # Cyclical time encoding — jam merepresentasikan siklus 24 jam, bukan angka linier
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24.0)

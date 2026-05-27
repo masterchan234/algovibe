@@ -442,7 +442,7 @@ class ExecutiveCoreService:
                                     price=px,
                                     reason="SIGNAL_SELL",
                                     entry_price=float(pos.get("entry_price") or 0),
-                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    amount_quote=float(pos.get("amount_quote") or 0),
                                     position_data=pos,
                                 ),
                             )
@@ -529,7 +529,7 @@ class ExecutiveCoreService:
                                     price=px,
                                     reason="LLM_SIGNAL_SELL",
                                     entry_price=float(pos.get("entry_price") or 0),
-                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    amount_quote=float(pos.get("amount_quote") or 0),
                                     position_data=pos,
                                 ),
                             )
@@ -647,11 +647,11 @@ class ExecutiveCoreService:
                 continue
             entry = float(pos.get("entry_price") or 0)
             amount = float(pos.get("amount_crypto") or 0)
-            amount_idr = float(pos.get("amount_idr") or 0)
+            amount_quote = float(pos.get("amount_quote") or 0)
             if entry <= 0 or amount <= 0:
                 continue
 
-            fee_buy = amount_idr * FEE_BUY_TAKER
+            fee_buy = amount_quote * FEE_BUY_TAKER
             fee_sell = amount * tick.price * FEE_SELL_TAKER
             gross = (tick.price - entry) * amount
             total_unrealized += gross - fee_buy - fee_sell
@@ -669,7 +669,7 @@ class ExecutiveCoreService:
                 self.cached_balance = float(bal_data.get('free', {}).get(quote_currency, 0))
             
             stats = db.get_all_time_stats()
-            self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
+            self._realized_pnl = float(stats.get("total_pnl_quote") or 0.0)
         except Exception as e:
             logger.debug(f"[EXECUTIVE] Balance/Stats fetch skip: {e}")
             pass
