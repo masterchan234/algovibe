@@ -830,7 +830,7 @@ def analyze_ohlcv_target_setup(
         target_trades_day = int(_clamp(_np.ceil(trades_needed_full_cap), 1, 12))
         needed_position = target_daily_pnl / max(1e-9, target_trades_day * edge_trade)
         max_position_usdt = float(_clamp(needed_position, MIN_TRADE_USDT, balance_usdt))
-        max_open_positions = int(1 if max_position_idr >= (0.6 * balance_idr) else 2)
+        max_open_positions = int(1 if max_position_usdt >= (0.6 * balance_usdt) else 2)
 
         recommendation = _build_coin_recommendation(
             q=q,

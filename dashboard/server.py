@@ -2011,6 +2011,13 @@ def get_backtest_public_summary():
         """)
         top_pairs = [dict(row) for row in cur.fetchall()]
 
+        # Total distinct pairs analyzed (from latest analyze run)
+        cur.execute("""
+            SELECT COUNT(DISTINCT pair) AS cnt
+            FROM backtest_coin_analysis
+        """)
+        total_pairs = (cur.fetchone() or {"cnt": 0})["cnt"] or 0
+
         # Exit reason breakdown
         cur.execute("""
             SELECT exit_reason, COUNT(*) AS cnt
@@ -2041,6 +2048,7 @@ def get_backtest_public_summary():
         return jsonify({
             "profiles": profiles,
             "top_pairs": top_pairs,
+            "total_pairs": total_pairs,
             "exit_reasons": exit_reasons,
             "equity_curve": equity_curve,
         })

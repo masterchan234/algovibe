@@ -81,8 +81,10 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
     close_arr = df["close"].values
     high_arr = df["high"].values
     low_arr = df["low"].values
+    open_arr = df["open"].values
     ts_epochs = _np.array([c["ts"].timestamp() for c in candles])
     ema50_arr = df["close"].ewm(span=50, adjust=False).mean().values
+    pending_entry = None  # next-candle entry queue
 
     for i in range(min_candles, len(candles)):
         ts_epoch = ts_epochs[i]
@@ -91,6 +93,28 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
         high = high_arr[i]
         low = low_arr[i]
         sig = history[i]
+
+        # Fill pending entry at this candle's open (next-candle entry simulation).
+        # Signal fires at previous candle close; execution at next candle open
+        # avoids buying the local top of the momentum spike.
+        if pending_entry is not None and position is None:
+            open_fill_px = open_arr[i] * (1.0 + slippage)
+            p_trade_idr = pending_entry["trade_idr"]
+            p_buy_fee = p_trade_idr * fee_buy
+            p_crypto_amt = (p_trade_idr - p_buy_fee) / open_fill_px
+            position = {
+                "entry_price": open_fill_px,
+                "amount_idr": p_trade_idr,
+                "amount_crypto": p_crypto_amt,
+                "buy_fee": p_buy_fee,
+                "entry_ts": ts_epoch,
+                "highest_price": open_arr[i],
+                "trailing_sl_price": 0.0,
+                "dynamic_sl": 0.0,
+                "buy_score": pending_entry["buy_score"],
+                "dca_tier": 0,
+            }
+            pending_entry = None
 
         if position:
             entry_px = position["entry_price"]
@@ -204,23 +228,11 @@ def _run_backtest_pair(p: dict, pair: str, candles: list[dict], start_time: date
             pass
 
         trade_idr = min(pos_idr, current_cap * 0.9)
-        buy_fee = trade_idr * fee_buy
-        entry_px = close * (1.0 + slippage)
-        crypto_amt = (trade_idr - buy_fee) / entry_px
-
-        position = {
-            "entry_price": entry_px,
-            "amount_idr": trade_idr,
-            "amount_crypto": crypto_amt,
-            "buy_fee": buy_fee,
-            "entry_ts": ts_epoch,
-            "highest_price": close,
-            "trailing_sl_price": 0.0,
-            "dynamic_sl": 0.0,  # dynamic breakeven/trailing SL (selalu aktif)
+        current_cap -= trade_idr  # Reserve capital; entry fills at next candle open
+        pending_entry = {
+            "trade_idr": trade_idr,
             "buy_score": sig["buy_score"],
-            "dca_tier": 0,
         }
-        current_cap -= trade_idr
 
     if position:
         last_c = candles[-1]
@@ -313,14 +325,14 @@ def _get_signal_history(pair: str, candles: list[dict], p: dict, pair_cfg: dict 
     # (close[-1] - close[-4]) / close[-4] * 100
     df["velocity"] = (close.pct_change(4) * 100.0).fillna(0.0)
 
-    # buy_pressure: rolling candle close position dalam range (20 candle, shifted 1)
-    # Proxy terbaik dari order book imbalance yang tersedia dari OHLCV.
+    # buy_pressure: EMA-5 candle close position dalam range (shifted 1)
+    # EMA-5 lebih responsif dari SMA-20: saat momentum bullish kuat, close sering di atas
+    # range (candle_pos mendekati 100), sehingga EMA-5 cepat melewati threshold 65.
     # (close-low)/(high-low) = 1.0 saat candle bullish penuh, 0.0 saat bearish penuh.
-    # Rolling mean over 20 candle = persistensi buying pressure (mirip imbalance ratio live bot).
     # Shift(1) agar candle saat ini tidak self-referencing.
     hl_range = (high - low).replace(0, _np.nan)
     candle_pos = ((close - low) / hl_range * 100.0).fillna(50.0)
-    df["buy_pressure"] = candle_pos.rolling(20, min_periods=5).mean().shift(1).fillna(50.0)
+    df["buy_pressure"] = candle_pos.ewm(span=5, adjust=False).mean().shift(1).fillna(50.0)
 
     # Adaptive volatility — sama seperti live bot: naikkan threshold saat vol tinggi
     # compute_adaptive_thresholds() menggunakan std(returns) * 100 atas 20 candle terakhir

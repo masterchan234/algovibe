@@ -251,7 +251,7 @@ import PortalHeader from '../components/PortalHeader.vue'
 
 const loading = ref(true)
 const error = ref(null)
-const summary = ref({ profiles: [], top_pairs: [], exit_reasons: [], equity_curve: [] })
+const summary = ref({ profiles: [], top_pairs: [], total_pairs: 0, exit_reasons: [], equity_curve: [] })
 
 onMounted(async () => {
   document.title = 'Backtest Report | Algovibe Intelligence'
@@ -269,7 +269,7 @@ onMounted(async () => {
 const totalTrades = computed(() =>
   summary.value.profiles.reduce((s, p) => s + (p.total_trades || 0), 0)
 )
-const pairCount = computed(() => summary.value.top_pairs.length)
+const pairCount = computed(() => summary.value.total_pairs || summary.value.top_pairs.length)
 const bestWinRate = computed(() => {
   const rates = summary.value.profiles.map(p => p.win_rate || 0)
   return fmt1(Math.max(...rates, 0) * 100)

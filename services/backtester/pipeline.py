@@ -66,24 +66,23 @@ def _load_pairs_from_ohlcv_window(start: datetime, end: datetime, pairs_filter: 
     return pairs
 
 
-def _validate_pair_setup_coverage(pairs: list[str], pair_setup_map: dict[str, dict], strict_per_coin: bool) -> bool:
+def _filter_pairs_by_setup_coverage(pairs: list[str], pair_setup_map: dict[str, dict], strict_per_coin: bool) -> list[str]:
     missing_pairs = sorted([px for px in pairs if str(px).lower() not in pair_setup_map])
     if not missing_pairs:
-        return True
+        return pairs
 
     preview = ", ".join(missing_pairs[:10])
     if len(missing_pairs) > 10:
         preview += f", ... (+{len(missing_pairs)-10} lainnya)"
 
     if strict_per_coin:
-        print(" Strict per-coin aktif: setup teknikal per-koin belum lengkap.")
-        print(f"   Missing pair setup: {preview}")
-        print("   Jalankan `analyze` dulu agar backtest_coin_analysis terisi untuk semua pair tersebut.")
-        return False
+        print(f"[WARN] Strict per-coin: {len(missing_pairs)} pair tanpa setup analysis dilewati: {preview}")
+        print("   (Pair ini tidak memenuhi filter analyze — dilanjutkan tanpa pair tersebut.)")
+        return [px for px in pairs if str(px).lower() in pair_setup_map]
 
     print("[WARN] Per-coin setup belum lengkap, menjalankan fallback ke profile global untuk pair yang missing.")
     print(f"   Missing pair setup: {preview}")
-    return True
+    return pairs
 
 
 def _enrich_profiles_for_run(profiles: list[dict], pair_setup_map: dict[str, dict]) -> list[dict]:
@@ -168,7 +167,9 @@ def run_backtest(
     logger.info(f"[run] Loaded per-coin setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
     print(f"ℹ Loaded per-coin technical setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
 
-    if not _validate_pair_setup_coverage(pairs, pair_setup_map, strict_per_coin):
+    pairs = _filter_pairs_by_setup_coverage(pairs, pair_setup_map, strict_per_coin)
+    if not pairs:
+        logger.warning("[run] No pairs remaining after setup coverage filter.")
         return
 
     context = BacktestRunContext(
