@@ -1024,8 +1024,9 @@ class ExitManager:
                         price = float(tickers.get(pair, {}).get('last', 0))
                         value_idr = amount * price if price > 0 else 0
                         
-                        # Jangan adopsi aset debu (di bawah Rp 10.000 / minimum trade)
-                        if price > 0 and value_idr < 10000:
+                        # Jangan adopsi aset debu (di bawah minimum trade)
+                        from config import MIN_TRADE_IDR as _min_trade
+                        if price > 0 and value_idr < _min_trade:
                             continue
 
                         # Coba dapatkan harga beli yang lebih akurat dari trade history terbaru.
@@ -1107,7 +1108,8 @@ class ExitManager:
                     # OPEN: hapus jika saldo sangat kecil/nol ATAU nilai di bawah Rp 5.000.
                     # Guard: hanya evaluasi nilai IDR jika price valid (> 0), hindari false-delete
                     # saat ticker stale (price=0 -> value_idr=0 < 5000 bisa hapus posisi aktif).
-                    if amount_on_exchange < 1e-8 or (price > 0 and value_idr < 5000 and amount_on_exchange > 0):
+                    from config import MIN_TRADE_IDR as _min_trade
+                    if amount_on_exchange < 1e-8 or (price > 0 and value_idr < (_min_trade / 2) and amount_on_exchange > 0):
                         log_message(f"[AUTO-RECONCILE] Removing ghost position {pair} (Balance on exchange: {amount_on_exchange}, Value: {format_currency(value_idr, signed=False)})")
                         db.delete_position(pair)
                         positions.pop(pair, None)
@@ -1168,7 +1170,8 @@ class ExitManager:
         STAGNANT_RESCUE_MINUTES = 20  # Ambang waktu mandek untuk trigger rescue basket
 
         #  BTC Price Tracking (for 5-minute crash detection) 
-        btc_ticker_data = current_tickers.get('btcidr') or {}
+        _btc_key = 'btcusdt' if os.getenv("EXCHANGE", "binance").lower() == 'binance' else 'btcidr'
+        btc_ticker_data = current_tickers.get(_btc_key) or {}
         _btc_raw = btc_ticker_data.get('last') or btc_ticker_data.get('buy')
         btc_current = float(_btc_raw) if _btc_raw not in (None, '', 0, '0') else 0.0
         _now_ts = time.time()

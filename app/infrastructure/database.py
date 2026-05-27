@@ -970,6 +970,131 @@ class Database:
                         updated_at=excluded.updated_at
                 ''', (asset, float(data.get('free', 0)), float(data.get('used', 0)), float(data.get('total', 0))))
 
+    def save_equity_snapshot(
+        self,
+        *,
+        balance_quote: float = 0.0,
+        position_value: float = 0.0,
+        total_equity: float = 0.0,
+        realized_pnl_day: float = 0.0,
+        realized_pnl_total: float = 0.0,
+        unrealized_pnl: float = 0.0,
+        peak_equity: float = 0.0,
+        drawdown_pct: float = 0.0,
+        open_positions: int = 0,
+        trade_count_day: int = 0,
+        win_count_day: int = 0,
+        loss_count_day: int = 0,
+        win_rate_day: float = 0.0,
+        exchange: str = "unknown",
+        dry_run: bool = False,
+        snapshot_type: str = "auto",
+        ts=None,
+    ) -> None:
+        """Insert satu baris snapshot performa ekuitas ke equity_performance.
+
+        Gunakan keyword-only args agar tidak ada ambiguitas urutan.
+        ts default: NOW() (sisi DB).
+        """
+        import os as _os
+        if exchange == "unknown":
+            exchange = _os.getenv("EXCHANGE", "binance").lower()
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                if ts is not None:
+                    cursor.execute(
+                        """
+                        INSERT INTO equity_performance (
+                            ts, snapshot_type,
+                            balance_quote, position_value, total_equity,
+                            realized_pnl_day, realized_pnl_total, unrealized_pnl,
+                            peak_equity, drawdown_pct,
+                            open_positions, trade_count_day,
+                            win_count_day, loss_count_day, win_rate_day,
+                            exchange, dry_run
+                        ) VALUES (
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s
+                        )
+                        ON CONFLICT (ts, snapshot_type) DO UPDATE SET
+                            balance_quote      = EXCLUDED.balance_quote,
+                            position_value     = EXCLUDED.position_value,
+                            total_equity       = EXCLUDED.total_equity,
+                            realized_pnl_day   = EXCLUDED.realized_pnl_day,
+                            realized_pnl_total = EXCLUDED.realized_pnl_total,
+                            unrealized_pnl     = EXCLUDED.unrealized_pnl,
+                            peak_equity        = GREATEST(equity_performance.peak_equity, EXCLUDED.peak_equity),
+                            drawdown_pct       = EXCLUDED.drawdown_pct,
+                            open_positions     = EXCLUDED.open_positions,
+                            trade_count_day    = EXCLUDED.trade_count_day,
+                            win_count_day      = EXCLUDED.win_count_day,
+                            loss_count_day     = EXCLUDED.loss_count_day,
+                            win_rate_day       = EXCLUDED.win_rate_day
+                        """,
+                        (
+                            ts, snapshot_type,
+                            balance_quote, position_value, total_equity,
+                            realized_pnl_day, realized_pnl_total, unrealized_pnl,
+                            peak_equity, drawdown_pct,
+                            open_positions, trade_count_day,
+                            win_count_day, loss_count_day, win_rate_day,
+                            exchange, dry_run,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO equity_performance (
+                            ts, snapshot_type,
+                            balance_quote, position_value, total_equity,
+                            realized_pnl_day, realized_pnl_total, unrealized_pnl,
+                            peak_equity, drawdown_pct,
+                            open_positions, trade_count_day,
+                            win_count_day, loss_count_day, win_rate_day,
+                            exchange, dry_run
+                        ) VALUES (
+                            NOW(), %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s
+                        )
+                        ON CONFLICT (ts, snapshot_type) DO UPDATE SET
+                            balance_quote      = EXCLUDED.balance_quote,
+                            position_value     = EXCLUDED.position_value,
+                            total_equity       = EXCLUDED.total_equity,
+                            realized_pnl_day   = EXCLUDED.realized_pnl_day,
+                            realized_pnl_total = EXCLUDED.realized_pnl_total,
+                            unrealized_pnl     = EXCLUDED.unrealized_pnl,
+                            peak_equity        = GREATEST(equity_performance.peak_equity, EXCLUDED.peak_equity),
+                            drawdown_pct       = EXCLUDED.drawdown_pct,
+                            open_positions     = EXCLUDED.open_positions,
+                            trade_count_day    = EXCLUDED.trade_count_day,
+                            win_count_day      = EXCLUDED.win_count_day,
+                            loss_count_day     = EXCLUDED.loss_count_day,
+                            win_rate_day       = EXCLUDED.win_rate_day
+                        """,
+                        (
+                            snapshot_type,
+                            balance_quote, position_value, total_equity,
+                            realized_pnl_day, realized_pnl_total, unrealized_pnl,
+                            peak_equity, drawdown_pct,
+                            open_positions, trade_count_day,
+                            win_count_day, loss_count_day, win_rate_day,
+                            exchange, dry_run,
+                        ),
+                    )
+        except Exception as e:
+            logger.error("[db] save_equity_snapshot error: %s", e)
+
     def get_balances(self):
         """Ambil seluruh saldo koin dari database."""
         with self.get_connection() as conn:

@@ -8,6 +8,7 @@ Runs only after all entry gates have passed.
 import config
 from app.domain.technicals import calculate_atr
 from utils.logger import log_message
+from .trade_execution import _to_ccxt_symbol
 
 
 def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
@@ -29,7 +30,7 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
     knn_decision = gate['knn_decision']
 
     try:
-        symbol_atr = pair.upper().replace("IDR", "/IDR")
+        symbol_atr = _to_ccxt_symbol(pair)
         ohlcv_atr = bot.exchange.fetch_ohlcv(symbol_atr, timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=20)
         if ohlcv_atr:
             highs = [c[2] for c in ohlcv_atr]

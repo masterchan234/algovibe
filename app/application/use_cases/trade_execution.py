@@ -29,6 +29,16 @@ from config import (
     SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
 
+def _to_ccxt_symbol(pair: str) -> str:
+    """Convert internal pair id (e.g. 'solusdt' / 'solidr') to CCXT symbol ('SOL/USDT' / 'SOL/IDR')."""
+    s = pair.upper()
+    if s.endswith("USDT"):
+        return f"{s[:-4]}/USDT"
+    if s.endswith("IDR"):
+        return f"{s[:-3]}/IDR"
+    return s
+
+
 def format_currency(val, is_price=False):
     is_usdt = os.getenv("EXCHANGE", "indodax").lower() == 'binance'
     prefix = "$" if is_usdt else "Rp "
@@ -89,7 +99,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
         - bid_depth_idr: total IDR available at bid side for our order
     """
     try:
-        symbol = pair.upper().replace("IDR", "/IDR")
+        symbol = _to_ccxt_symbol(pair)
         orderbook = exchange_client.fetch_order_book(symbol, limit=20)
         
         if not orderbook or 'bids' not in orderbook or 'asks' not in orderbook:
@@ -371,7 +381,7 @@ def execute_trade(
             buy_price = ema_9
             log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: {format_currency(buy_price, True)}")
 
-        symbol = pair.upper().replace("IDR", "/IDR")
+        symbol = _to_ccxt_symbol(pair)
         amount_crypto = amount_quote / buy_price
 
         tp_target = buy_price * (1 + final_tp)
@@ -562,7 +572,7 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
         if amount_crypto <= 0 or not pair:
             return {"pair": pair, "ok": False, "error": "invalid position data"}
 
-        symbol = pair.upper().replace("IDR", "/IDR")
+        symbol = _to_ccxt_symbol(pair)
         # Build Indodax param: ensure suffix is exactly '_idr', not mid-string
         _pair_param = pair.lower()
         if _pair_param.endswith("idr"):

@@ -38,8 +38,10 @@ _BREAK = "BREAK"
 
 
 def build_high_speed_candidates(bot, ranked, tickers):
+    _exch = os.getenv("EXCHANGE", "binance").lower()
+    _default_watch = 'btcusdt' if _exch == 'binance' else 'btcidr'
     open_positions = bot.exit_manager.get_open_positions()
-    watch_pair = db.get_state('current_watch_pair', 'btcidr')
+    watch_pair = db.get_state('current_watch_pair', _default_watch)
 
     priority_pairs = list(open_positions.keys())
     if watch_pair not in priority_pairs:
