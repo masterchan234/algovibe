@@ -948,6 +948,43 @@ class Database:
             return DEFAULT_DRY_RUN
         return val.lower() in ("true", "1")
 
+    def save_ohlcv_1m(self, candles: list) -> None:
+        """Batch-upsert completed 1m OHLCV candles ke tabel ohlcv_1m.
+
+        candles: list of dict dengan keys:
+            ts    — unix timestamp (detik, awal menit)
+            pair  — e.g. 'solusdt' (akan di-upper sebelum insert)
+            open, high, low, close — DOUBLE PRECISION
+            volume — quote volume delta (bisa 0 jika tidak tersedia)
+        """
+        if not candles:
+            return
+        from datetime import datetime, timezone
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for c in candles:
+                    cursor.execute(
+                        """
+                        INSERT INTO ohlcv_1m (ts, pair, open, high, low, close, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (pair, ts) DO UPDATE SET
+                            open   = EXCLUDED.open,
+                            high   = GREATEST(ohlcv_1m.high, EXCLUDED.high),
+                            low    = LEAST(ohlcv_1m.low,  EXCLUDED.low),
+                            close  = EXCLUDED.close,
+                            volume = EXCLUDED.volume
+                        """,
+                        (
+                            datetime.fromtimestamp(c["ts"], tz=timezone.utc),
+                            c["pair"].upper(),
+                            c["open"], c["high"], c["low"], c["close"],
+                            c.get("volume", 0.0),
+                        ),
+                    )
+        except Exception as e:
+            logger.error("[db] save_ohlcv_1m error: %s", e)
+
     #  [Senior Logic] Realtime Balance Sync 
     
     def save_balances(self, balances_dict: dict):

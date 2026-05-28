@@ -86,12 +86,18 @@ class ExecutiveCoreService:
         # Equity tracking
         self._realized_pnl: float = 0.0
         self._unrealized_pnl: float = 0.0
+        self._position_value: float = 0.0   # market value of open positions in quote
+        self._open_positions_count: int = 0
         self._pnl_samples: list = []   # [(ts, net_pnl), ...]
         self._peak_equity: float = 0.0
         try:
             self._peak_equity = float(db.get_state("peak_net_pnl_session", 0.0) or 0.0)
         except Exception:
             self._peak_equity = 0.0
+
+        # Daily stats cache (refreshed every 30s — changes infrequently)
+        self._daily_stats_cache: dict = {}
+        self._daily_stats_last_fetch: float = 0.0
 
         # Velocity (IDR/s)
         self._velocity: float = 0.0
@@ -638,6 +644,8 @@ class ExecutiveCoreService:
 
         current_dr_val = 1 if db.is_dry_run() else 0
         total_unrealized = 0.0
+        total_position_value = 0.0
+        open_count = 0
         for pos in positions_iter:
             if int(pos.get("dry_run", 0)) != current_dr_val:
                 continue
@@ -655,8 +663,12 @@ class ExecutiveCoreService:
             fee_sell = amount * tick.price * FEE_SELL_TAKER
             gross = (tick.price - entry) * amount
             total_unrealized += gross - fee_buy - fee_sell
+            total_position_value += tick.price * amount
+            open_count += 1
 
         self._unrealized_pnl = total_unrealized
+        self._position_value = total_position_value
+        self._open_positions_count = open_count
 
         #  Update Balance & Stats 
         try:
@@ -730,6 +742,42 @@ class ExecutiveCoreService:
                 db.save_state("net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
                 db.save_state("net_pnl_realized",   str(round(self._realized_pnl, 2)))
                 db.save_state("peak_net_pnl_session", str(round(self._peak_equity, 2)))
+
+                # Refresh daily stats cache every 30s
+                _now = time.time()
+                if _now - self._daily_stats_last_fetch >= 30:
+                    try:
+                        _ds = db.get_daily_stats(dry_run=1 if db.is_dry_run() else 0)
+                        self._daily_stats_cache = _ds
+                        self._daily_stats_last_fetch = _now
+                    except Exception:
+                        pass
+
+                # Realtime equity insert (every second)
+                _ds = self._daily_stats_cache
+                _net_pnl = self._realized_pnl + self._unrealized_pnl
+                _peak = self._peak_equity if self._peak_equity != 0 else _net_pnl
+                _drawdown = ((_peak - _net_pnl) / abs(_peak) * 100.0) if _peak != 0 else 0.0
+                _tc = int(_ds.get("total_trades") or 0)
+                _wc = int(_ds.get("win_count") or 0)
+                _lc = int(_ds.get("loss_count") or 0)
+                _wr = (_wc / _tc * 100.0) if _tc > 0 else 0.0
+                db.save_equity_snapshot(
+                    balance_quote=round(self.cached_balance, 6),
+                    position_value=round(self._position_value, 6),
+                    total_equity=round(self.cached_balance + self._position_value, 6),
+                    realized_pnl_day=round(float(_ds.get("total_pnl_quote") or 0.0), 6),
+                    realized_pnl_total=round(self._realized_pnl, 6),
+                    unrealized_pnl=round(self._unrealized_pnl, 6),
+                    peak_equity=round(_peak, 6),
+                    drawdown_pct=round(_drawdown, 4),
+                    open_positions=self._open_positions_count,
+                    trade_count_day=_tc,
+                    win_count_day=_wc,
+                    loss_count_day=_lc,
+                    win_rate_day=round(_wr, 2),
+                    dry_run=db.is_dry_run(),
+                )
 
                 # Heartbeat every 5 seconds
                 _heartbeat_counter += 1

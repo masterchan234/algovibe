@@ -38,7 +38,7 @@ from shared.algovibe_pb2 import Tick, Signal, SignalAction, SignalSource  # type
 
 # Bot domain/infrastructure imports
 from app.application.oracle import Oracle
-from app.infrastructure.database import db
+from app.infrastructure.database import db, db_backtest
 from app.domain.scoring import calculate_score
 from app.domain.technicals import get_technical_summary, derive_trade_signal, compute_adaptive_thresholds
 from app.application.use_cases.candidate_enrichment import enrich_pair
@@ -128,6 +128,14 @@ class BrainInferenceService:
         
         # Load blacklist
         self.blacklist = set(db.get_blacklist())
+        # Live 1m OHLCV candle builder
+        # _candles: running (open) candle per pair
+        #   {pair: {ts, open, high, low, close, vol_start, vol_cur}}
+        self._candles: dict = {}
+        self._candle_buf: list = []          # completed candles waiting flush
+        self._candle_buf_lock = threading.Lock()
+        self._candle_last_flush: float = 0.0
+
         # Cache per-pair untuk compute_adaptive_thresholds (TTL 5 menit).
         # Menghindari O(n²) recalculation tiap tick untuk 200+ pair.
         self._adaptive_cache: dict = {}  # {pair: (timestamp, thresholds|None)}
@@ -193,6 +201,12 @@ class BrainInferenceService:
                     self._history[symbol] = deque(maxlen=self._history_maxlen)
                 self._history[symbol].append(price)
 
+                # Live 1m candle builder — gunakan base-asset 24h volume (tick.volume)
+                # agar delta per-menit menghasilkan volume dalam satuan base-asset (e.g. TRX)
+                # yang konsisten dengan data historis dari Binance klines API.
+                _vol_base = float(tick.volume) if tick.volume else 0.0
+                self._update_live_candle(symbol, price, _vol_base)
+
                 # Sinkronisasi OHLC H/L cache agar panjang == hist (proxy ATR).
                 # Volume TIDAK diisi dari WS tick karena nilai per-candle tidak tersedia;
                 # mengisi dengan 0.0 akan mendilusi data volume asli dari backfill OHLC API.
@@ -229,6 +243,49 @@ class BrainInferenceService:
             except Exception as exc:
                 logger.warning("[brain-inference] Tick processing error: %s", exc)
                 continue
+
+    def _update_live_candle(self, pair: str, price: float, vol_base: float) -> None:
+        """Akumulasi tick ke candle 1m. Saat menit berganti, candle selesai
+        dimasukkan ke buffer untuk di-flush ke ohlcv_1m.
+        vol_base = 24h base-asset rolling volume dari tick.volume.
+        Delta per menit ≈ volume base-asset pada candle tersebut."""
+        ts_min = int(time.time()) // 60 * 60  # truncate ke awal menit
+        existing = self._candles.get(pair)
+        if existing is None:
+            # Mulai candle pertama untuk pair ini
+            self._candles[pair] = {
+                "ts": ts_min, "open": price, "high": price,
+                "low": price, "close": price,
+                "vol_start": vol_base, "vol_cur": vol_base,
+            }
+            return
+        if existing["ts"] == ts_min:
+            # Masih menit yang sama — update running candle
+            if price > existing["high"]:
+                existing["high"] = price
+            if price < existing["low"]:
+                existing["low"] = price
+            existing["close"] = price
+            existing["vol_cur"] = vol_base
+        else:
+            # Menit berganti — selesaikan candle lama, mulai yang baru
+            vol_delta = max(0.0, existing["vol_cur"] - existing["vol_start"])
+            completed = {
+                "ts":     existing["ts"],
+                "pair":   pair,
+                "open":   existing["open"],
+                "high":   existing["high"],
+                "low":    existing["low"],
+                "close":  existing["close"],
+                "volume": vol_delta,
+            }
+            with self._candle_buf_lock:
+                self._candle_buf.append(completed)
+            self._candles[pair] = {
+                "ts": ts_min, "open": price, "high": price,
+                "low": price, "close": price,
+                "vol_start": vol_base, "vol_cur": vol_base,
+            }
 
     def _pre_load_history(self):
         """Pre-load history from DB on startup."""
@@ -296,6 +353,17 @@ class BrainInferenceService:
                 # litert-lm-decision service handles this now.
                 pass
                 
+                # Flush completed 1m candles ke ohlcv_1m
+                _now = time.time()
+                if _now - self._candle_last_flush >= 60:
+                    with self._candle_buf_lock:
+                        _to_flush = self._candle_buf[:]
+                        self._candle_buf.clear()
+                    if _to_flush:
+                        db_backtest.save_ohlcv_1m(_to_flush)
+                        logger.info("[OHLCV] Flushed %d 1m candles to backtest DB.", len(_to_flush))
+                    self._candle_last_flush = _now
+
                 # Heartbeat to DB
                 db.save_state("brain_heartbeat", time.time())
                 
