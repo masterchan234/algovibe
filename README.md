@@ -14,6 +14,8 @@
 - **Binance Spot Ready:** Kalkulasi PnL akurat yang memperhitungkan fee round-trip exchange secara tepat.
 - **Interactive Dashboard:** Monitoring realtime via Vue.js & SocketIO dengan visualisasi radar market dan eksekusi manual.
 - **K-NN Worker:** Background service yang mengklasifikasikan pola DNA harga historis ke dalam Redis secara real-time.
+- **ML Fast-Track Gate:** Model ML per-pair (RandomForest) memberikan jalur bypass untuk gate EMA-50/MTFA, gate teknikal (5), dan gate sideways (6) jika `ml_prob >= 0.68` — memungkinkan entry pada setup yang secara statistik terbukti profitable meski kondisi tren tidak ideal.
+- **Live Market Universe:** `BinanceProvider` secara otomatis berlangganan top gainers + losers + high-volume dari Binance public API saat startup, dan me-refresh setiap 5 menit — memastikan bot selalu fokus pada pair yang paling aktif bergerak.
 - **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange. Auto-reconcile dilengkapi guard terhadap ticker stale (harga=0) — posisi tidak akan dihapus kecuali harga valid tersedia, mencegah false-delete pada saat feed WebSocket terputus sementara.
 - **Safe Exit Timeout Override:** Saat limit sell gagal fill, bot membatalkan order lama dan melakukan market sell pengganti — dengan verifikasi cancel terkonfirmasi terlebih dahulu sebelum order baru dikirim, mencegah double-fill.
 - **Multi-Tier Capital Protection:** Sistem berlapis — Basket Harvest, Momentum Equity Protection, Net-Zero Survival Guard — melindungi modal dari drawdown beruntun.
@@ -57,7 +59,7 @@ graph TD
 ```
 
 ---
-
+w
 ## 🧠 Cara Kerja (Technical Engine - v3.0)
 
 Algovibe menggunakan sistem **HFT Momentum Breakout Confluence** dengan 3 indikator utama berkecepatan tinggi:
@@ -83,10 +85,11 @@ Gerbang dievaluasi secara **Asinkron** untuk menghemat CPU dan menurunkan latens
 4.  **Multi-confluence technical gate** (SELL block jika `sell_score >= 5.0`)
     *   **ATR Volatility Filter (4b):** Reject jika ATR > 3% harga (4.5% di loose gates).
     *   **EMA-50 Trend Filter (4c):** Reject jika harga < EMA-50.
-        *   *Bottom-Explosion Exception:* Bypass filter EMA jika deteksi Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.
-    *   **MTFA Alignment (Multi-Timeframe):** Harga harus berada di atas EMA-50 pada timeframe 5m dan 15m (approx dari history 1m).
-5.  **Technical probability & CVD imbalance threshold** (Mengambil data imbalance real-time dari Redis).
-6.  **Trend / breakout requirement**
+        *   *Bottom-Explosion Exception:* Bypass jika Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.
+        *   *ML Fast-Track Exception:* Bypass jika `ml_prob >= 0.68` (model RandomForest per-pair yakin tinggi).
+    *   **MTFA Alignment (Multi-Timeframe):** Harga harus berada di atas EMA-50 pada timeframe 5m dan 15m (approx dari history 1m). Juga di-bypass oleh ML fast-track.
+5.  **Technical probability & CVD imbalance threshold** (Mengambil data imbalance real-time dari Redis). Di-bypass oleh ML fast-track.
+6.  **Trend / breakout requirement** (Di-bypass oleh ML fast-track pada kondisi SIDEWAYS dengan momentum kuat).
 7.  **Radar recommendation guard**
 8.  **Dynamic threshold based on volatility + trend**
 9.  **Consecutive-loss halt / Shadow Recovery**
@@ -210,7 +213,10 @@ docker compose run --rm backtester optimize --generations 5
 
 ```
 services/
-├── market_pipe/        # Ingress: Exchange WS -> ZMQ Protobuf (latency ultra-rendah)
+├── market_pipe/        # Ingress: Exchange WS -> ZMQ Protobuf; provider dipilih via env EXCHANGE
+│   └── providers/
+│       ├── binance.py  # BinanceProvider: live top gainers+losers+vol, auto-refresh 5 menit
+│       └── indodax.py  # IndodaxProvider: subscribe dari DB ticker_history
 ├── brain_inference/    # Scoring & Oracle: live in-memory history, 3 indikator v3.0
 ├── executive_core/     # Execution: Risk Checks, P&L, Order Placement, Exit Manager
 ├── exchange_reconcile/ # Reconcile: sinkronisasi wallet & order state dari exchange ke DB
@@ -220,7 +226,7 @@ services/
 └── litert_lm_decision/ # LLM service (DINONAKTIFKAN — trading path di-guard TECHNICAL_ONLY_MODE)
 app/
 ├── application/
-│   ├── entry_gates.py          # Asynchronous Entry Gates, MTFA, Wick Delay
+│   ├── entry_gates.py          # Asynchronous Entry Gates, MTFA, Wick Delay, ML Fast-Track bypass
 │   ├── session_awareness.py    # 7-state strategy ladder: HALT → MOMENTUM_CHASE; injects risk params ke brain-inference & pair-pipeline
 │   ├── use_cases/
 │   │   ├── trade_execution.py  # BUY execution, fee-trap pure-% guard
@@ -230,7 +236,7 @@ app/
 ├── domain/
 │   ├── technicals.py   # 3 indikator v3.0 (Velocity, Volume Ratio, OB Pressure) + 15 helper indicators
 │   ├── scoring.py      # Radar scoring; terima price_history (live) sebagai arg ke-4
-│   └── predictor.py    # ML model inference (Scalper V2)
+│   └── predictor.py    # ML model inference (Scalper V2); get_raw_ml_prob() untuk fast-track gate
 └── infrastructure/
     ├── database.py     # PostgreSQL/TimescaleDB connector
     ├── ws_market.py    # WebSocket market stream + in-memory ticker/OB cache

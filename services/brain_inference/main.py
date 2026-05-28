@@ -489,6 +489,7 @@ class BrainInferenceService:
                     self._tickers[pair_norm]["change_24h"] = m["change_24h"]
 
             logger.info("[BRAIN] Top Gainers 24h: %s", movers.get('gainers_brief'))
+            logger.info("[BRAIN] Top Losers  24h: %s", movers.get('losers_brief'))
             logger.info("[BRAIN] Trending (vol): %s", movers.get('trending_brief'))
             if seeded > 0:
                 logger.info("[BRAIN] Seeded %d mover pair ke scan universe.", seeded)

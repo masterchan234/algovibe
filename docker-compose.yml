@@ -153,6 +153,7 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
+      - ./models:/app/scalp_models:ro  # Per-pair RandomForest scalp classifiers
       - ./services:/app/services
       - ./app:/app/app
       - ./shared:/app/shared
@@ -209,6 +210,7 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
+      - ./models:/app/scalp_models:ro  # Per-pair RandomForest scalp classifiers
       - algovibe_ipc:/tmp           # Same IPC volume
       - ./services:/app/services
       - ./app:/app/app

@@ -32,7 +32,7 @@ _ROC_CAP_PCT   = 5.0
 _ROC_COEFF     = 0.08
 
 #  Per-pair model cache: {pair: (model, mtime)} 
-_PAIR_MODEL_DIR  = "models"
+_PAIR_MODEL_DIR  = "scalp_models"
 _pair_models: dict = {}
 
 _PAIR_FEATURE_NAMES = [

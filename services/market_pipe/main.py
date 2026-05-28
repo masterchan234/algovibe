@@ -2,7 +2,7 @@
 services/market_pipe/main.py — Market-Pipe Microservice Entry Point
 ====================================================================
 Standalone service that:
-  1. Connects to the Indodax WebSocket (via IndodaxProvider).
+  1. Connects to the exchange WebSocket (Binance or Indodax, via env EXCHANGE).
   2. Normalises every price update into a Protobuf Tick.
   3. Publishes the serialised Tick bytes over ZMQ IPC to
      ipc:///tmp/market_stream.ipc.
@@ -30,7 +30,12 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from shared.transport import ZMQPublisher, IPC_MARKET, install_uvloop
-from services.market_pipe.providers.indodax import IndodaxProvider
+
+_exchange = os.getenv("EXCHANGE", "binance").lower()
+if _exchange == "binance":
+    from services.market_pipe.providers.binance import BinanceProvider as _Provider
+else:
+    from services.market_pipe.providers.indodax import IndodaxProvider as _Provider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +58,7 @@ def main() -> None:
     publisher = ZMQPublisher(IPC_MARKET)
     publisher.start()
 
-    provider = IndodaxProvider(
+    provider = _Provider(
         on_tick=publisher.send,
         on_trade=publisher.send,
     )

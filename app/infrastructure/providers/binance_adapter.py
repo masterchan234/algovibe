@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import ccxt
+import requests
 
 from .base_adapter import BaseExchangeAdapter
 
@@ -241,45 +242,73 @@ class BinanceAdapter(BaseExchangeAdapter):
         from config import SECTOR_MAP
         return list(SECTOR_MAP.keys())
 
+    # Stablecoin bases yang diexclude dari market movers scan
+    _STABLECOIN_BASES = frozenset({
+        'USDC', 'FDUSD', 'TUSD', 'USDP', 'BUSD', 'DAI', 'USDB', 'USD1', 'XUSD',
+        'U', 'RLUSD', 'XAUT', 'PAXG', 'EUR', 'GBP', 'TRY', 'BRL', 'AUD',
+    })
+
     def fetch_market_movers(self, top_n: int = 20) -> dict:
-        """Return top gainers, losers, and trending USDT pairs."""
+        """Return top gainers, losers, dan trending USDT pairs dari Binance public API.
+
+        Menggunakan REST langsung (bukan CCXT) untuk kecepatan.
+        Filter: vol >= $5M, exclude stablecoins.
+        """
+        _EMPTY = {"gainers": [], "losers": [], "trending": [], "momentum_7d": [],
+                  "gainers_brief": "", "losers_brief": "", "trending_brief": ""}
         try:
-            tickers = self._ccxt.fetch_tickers()
-            usdt_tickers = []
-            for sym, t in tickers.items():
-                if sym.endswith('/USDT'):
-                    change = float(t.get('percentage', 0.0) or 0.0)
-                    vol = float(t.get('quoteVolume', 0.0) or 0.0)
-                    usdt_tickers.append({
-                        "pair": self._normalise_symbol(sym),
-                        "change": change,
-                        "vol": vol,
-                        "ticker": t
-                    })
+            resp = requests.get(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                logger.warning("[BinanceAdapter] fetch_market_movers HTTP %d", resp.status_code)
+                return _EMPTY
 
-            gainers = sorted(usdt_tickers, key=lambda x: x["change"], reverse=True)[:top_n]
-            losers = sorted(usdt_tickers, key=lambda x: x["change"])[:top_n]
-            trending = sorted(usdt_tickers, key=lambda x: x["vol"], reverse=True)[:top_n]
+            raw = resp.json()
+            candidates = []
+            for t in raw:
+                sym = str(t.get('symbol', ''))
+                if not sym.endswith('USDT'):
+                    continue
+                base = sym[:-4]
+                if base in self._STABLECOIN_BASES:
+                    continue
+                vol = float(t.get('quoteVolume', 0) or 0)
+                if vol < 5_000_000:   # min $5 juta notional/24h
+                    continue
+                change = float(t.get('priceChangePercent', 0) or 0)
+                last  = float(t.get('lastPrice', 0) or t.get('prevClosePrice', 0) or 0)
+                if last <= 0:
+                    continue
+                candidates.append({
+                    "pair":       sym.lower(),
+                    "last":       last,
+                    "change_24h": change,
+                    "change_24h_pct": change,
+                    "vol_idr":    vol,   # USDT volume, mapped ke vol_idr slot
+                })
 
-            def _map(item):
-                t = item["ticker"]
-                return {
-                    "pair": item["pair"],
-                    "last": float(t.get('last', 0.0) or t.get('close', 0.0) or 0.0),
-                    "change_24h": item["change"],
-                    "change_24h_pct": item["change"],
-                    "vol_idr": item["vol"],
-                }
+            gainers  = sorted(candidates, key=lambda x: x["change_24h"], reverse=True)[:top_n]
+            losers   = sorted(candidates, key=lambda x: x["change_24h"])[:top_n]
+            trending = sorted(candidates, key=lambda x: x["vol_idr"],    reverse=True)[:top_n]
+
+            gainers_brief  = " ".join(f"{x['pair'].replace('usdt','')}({x['change_24h']:+.1f}%)" for x in gainers[:8])
+            losers_brief   = " ".join(f"{x['pair'].replace('usdt','')}({x['change_24h']:+.1f}%)" for x in losers[:8])
+            trending_brief = " ".join(f"{x['pair'].replace('usdt','')}({x['vol_idr']/1e6:.0f}M)"  for x in trending[:8])
 
             return {
-                "gainers": [_map(x) for x in gainers],
-                "losers": [_map(x) for x in losers],
-                "trending": [_map(x) for x in trending],
-                "momentum_7d": [_map(x) for x in trending],
+                "gainers":       gainers,
+                "losers":        losers,
+                "trending":      trending,
+                "momentum_7d":   trending,  # alias — brain_inference menggunakan ini juga
+                "gainers_brief": gainers_brief,
+                "losers_brief":  losers_brief,
+                "trending_brief": trending_brief,
             }
         except Exception as e:
-            logger.error(f"[BinanceAdapter] Failed to fetch market movers: {e}")
-            return {"gainers": [], "losers": [], "trending": [], "momentum_7d": []}
+            logger.error("[BinanceAdapter] fetch_market_movers failed: %s", e)
+            return _EMPTY
 
     #  Order management 
 
