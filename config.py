@@ -464,10 +464,9 @@ MIN_PRICE_FILTER = 10
 # AUTO-TRAINER (Background Self-Training)
 # ==========================================
 AUTO_TRAIN_ENABLED         = True
-AUTO_TRAIN_INTERVAL_HOURS  = 1      # Retrain setiap 6 jam
-AUTO_TRAIN_MIN_SAMPLES     = 300    # Minimal closed trades sebelum training diizinkan
-AUTO_TRAIN_MIN_ACCURACY    = 0.55   # Floor accuracy — model baru tidak di-deploy jika di bawah ini
+AUTO_TRAIN_INTERVAL_HOURS  = 1      # Retrain setiap N jam
+AUTO_TRAIN_DAYS            = 90     # Window OHLCV data dalam hari untuk training
+AUTO_TRAIN_MIN_CANDLES     = 500    # Minimal candle per pair sebelum training diizinkan
+AUTO_TRAIN_MIN_ACCURACY    = 0.52   # Floor ROC-AUC — 0.5=random, 0.52=sedikit di atas random
 AUTO_TRAIN_MIN_DELTA       = 0.01   # Model baru harus >= model lama + 1% agar menggantikan
-AUTO_TRAIN_RF_MODEL_PATH   = "models/scalper_v2.joblib"
-AUTO_TRAIN_RF_MODEL_TMP    = "models/scalper_v2.joblib.tmp"
 AUTO_TRAIN_LOG_PATH        = "data/logs/auto_trainer.log"

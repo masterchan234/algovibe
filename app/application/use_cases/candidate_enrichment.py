@@ -29,7 +29,8 @@ def enrich_pair(bot, p, tickers):
     imbalance_ratio = p.get('imbalance', 1.0)
 
     # Pure technical probability — no AI sentiment multiplier applied.
-    tq_prob = get_prediction(history, tickers.get(pair))
+    # Pass pair agar predictor memakai per-pair model jika tersedia.
+    tq_prob = get_prediction(history, tickers.get(pair), pair=pair)
 
     ch_5m = ch_15m = ch_1h = 0.0
     if len(history) >= 2:

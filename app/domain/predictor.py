@@ -7,14 +7,11 @@ Model ML (RandomForest) tetap dipakai sebagai refinement, bukan decision-maker u
 """
 
 import os
-import time
 import joblib
 import numpy as np
-import pandas as pd
-from datetime import datetime
 from app.domain.technicals import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
-    calculate_stochastic_rsi, calculate_ema, calculate_volatility,
+    calculate_stochastic_rsi, calculate_ema,
     calculate_ema_slope, calculate_williams_r, calculate_roc,
     _MACD_NORM_FACTOR,
 )
@@ -34,41 +31,136 @@ _RSI_SIGMOID_SCALE  = 12.0
 _ROC_CAP_PCT   = 5.0
 _ROC_COEFF     = 0.08
 
-#  Global model cache 
-MODEL_PATH   = "models/scalper_v2.joblib"
-_model       = None
-_model_mtime: float = 0.0
+#  Per-pair model cache: {pair: (model, mtime)} 
+_PAIR_MODEL_DIR  = "models"
+_pair_models: dict = {}
+
+_PAIR_FEATURE_NAMES = [
+    "RSI", "RSI_Change", "RSI_Slope", "MACD_Hist", "MACD_Signal_Cross",
+    "BB_Pos", "BB_Width", "Stoch_K", "Stoch_D", "Stoch_Cross",
+    "Williams_R", "EMA_9_21_Diff", "EMA_Above_50", "Vol_Ratio", "Vol_Change",
+    "Price_Change_1m", "Price_Change_3m", "Price_Change_5m", "ATR_Pct", "OBV_Slope",
+]
 
 
-def _load_model():
-    global _model, _model_mtime
-    if not os.path.exists(MODEL_PATH):
+def _load_pair_model(pair: str):
+    """Load per-pair scalp classifier dari models/{pair}_1m_90d_1m_scalp_classifier.pkl.
+    Hot-reload otomatis jika file diperbarui. Returns model atau None.
+    """
+    global _pair_models
+    path = os.path.join(_PAIR_MODEL_DIR, f"{pair}_1m_90d_1m_scalp_classifier.pkl")
+    if not os.path.exists(path):
         return None
     try:
-        current_mtime = os.path.getmtime(MODEL_PATH)
-        if _model is None or current_mtime > _model_mtime:
-            _model = joblib.load(MODEL_PATH)
-            _model_mtime = current_mtime
-            log_message(
-                f" [Predictor] Scalper V2 Model loaded "
-                f"(mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})."
-            )
+        mtime = os.path.getmtime(path)
+        cached = _pair_models.get(pair)
+        if cached is None or mtime > cached[1]:
+            model = joblib.load(path)
+            _pair_models[pair] = (model, mtime)
+            log_message(f"[OK] [Predictor] Per-pair model loaded: {pair}")
+        return _pair_models[pair][0]
     except Exception as e:
-        log_message(f"[WARN] [Predictor] Failed to load model: {e}")
-    return _model
+        log_message(f"[WARN] [Predictor] Failed to load pair model {pair}: {e}")
+        return None
+
+
+def _build_pair_features(prices: list) -> "np.ndarray | None":
+    """Bangun 20-feature vector yang kompatibel dengan train_scalp_classifiers.py.
+
+    Fitur berbasis OHLCV yang tidak tersedia (volume, high, low) di-approximate
+    dari data close saja — Williams %R via close min/max, ATR via selisih close,
+    volume features (Vol_Ratio, Vol_Change, OBV_Slope) fallback ke nilai netral.
+    """
+    n = len(prices)
+    if n < 30:
+        return None
+
+    closes = np.array(prices, dtype=float)
+
+    # 1-3. RSI, RSI_Change, RSI_Slope
+    rsi_now   = calculate_rsi(prices)
+    rsi_prev3 = calculate_rsi(list(closes[:-3])) if n > 16 else rsi_now
+    rsi_change = rsi_now - rsi_prev3
+    rsi_slope  = rsi_change / 3.0
+
+    # 4-5. MACD_Hist, MACD_Signal_Cross
+    macd_hist, prev_hist = 0.0, 0.0
+    if n >= 35:
+        _, _, macd_hist = calculate_macd(prices)
+    if n >= 36:
+        _, _, prev_hist = calculate_macd(list(closes[:-1]))
+    macd_cross = (1.0 if (macd_hist > 0 and prev_hist <= 0) else
+                  -1.0 if (macd_hist < 0 and prev_hist >= 0) else 0.0)
+
+    # 6-7. BB_Pos (= bb_pct), BB_Width
+    if n >= 20:
+        _, _, _, bb_pct = calculate_bollinger_bands(prices)
+        bb_arr  = closes[-20:]
+        bb_mid  = float(np.mean(bb_arr))
+        bb_std  = float(np.std(bb_arr, ddof=0))
+        bb_width = (4.0 * bb_std / bb_mid) if bb_mid > 0 else 0.0
+    else:
+        bb_pct   = 0.5
+        bb_width = 0.0
+
+    # 8-10. Stoch_K, Stoch_D, Stoch_Cross (RSI-based)
+    stoch_k, stoch_d = calculate_stochastic_rsi(prices)
+    stoch_cross = 1.0 if stoch_k > stoch_d else 0.0
+
+    # 11. Williams %R — approximate menggunakan min/max close-14 sebagai proxy H/L
+    if n >= 14:
+        wnd = closes[-14:]
+        hh  = float(np.max(wnd))
+        ll  = float(np.min(wnd))
+        wr  = ((hh - closes[-1]) / (hh - ll) * -100.0) if (hh - ll) > 0 else -50.0
+    else:
+        wr = -50.0
+
+    # 12-13. EMA_9_21_Diff, EMA_Above_50
+    ema9  = calculate_ema(prices, 9)  if n >= 9  else float(closes[-1])
+    ema21 = calculate_ema(prices, 21) if n >= 21 else float(closes[-1])
+    ema50 = calculate_ema(prices, 50) if n >= 50 else float(closes[-1])
+    ema_9_21_diff = ((ema9 - ema21) / ema21 * 100.0) if ema21 > 0 else 0.0
+    ema_above_50  = 1.0 if closes[-1] > ema50 else 0.0
+
+    # 14-15. Vol_Ratio, Vol_Change — tidak ada data volume, gunakan nilai netral
+    vol_ratio  = 1.0
+    vol_change = 0.0
+
+    # 16-18. Price_Change_1m/3m/5m
+    def _pct(a, b): return ((a - b) / b * 100.0) if b > 0 else 0.0
+    pc1 = _pct(closes[-1], closes[-2]) if n >= 2  else 0.0
+    pc3 = _pct(closes[-1], closes[-4]) if n >= 4  else 0.0
+    pc5 = _pct(closes[-1], closes[-6]) if n >= 6  else 0.0
+
+    # 19. ATR_Pct — approximate via abs selisih close (tanpa high/low)
+    if n >= 15:
+        diffs   = np.abs(np.diff(closes[-15:]))
+        atr_pct = (float(np.mean(diffs)) / closes[-1] * 100.0) if closes[-1] > 0 else 0.0
+    else:
+        atr_pct = 0.0
+
+    # 20. OBV_Slope — tidak ada volume, nilai netral
+    obv_slope = 0.0
+
+    return np.array([[
+        rsi_now, rsi_change, rsi_slope,
+        macd_hist, macd_cross,
+        bb_pct, bb_width,
+        stoch_k, stoch_d, stoch_cross,
+        wr, ema_9_21_diff, ema_above_50,
+        vol_ratio, vol_change,
+        pc1, pc3, pc5,
+        atr_pct, obv_slope,
+    ]], dtype=float)
 
 
 def preload_model() -> None:
-    """Pre-load the ML model into the global cache at startup.
+    """No-op — per-pair models di-load on-demand saat pertama kali pair diprediksi.
 
-    Calling this once at bot startup ensures subsequent calls to get_prediction()
-    return immediately without paying the joblib load cost on the first trade.
+    Dipanggil dari bootstrap.py; dipertahankan agar signature tidak berubah.
     """
-    model = _load_model()
-    if model is not None:
-        log_message("[OK] [Predictor] ML model pre-loaded into memory at startup.")
-    else:
-        log_message("[WARN] [Predictor] ML model not found at startup (will load on demand when available).")
+    pass
 
 
 def _compute_technical_probability(price_history: list, ticker_data: dict = None) -> float:
@@ -222,15 +314,18 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
     return float(round(max(0.0, min(0.99, prob)), 4))
 
 
-def get_prediction(price_history: list, ticker_data: dict = None) -> float:
+def get_prediction(price_history: list, ticker_data: dict = None, pair: str = None) -> float:
     """
     Probabilitas eksekusi trade — PURE TECHNICAL (v2.0).
 
     Perubahan dari v1:
     - Semua pengaruh LLM/AI dihapus sepenuhnya.
     - Base score 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, WilliamsR, ROC, OB).
-    - Model ML (HistGradientBoosting) tetap digunakan sebagai refinement.
+    - Model ML (per-pair RandomForest) sebagai refinement jika model tersedia.
     - Bobot blend dinamis berdasarkan tingkat kecocokan tech vs ML.
+
+    Args:
+        pair: Jika diberikan, muat per-pair model dari models/{pair}_1m_90d_1m_scalp_classifier.pkl.
 
     Returns:
         -1.0  → Warming Up (data kurang dari minimum)
@@ -246,57 +341,25 @@ def get_prediction(price_history: list, ticker_data: dict = None) -> float:
         #  1. Pure Technical Base Score 
         tech_prob = _compute_technical_probability(price_history, ticker_data)
 
-        #  2. Machine Learning Refinement 
-        model = _load_model()
-        if model:
-            rsi = calculate_rsi(price_history)
-            _, _, macd_hist = calculate_macd(price_history) if n >= 35 else (0, 0, 0)
-            _, _, _, bb_pct = calculate_bollinger_bands(price_history) if n >= 20 else (0, 0, 0, 0.5)
-            stoch_k, stoch_d = calculate_stochastic_rsi(price_history)
-            vol = calculate_volatility(price_history)
+        #  2. Machine Learning Refinement (per-pair RandomForest) 
+        pair_model = _load_pair_model(pair) if pair else None
 
-            ema9  = calculate_ema(price_history, 9) if n >= 9 else price_history[-1]
-            ema21 = calculate_ema(price_history, 21) if n >= 21 else price_history[-1]
-            ema_dist = (price_history[-1] - ema21) / ema21 if ema21 > 0 else 0.0
-
-            imbalance_val = 0.5
-            if ticker_data:
-                bd = float(ticker_data.get("bid_depth", 0))
-                ad = float(ticker_data.get("ask_depth", 0))
-                if (bd + ad) > 0:
-                    imbalance_val = bd / (bd + ad)
-
-            hour = datetime.now().hour
-
-            features_df = pd.DataFrame([{
-                "ai_prob":          tech_prob,
-                "imbalance":        imbalance_val,
-                "volatility":       vol,
-                "rsi":              rsi,
-                "ema_dist":         ema_dist,
-                "ema_dist_abs":     abs(ema_dist),
-                "rsi_oversold":     max(0.0, (30.0 - rsi) / 30.0),
-                "rsi_overbought":   max(0.0, (rsi - 70.0) / 30.0),
-                "hour_sin":         np.sin(2 * np.pi * hour / 24.0),
-                "hour_cos":         np.cos(2 * np.pi * hour / 24.0),
-            }])
-
-            ml_prob = model.predict_proba(features_df)[0][1]
-
-            # Blend dinamis: ketika tech dan ML sepakat, kita bisa percaya lebih;
-            # ketika mereka berbeda jauh, kita tetap dominankan sinyal teknikal.
-            divergence = abs(tech_prob - ml_prob)
-            if divergence < 0.10:
-                # Keduanya sepakat — 55% tech, 45% ML
-                final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
-            elif divergence < 0.25:
-                # Perbedaan moderat — 65% tech, 35% ML
-                final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+        if pair_model:
+            # Per-pair model: 20 OHLCV-derived features
+            feat = _build_pair_features(price_history)
+            if feat is not None:
+                ml_prob    = float(pair_model.predict_proba(feat)[0][1])
+                divergence = abs(tech_prob - ml_prob)
+                if divergence < 0.10:
+                    final_prob = tech_prob * 0.55 + ml_prob * 0.45
+                elif divergence < 0.25:
+                    final_prob = tech_prob * 0.65 + ml_prob * 0.35
+                else:
+                    final_prob = tech_prob * 0.75 + ml_prob * 0.25
             else:
-                # Divergensi tinggi — percayai sinyal teknikal lebih (75% tech, 25% ML)
-                final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
+                final_prob = tech_prob
         else:
-            # Tanpa model ML — murni teknikal
+            # Tidak ada per-pair model — murni teknikal
             final_prob = tech_prob
 
         return float(round(max(0.0, min(final_prob, 0.99)), 4))

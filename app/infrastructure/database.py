@@ -462,6 +462,7 @@ class Database:
 
         if dry_run is None:
             dry_run = self.is_dry_run()
+        dry_run = bool(dry_run)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM positions WHERE dry_run = %s", (dry_run,))
@@ -628,6 +629,7 @@ class Database:
         """Ambil statistik performa harian (24 jam terakhir) dari trade_history."""
         if dry_run is None:
             dry_run = self.is_dry_run()
+        dry_run = bool(dry_run)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -678,6 +680,7 @@ class Database:
         """Ambil statistik performa all-time dari trade_history."""
         if dry_run is None:
             dry_run = self.is_dry_run()
+        dry_run = bool(dry_run)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -1276,6 +1279,7 @@ class Database:
         """Menghasilkan laporan audit kuantitatif untuk 24 jam terakhir."""
         if dry_run is None:
             dry_run = self.is_dry_run()
+        dry_run = bool(dry_run)
         """
         Laporan audit kuantitatif untuk dashboard:
         - Precision per LLM verdict

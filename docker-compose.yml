@@ -494,6 +494,29 @@ services:
     networks:
       - default
 
+  auto-trainer:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-auto-trainer
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - DATABASE_URL_TRAIN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+    volumes:
+      - algovibe_data:/app/data
+      - ./models:/app/models
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    command: ["python", "-m", "app.infrastructure.auto_trainer"]
+    networks:
+      - default
+
 networks:
   default:
     driver: bridge
