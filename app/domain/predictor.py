@@ -163,6 +163,30 @@ def preload_model() -> None:
     pass
 
 
+def get_raw_ml_prob(pair: str, price_history: list) -> "float | None":
+    """Probabilitas ML murni untuk pair — tanpa blending dengan tech_prob.
+
+    Berguna untuk ML fast-track gate: jika model sangat yakin (>= 0.68),
+    bot bisa bypass beberapa gate teknikal yang terlalu konservatif.
+
+    Returns:
+        float (0.0-1.0)  — probabilitas class 1 (upward move) dari model
+        None             — model tidak tersedia atau fitur kurang
+    """
+    if not pair or not price_history:
+        return None
+    model = _load_pair_model(pair.lower())
+    if model is None:
+        return None
+    feat = _build_pair_features(price_history)
+    if feat is None:
+        return None
+    try:
+        return float(model.predict_proba(feat)[0][1])
+    except Exception:
+        return None
+
+
 def _compute_technical_probability(price_history: list, ticker_data: dict = None) -> float:
     """
     Menghitung probabilitas BUY murni dari indikator teknikal.

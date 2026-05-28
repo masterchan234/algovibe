@@ -203,6 +203,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     tq_prob = enriched['tq_prob']
     current_vol = p['volatility']
 
+    # ML Fast-Track: jika model per-pair sangat yakin (>= 0.68), bypass gate 4c/5/6.
+    # Model sudah belajar dari 90 hari histori pair ini — lebih tahu dari threshold statis.
+    ml_prob       = enriched.get('ml_prob')  # None jika tidak ada model
+    ml_fast_track = ml_prob is not None and ml_prob >= 0.68
+
     #  1. Skip pairs already held or blacklisted (O(1) Trigger Monitor)
     if pair in open_positions or pair in bot.blacklist:
         return None
@@ -265,13 +270,16 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     #  4c. EMA-50 Trend & MTFA Alignment (O(1) Trigger Monitor via State Cache)
     is_explosion_setup = False
     if len(history) >= 14:
-        # Bypass trend guards if extreme Mean Reversion setup is triggered (Bottom-Explosion)
+        # Bypass trend guards jika extreme Mean Reversion (Bottom-Explosion)
         is_explosion_setup = (
             (tech.get('rsi', 50.0) < 26.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
             or tech.get('velocity', 0.0) > 0.2
         )
 
-    if not config.DRY_RUN_LOOSE_GATES and not is_explosion_setup:
+    # ML fast-track juga bypass EMA-50/MTFA (model sudah belajar trend dari 90 hari data)
+    bypass_trend_check = is_explosion_setup or ml_fast_track
+
+    if not config.DRY_RUN_LOOSE_GATES and not bypass_trend_check:
         # Verify 1m EMA-50
         if not states['ema_50_ok']:
             _last_price = float(p.get('last', 0.0))
@@ -291,6 +299,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         log_message(
             f"[GATE] {pair} [SPECIAL]: Bottom-Explosion setup (Vel={tech.get('velocity'):.2f}%, "
             f"VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50/MTFA trend filters."
+        )
+    elif ml_fast_track:
+        log_message(
+            f"[GATE] {pair} [ML-FAST-TRACK] ml_prob={ml_prob:.3f} >= 0.68 — bypassing EMA-50/MTFA"
         )
 
     #  4d. Vertical Spike / RSI Ceiling Filter (O(1) Trigger Monitor)
@@ -356,7 +368,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     tech_ready = tq_prob >= tech_gate_threshold
     has_strong_imb = imbalance_ratio >= imb_gate_threshold
-    if not tech_ready and not has_strong_imb:
+    if not tech_ready and not has_strong_imb and not ml_fast_track:
         msg = f"[GATE] {pair} REJECTED: Tech prob {tq_prob * 100:.0f}% < {tech_gate_threshold * 100:.0f}%, CVD Imbalance {imbalance_ratio:.2f} < {imb_gate_threshold:.2f}"
         log_message(msg)
         save_gate_state(msg)
@@ -368,9 +380,11 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         _vol_ratio = tech.get('volume_ratio', 1.0)
         
         sideway_relaxed_ok = (
-            (is_loose or (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3))
-            and tq_prob >= max(tech_gate_threshold, 0.45)
-            and imbalance_ratio >= 1.05
+            ml_fast_track       # ML sangat yakin — izinkan SIDEWAYS tanpa syarat tambahan
+            or is_loose
+            or (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3
+                and tq_prob >= max(tech_gate_threshold, 0.45)
+                and imbalance_ratio >= 1.05)
         )
         if not sideway_relaxed_ok:
             msg = f"[GATE] {pair} REJECTED: No trend/breakout support (trend={trend})"

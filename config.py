@@ -47,8 +47,8 @@ TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 6
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.12    # Sizing ~12% per trade (regular signal)
-CAPITAL_PER_TRADE_PCT_HIGH_OPP = 0.20  # Sizing ~20% per trade untuk high-opportunity (TQ_PROB >= 0.75)
+CAPITAL_PER_TRADE_PCT = 0.18    # Sizing ~18% per trade (regular signal)
+CAPITAL_PER_TRADE_PCT_HIGH_OPP = 0.30  # Sizing ~30% per trade untuk high-opportunity (TQ_PROB >= 0.75)
 MAX_OPEN_POSITIONS = 6             # Maksimal 6 posisi bersamaan — jaga sizing tetap besar
 MIN_BALANCE_THRESHOLD = 10.0   # Jangan trading jika saldo < 10 USDT
 MIN_TRADE_IDR = 10.0   # Legacy mapping compatibility (USDT)
