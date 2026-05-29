@@ -2,6 +2,7 @@ import time
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 import config
 from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
@@ -95,23 +96,61 @@ class Oracle:
             Trading pair identifier (e.g., "btcusdt" or "btc_idr").
         tech: dict
             Dictionary containing all technical indicators required for decision.
-            Expected keys: rsi, volatility, momentum, ema9, ema50, stoch_k, stoch_d,
-            buy_pressure, imbalance, volume_ratio, price_velocity, etc.
+            Expected keys: velocity, volume_ratio, buy_pressure (indikator utama HFT),
+            rsi, volatility, ema9, ema50, stoch_k, stoch_d, macd_hist, bb_pct,
+            signal (verdict teknikal), tech_confidence, sell_score.
 
         Returns
         -------
         str
             "BUY", "HOLD" or "AVOID". If any error occurs, defaults to "HOLD".
         """
-        # Build prompt – concise but includes all indicators for LLM to reason.
+        # [HYBRID MODE] request_llm_entry_decision selalu aktif: teknikal dikirim ke LLM
+        # dan LLM melakukan analisa + pengambilan keputusan entry (BUY/HOLD/AVOID).
+        # Method ini adalah jembatan hybrid — tidak diblock oleh TECHNICAL_ONLY_MODE.
+        # Guard TECHNICAL_ONLY_MODE tetap berlaku untuk jalur LLM lain (veto, auto_queue, dll.).
+
+        # Ambil 3 indikator utama scalping HFT (AGENTS.md §7) dengan bobot eksplisit:
+        # 1. Price Velocity  (bobot 3.5) — kenaikan/penurunan harga cepat 4-periode
+        # 2. Volume Ratio    (bobot 3.5) — volume saat ini vs MA-20
+        # 3. OB Buy Pressure (bobot 3.0) — rasio Bid/Ask depth volume
+        velocity     = tech.get('velocity', tech.get('price_velocity', 'N/A'))
+        volume_ratio = tech.get('volume_ratio', 'N/A')
+        buy_pressure = tech.get('buy_pressure', 50.0)  # % bid dari total depth
+
+        # Sinyal teknikal dari derive_trade_signal (sudah melewati semua indicator scoring)
+        signal_verdict   = tech.get('signal', tech.get('verdict', 'N/A'))
+        tech_confidence  = tech.get('tech_confidence', 0)
+        sell_score       = tech.get('sell_score', 0)
+
+        # Secondary indicators — konteks tambahan
+        rsi         = tech.get('rsi', 'N/A')
+        volatility  = tech.get('volatility', 'N/A')
+        stoch_k     = tech.get('stoch_k', 'N/A')
+        stoch_d     = tech.get('stoch_d', 'N/A')
+        macd_hist   = tech.get('macd_hist', 'N/A')
+        bb_pct      = tech.get('bb_pct', 'N/A')
+        ema9        = tech.get('ema9', 'N/A')
+        ema50       = tech.get('ema50', 'N/A')
+
+        # Build prompt — fokus pada 3 indikator utama HFT, lalu secondary indicators
         prompt = (
-            f"You are a quantitative crypto analyst. Given the following technical indicators for {pair.upper()}, "
-            f"decide whether to BUY, HOLD, or AVOID. Provide only the word (BUY/HOLD/AVOID).\n"
-            f"RSI: {tech.get('rsi', 'N/A')}, Volatility%: {tech.get('volatility', 'N/A')}, "
-            f"Momentum: {tech.get('momentum', 'N/A')}, EMA9: {tech.get('ema9', 'N/A')}, EMA50: {tech.get('ema50', 'N/A')}, "
-            f"Stoch_K: {tech.get('stoch_k', 'N/A')}, Stoch_D: {tech.get('stoch_d', 'N/A')}, "
-            f"BuyPressure%: {tech.get('buy_pressure', 'N/A')}, Imbalance: {tech.get('imbalance', 'N/A')}, "
-            f"VolumeRatio: {tech.get('volume_ratio', 'N/A')}, Velocity%: {tech.get('velocity', 'N/A')}."
+            f"You are a quantitative crypto scalping analyst. Evaluate the following technical"
+            f" indicators for {pair.upper()} and decide: BUY, HOLD, or AVOID.\n\n"
+            f"=== PRIMARY HFT INDICATORS (High Weight) ===\n"
+            f"Price Velocity (4-period momentum): {velocity}%  [Weight 3.5 — >0.4% = strong BUY, >0.15% = moderate]\n"
+            f"Volume Ratio (vs MA-20):             {volume_ratio}x  [Weight 3.5 — >=2.0x = strong BUY, >=1.4x = moderate]\n"
+            f"OB Buy Pressure (Bid/Ask depth %):   {buy_pressure:.1f}%  [Weight 3.0 — >=65% = strong BUY, >=55% = moderate]\n\n"
+            f"=== TECHNICAL SIGNAL (from multi-indicator scoring) ===\n"
+            f"Signal Verdict: {signal_verdict}  |  Tech Confidence: {tech_confidence:.1f}%  |  Sell Score: {sell_score:.1f}\n\n"
+            f"=== SECONDARY INDICATORS (Context) ===\n"
+            f"RSI: {rsi}, Stoch_K: {stoch_k}, Stoch_D: {stoch_d}\n"
+            f"MACD_Hist: {macd_hist}, BB%: {bb_pct}\n"
+            f"EMA9: {ema9}, EMA50: {ema50}, Volatility: {volatility}%\n\n"
+            f"DECISION RULE: Output exactly one word — BUY, HOLD, or AVOID.\n"
+            f"BUY only if primary HFT indicators show strong confluence AND Signal Verdict is BUY.\n"
+            f"AVOID if Sell Score >= 5.0 or momentum is clearly negative.\n"
+            f"HOLD in all other cases."
         )
 
         # Load endpoint configuration from environment (added to .env)
@@ -125,14 +164,18 @@ class Oracle:
 
         import requests
         headers = {'Content-Type': 'application/json'}
+        api_key = os.getenv('LLM_API_KEY', '').strip()
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
         payload = {
             'model': model,
             'messages': [
-                {'role': 'system', 'content': 'You are a concise crypto trading assistant.'},
+                {'role': 'system', 'content': 'You are a profesional crypto trading analyst.'},
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': 0.0,
             'max_tokens': 5,
+            'stream': False,
         }
         try:
             response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_sec)
@@ -140,23 +183,62 @@ class Oracle:
                 log_message(f"[LLM-ENTRY] HTTP {response.status_code}, body: {response.text[:120]}")
                 decision = 'HOLD'
             else:
-                data = response.json()
-                # OpenAI style: data['choices'][0]['message']['content']
-                choice = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-                decision = choice.strip().upper()
+                decision = 'HOLD'
+                response_text = response.text or ''
+                parsed = None
+
+                try:
+                    parsed = response.json()
+                except Exception:
+                    parsed = None
+
+                # 1) Standard OpenAI-compatible JSON response
+                if isinstance(parsed, dict):
+                    choice = parsed.get('choices', [{}])[0]
+                    content = (
+                        choice.get('message', {}).get('content', '')
+                        or choice.get('text', '')
+                        or parsed.get('content', '')
+                    )
+                    m = re.search(r'\b(BUY|HOLD|AVOID)\b', str(content).upper())
+                    if m:
+                        decision = m.group(1)
+
+                # 2) SSE / chunked fallback (e.g., lines prefixed with "data:")
                 if decision not in ('BUY', 'HOLD', 'AVOID'):
-                    # Fallback raw
-                    raw = data.get('content', '').strip().upper()
-                    decision = raw if raw in ('BUY', 'HOLD', 'AVOID') else 'HOLD'
+                    chunks = []
+                    for raw_line in response_text.splitlines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if line.startswith('data:'):
+                            line = line[5:].strip()
+                        if not line or line == '[DONE]':
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            ch = obj.get('choices', [{}])[0]
+                            piece = (
+                                ch.get('delta', {}).get('content', '')
+                                or ch.get('message', {}).get('content', '')
+                                or ch.get('text', '')
+                                or obj.get('content', '')
+                            )
+                            if piece:
+                                chunks.append(str(piece))
+                        except Exception:
+                            chunks.append(line)
+
+                    combined = ' '.join(chunks) if chunks else response_text
+                    m = re.search(r'\b(BUY|HOLD|AVOID)\b', str(combined).upper())
+                    decision = m.group(1) if m else 'HOLD'
         except Exception as e:
             log_message(f"[LLM-ENTRY] request error for {pair}: {e}")
             decision = 'HOLD'
-        # Log decision to system_events for dashboard consumption
+        # Simpan keputusan ke system_events (selalu ke live DB agar tidak hilang di dry-run)
         try:
-            db.execute(
-                "INSERT INTO system_events (pair, type, message, level) VALUES (%s, %s, %s, %s)",
-                (pair, 'LLM_ENTRY_SIGNAL', decision, 'INFO')
-            )
+            _target_db = db.live if hasattr(db, 'live') else db
+            _target_db.log_system_event(pair, 'LLM_ENTRY_SIGNAL', decision, 'INFO')
         except Exception as e_log:
             log_message(f"[LLM-ENTRY] DB log error: {e_log}")
         return decision

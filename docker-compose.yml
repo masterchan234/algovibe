@@ -144,6 +144,8 @@ services:
         condition: service_started
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
@@ -201,6 +203,8 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun

@@ -684,17 +684,55 @@ class BrainInferenceService:
 
                 print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
-                print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
-
-                # ── LLM Entry Decision ──
+                # ── LLM Entry Decision (Hybrid Mode) ──────────────────────────────────────
+                # Build tech dict lengkap dari enriched untuk dikirim ke LLM.
+                # LLM menerima 3 indikator utama HFT + signal teknikal + secondary indicators.
                 try:
-                    llm_decision = self.oracle.request_llm_entry_decision(pair, enriched)
+                    _tech_base = dict(enriched.get('tech', {}))
+                    _tech_sig  = enriched.get('tech_sig', {})
+
+                    # Inject signal teknikal dari derive_trade_signal
+                    _tech_base['signal']          = enriched.get('signal_verdict', 'N/A')
+                    _tech_base['verdict']         = enriched.get('signal_verdict', 'N/A')
+                    _tech_base['tech_confidence'] = float(_tech_sig.get('confidence', 0))
+                    _tech_base['sell_score']      = float(_tech_sig.get('sell_score', 0))
+
+                    # Inject buy_pressure dari imbalance ratio (bid/ask ratio → % bid dari total depth)
+                    # imbalance = bid/ask → buy_pressure% = imbalance / (imbalance + 1) * 100
+                    _imb = float(r.get('imbalance', enriched.get('imbalance_ratio', 1.0)) or 1.0)
+                    _tech_base['buy_pressure'] = round(_imb / (_imb + 1.0) * 100.0, 1)
+
+                    llm_decision = self.oracle.request_llm_entry_decision(pair, _tech_base)
                 except Exception as lme:
-                    logger.error("[LLM-ENTRY] %s error: %s", pair, lme)
+                    logger.error('[LLM-ENTRY] %s error: %s', pair, lme)
                     llm_decision = 'HOLD'
+
                 if llm_decision != 'BUY':
-                    logger.info("[LLM-ENTRY] %s decision %s – skipping entry.", pair, llm_decision)
+                    logger.info(
+                        '[LLM-ENTRY] [BLOCK] %s decision=%s vel=%.2f%% vr=%.2f bp=%.1f%% sig=%s',
+                        pair, llm_decision,
+                        float(_tech_base.get('velocity', 0) or 0),
+                        float(_tech_base.get('volume_ratio', 1) or 1),
+                        float(_tech_base.get('buy_pressure', 50)),
+                        _tech_base.get('signal', 'N/A'),
+                    )
+                    # Persist alasan block ke pair_runtime_state agar tampil di dashboard audit
+                    db.upsert_pair_runtime_state(
+                        pair.lower(),
+                        gate_skip_reason=f'LLM_ENTRY_BLOCK:{llm_decision}',
+                        gate_ts=datetime.now(),
+                    )
                     continue
+
+                logger.info(
+                    '[LLM-ENTRY] [PASS] %s BUY confirmed — vel=%.2f%% vr=%.2f bp=%.1f%% sig=%s conf=%.1f%%',
+                    pair,
+                    float(_tech_base.get('velocity', 0) or 0),
+                    float(_tech_base.get('volume_ratio', 1) or 1),
+                    float(_tech_base.get('buy_pressure', 50)),
+                    _tech_base.get('signal', 'N/A'),
+                    float(_tech_base.get('tech_confidence', 0)),
+                )
 
                 if recovery_mode:
                     total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0
