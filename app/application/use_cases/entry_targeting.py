@@ -28,6 +28,8 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
     tq_prob = enriched['tq_prob']
     current_vol = p['volatility']
     knn_decision = gate['knn_decision']
+    tp_mult = float(gate.get('tp_multiplier', 1.0) or 1.0)
+    sl_mult = float(gate.get('sl_multiplier', 1.0) or 1.0)
 
     try:
         symbol_atr = _to_ccxt_symbol(pair)
@@ -87,6 +89,10 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             log_message(f"[WARN] ATR Calculation fallback: {e}")
         final_dyn_tp = knn_decision['target_tp']
         final_dyn_sl = knn_decision['target_sl']
+
+    # Regime-aware overlay (TRENDING/SIDEWAYS/VOLATILE)
+    final_dyn_tp = max(0.006, min(0.20, float(final_dyn_tp) * tp_mult))
+    final_dyn_sl = -max(0.005, min(0.050, abs(float(final_dyn_sl)) * sl_mult))
 
     # [Scalp Optimization] Selalu gunakan TAKER (Market Order) untuk kecepatan eksekusi
     use_taker = True

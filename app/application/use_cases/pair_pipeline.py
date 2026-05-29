@@ -200,7 +200,27 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
         try:
             enriched = enrich_pair(bot, p, tickers)
 
+            # First run existing entry gates
             gate = check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions)
+            if gate is None:
+                continue
+            if gate == _BREAK:
+                break
+
+            # NEW: LLM entry decision – ask external LLM for final BUY/HOLD/AVOID
+            try:
+                llm_decision = bot.oracle.request_llm_entry_decision(p['pair'], enriched['tech'])
+            except Exception as e:
+                log_message(f"[LLM-ENTRY] error for {p.get('pair')}: {e}")
+                llm_decision = 'HOLD'
+            if llm_decision != 'BUY':
+                # Skip non‑BUY decisions; we keep the gate scorecard for diagnostics
+                log_message(f"[LLM-ENTRY] {p.get('pair')} decision {llm_decision} – skipping entry.")
+                continue
+
+            # Existing logic expects a gate dict; ensure gate is dict for downstream
+            if not isinstance(gate, dict):
+                gate = {}
             if gate is None:
                 continue
             if gate == _BREAK:

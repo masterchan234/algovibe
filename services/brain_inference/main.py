@@ -684,6 +684,18 @@ class BrainInferenceService:
 
                 print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
+                print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
+
+                # ── LLM Entry Decision ──
+                try:
+                    llm_decision = self.oracle.request_llm_entry_decision(pair, enriched)
+                except Exception as lme:
+                    logger.error("[LLM-ENTRY] %s error: %s", pair, lme)
+                    llm_decision = 'HOLD'
+                if llm_decision != 'BUY':
+                    logger.info("[LLM-ENTRY] %s decision %s – skipping entry.", pair, llm_decision)
+                    continue
+
                 if recovery_mode:
                     total_conf = float((gate or {}).get("total_confidence", 0)) if isinstance(gate, dict) else 0.0
                     # Recovery: butuh confidence minimum 75% agar masuk

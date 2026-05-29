@@ -1297,6 +1297,210 @@ def get_stats():
         logging.error(f"Error in get_stats route: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/entry-scorecards')
+@login_required
+def get_entry_scorecards():
+    """Audit endpoint for score-based entry decisions and factor breakdowns."""
+    conn = get_db_connection()
+    try:
+        limit = min(max(int(request.args.get('limit', 200)), 20), 1000)
+        pair_filter = str(request.args.get('pair', '') or '').strip().lower()
+        hours = min(max(int(request.args.get('hours', 24) or 24), 1), 168)
+
+        where_sql = "WHERE signal LIKE 'ENTRY_GATE_%%'"
+        params = []
+        if pair_filter:
+            where_sql += " AND pair = %s"
+            params.append(pair_filter)
+        where_sql += " AND created_at >= NOW() - (%s || ' hours')::interval"
+        params.append(str(hours))
+
+        totals_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_PASS') AS pass_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_REJECT') AS reject_count
+            FROM signals_log
+            {where_sql}
+            """,
+            tuple(params)
+        ).fetchone() or {}
+
+        rows = conn.execute(
+            f"""
+            SELECT created_at, pair, signal, buy_score, sell_score, confidence, regime, trade_id
+            FROM signals_log
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            tuple(params + [limit])
+        ).fetchall()
+
+        decisions = []
+        factor_stats = {}
+
+        for r in rows:
+            signal = str(r.get('signal') or '')
+            is_pass = signal.endswith('_PASS')
+
+            notes_raw = ""
+            trade_id = str(r.get('trade_id') or '')
+            if trade_id.startswith('scorecard:'):
+                notes_raw = trade_id.split('scorecard:', 1)[1]
+
+            notes = [n.strip() for n in notes_raw.split('|') if n.strip()]
+            for n in notes:
+                if ':' in n:
+                    factor, points = n.rsplit(':', 1)
+                else:
+                    factor, points = n, '+0'
+
+                rec = factor_stats.setdefault(
+                    factor,
+                    {
+                        "factor": factor,
+                        "count": 0,
+                        "pass_count": 0,
+                        "reject_count": 0,
+                        "sum_points": 0.0,
+                    },
+                )
+                rec['count'] += 1
+                if is_pass:
+                    rec['pass_count'] += 1
+                else:
+                    rec['reject_count'] += 1
+                try:
+                    rec['sum_points'] += float(points)
+                except Exception:
+                    pass
+
+            decisions.append({
+                "created_at": str(r.get('created_at') or ''),
+                "pair": str(r.get('pair') or ''),
+                "decision": 'PASS' if is_pass else 'REJECT',
+                "entry_score": float(r.get('buy_score') or 0.0),
+                "entry_threshold": float(r.get('sell_score') or 0.0),
+                "confidence": float(r.get('confidence') or 0.0),
+                "regime": str(r.get('regime') or 'UNKNOWN'),
+                "score_notes": notes,
+            })
+
+        factors = []
+        for v in factor_stats.values():
+            c = max(1, int(v['count']))
+            factors.append({
+                "factor": v['factor'],
+                "count": v['count'],
+                "pass_count": v['pass_count'],
+                "reject_count": v['reject_count'],
+                "avg_points": round(float(v['sum_points']) / c, 3),
+                "pass_rate_pct": round((v['pass_count'] / c) * 100.0, 2),
+            })
+
+        factors.sort(key=lambda x: (x['count'], abs(x['avg_points'])), reverse=True)
+        total_count = int(totals_row.get('total_count') or 0)
+        pass_count = int(totals_row.get('pass_count') or 0)
+        reject_count = int(totals_row.get('reject_count') or 0)
+        pass_rate = round((pass_count / max(1, total_count)) * 100.0, 2)
+
+        trend_rows = conn.execute(
+            f"""
+            SELECT
+                date_trunc('hour', created_at) AS bucket,
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_PASS') AS pass_count
+            FROM signals_log
+            {where_sql}
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """,
+            tuple(params)
+        ).fetchall()
+
+        trend_series = []
+        for row in trend_rows:
+            total = int(row.get('total_count') or 0)
+            pass_in_bucket = int(row.get('pass_count') or 0)
+            bucket_ts = row.get('bucket')
+            bucket_epoch = 0
+            bucket_label = ''
+            if bucket_ts:
+                try:
+                    bucket_epoch = int(bucket_ts.timestamp())
+                    bucket_label = bucket_ts.strftime('%H:%M')
+                except Exception:
+                    bucket_label = str(bucket_ts)
+            trend_series.append({
+                "t": bucket_epoch,
+                "label": bucket_label,
+                "total": total,
+                "pass_rate": round((pass_in_bucket / max(1, total)) * 100.0, 2),
+            })
+
+        latest_snapshots = conn.execute(
+            """
+            SELECT key, value, updated_at
+            FROM bot_state
+            WHERE key LIKE 'entry_scorecard_%%'
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+
+        pair_rows = conn.execute(
+            """
+            SELECT pair, COUNT(*) AS n
+            FROM signals_log
+            WHERE signal LIKE 'ENTRY_GATE_%%'
+              AND created_at >= NOW() - (%s || ' hours')::interval
+            GROUP BY pair
+            ORDER BY n DESC
+            LIMIT 100
+            """,
+            (str(hours),)
+        ).fetchall()
+        pair_options = [str(r.get('pair') or '') for r in pair_rows if r.get('pair')]
+
+        snapshots = []
+        for row in latest_snapshots:
+            raw = row.get('value')
+            parsed = None
+            try:
+                parsed = json.loads(raw) if raw else None
+            except Exception:
+                parsed = None
+            snapshots.append({
+                "key": row.get('key'),
+                "updated_at": str(row.get('updated_at') or ''),
+                "payload": parsed,
+            })
+
+        return jsonify({
+            "summary": {
+                "pair": pair_filter or None,
+                "hours": hours,
+                "sample_size": total_count,
+                "recent_sample_size": len(decisions),
+                "pass_count": pass_count,
+                "reject_count": reject_count,
+                "pass_rate_pct": pass_rate,
+            },
+            "pair_options": pair_options,
+            "factors": factors[:30],
+            "recent_decisions": decisions,
+            "trend_series": trend_series,
+            "latest_scorecards": snapshots,
+        })
+    except Exception as e:
+        logging.warning(f"[/api/entry-scorecards] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/api/positions')
 @login_required
 def get_positions():

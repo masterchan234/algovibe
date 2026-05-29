@@ -68,6 +68,7 @@ def dispatch_entry(bot, p, enriched, gate, target):
             volatility=p['volatility'],
             dynamic_tp=target['final_dyn_tp'],
             dynamic_sl=target['final_dyn_sl'],
+            entry_size_factor=float(gate.get('entry_size_factor', 1.0) if isinstance(gate, dict) else 1.0),
             taker=target['use_taker'],
         )
         time.sleep(1)

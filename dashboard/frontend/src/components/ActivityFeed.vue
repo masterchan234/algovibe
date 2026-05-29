@@ -134,7 +134,7 @@
               <div class="col-pair">
                 <div class="pair-name">{{ formatPair(trade.pair) }}</div>
                 <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
-                <div class="exit-reason" v-if="trade.reason">{{ trade.reason }}</div>
+                <div class="exit-reason" :class="exitReasonClass(trade)" v-if="trade.reason">{{ displayTradeReason(trade) }}</div>
               </div>
               <div class="col-size">
                 <div class="val-idr">{{ formatIdr(trade.amount_quote || 0) }}</div>
@@ -258,6 +258,30 @@ function displayStatus(pos) {
     return 'DUST'
   }
   return pos.status
+}
+
+function displayTradeReason(trade) {
+  const reason = trade.reason || ''
+  const pnl = Number(trade.pnl_quote || 0)
+  if (reason === 'TAKE_PROFIT') return pnl < 0 ? 'TP · NET LOSS' : 'TAKE PROFIT'
+  if (reason === 'STOP_LOSS') return pnl >= 0 ? 'TRAIL STOP' : 'STOP LOSS'
+  if (reason === 'HARD_STOP_LOSS') return 'HARD STOP'
+  if (reason === 'EXIT_TIMEOUT') return 'TIMEOUT'
+  if (reason === 'BASKET_EXIT') return 'BASKET EXIT'
+  if (reason === 'MANUAL_DASHBOARD_EXIT') return 'MANUAL EXIT'
+  if (reason === 'FORCE_PROFIT_HIGH_TIER') return 'FORCE PROFIT'
+  if (reason === 'RAPID_TP_GOOD_PROFIT') return 'RAPID TP'
+  return reason.replace(/_/g, ' ')
+}
+
+function exitReasonClass(trade) {
+  const reason = trade.reason || ''
+  const pnl = Number(trade.pnl_quote || 0)
+  if (reason === 'TAKE_PROFIT' && pnl < 0) return 'reason-tp-loss'
+  if (reason === 'TAKE_PROFIT') return 'reason-tp'
+  if ((reason === 'STOP_LOSS' || reason === 'HARD_STOP_LOSS') && pnl >= 0) return 'reason-trail'
+  if (reason === 'STOP_LOSS' || reason === 'HARD_STOP_LOSS') return 'reason-sl'
+  return 'reason-other'
 }
 
 function markExitRequestedUx(pair) {
@@ -597,6 +621,11 @@ function formatIdr(val, signed = true) {
   font-size: 8px; font-weight: 700; text-transform: uppercase;
   color: #8b949e; letter-spacing: 0.4px; margin-top: 2px; opacity: 0.75;
 }
+.exit-reason.reason-tp { color: #3fb950; opacity: 0.9; }
+.exit-reason.reason-tp-loss { color: #f0883e; opacity: 1; font-weight: 900; letter-spacing: 0.6px; }
+.exit-reason.reason-trail { color: #58a6ff; opacity: 0.9; }
+.exit-reason.reason-sl { color: #f85149; opacity: 0.85; }
+.exit-reason.reason-other { color: #8b949e; opacity: 0.75; }
 .status-pill {
   display: inline-block;
   font-size: 8px;

@@ -197,7 +197,65 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             gate_ts=datetime.now(),
         )
 
-    trend = enriched['trend']
+    def persist_scorecard(decision: str, score: float, threshold: float, notes: list,
+                          total_conf: float = 0.0, aggressive: bool = False,
+                          regime_lbl: str = "UNKNOWN", tech_ctx: dict = None):
+        """Persist entry score telemetry for institutional audit trail."""
+        try:
+            safe_notes = [str(n).strip() for n in (notes or []) if str(n).strip()]
+            payload = {
+                "pair": pair,
+                "decision": decision,
+                "entry_score": round(float(score), 2),
+                "entry_threshold": round(float(threshold), 2),
+                "aggressive": bool(aggressive),
+                "market_regime": regime_lbl,
+                "total_confidence": round(float(total_conf), 2),
+                "notes": safe_notes[:32],
+                "ts": datetime.now().isoformat(),
+            }
+            db.save_state(f"entry_scorecard_{pair_lower}", json.dumps(payload))
+
+            _tech = tech_ctx or {}
+            # Keep more gate evidence in the audit row so dashboard gate cards
+            # can map statuses from the latest decision without losing late-stage factors.
+            score_notes_compact = "|".join(safe_notes)[:1800]
+            db.insert_signal_log(
+                pair=pair_lower,
+                exchange=os.getenv("EXCHANGE", "binance").lower(),
+                signal=f"ENTRY_GATE_{decision}",
+                buy_score=float(score),
+                sell_score=float(threshold),
+                confidence=float(total_conf if total_conf > 0 else score),
+                price=float(p.get('last', 0.0) or 0.0),
+                volume_ratio=float(_tech.get('volume_ratio', 0.0) or 0.0),
+                rsi=float(_tech.get('rsi', 50.0) or 50.0),
+                regime=str(regime_lbl),
+                executed=False,
+                trade_id=f"scorecard:{score_notes_compact}",
+                dry_run=bool(config.DRY_RUN),
+            )
+        except Exception:
+            pass
+
+    def reject_with_scorecard(msg: str, note: str, score: float = 0.0,
+                              threshold: float = 0.0, regime_lbl: str = "UNKNOWN",
+                              total_conf: float = 0.0, tech_ctx: dict = None):
+        log_message(msg)
+        save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=score,
+            threshold=threshold,
+            notes=[note],
+            total_conf=total_conf,
+            aggressive=False,
+            regime_lbl=regime_lbl,
+            tech_ctx=tech_ctx,
+        )
+        return None
+
+    trend = str(enriched['trend']).upper()
     breakout = enriched['breakout']
     history = enriched['history']
     tq_prob = enriched['tq_prob']
@@ -210,7 +268,10 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     #  1. Skip pairs already held or blacklisted (O(1) Trigger Monitor)
     if pair in open_positions or pair in bot.blacklist:
-        return None
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: already open or blacklisted",
+            note="POSITION_OR_BLACKLIST:-20",
+        )
 
     # Load State Cache (Heavy calculations, DB lookups, Cooldowns, ATR once per minute)
     states = get_state_monitors(pair, history, bot, p)
@@ -224,8 +285,68 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     #  2. Cooldown Guard (O(1) Trigger Monitor via State Cache)
     if not states['cooldown_ok']:
-        log_message(f"[GATE] {pair} REJECTED: Cooldown active until {states['cooldown_until']}")
-        return None
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: Cooldown active until {states['cooldown_until']}",
+            note="COOLDOWN_ACTIVE:-18",
+        )
+
+    # Regime routing untuk profile entry institusional
+    market_regime = "SIDEWAYS"
+    if current_vol >= 2.2 or states.get('atr_pct', 0.0) >= 2.8:
+        market_regime = "VOLATILE"
+    elif trend == "UP" and breakout:
+        market_regime = "TRENDING"
+
+    regime_profile = {
+        "TRENDING": {
+            "entry_threshold": 60.0,
+            "aggressive_threshold": 80.0,
+            "tp_mult": 1.10,
+            "sl_mult": 1.00,
+            "cooldown_sec": 30,
+            "size_mult": 1.00,
+        },
+        "SIDEWAYS": {
+            "entry_threshold": 62.0,
+            "aggressive_threshold": 82.0,
+            "tp_mult": 0.90,
+            "sl_mult": 0.92,
+            "cooldown_sec": 90,
+            "size_mult": 0.90,
+        },
+        "VOLATILE": {
+            "entry_threshold": 68.0,
+            "aggressive_threshold": 86.0,
+            "tp_mult": 0.82,
+            "sl_mult": 0.86,
+            "cooldown_sec": 150,
+            "size_mult": 0.78,
+        },
+    }[market_regime]
+
+    # CHOPPY handling: tidak membunuh entry, tapi perketat manajemen risiko.
+    regime_upper = str(regime or "RANGING").upper()
+    if regime_upper == "CHOPPY":
+        regime_profile["size_mult"] *= 0.80
+        regime_profile["tp_mult"] *= 0.85
+        regime_profile["sl_mult"] *= 0.90
+
+    if config.DRY_RUN_LOOSE_GATES:
+        regime_profile["entry_threshold"] -= 8.0
+        regime_profile["aggressive_threshold"] -= 8.0
+
+    # Cooldown beda per-regime agar re-entry cadence terkontrol.
+    _last_entry_ts = float(db.get_state(f"entry_last_ts_{pair_lower}", 0.0) or 0.0)
+    _elapsed = time.time() - _last_entry_ts
+    if _elapsed < regime_profile["cooldown_sec"]:
+        wait_left = int(regime_profile["cooldown_sec"] - _elapsed)
+        msg = f"[GATE] {pair} REJECTED: Regime cooldown {wait_left}s ({market_regime})"
+        return reject_with_scorecard(
+            msg=msg,
+            note="REGIME_COOLDOWN:-15",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+        )
 
     #  3. Radar recommendation + tracking log (O(1) Trigger Monitor)
     radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
@@ -253,19 +374,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=states['adaptive_eg'], vol_idr_24h=_vol_idr_eg)
 
     if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
-        msg = (
-            f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})"
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})",
+            note=f"SELL_BLOCK:{-abs(float(tech_sig.get('sell_score', 0) or 0)):.0f}",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
         )
-        log_message(msg)
-        save_gate_state(msg)
-        return None
-
-    #  4b. ATR Volatility Filter (O(1) Trigger Monitor via State Cache)
-    if not states['atr_ok']:
-        msg = f"[GATE] {pair} REJECTED: ATR Volatility {states['atr_pct']:.2f}% > limit"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
 
     #  4c. EMA-50 Trend & MTFA Alignment (O(1) Trigger Monitor via State Cache)
     is_explosion_setup = False
@@ -276,24 +391,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
             or tech.get('velocity', 0.0) > 0.2
         )
 
-    # ML fast-track juga bypass EMA-50/MTFA (model sudah belajar trend dari 90 hari data)
+    # ML fast-track juga bypass penalti trend score.
     bypass_trend_check = is_explosion_setup or ml_fast_track
-
-    if not config.DRY_RUN_LOOSE_GATES and not bypass_trend_check:
-        # Verify 1m EMA-50
-        if not states['ema_50_ok']:
-            _last_price = float(p.get('last', 0.0))
-            msg = f"[GATE] {pair} REJECTED: Price {_last_price:.4f} < 1m EMA-50"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
-
-        # Verify 5m & 15m Multi-Timeframe Alignment (MTFA)
-        if not states['mtfa_ok']:
-            msg = f"[GATE] {pair} REJECTED: Price fails 5m/15m EMA-50 trend alignment (MTFA)"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
 
     if is_explosion_setup:
         log_message(
@@ -315,39 +414,30 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     
     _is_pump_momentum = _velocity > 0.3 and _vol_ratio > 1.6
     
-    if _rsi_now > _rsi_ceiling and not _is_pump_momentum:
-        msg = f"[GATE] {pair} REJECTED: RSI Ceiling {_rsi_now:.1f} > {_rsi_ceiling:.1f}"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
-
+    _dist_ema9 = 0.0
+    _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0
     if _ema9 > 0:
         _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
-        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0
-        if _dist_ema9 > _dist_limit:
-            msg = f"[GATE] {pair} REJECTED: Vertical Spike {_dist_ema9:.2f}% > EMA-9 limit"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
 
     #  4e. Resistance-Guard (Double-Top Prevention) (O(1) Trigger Monitor)
+    is_near_resistance = False
     if len(history) >= 20:
         _recent_high = max(history)
         _threshold_high = _recent_high * 0.993
         _stoch_k = tech.get('stoch_k', 50.0)
-        
-        if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout and _velocity < 0.2:
-            msg = f"[GATE] {pair} REJECTED: Resistance-Guard Price {_last:.0f} near High {_recent_high:.0f}"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
+        is_near_resistance = (
+            _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout and _velocity < 0.2
+        )
 
     #  5. Technical probability & CVD imbalance threshold (O(1) Trigger Monitor via Redis)
     if tq_prob < 0:
-        msg = "[GATE] WARMUP: Insufficient data for TQ_Prob"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
+        return reject_with_scorecard(
+            msg="[GATE] WARMUP: Insufficient data for TQ_Prob",
+            note="TQ_WARMUP:-12",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
     # Retrieve real-time CVD imbalance ratio from Redis (zero-latency)
     imbalance_ratio = 1.0
@@ -368,37 +458,82 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     tech_ready = tq_prob >= tech_gate_threshold
     has_strong_imb = imbalance_ratio >= imb_gate_threshold
-    if not tech_ready and not has_strong_imb and not ml_fast_track:
-        msg = f"[GATE] {pair} REJECTED: Tech prob {tq_prob * 100:.0f}% < {tech_gate_threshold * 100:.0f}%, CVD Imbalance {imbalance_ratio:.2f} < {imb_gate_threshold:.2f}"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
 
-    #  6. Trend / breakout requirement (O(1) Trigger Monitor)
-    if not breakout and trend != "UP":
-        _velocity = tech.get('velocity', 0.0)
-        _vol_ratio = tech.get('volume_ratio', 1.0)
-        
-        sideway_relaxed_ok = (
-            ml_fast_track       # ML sangat yakin — izinkan SIDEWAYS tanpa syarat tambahan
-            or is_loose
-            or (trend == "SIDEWAYS" and _velocity > 0.15 and _vol_ratio > 1.3
-                and tq_prob >= max(tech_gate_threshold, 0.45)
-                and imbalance_ratio >= 1.05)
-        )
-        if not sideway_relaxed_ok:
-            msg = f"[GATE] {pair} REJECTED: No trend/breakout support (trend={trend})"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
+    # PRIORITAS 1: model scoring institusional (mengganti mayoritas hard gate).
+    entry_score = 50.0
+    score_notes = []
 
-    #  7. Radar recommendation guard (O(1) Trigger Monitor)
-    if radar_rec == "SELL":
-        msg = f"[BLOCK] RADAR BLOCK: rekomendasi SELL ({radar_reason})"
-        print(f"[DEBUG-GATE] {pair} REJECTED: RADAR SELL ({radar_reason})", flush=True)
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+    def _add_score(points: float, reason: str):
+        nonlocal entry_score
+        entry_score += points
+        score_notes.append(f"{reason}:{points:+.0f}")
+
+    # EMA50 / MTFA (satu keluarga trend filter)
+    if states.get('ema_50_ok'):
+        _add_score(10.0, "EMA50_ALIGN")
+    else:
+        _add_score(-8.0, "EMA50_MISS")
+
+    if states.get('mtfa_ok'):
+        _add_score(8.0, "MTFA_ALIGN")
+    else:
+        _add_score(-6.0, "MTFA_MISS")
+
+    # Orderflow / imbalance
+    if has_strong_imb:
+        _add_score(15.0, "STRONG_IMBALANCE")
+    elif imbalance_ratio >= 1.05:
+        _add_score(6.0, "IMBALANCE_OK")
+    else:
+        _add_score(-6.0, "IMBALANCE_WEAK")
+
+    # Breakout / trend support
+    if breakout:
+        _add_score(20.0, "BREAKOUT")
+    elif trend == "UP":
+        _add_score(8.0, "TREND_UP")
+    elif trend == "SIDEWAYS":
+        _add_score(-2.0, "SIDEWAYS")
+    else:
+        _add_score(-10.0, "TREND_AGAINST")
+
+    # TQ probability
+    if tech_ready:
+        _add_score(12.0, "TECH_PROB_OK")
+    elif tq_prob >= max(0.40, tech_gate_threshold - 0.05):
+        _add_score(3.0, "TECH_PROB_NEAR")
+    else:
+        _add_score(-12.0, "TECH_PROB_LOW")
+
+    # RSI / vertical spike quality
+    if 45.0 <= _rsi_now <= 68.0:
+        _add_score(5.0, "RSI_HEALTHY")
+    elif _rsi_now > _rsi_ceiling and not _is_pump_momentum:
+        _add_score(-8.0, "RSI_CEILING")
+
+    if _ema9 > 0 and _dist_ema9 > _dist_limit:
+        _add_score(-8.0, "VERTICAL_SPIKE")
+
+    if is_near_resistance:
+        _add_score(-10.0, "RESISTANCE_NEAR")
+
+    # Volatility quality
+    if states['atr_ok']:
+        _add_score(4.0, "ATR_OK")
+    else:
+        _add_score(-8.0, "ATR_HIGH")
+
+    # Radar hanya informational score (bukan hard gate)
+    if radar_rec == "BUY":
+        _add_score(6.0, "RADAR_BUY")
+    elif radar_rec == "SELL":
+        _add_score(-6.0, "RADAR_SELL")
+
+    # CHOPPY tidak dipenalti dua kali: no hard block/no extra score penalty.
+    if bypass_trend_check:
+        _add_score(6.0, "BYPASS_SIGNAL")
+
+    entry_score = max(0.0, min(100.0, entry_score))
 
     #  9. Dynamic threshold based on volatility + trend (O(1) Trigger Monitor)
     dynamic_threshold = 55.0
@@ -417,9 +552,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     #  10. Consecutive-loss halt (O(1) Trigger Monitor via State Cache)
     if not states['global_pause_ok']:
         msg = f"  GLOBAL PAUSE ({states['consecutive_losses']} losses): Evaluating for SHADOW PROBE."
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+        return reject_with_scorecard(
+            msg=f"{msg} [{pair}]",
+            note="GLOBAL_PAUSE:-25",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
     #  11. K-NN Isolated pattern scoring (O(1) Redis Retrieval with Safe Fallback)
     rsi_val = calculate_rsi(history)
@@ -465,9 +604,14 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if knn_decision.get('verdict') == "AVOID":
         msg = "[BLOCK] [K-NN Avoid]: pola historis buruk, skip."
         print(f"[DEBUG-GATE] {pair} REJECTED: K-NN AVOID", flush=True)
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+        return reject_with_scorecard(
+            msg=f"{msg} [{pair}]",
+            note="KNN_AVOID:-18",
+            score=entry_score,
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
     min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
@@ -479,11 +623,64 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         print(f"[DEBUG-GATE] {pair} REJECTED: Base Confidence {base_confidence:.1f}% < Floor {min_base_conf:.1f}%", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=entry_score,
+            threshold=float(regime_profile['entry_threshold']),
+            notes=score_notes + [f"BASE_CONF:{base_confidence:.1f}"],
+            total_conf=base_confidence,
+            aggressive=False,
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
+        return None
+
+    # Final score gate
+    entry_threshold = float(regime_profile['entry_threshold'])
+    aggressive_threshold = float(regime_profile['aggressive_threshold'])
+    if ml_fast_track:
+        entry_threshold = max(50.0, entry_threshold - 6.0)
+        aggressive_threshold = max(70.0, aggressive_threshold - 4.0)
+
+    if entry_score < entry_threshold:
+        msg = (
+            f"[GATE] {pair} REJECTED: score {entry_score:.1f} < {entry_threshold:.1f} "
+            f"({market_regime}) [{', '.join(score_notes[:6])}]"
+        )
+        log_message(msg)
+        save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=entry_score,
+            threshold=entry_threshold,
+            notes=score_notes,
+            total_conf=base_confidence,
+            aggressive=False,
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
         return None
 
     #  13. Final Confidence threshold
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit
+
+    aggressive_entry = entry_score >= aggressive_threshold
+    entry_size_factor = float(regime_profile['size_mult'])
+    if aggressive_entry:
+        entry_size_factor *= 1.20
+
+    db.save_state(f"entry_last_ts_{pair_lower}", str(time.time()))
+    persist_scorecard(
+        decision="PASS",
+        score=entry_score,
+        threshold=entry_threshold,
+        notes=score_notes,
+        total_conf=total_confidence,
+        aggressive=aggressive_entry,
+        regime_lbl=market_regime,
+        tech_ctx=tech,
+    )
 
     res = {
         "mode": "SHADOW" if (states['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES) else "LIVE",
@@ -491,6 +688,15 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         "radar_reason": radar_reason,
         "rsi_val": rsi_val,
         "total_confidence": total_confidence,
+        "entry_score": float(entry_score),
+        "entry_threshold": entry_threshold,
+        "aggressive_threshold": aggressive_threshold,
+        "aggressive_entry": aggressive_entry,
+        "entry_size_factor": entry_size_factor,
+        "market_regime": market_regime,
+        "regime_cooldown_sec": int(regime_profile['cooldown_sec']),
+        "tp_multiplier": float(regime_profile['tp_mult']),
+        "sl_multiplier": float(regime_profile['sl_mult']),
         "dynamic_threshold": dynamic_threshold,
         "knn_decision": knn_decision,
         "velocity": float(_velocity),

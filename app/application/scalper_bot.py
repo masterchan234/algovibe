@@ -349,6 +349,7 @@ class ScalperBot:
         volatility=0.0,
         dynamic_tp=None,
         dynamic_sl=None,
+        entry_size_factor=1.0,
         taker=False,
     ):
         return execute_trade_use_case(
@@ -363,6 +364,7 @@ class ScalperBot:
             volatility=volatility,
             dynamic_tp=dynamic_tp,
             dynamic_sl=dynamic_sl,
+            entry_size_factor=entry_size_factor,
             taker=taker,
         )
 

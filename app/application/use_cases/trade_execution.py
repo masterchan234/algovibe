@@ -161,6 +161,7 @@ def execute_trade(
     volatility=0.0,
     dynamic_tp=None,
     dynamic_sl=None,
+    entry_size_factor=1.0,
     taker=False,
 ):
     try:
@@ -325,6 +326,14 @@ def execute_trade(
             log_message(
                 f"[SELL] [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
                 f"{format_currency(amount_quote)} ({recovery_factor*100:.0f}% dari normal)"
+            )
+
+        # Regime-aware sizing factor dari scoring gate.
+        entry_size_factor = max(0.30, min(1.50, float(entry_size_factor or 1.0)))
+        if abs(entry_size_factor - 1.0) > 1e-6:
+            amount_quote *= entry_size_factor
+            log_message(
+                f"[EXECUTIVE] [REGIME SIZING] {pair}: size_factor={entry_size_factor:.2f} -> {format_currency(amount_quote)}"
             )
 
         # 2. Dynamic check (Participation Rate)
