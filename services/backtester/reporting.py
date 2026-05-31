@@ -22,7 +22,7 @@ def _print_run_report(profile_id: int, profile_name: str) -> None:
         print(f"  Pairs Tested    : {n_pairs:<10} | Total Trades : {row['total_trades']:<10} ")
         print(f"  Win Rate        : {row['win_rate']*100:6.2f}%    | Net PnL (USDT): $ {row['total_pnl_quote']:>12,.2f} ")
         print(f"  ROI             : {row['total_pnl_pct']:>+6.2f}%     | Profit Factor: {row['profit_factor']:>12.2f} ")
-        print(f"  Max Drawdown    : $ {row['max_drawdown_idr']:>8,.2f} | Avg Duration : {row['avg_trade_duration_sec']/60:>10.1f} min ")
+        print(f"  Max Drawdown    : $ {row['max_drawdown_quote']:>8,.2f} | Avg Duration : {row['avg_trade_duration_sec']/60:>10.1f} min ")
         print("" + "" * 68 + "")
     finally:
         conn.close()
@@ -48,7 +48,7 @@ def _print_comparison_table() -> None:
                         "trades": row["total_trades"],
                         "roi": row["total_pnl_pct"],
                         "pf": row["profit_factor"],
-                        "mdd": row["max_drawdown_idr"],
+                        "mdd": row["max_drawdown_quote"],
                     }
                 )
         if not data:
