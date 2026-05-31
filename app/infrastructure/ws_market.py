@@ -33,7 +33,7 @@ CHANNEL_SUMMARY = "market:summary-24h"
 CHANNEL_OB_PFX  = "market:order-book-"   # Indodax
 CHANNEL_TRADE_PFX = "market:trade-activity-" # Indodax
 
-OB_TOP_PAIRS     = 9999
+OB_TOP_PAIRS     = 400
 OB_MIN_VOL_IDR   = 20000.0  # USDT or IDR scale depending on active exchange
 
 # Pair yang SELALU di-subscribe order book terlepas dari volume threshold

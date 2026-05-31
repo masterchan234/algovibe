@@ -33,7 +33,7 @@ INITIAL_CAPITAL        = 1000.0  # Tether (USDT) for Binance Spot
 DAILY_LOSS_LIMIT_PCT   = 0.03
 DAILY_PROFIT_TARGET_PCT = 5.0    # 5.0% dari kapital untuk Sleep Mode (Cut-Off)
 MAX_CONSECUTIVE_LOSSES = 3
-MAX_TRACKED_PAIRS      = 9999
+MAX_TRACKED_PAIRS      = 400
 MIN_VOLUME_FILTER      = 30000.0  # USDT per 24h (Global Minimum: $30k)
 LIQUIDITY_MULTIPLIER   = 25.0   # [Konservatif] Volume 24h harus minimal 25x besar modal per trade
 

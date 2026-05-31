@@ -118,12 +118,9 @@ class BinanceProvider(IndodaxProvider):
         # Tambahkan live top movers dari Binance API
         pairs.update(self._fetch_live_mover_pairs())
 
-        subscribed = 0
         try:
-            for p in sorted(pairs):
-                self._mws.subscribe_market_trades(p)
-                subscribed += 1
-                time.sleep(0.25)  # Binance WS rate limit: max 5 subscribe/s per connection
+            self._mws.bulk_subscribe_market_trades(set(pairs))
+            subscribed = len(pairs)
         except Exception as e:
             logger.warning("[BINANCE Provider] Trade subscriptions failed: %s", e)
 
@@ -236,13 +233,10 @@ class BinanceProvider(IndodaxProvider):
         while self._running:
             target_pairs = self._fetch_live_mover_pairs()
             seeded = 0
-            for pair in target_pairs:
-                if not self._running:
-                    break
+            if self._running and target_pairs:
                 try:
-                    self._mws.subscribe_market_trades(pair)
-                    seeded += 1
-                    time.sleep(0.25)  # Binance WS rate limit: max 5 subscribe/s
+                    self._mws.bulk_subscribe_market_trades(set(target_pairs))
+                    seeded = len(target_pairs)
                 except Exception:
                     pass
             if seeded:
