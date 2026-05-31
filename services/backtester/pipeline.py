@@ -189,7 +189,7 @@ def _persist_results(all_results, profiles, start, now):
         p_trades = [t for t in all_results if t["profile_id"] == p["id"]]
         if p_trades:
             portfolio = _simulate_portfolio(p_trades, p)
-            stats = _compute_stats(portfolio, p["initial_capital_idr"], start, now)
+            stats = _compute_stats(portfolio, p["initial_capital_quote"], start, now)
             if stats:
                 rid = _save_result(p["id"], None, stats, portfolio)
                 _save_result_pair_setups(

@@ -42,7 +42,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
         days_tested = (w_end - w_start).total_seconds() / 86400.0 if w_end and w_start and w_end > w_start else 90.0
 
         target_roi_daily = float(p.get("target_roi_pct", 0.0) or 0.0)
-        target_pnl_daily = float(p.get("target_pnl_idr", 0.0) or 0.0)
+        target_pnl_daily = float(p.get("target_pnl_quote", 0.0) or 0.0)
         if target_daily_pnl is not None and target_daily_pnl > 0:
             target_pnl_daily = float(target_daily_pnl)
         elif target_pnl_daily <= 0:
@@ -69,7 +69,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
         m = re.search(r"_v(\d+)$", p["profile_name"])
         v = int(m.group(1)) + 1 if m else 2
         new_p["profile_name"] = f"{p['profile_name'].split('_v')[0]}_v{v}"
-        new_p["target_pnl_idr"] = target_pnl_daily
+        new_p["target_pnl_quote"] = target_pnl_daily
 
         changes = []
         param_diffs = []
@@ -105,7 +105,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
             _set_if_changed("dca_enabled", False, "Recovery mode: disable DCA while expectancy negative")
             _set_if_changed("cooldown_seconds", int(min(1800, max(300, int(float(p.get("cooldown_seconds", 300))) + 120))), "Recovery mode: increase cooldown to reduce overtrading")
         elif target_gap > 0 and win_rate >= 0.5 and pf >= 1.2:
-            current_cap = float(p.get("initial_capital_idr", 1000.0) or 1000.0)
+            current_cap = float(p.get("initial_capital_quote", 1000.0) or 1000.0)
             current_pos = float(p.get("max_position_quote", 120.0) or 120.0)
             cap_limit = current_cap * 0.35
             bumped_pos = round(min(cap_limit, max(current_pos + MIN_TRADE_USDT, current_pos * 1.2)), 2)
@@ -226,8 +226,8 @@ def _build_coin_recommendation(
     obv_mild = _clamp(obv_strong * 0.4, 1.5, 4.0)
 
     return {
-        "initial_capital_idr": float(balance_usdt),
-        "min_position_idr": float(MIN_TRADE_USDT),
+        "initial_capital_quote": float(balance_usdt),
+        "min_position_quote": float(MIN_TRADE_USDT),
         "max_position_quote": round(max_position_usdt, 2),
         "max_open_positions": int(max_open_positions),
         "buy_threshold": round(buy_threshold, 2),
@@ -325,7 +325,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     rec_buy_threshold, rec_sell_block_threshold, rec_target_tp_pct, rec_target_sl_pct,
                     rec_buy_score_threshold, rec_sell_score_threshold, rec_opposing_max,
                     rec_cooldown_seconds, rec_max_hold_minutes, rec_ema_trend_filter_enabled, rec_atr_max_pct,
-                    rec_max_position_idr, rec_max_open_positions, rec_dca_enabled, rec_dca_max_tiers,
+                    rec_max_position_quote, rec_max_open_positions, rec_dca_enabled, rec_dca_max_tiers,
                     rec_rsi_oversold, rec_rsi_overbought,
                     rec_bb_extreme_low, rec_bb_low, rec_bb_high, rec_bb_extreme_high,
                     rec_stoch_k_oversold, rec_stoch_d_oversold, rec_stoch_k_overbought, rec_stoch_d_overbought,
@@ -393,7 +393,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     rec_max_hold_minutes = EXCLUDED.rec_max_hold_minutes,
                     rec_ema_trend_filter_enabled = EXCLUDED.rec_ema_trend_filter_enabled,
                     rec_atr_max_pct = EXCLUDED.rec_atr_max_pct,
-                    rec_max_position_idr = EXCLUDED.rec_max_position_idr,
+                    rec_max_position_quote = EXCLUDED.rec_max_position_quote,
                     rec_max_open_positions = EXCLUDED.rec_max_open_positions,
                     rec_dca_enabled = EXCLUDED.rec_dca_enabled,
                     rec_dca_max_tiers = EXCLUDED.rec_dca_max_tiers,
@@ -531,8 +531,8 @@ def _create_profile_from_analysis(
 
     payload = {
         "profile_name": effective_name,
-        "initial_capital_idr": float(recommendation["initial_capital_idr"]),
-        "min_position_idr": float(recommendation["min_position_idr"]),
+        "initial_capital_quote": float(recommendation["initial_capital_quote"]),
+        "min_position_quote": float(recommendation["min_position_quote"]),
         "max_position_quote": float(recommendation["max_position_quote"]),
         "max_open_positions": int(recommendation["max_open_positions"]),
         "timeframe_minutes": int(max(1, timeframe_minutes)),
@@ -547,7 +547,7 @@ def _create_profile_from_analysis(
         "atr_max_pct": float(recommendation["atr_max_pct"]),
         "dca_enabled": bool(recommendation["dca_enabled"]),
         "dca_max_tiers": int(recommendation["dca_max_tiers"]),
-        "target_pnl_idr": float(target_daily_pnl),
+        "target_pnl_quote": float(target_daily_pnl),
         "target_roi_pct": 0.0,
         "is_active": bool(activate_new_profile),
     }

@@ -16,7 +16,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
 
     strat_mode = p.get("strategy_mode", "scalping")
     tf_min = int(p.get("timeframe_minutes", 1))
-    pos_idr = float(pair_cfg.get("max_position_quote", p.get("max_position_quote", 120.0)))
+    pos_quote = float(pair_cfg.get("max_position_quote", p.get("max_position_quote", 120.0)))
     min_candles = 50
 
     fee_buy = float(p.get("fee_buy_taker", 0.001))   # Binance Spot taker 0.1%
@@ -37,7 +37,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
     ema_trend_f = pair_cfg.get("ema_trend_filter_enabled", p.get("ema_trend_filter_enabled", True))
     max_hold_m = int(pair_cfg.get("max_hold_minutes", p.get("max_hold_minutes", 1440)))
     cooldown_sec = int(pair_cfg.get("cooldown_seconds", p.get("cooldown_seconds", 300)))
-    min_position_idr = float(pair_cfg.get("min_position_idr", p.get("min_position_idr", MIN_TRADE_USDT)))
+    min_position_quote = float(pair_cfg.get("min_position_quote", p.get("min_position_quote", MIN_TRADE_USDT)))
 
     if isinstance(df_or_candles, list):
         df = pd.DataFrame(df_or_candles)
@@ -80,7 +80,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
     if not history or len(history) != len(candles):
         return {"trades": [], "stats": {}}
 
-    current_cap = float(p.get("initial_capital_idr", 1000.0))
+    current_cap = float(p.get("initial_capital_quote", 1000.0))
     position = None
     cooldown_until = 0
     pair_consecutive_losses = 0  # Anti-Bleed: track consecutive losses for THIS pair
@@ -107,12 +107,12 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
         # avoids buying the local top of the momentum spike.
         if pending_entry is not None and position is None:
             open_fill_px = open_arr[i] * (1.0 + slippage)
-            p_trade_idr = pending_entry["trade_idr"]
-            p_buy_fee = p_trade_idr * fee_buy
-            p_crypto_amt = (p_trade_idr - p_buy_fee) / open_fill_px
+            p_trade_quote = pending_entry["trade_quote"]
+            p_buy_fee = p_trade_quote * fee_buy
+            p_crypto_amt = (p_trade_quote - p_buy_fee) / open_fill_px
             position = {
                 "entry_price": open_fill_px,
-                "amount_quote": p_trade_idr,
+                "amount_quote": p_trade_quote,
                 "amount_crypto": p_crypto_amt,
                 "buy_fee": p_buy_fee,
                 "entry_ts": ts_epoch,
@@ -126,7 +126,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
 
         if position:
             entry_px = position["entry_price"]
-            entry_idr = position["amount_quote"]
+            entry_quote = position["amount_quote"]
             crypto = position["amount_crypto"]
 
             current_highest = position["highest_price"]
@@ -201,7 +201,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
                 gross_pnl = (exit_price - entry_px) * crypto
                 sell_fee = exit_price * crypto * fee_sell
                 net_pnl = gross_pnl - position["buy_fee"] - sell_fee
-                pnl_pct = net_pnl / entry_idr * 100 if entry_idr > 0 else 0
+                pnl_pct = net_pnl / entry_quote * 100 if entry_quote > 0 else 0
                 duration = int(ts_epoch - position["entry_ts"])
                 trades.append(
                     {
@@ -211,7 +211,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
                         "exit_time": ts,
                         "entry_price": entry_px,
                         "exit_price": exit_price,
-                        "amount_quote": entry_idr,
+                        "amount_quote": entry_quote,
                         "amount_crypto": crypto,
                         "pnl_quote": round(net_pnl, 2),
                         "pnl_pct": round(pnl_pct, 4),
@@ -221,7 +221,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
                         "duration_seconds": duration,
                     }
                 )
-                current_cap += entry_idr + net_pnl
+                current_cap += entry_quote + net_pnl
                 position = None
                 # Anti-Bleed: escalate cooldown on consecutive losses per pair
                 if net_pnl > 0:
@@ -237,7 +237,7 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
 
         if ts_epoch < cooldown_until:
             continue
-        if current_cap < min_position_idr:
+        if current_cap < min_position_quote:
             break
         if sig["verdict"] != "BUY" or sig["buy_score"] < buy_threshold:
             continue
@@ -248,10 +248,10 @@ def _run_backtest_pair(p: dict, pair: str, df_or_candles: list[dict] | pd.DataFr
         if strat_mode == "trend_pullback":
             pass
 
-        trade_idr = min(pos_idr, current_cap * 0.9)
-        current_cap -= trade_idr  # Reserve capital; entry fills at next candle open
+        trade_quote = min(pos_quote, current_cap * 0.9)
+        current_cap -= trade_quote  # Reserve capital; entry fills at next candle open
         pending_entry = {
-            "trade_idr": trade_idr,
+            "trade_quote": trade_quote,
             "buy_score": sig["buy_score"],
         }
 
@@ -430,15 +430,15 @@ def _compute_stats(trades: list[dict], capital: float, start: datetime, end: dat
 
     equity = capital
     peak = capital
-    max_dd_idr = 0.0
+    max_dd_quote = 0.0
     max_dd_pct = 0.0
     for p in pnls:
         equity += p
         if equity > peak:
             peak = equity
         dd = peak - equity
-        if dd > max_dd_idr:
-            max_dd_idr = dd
+        if dd > max_dd_quote:
+            max_dd_quote = dd
         dd_p = (dd / peak * 100) if peak > 0 else 0
         if dd_p > max_dd_pct:
             max_dd_pct = dd_p
@@ -475,18 +475,18 @@ def _compute_stats(trades: list[dict], capital: float, start: datetime, end: dat
         "total_pnl_quote": float(round(total_pnl, 2)),
         "total_pnl_pct": float(round(total_pnl / capital * 100, 4)),
         "max_drawdown_pct": float(round(max_dd_pct, 4)),
-        "max_drawdown_idr": float(round(max_dd_idr, 2)),
+        "max_drawdown_quote": float(round(max_dd_quote, 2)),
         "profit_factor": float(round(pf, 2)),
         "sharpe_ratio": float(round(sharpe, 4)),
         "avg_trade_duration_sec": int(_np.mean([t["duration_seconds"] for t in trades])),
-        "avg_pnl_per_trade_idr": float(round(_np.mean(pnls), 2)),
+        "avg_pnl_per_trade_quote": float(round(_np.mean(pnls), 2)),
         "avg_pnl_per_trade_pct": float(round(_np.mean([t["pnl_pct"] for t in trades]), 4)),
         "max_consecutive_wins": 0,
         "max_consecutive_losses": 0,
-        "initial_capital_idr": float(capital),
-        "final_capital_idr": float(capital + total_pnl),
+        "initial_capital_quote": float(capital),
+        "final_capital_quote": float(capital + total_pnl),
         "sortino_ratio": float(round(sortino, 4)),
-        "recovery_factor": float(round(total_pnl / max_dd_idr, 4)) if max_dd_idr > 0 else 0.0,
+        "recovery_factor": float(round(total_pnl / max_dd_quote, 4)) if max_dd_quote > 0 else 0.0,
         "calmar_ratio": float(round(calmar, 4)),
         "expectancy_quote": float(round(expectancy, 2)),
     }
@@ -550,7 +550,7 @@ def _simulate_portfolio(all_trades: list[dict], profile: dict) -> list[dict]:
     if not all_trades:
         return []
     sorted_trades = sorted(all_trades, key=lambda x: x["entry_time"])
-    capital = float(profile.get("initial_capital_idr", 1000000.0))
+    capital = float(profile.get("initial_capital_quote", 1000000.0))
     max_pos = int(profile.get("max_open_positions", 3))
     available_cash = capital
     active_trades = []
@@ -589,9 +589,9 @@ def _save_result(pid, pair, stats, trades):
             """
             INSERT INTO backtest_results (
                 profile_id, window_start, window_end, pair, total_trades, winning_trades, losing_trades, win_rate,
-                total_pnl_idr, total_pnl_pct, max_drawdown_idr, max_drawdown_pct,
-                profit_factor, sharpe_ratio, initial_capital_idr, final_capital_idr,
-                avg_trade_duration_sec, avg_pnl_per_trade_idr, avg_pnl_per_trade_pct
+                total_pnl_quote, total_pnl_pct, max_drawdown_quote, max_drawdown_pct,
+                profit_factor, sharpe_ratio, initial_capital_quote, final_capital_quote,
+                avg_trade_duration_sec, avg_pnl_per_trade_quote, avg_pnl_per_trade_pct
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """,
             (
@@ -605,14 +605,14 @@ def _save_result(pid, pair, stats, trades):
                 float(_c(stats["win_rate"])),
                 float(_c(stats["total_pnl_quote"])),
                 float(_c(stats["total_pnl_pct"])),
-                float(_c(stats["max_drawdown_idr"])),
+                float(_c(stats["max_drawdown_quote"])),
                 float(_c(stats["max_drawdown_pct"])),
                 float(_c(stats["profit_factor"])),
                 float(_c(stats["sharpe_ratio"])),
-                float(_c(stats["initial_capital_idr"])),
-                float(_c(stats["final_capital_idr"])),
+                float(_c(stats["initial_capital_quote"])),
+                float(_c(stats["final_capital_quote"])),
                 int(_c(stats["avg_trade_duration_sec"])),
-                float(_c(stats["avg_pnl_per_trade_idr"])),
+                float(_c(stats["avg_pnl_per_trade_quote"])),
                 float(_c(stats["avg_pnl_per_trade_pct"])),
             ),
         )
@@ -622,7 +622,7 @@ def _save_result(pid, pair, stats, trades):
                 """
                 INSERT INTO backtest_trades (
                     result_id, pair, entry_time, exit_time, entry_price, exit_price,
-                    amount_idr, amount_crypto, pnl_idr, pnl_pct, exit_reason,
+                    amount_quote, amount_crypto, pnl_quote, pnl_pct, exit_reason,
                     buy_score, sell_score_at_exit, duration_seconds
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
@@ -698,7 +698,7 @@ def _load_latest_coin_setup(pairs: list[str]) -> dict[str, dict]:
                 rec_max_hold_minutes,
                 rec_ema_trend_filter_enabled,
                 rec_atr_max_pct,
-                rec_max_position_idr,
+                rec_max_position_quote,
                 rec_dca_enabled,
                 rec_dca_max_tiers,
                 rec_rsi_oversold,
@@ -756,7 +756,7 @@ def _load_latest_coin_setup(pairs: list[str]) -> dict[str, dict]:
                 "max_hold_minutes": int(r["rec_max_hold_minutes"] or 1440),
                 "ema_trend_filter_enabled": bool(r["rec_ema_trend_filter_enabled"]),
                 "atr_max_pct": float(r["rec_atr_max_pct"] or 3.0),
-                "max_position_quote": float(r["rec_max_position_idr"] or 100000.0),
+                "max_position_quote": float(r["rec_max_position_quote"] or 100000.0),
                 "dca_enabled": bool(r["rec_dca_enabled"]),
                 "dca_max_tiers": int(r["rec_dca_max_tiers"] or 1),
                 "rsi_oversold": float(r["rec_rsi_oversold"] or 35.0),
