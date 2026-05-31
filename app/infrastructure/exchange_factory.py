@@ -32,6 +32,8 @@ def create_exchange_client():
                 'enableRateLimit': True,
                 'options': {
                     'adjustForTimeDifference': True,
+                    'defaultType': 'spot',
+                    'fetchCurrencies': False,
                 }
             }
         )

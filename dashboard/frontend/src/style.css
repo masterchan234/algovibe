@@ -1,3 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap');
+
+:root {
+  /* Core Colors */
+  --bg-deep: #050505;
+  --bg-surface: rgba(18, 18, 18, 0.7);
+  --bg-surface-hover: rgba(25, 25, 25, 0.85);
+  --border-light: rgba(255, 255, 255, 0.08);
+  --border-focus: rgba(255, 255, 255, 0.15);
+  
+  /* Pro Trader Colors */
+  --bg-trader-main: #0b0e11;
+  --bg-trader-panel: #181a20;
+  --bg-trader-hover: #2b3139;
+  --border-trader: #2b3139;
+
+  /* Text */
+  --text-primary: #eaecef;
+  --text-secondary: #848e9c;
+  --text-tertiary: #5e6673;
+  
+  /* Accents */
+  --accent-purple: #8b5cf6;
+  --accent-purple-glow: rgba(139, 92, 246, 0.4);
+  --accent-blue: #3b82f6;
+  --accent-green: #0ecb81;
+  --accent-red: #f6465d;
+  --accent-amber: #f59e0b;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -5,19 +35,166 @@
 }
 
 body {
-  background: #0d1117;
-  color: #e6edf3;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-deep);
+  background-image: 
+    radial-gradient(circle at 15% 50%, rgba(139, 92, 246, 0.05), transparent 25%),
+    radial-gradient(circle at 85% 30%, rgba(59, 130, 246, 0.05), transparent 25%);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
 }
 
 ::-webkit-scrollbar {
-  width: 4px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #161b22;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
-  border-radius: 2px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.2);
+}
+
+/* Trader Panel (Pro Industrial Look) */
+.trader-panel {
+  background: var(--bg-trader-panel);
+  border: 1px solid var(--border-trader);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  transition: border-color 0.2s ease;
+}
+
+.trader-panel:hover {
+  border-color: var(--text-tertiary);
+}
+
+.trader-btn {
+  background: var(--bg-trader-hover);
+  border: 1px solid transparent;
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trader-btn:hover:not(:disabled) {
+  background: var(--border-trader);
+}
+
+.trader-btn.btn-buy {
+  background: var(--accent-green);
+  color: #fff;
+}
+.trader-btn.btn-buy:hover:not(:disabled) {
+  background: #10e092;
+}
+
+.trader-btn.btn-sell {
+  background: var(--accent-red);
+  color: #fff;
+}
+.trader-btn.btn-sell:hover:not(:disabled) {
+  background: #ff5e73;
+}
+
+.trader-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Glassmorphism Utilities */
+.glass-panel {
+  background: var(--bg-surface);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-panel:hover {
+  border-color: var(--border-focus);
+}
+
+.glass-btn {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.glass-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-focus);
+  transform: translateY(-1px);
+}
+
+.glass-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.glass-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Typography Utilities */
+.text-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+.text-gradient {
+  background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.text-gradient-purple {
+  background: linear-gradient(135deg, #c4b5fd, var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 2s infinite alternate;
+}
+
+@keyframes pulseGlow {
+  from { box-shadow: 0 0 10px var(--accent-purple-glow); }
+  to { box-shadow: 0 0 20px var(--accent-purple-glow), 0 0 40px rgba(139, 92, 246, 0.2); }
 }

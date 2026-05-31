@@ -1659,6 +1659,7 @@ class NewsMaker:
             "- exactly one empty line between sections\n"
             "- do NOT use markdown code fences (```), HTML tags, blockquotes, or nested lists\n"
             "- avoid repetitive content between sections\n"
+            "- LEGAL COMPLIANCE: DO NOT guarantee profit, DO NOT promise returns, DO NOT invite or solicit people to invest, and DO NOT use the word 'Oracle'. Always use neutral, objective, and analytical language.\n"
         )
 
     def _markdown_article_section_template(self, variant):
@@ -1709,6 +1710,7 @@ class NewsMaker:
             "- Maximum of 2 sentences, total length <= 260 characters.\n"
             "- Must mention at least 1 concrete technical metric (trend/signal/ch_1h/regime/sentiment).\n"
             "- Do NOT use markdown code fences or HTML blocks.\n"
+            "- LEGAL COMPLIANCE: DO NOT guarantee profit, DO NOT promise returns, DO NOT invite people to invest, and DO NOT use the word 'Oracle'.\n"
             "Respond ONLY with a single JSON object (no wrappers, no extra text):\n"
             '{"brief":"..."}'
         )

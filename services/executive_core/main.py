@@ -178,8 +178,14 @@ class ExecutiveCoreService:
         self._legacy_exit_enabled = True
 
         # Private WS order updates are required so pending BUY/SELL can be reconciled.
-        api_key = os.getenv("INDODAX_API_KEY", "")
-        api_secret = os.getenv("INDODAX_API_SECRET", "")
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            api_key = os.getenv("BINANCE_API_KEY", "")
+            api_secret = os.getenv("BINANCE_API_SECRET", "")
+        else:
+            api_key = os.getenv("INDODAX_API_KEY", "")
+            api_secret = os.getenv("INDODAX_API_SECRET", "")
+            
         self._private_ws = None
         if api_key and api_secret:
             self._private_ws = PrivateWS(
@@ -188,7 +194,7 @@ class ExecutiveCoreService:
                 on_order_update=self.exit_manager.handle_order_update,
             )
         else:
-            logger.warning("[executive-core] PrivateWS disabled: missing API credentials")
+            logger.warning(f"[executive-core] PrivateWS disabled: missing {eid.upper()} API credentials")
 
     #  Lifecycle 
 
@@ -435,7 +441,8 @@ class ExecutiveCoreService:
                 elif sig.action == 2:  # SELL
                     pair = str(sig.symbol or "").lower()
                     logger.info(f"[EXECUTIVE] Received SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
-                    pos = db.get_position(pair)
+                    loop = asyncio.get_event_loop()
+                    pos = await loop.run_in_executor(None, db.get_position, pair)
                     if pos and pos.get("status") == "OPEN":
                         tick = self._ticks.get(pair)
                         px = float(tick.price) if tick and tick.price > 0 else float(pos.get("entry_price") or 0)
@@ -601,13 +608,16 @@ class ExecutiveCoreService:
 
                 self._ticks[tick.symbol] = tick
                 # History buffering for radar/dashboard
-                if tick.symbol not in self._price_history:
-                    self._price_history[tick.symbol] = []
-                # Only append if price changed or it's empty to save space
-                if not self._price_history[tick.symbol] or self._price_history[tick.symbol][-1] != tick.price:
-                    self._price_history[tick.symbol].append(tick.price)
-                    if len(self._price_history[tick.symbol]) > 60:
-                        self._price_history[tick.symbol].pop(0)
+                # Only append if price changed or it's empty to save space.
+                # Use immutable updates (copy on write) to avoid dictionary mutation exceptions
+                # when read concurrently by the legacy exit monitor thread.
+                hist = self._price_history.get(tick.symbol, [])
+                if not hist or hist[-1] != tick.price:
+                    new_hist = list(hist)
+                    new_hist.append(tick.price)
+                    if len(new_hist) > 60:
+                        new_hist.pop(0)
+                    self._price_history[tick.symbol] = new_hist
 
             except Exception as exc:
                 logger.error(f"[EXECUTIVE] Tick processing error: {exc}")
@@ -618,7 +628,11 @@ class ExecutiveCoreService:
             updates = []
             for symbol, hist in self._price_history.items():
                 if len(hist) > 0:
-                    updates.append((symbol, list(hist), 0.0, 0.0, 0.0))
+                    last = hist[-1]
+                    ch_5m  = ((last - hist[-5])  / hist[-5]  * 100) if len(hist) >= 5  else 0.0
+                    ch_15m = ((last - hist[-15]) / hist[-15] * 100) if len(hist) >= 15 else 0.0
+                    ch_1h  = ((last - hist[0])   / hist[0]   * 100) if len(hist) >= 60 else 0.0
+                    updates.append((symbol, list(hist), ch_5m, ch_15m, ch_1h))
             if updates:
                 db.save_ticker_history_batch(updates)
         except Exception as e:
@@ -632,7 +646,8 @@ class ExecutiveCoreService:
         and run risk guards.
         """
         try:
-            open_positions = db.get_open_positions()
+            loop = asyncio.get_running_loop()
+            open_positions = await loop.run_in_executor(None, db.get_open_positions)
         except Exception as exc:
             logger.error(f"[EXECUTIVE] DB error fetching positions: {exc}")
             return
@@ -683,7 +698,7 @@ class ExecutiveCoreService:
             stats = db.get_all_time_stats()
             self._realized_pnl = float(stats.get("total_pnl_quote") or 0.0)
         except Exception as e:
-            logger.debug(f"[EXECUTIVE] Balance/Stats fetch skip: {e}")
+            logger.debug(f"[executive-core] Balance/Stats fetch skip: {e}")
             pass
 
         net_pnl = self._realized_pnl + self._unrealized_pnl
@@ -739,15 +754,17 @@ class ExecutiveCoreService:
                 self._equity_pub.send(equity.SerializeToString())
 
                 # Persist snapshot to DB for dashboard
-                db.save_state("net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
-                db.save_state("net_pnl_realized",   str(round(self._realized_pnl, 2)))
-                db.save_state("peak_net_pnl_session", str(round(self._peak_equity, 2)))
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, db.save_state, "net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
+                await loop.run_in_executor(None, db.save_state, "net_pnl_realized",   str(round(self._realized_pnl, 2)))
+                await loop.run_in_executor(None, db.save_state, "peak_net_pnl_session", str(round(self._peak_equity, 2)))
 
                 # Refresh daily stats cache every 30s
                 _now = time.time()
                 if _now - self._daily_stats_last_fetch >= 30:
                     try:
-                        _ds = db.get_daily_stats(dry_run=1 if db.is_dry_run() else 0)
+                        loop = asyncio.get_running_loop()
+                        _ds = await loop.run_in_executor(None, lambda: db.get_daily_stats(dry_run=1 if db.is_dry_run() else 0))
                         self._daily_stats_cache = _ds
                         self._daily_stats_last_fetch = _now
                     except Exception:

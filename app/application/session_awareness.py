@@ -55,8 +55,8 @@ STRATEGIES = {
         "max_new_positions":    0,
         "focus_top_n":          0,
         "description": (
-            "Consecutive loss limit reached. Semua entry diblok. "
-            "Reset manual diperlukan atau tunggu cooldown habis."
+            "Consecutive loss limit reached. All entries blocked. "
+            "Manual reset required or wait for cooldown to expire."
         ),
     },
     "RECOVERY_CRISIS": {
@@ -69,8 +69,8 @@ STRATEGIES = {
         "max_new_positions":    1,
         "focus_top_n":          3,
         "description": (
-            "Deep drawdown (>3x daily limit). Trade micro-size saja. "
-            "Butuh confluence hampir sempurna. Tujuan: stop bleeding dulu."
+            "Deep drawdown (>3x daily limit). Micro-size trades only. "
+            "Near-perfect confluence required. Objective: stop the bleeding."
         ),
     },
     "RECOVERY_DAILY": {
@@ -83,8 +83,8 @@ STRATEGIES = {
         "max_new_positions":    1,
         "focus_top_n":          5,
         "description": (
-            "Daily loss limit hit. Max 1 posisi baru, size -60%. "
-            "Hanya masuk setup momentum sangat kuat. Tujuan: partial recovery."
+            "Daily loss limit hit. Max 1 new position, size -60%. "
+            "Only enter strongest momentum setups. Objective: partial recovery."
         ),
     },
     "RECOVERY_ALLTIME": {
@@ -98,8 +98,8 @@ STRATEGIES = {
         "max_new_positions":    2,
         "focus_top_n":          5,
         "description": (
-            "Account dalam drawdown all-time. Recovery metodis: size -35%, "
-            "threshold lebih tinggi. Konsistensi > agresivitas."
+            "Account in all-time drawdown. Methodical recovery: size -35%, "
+            "higher thresholds. Consistency > aggression."
         ),
     },
     "CAUTIOUS": {
@@ -112,8 +112,8 @@ STRATEGIES = {
         "max_new_positions":    3,
         "focus_top_n":          7,
         "description": (
-            "Kondisi kurang ideal (choppy/bearish atau daily loss >50%). "
-            "Exposure dikurangi, threshold diperketat sedikit."
+            "Suboptimal conditions (choppy/bearish or daily loss >50%). "
+            "Reduced exposure, slightly tighter thresholds."
         ),
     },
     "NORMAL": {
@@ -125,8 +125,8 @@ STRATEGIES = {
         "max_new_positions":    5,
         "focus_top_n":          10,
         "description": (
-            "Operasi standar. Full capital deployment. "
-            "Scan top 10 pair, threshold default."
+            "Standard operation. Full capital deployment. "
+            "Scanning top 10 pairs with default thresholds."
         ),
     },
     "MOMENTUM_CHASE": {
@@ -139,8 +139,8 @@ STRATEGIES = {
         "max_new_positions":    6,
         "focus_top_n":          12,
         "description": (
-            "Bull market + account profitable. Pressing edge secara moderat: "
-            "+15% size, scan lebih luas. Tetap disiplin, bukan rakus."
+            "Bull market + account profitable. Moderately pressing the edge: "
+            "+15% size, wider scan range. Stay disciplined, not greedy."
         ),
     },
 }
@@ -209,13 +209,13 @@ def compute_session_awareness(oracle, regime: str, consecutive_losses: int) -> d
             state = "HALT"
             reason = (
                 f"Consecutive losses {consecutive_losses}/{config.MAX_CONSECUTIVE_LOSSES} "
-                "reached. Trading diblok."
+                "reached. Trading blocked."
             )
 
         elif alltime_realized <= crisis_threshold:
             state = "RECOVERY_CRISIS"
             reason = (
-                f"All-time realized PnL ${alltime_realized:.2f} melampaui "
+                f"All-time realized PnL ${alltime_realized:.2f} exceeded "
                 f"crisis threshold ${crisis_threshold:.2f} (3x daily limit)."
             )
 
@@ -229,8 +229,8 @@ def compute_session_awareness(oracle, regime: str, consecutive_losses: int) -> d
         elif alltime_realized < -0.01:  # threshold kecil untuk hindari floating point noise
             state = "RECOVERY_ALLTIME"
             reason = (
-                f"Account dalam drawdown all-time: ${alltime_realized:.2f}. "
-                "Recovery metodis diaktifkan."
+                f"Account in all-time drawdown: ${alltime_realized:.2f}. "
+                "Methodical recovery activated."
             )
 
         elif (
@@ -239,7 +239,7 @@ def compute_session_awareness(oracle, regime: str, consecutive_losses: int) -> d
         ):
             state = "CAUTIOUS"
             reason = (
-                f"Kondisi kurang ideal: regime={regime}, "
+                f"Suboptimal conditions: regime={regime}, "
                 f"daily_pnl=${daily_pnl:.2f}."
             )
 
@@ -257,7 +257,7 @@ def compute_session_awareness(oracle, regime: str, consecutive_losses: int) -> d
         else:
             state = "NORMAL"
             reason = (
-                f"Kondisi standar: regime={regime}, "
+                f"Standard conditions: regime={regime}, "
                 f"all-time=${alltime_realized:.2f}, today=${daily_pnl:.2f}."
             )
 

@@ -1668,7 +1668,8 @@ class Database:
             'sector_history',
             'shadow_orders',
             'order_book',
-            'market_depth'
+            'market_depth',
+            'equity_performance'
         ]
         
         counts = {}
@@ -1681,10 +1682,16 @@ class Database:
                 
                 # Reset specific bot_state keys
                 cursor.execute(
-                    "UPDATE bot_state SET value = '0' WHERE key IN ('consecutive_losses', 'daily_target_hit')"
+                    "UPDATE bot_state SET value = '0' WHERE key IN ('consecutive_losses', 'daily_target_hit', 'peak_pnl_today', 'daily_profit_target', 'net_zero_target_floor', 'net_pnl_realized')"
                 )
                 cursor.execute(
                     "UPDATE bot_state SET value = 'NORMAL' WHERE key = 'session_mode'"
+                )
+                cursor.execute(
+                    "UPDATE bot_state SET value = 'true' WHERE key = 'session_buy_enabled'"
+                )
+                cursor.execute(
+                    "UPDATE bot_state SET value = 'false' WHERE key IN ('session_latched', 'target_protection_active', 'net_zero_survival_active')"
                 )
                 counts['bot_state_reset'] = cursor.rowcount
                 
@@ -1832,12 +1839,12 @@ class DatabaseRouter:
     """Routes all DB operations to algotrade_live.db or algotrade_dryrun.db
     based on the current dry_run flag in bot_state.
 
-    - Mode-control keys (dry_run, dry_run_loose_gates) are always read from
+    - Mode-control keys (dry_run) are always read from
       the live DB (source of truth) and written to BOTH DBs on change.
     - All other operations go to the currently-active DB.
     - Mode is cached for 2 seconds to avoid hammering SQLite.
     """
-    _SYNC_KEYS = {"dry_run", "dry_run_loose_gates"}
+    _SYNC_KEYS = {"dry_run"}
 
     def __init__(self):
         from config import DATABASE_URL_LIVE, DATABASE_URL_DRYRUN

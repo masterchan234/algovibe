@@ -397,16 +397,14 @@ def execute_trade(
         sl_target = buy_price * (1 + final_sl)
 
         if config.DRY_RUN:
-            # Apply the same slippage_buffer the live adapter models (0.21%) so
-            # the simulated entry price is not unrealistically tight.
-            _sim_slippage = 0.0021  # mirrors IndodaxAdapter.fee_structure['slippage_buffer']
-            sim_fill_price = buy_price * (1 + _sim_slippage)
-            buy_price = sim_fill_price   # update buy_price so PnL calc uses realistic entry
-            amount_crypto = amount_quote / buy_price  # recalculate amount at simulated fill
+            # Simulate fees/slippage purely by reducing the amount of coins received, 
+            # keeping the entry price (buy_price) perfectly aligned with the market ticker.
+            _sim_slippage = 0.0021  # 0.21% taker fee + slippage penalty
+            amount_crypto = (amount_quote / buy_price) * (1 - _sim_slippage)
             order = {
                 'id': f"DRY-{int(time.time())}",
                 'status': 'closed',
-                'price': buy_price,   # [SIMULATION] pre-computed price + 0.21% slippage
+                'price': buy_price,   # [SIMULATION] 100% pure market price
                 'amount': amount_crypto,
                 'symbol': symbol,
                 'timestamp': datetime.now().isoformat(),

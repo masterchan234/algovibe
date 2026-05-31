@@ -33,8 +33,8 @@ CHANNEL_SUMMARY = "market:summary-24h"
 CHANNEL_OB_PFX  = "market:order-book-"   # Indodax
 CHANNEL_TRADE_PFX = "market:trade-activity-" # Indodax
 
-OB_TOP_PAIRS     = 50
-OB_MIN_VOL_IDR   = 15000.0  # USDT or IDR scale depending on active exchange
+OB_TOP_PAIRS     = 9999
+OB_MIN_VOL_IDR   = 20000.0  # USDT or IDR scale depending on active exchange
 
 # Pair yang SELALU di-subscribe order book terlepas dari volume threshold
 def _get_high_priority_pairs():
@@ -259,7 +259,7 @@ class MarketDataWS:
                         sub_msg_trades = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
                         ws.send(json.dumps(sub_msg_trades))
                         logger.warning(f"[MarketWS] Subscribed to trade streams on connect/reconnect: {chunk}")
-                        time.sleep(0.2)
+                        time.sleep(0.5)
                         
                 if self._ob_subscribed:
                     pairs_list = list(self._ob_subscribed)
@@ -270,7 +270,7 @@ class MarketDataWS:
                         sub_msg_ob = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
                         ws.send(json.dumps(sub_msg_ob))
                         logger.warning(f"[MarketWS] Subscribed to depth streams on connect/reconnect: {chunk}")
-                        time.sleep(0.2)
+                        time.sleep(0.5)
                         
             self._connected.set()
         else:
@@ -707,7 +707,7 @@ class MarketDataWS:
                     sub_msg = {"method": "SUBSCRIBE", "params": streams, "id": self._next_id()}
                     self._ws_ref.send(json.dumps(sub_msg))
                     logger.warning(f"[MarketWS] Dynamic Trades Bulk Subscribed: {chunk}")
-                    time.sleep(0.2)  # Nice safe delay between bulk messages
+                    time.sleep(0.5)  # Nice safe delay between bulk messages
             else:
                 for p in pairs:
                     req_id = self._next_id()
@@ -780,7 +780,7 @@ class MarketDataWS:
                     for p in chunk:
                         self._ob_subscribed.add(p)
                     logger.info(f"[MarketWS] Bulk Subscribed order-books: {chunk}")
-                    time.sleep(0.2)
+                    time.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[MarketWS] Failed bulk OB subscription: {e}")
         else:

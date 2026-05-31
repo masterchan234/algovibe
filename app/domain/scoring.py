@@ -1,7 +1,11 @@
 import math
+import logging
 
 from config import SECTOR_MAP
 from app.domain.technicals import calculate_rsi, calculate_macd
+from utils.logger import log_message
+
+logger = logging.getLogger(__name__)
 
 # Sektor yang mendapat sector-momentum boost saat pumping
 _BOOSTED_SECTORS = {"AI", "MEME", "L1"}

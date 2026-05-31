@@ -249,7 +249,7 @@
                 <h3>Exit Rules & Capital Preservation</h3>
                 <ul class="specs-list">
                   <li><strong>Micro Profit Exit:</strong>
-                    <span>Evaluated strictly against the bid price (not last trade price) to guarantee real net profitability after transaction fees.</span>
+                    <span>Evaluated strictly against the bid price (not last trade price) to ensure net results account for transaction fees.</span>
                   </li>
                   <li><strong>Trailing Take Profit (TTP):</strong>
                     <span>Follows rising price trends and locks in profit when minor trend reversals are detected.</span>
@@ -270,7 +270,7 @@
         <div v-else-if="activeTab === 'ai'" class="tab-content animate-fade">
           <div class="grid-layout">
             <div class="main-column">
-              <h2>AI Layer (The Oracle) Role & Technical Only Mode</h2>
+              <h2>AI Analytics Layer Role & Technical Only Mode</h2>
               <p>
                 Algovibe is designed with a strict separation of concerns between artificial intelligence logic and core trade execution algorithms.
               </p>
@@ -283,9 +283,9 @@
                   </p>
                 </div>
                 <div class="concept-card">
-                  <h4>AI & Oracle Editorial Role</h4>
+                  <h4>AI Editorial Role</h4>
                   <p>
-                    The AI layer acts as an isolated research analyst (The Oracle). It processes market news, identifies trend anomalies, and compiles market intelligence reports and editorial articles published in real-time on this portal.
+                    The AI layer acts as an isolated research analyst. It processes market news, identifies trend anomalies, and compiles market intelligence reports and editorial articles published in real-time on this portal.
                   </p>
                 </div>
               </div>
@@ -297,7 +297,7 @@
 
             <div class="side-column">
               <div class="specs-card spec-ai-card">
-                <h3>Oracle Architecture</h3>
+                <h3>AI Architecture</h3>
                 <ul class="specs-list">
                   <li><strong>Model:</strong>
                     <span>LiteRT Lightweight Inference Engine</span>
@@ -339,7 +339,7 @@ const tabs = [
   { id: 'architecture', label: 'SYSTEM ARCHITECTURE' },
   { id: 'indicators', label: 'INDICATOR MATRIX' },
   { id: 'safety', label: 'SAFETY & ENTRY GATES' },
-  { id: 'ai', label: 'AI LAYER (THE ORACLE)' },
+  { id: 'ai', label: 'AI ANALYTICS LAYER' },
 ]
 
 const activeTab = ref('architecture')

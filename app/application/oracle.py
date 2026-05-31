@@ -1065,16 +1065,16 @@ class Oracle:
         - Waktu sesi (Asia/Europe/US)
 
         Formula:
-          base_target = balance * BASE_RATE (1%)
+          base_target = balance * BASE_RATE (5%)
           x regime_multiplier  (BULLISH=1.5, CHOPPY=0.7, BEARISH=0.5, RANGING=0.8)
           x wr_multiplier      (WR>=60%=1.2, WR<40%=0.7, else=1.0)
           x session_multiplier (Asia peak=1.2, US peak=1.1, off-hours=0.8)
 
-        Minimum: Rp 50.000 (agar selalu ada target bermakna)
-        Maximum: 5% dari balance
+        Minimum: 5% dari balance
+        Maximum: 10% dari balance
 
         Returns:
-            float — target profit harian dalam IDR
+            float — target profit harian (USDT/IDR tergantung exchange)
         """
         try:
             regime = self.get_market_regime()
@@ -1095,8 +1095,8 @@ class Oracle:
             # Gunakan INITIAL_CAPITAL sebagai fallback aman jika saldo belum tersedia di DB
             effective_balance = balance if balance > 0 else INITIAL_CAPITAL
 
-            # 1. Base rate: 1% dari saldo
-            base_target = effective_balance * 0.01
+            # 1. Base rate: 5% dari saldo
+            base_target = effective_balance * 0.05
 
             # 2. Regime multiplier
             regime_mult = {
@@ -1129,9 +1129,9 @@ class Oracle:
 
             target = base_target * regime_mult * wr_mult * session_mult
 
-            # Clamp: min 1% saldo, max 5% saldo — keduanya berbasis balance aktual
-            target_min = max(5.0, effective_balance * 0.010)  # 1% balance, floor $5
-            target_max = effective_balance * 0.05              # 5% balance
+            # Clamp: min 5% saldo, max 10% saldo — keduanya berbasis balance aktual
+            target_min = max(25.0, effective_balance * 0.05)   # 5% balance, floor $25 (or equiv)
+            target_max = effective_balance * 0.10              # 10% balance
             target = max(target_min, min(target_max, target))
 
             logger.info(
@@ -1144,7 +1144,7 @@ class Oracle:
 
         except Exception as e:
             logger.error(f"[Oracle] calculate_daily_profit_target error: {e}")
-            return max(5.0, (balance if balance > 0 else INITIAL_CAPITAL) * 0.015)  # fallback 1.5% saldo
+            return max(25.0, (balance if balance > 0 else INITIAL_CAPITAL) * 0.05)  # fallback 5% saldo
 
     def refresh_daily_profit_target(self, balance: float = 0.0) -> float:
         """
@@ -1158,7 +1158,7 @@ class Oracle:
             target = self.calculate_daily_profit_target(balance=balance)
             db.save_state("daily_profit_target", str(target))
             db.save_state("daily_profit_target_ts", datetime.now().isoformat())
-            log_message(f"[TARGET] [TARGET] Profit harian diperbarui: Rp {target:,.0f}")
+            log_message(f"[TARGET] Profit harian diperbarui: {target:,.2f}")
             return target
         except Exception as e:
             logger.error(f"[Oracle] refresh_daily_profit_target error: {e}")
@@ -1493,7 +1493,7 @@ class Oracle:
             # Gabungkan lessons terakhir
             lessons_text = ""
             if self._lessons:
-                lessons_text = "\nPelajaran dari trade sebelumnya:\n"
+                lessons_text = "\nLessons from previous trades:\n"
                 for i, lesson in enumerate(self._lessons[-5:], 1):  # Max 5 lesson terbaru
                     lessons_text += f"  {i}. {lesson}\n"
 
@@ -1731,16 +1731,7 @@ class Oracle:
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
 
-        #  Dynamic profile from UI toggle (dry_run_loose_gates) 
-        if config.DRY_RUN_LOOSE_GATES:
-            # Loose profile: turunkan gate untuk eksplorasi sinyal lebih luas.
-            overrides["tech_threshold"] -= 0.10
-            overrides["min_vol"] *= 0.60
-            overrides["max_spread"] *= 1.40
-        else:
-            # Ideal profile: jaga kualitas entry saat toggle OFF.
-            overrides["tech_threshold"] = max(0.45, float(overrides["tech_threshold"]))
-
+        overrides["tech_threshold"] = max(0.45, float(overrides["tech_threshold"]))
         overrides["tech_threshold"] = max(0.25, min(0.95, float(overrides["tech_threshold"])))
         
         return overrides
@@ -1823,17 +1814,17 @@ class Oracle:
         """
         regime = self.get_market_regime()
         if decision == "SKIP_LATENCY":
-            return "Saya memutuskan berhenti sejenak karena mata saya 'rabun' (latency tinggi). Terlalu berisiko."
+            return "Taking a brief pause due to high latency. Too risky right now."
         if decision == "SKIP_REGIME":
-            return f"Saya tidak mau beli koin apapun sekarang karena pasar global sedang {regime}. Saya menjaga modal kita."
+            return f"Holding entries because the global market is {regime}. Capital preservation is active."
         if decision == "ADAPTIVE_SL":
-            return f"Pasar sedang {regime}, saya akan sedikit lebih 'sabar' menahan guncangan harga."
+            return f"Market is {regime}, maintaining wider stop-loss to absorb price shocks."
         if decision == "WHALE_BOOST":
-            return "Ada paus besar sedang menahan harga di bawah kita. Kesempatan emas!"
+            return "Massive buy wall detected below current price. Excellent entry opportunity."
         if decision == "SECTOR_BOOST":
-            return "Sektor koin ini sedang 'hot'. Momentum sedang berpihak pada kita."
+            return "This coin's sector is hot. Momentum is on our side."
         
-        return "Keputusan berdasarkan analisa teknikal murni."
+        return "Decision based purely on technical analysis."
 
     def get_whale_boost(self, pair: str) -> float:
         """
@@ -2056,12 +2047,12 @@ class Oracle:
             if not config.TECHNICAL_ONLY_MODE:
                 # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
                 prompt = (
-                    f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_quote:,.0f}. "
-                    f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
+                    f"Trade Post-Mortem: {pair} closed with {status} {pnl_quote:,.0f}. "
+                    f"Trade DNA: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
                     f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
                     f"vol={dna.get('volatility',0):.2f}%. "
-                    f"Sebagai quant analyst, apa satu pelajaran paling penting dari trade ini? "
-                    f"Jawab dalam 1 kalimat ringkas bahasa Indonesia."
+                    f"As a quant analyst, what is the single most important lesson from this trade? "
+                    f"Answer in one concise English sentence."
                 )
                 self.llm_worker.query_async("POST_MORTEM", prompt)
             

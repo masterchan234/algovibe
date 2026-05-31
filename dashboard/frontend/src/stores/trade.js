@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
+import { ref, reactive, shallowRef } from 'vue'
 import { io } from 'socket.io-client'
 import { useNotifications } from '../composables/useNotifications'
 import { useAuth } from '../composables/useAuth'
@@ -90,7 +90,6 @@ export const useTradeStore = defineStore('trade', () => {
     history_count: 0,
     open_count: 0,
     dry_run: true,
-    dry_run_loose_gates: false,
     technical_only_mode: true,
     manual_exit_max_net_pct: 0.001,
     // BTC Condition
@@ -117,7 +116,7 @@ export const useTradeStore = defineStore('trade', () => {
   })
 
   // Open positions (trades)
-  const positions = ref([])
+  const positions = shallowRef([])
 
   // Approval gate: pending action waiting for Supreme Commander decision
   const pendingAction = ref(null)
@@ -129,19 +128,22 @@ export const useTradeStore = defineStore('trade', () => {
   const bracketExitConfirm = ref(null)
 
   // Activity feed (logs)
-  const activityFeed = ref([])
+  const activityFeed = shallowRef([])
   const MAX_FEED_ITEMS = 100
 
   // LiteRT-LM Exit Decisions
-  const llmDecisions = ref([])
+  const llmDecisions = shallowRef([])
   const MAX_LLM_ITEMS = 40
 
   // Profit history for line chart: [{time, pnl}]
   // Capacity is adaptive: 75 pts on mobile, 300 on desktop
-  const pnlHistory = ref([])
+  const pnlHistory = shallowRef([])
 
   // Radar data
-  const radarPairs = ref([])
+  const radarPairs = shallowRef([])
+
+  // Market depths map { "btcusdt": [bidDepth, askDepth] }
+  const marketDepths = shallowRef({})
 
   function _selectedModeDryRun() {
     try {
@@ -173,10 +175,15 @@ export const useTradeStore = defineStore('trade', () => {
 
   function _addFeedItems(items) {
     const normalized = items.map((item, idx) => _normalizeLogItem(item, idx))
+    const current = activityFeed.value
+    let updated = [...current]
+    let added = false
+
     for (const item of normalized) {
       // Avoid duplicates by id
-      if (!activityFeed.value.find(x => x.id === item.id)) {
-        activityFeed.value.unshift(item)
+      if (!current.find(x => x.id === item.id)) {
+        updated.unshift(item)
+        added = true
         
         // Trigger Alerts for new items
         const side = (item.side || '').toUpperCase()
@@ -195,8 +202,11 @@ export const useTradeStore = defineStore('trade', () => {
         }
       }
     }
-    if (activityFeed.value.length > MAX_FEED_ITEMS) {
-      activityFeed.value = activityFeed.value.slice(0, MAX_FEED_ITEMS)
+    if (added) {
+      if (updated.length > MAX_FEED_ITEMS) {
+        updated = updated.slice(0, MAX_FEED_ITEMS)
+      }
+      activityFeed.value = updated
     }
   }
 
@@ -208,23 +218,28 @@ export const useTradeStore = defineStore('trade', () => {
     const now = new Date()
     const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     const maxPts = _maxHistory()
+    const current = pnlHistory.value
 
     // Always record two points if empty to ensure ECharts draws a line immediately
-    if (pnlHistory.value.length === 0) {
+    if (current.length === 0) {
       const prevNow = new Date(now.getTime() - 1000)
       const prevTimeStr = prevNow.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      pnlHistory.value.push({ time: prevTimeStr, pnl: rounded })
-      pnlHistory.value.push({ time: timeStr, pnl: rounded })
+      pnlHistory.value = [
+        { time: prevTimeStr, pnl: rounded },
+        { time: timeStr, pnl: rounded }
+      ]
       return
     }
 
     // Skip only if value is same and we have enough data to avoid spam
-    const last = pnlHistory.value[pnlHistory.value.length - 1]
-    if (last && last.pnl === rounded && pnlHistory.value.length > 20) return
-    pnlHistory.value.push({ time: timeStr, pnl: rounded })
-    if (pnlHistory.value.length > maxPts) {
-      pnlHistory.value = pnlHistory.value.slice(-maxPts)
+    const last = current[current.length - 1]
+    if (last && last.pnl === rounded && current.length > 20) return
+    
+    let updated = [...current, { time: timeStr, pnl: rounded }]
+    if (updated.length > maxPts) {
+      updated = updated.slice(-maxPts)
     }
+    pnlHistory.value = updated
   }
 
   async function connect() {
@@ -325,7 +340,6 @@ export const useTradeStore = defineStore('trade', () => {
           history_count: data.history_count ?? 0,
           open_count: data.open_count ?? 0,
           dry_run: data.dry_run ?? true,
-          dry_run_loose_gates: data.dry_run_loose_gates ?? false,
           technical_only_mode: data.technical_only_mode ?? true,
           manual_exit_max_net_pct: data.manual_exit_max_net_pct ?? 0.001,
           btc_price: data.btc_price ?? 0,
@@ -386,6 +400,12 @@ export const useTradeStore = defineStore('trade', () => {
     s.on('radar_update', (data) => {
       if (Array.isArray(data)) {
         radarPairs.value = data
+      }
+    })
+
+    s.on('depth_update', (data) => {
+      if (data && typeof data === 'object') {
+        marketDepths.value = data
       }
     })
 
@@ -530,6 +550,7 @@ export const useTradeStore = defineStore('trade', () => {
     llmDecisions,
     pnlHistory,
     radarPairs,
+    marketDepths,
     connect,
     checkSessionStatus,
     statsSource,

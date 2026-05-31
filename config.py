@@ -31,8 +31,9 @@ _TECHNICAL_ONLY_INTERNAL = os.getenv("TECHNICAL_ONLY_MODE", "true").lower() in (
 
 INITIAL_CAPITAL        = 1000.0  # Tether (USDT) for Binance Spot
 DAILY_LOSS_LIMIT_PCT   = 0.03
+DAILY_PROFIT_TARGET_PCT = 5.0    # 5.0% dari kapital untuk Sleep Mode (Cut-Off)
 MAX_CONSECUTIVE_LOSSES = 3
-MAX_TRACKED_PAIRS      = 200
+MAX_TRACKED_PAIRS      = 9999
 MIN_VOLUME_FILTER      = 30000.0  # USDT per 24h (Global Minimum: $30k)
 LIQUIDITY_MULTIPLIER   = 25.0   # [Konservatif] Volume 24h harus minimal 25x besar modal per trade
 
@@ -47,9 +48,9 @@ TREND_FILTER_STATS_WINDOW_SEC = int(os.getenv("TREND_FILTER_STATS_WINDOW_SEC", 6
 # ==========================================
 # --- [Risk & Sizing] ---
 MAX_TRADES_PER_DAY = 9999       # [UNLIMITED] Scalp non-stop 24/7
-CAPITAL_PER_TRADE_PCT = 0.18    # Sizing ~18% per trade (regular signal)
-CAPITAL_PER_TRADE_PCT_HIGH_OPP = 0.30  # Sizing ~30% per trade untuk high-opportunity (TQ_PROB >= 0.75)
-MAX_OPEN_POSITIONS = 6             # Maksimal 6 posisi bersamaan — jaga sizing tetap besar
+CAPITAL_PER_TRADE_PCT = 0.065   # Sizing 6.5% per trade (15 posisi * 6.5% = 97.5% kapital)
+CAPITAL_PER_TRADE_PCT_HIGH_OPP = 0.10  # Sizing 10% per trade untuk high-opportunity (TQ_PROB >= 0.75)
+MAX_OPEN_POSITIONS = 15            # Maksimal 15 posisi bersamaan — sebar risiko saat reli
 MIN_BALANCE_THRESHOLD = 10.0   # Jangan trading jika saldo < 10 USDT
 MIN_TRADE_IDR = 10.0   # Legacy mapping compatibility (USDT)
 MIN_TRADE_USDT = 10.0  # Minimum order Binance Spot (10 USDT)
@@ -88,7 +89,7 @@ MICRO_PROFIT_EXIT_AUTO = os.getenv("MICRO_PROFIT_EXIT_AUTO", "true").lower() in 
 MICRO_PROFIT_BALANCE_THRESHOLD = float(os.getenv("MICRO_PROFIT_BALANCE_THRESHOLD", 300.0))   # Dari 1000 → hanya aktif saat balance benar-benar kecil
 MICRO_PROFIT_TP_PCT = float(os.getenv("MICRO_PROFIT_TP_PCT", 0.015))                          # Dari 0.008 → TP ceiling 1.5%
 # Net floor for micro mode (after-fee estimate). Keep > 0 to avoid pseudo-profit exits.
-MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.001))
+MICRO_PROFIT_MIN_NET_PCT = float(os.getenv("MICRO_PROFIT_MIN_NET_PCT", 0.003))
 
 # DUST Recovery Policy (quantitative controls)
 DUST_RECOVERY_ENABLED = os.getenv("DUST_RECOVERY_ENABLED", "true").lower() in ("1", "true", "yes", "on")
@@ -236,7 +237,7 @@ MOMENTUM_HIGH_CORR_BUFFER_REDUCTION = 0.5  # halve the buffer under high correla
 # HARVEST_ONLY selective re-entry:
 # Allows a small number of new BUY orders only for momentum setups with
 # high-quality profit profile while session remains in HARVEST_ONLY.
-HARVEST_MOMENTUM_REENTRY_ENABLED = True
+HARVEST_MOMENTUM_REENTRY_ENABLED = False
 HARVEST_MOMENTUM_MAX_NEW_POSITIONS = 1
 SMALL_ACCOUNT_MODE = INITIAL_CAPITAL <= 250.0
 HARVEST_MOMENTUM_MIN_CONFIDENCE = 78.0 if SMALL_ACCOUNT_MODE else 82.0   # total gate confidence (%).
@@ -328,7 +329,7 @@ FEE_SELL_MAKER = 0.0010  # 0.1%
 FEE_SELL_TAKER = 0.0010  # 0.1%
 FEE_SLIPPAGE_BUFFER = 0.0005 # 0.05% slippage buffer for market impact
 ROUND_TRIP_FEE_PCT = 0.0020  # 0.1% buy + 0.1% sell
-SMART_BREAK_EVEN_PCT = 0.0025  # 0.25% gross → REAL_PROFIT zone
+SMART_BREAK_EVEN_PCT = 0.0045  # 0.45% gross → REAL_PROFIT zone (ruang gerak anti whipsaw)
 MANUAL_EXIT_MAX_NET_PCT = 0.001  # 0.1%
 
 # --- Predator Strategy Parameters ---
@@ -401,15 +402,7 @@ def get_dynamic_dry_run():
     
     return _DRY_RUN_INTERNAL
 
-def get_dynamic_loose_gates():
-    try:
-        from app.infrastructure.database import db
-        db_val = db.get_state("dry_run_loose_gates")
-        if db_val is not None:
-            return db_val.lower() in ("true", "1")
-    except Exception:
-        pass
-    return False # Default
+
 
 def get_dynamic_technical_only_mode():
     import time
@@ -442,8 +435,7 @@ def clear_dry_run_cache():
 def __getattr__(name):
     if name == "DRY_RUN":
         return get_dynamic_dry_run()
-    if name == "DRY_RUN_LOOSE_GATES":
-        return get_dynamic_loose_gates()
+
     if name == "TECHNICAL_ONLY_MODE":
         return get_dynamic_technical_only_mode()
     raise AttributeError(f"module {__name__} has no attribute {name}")

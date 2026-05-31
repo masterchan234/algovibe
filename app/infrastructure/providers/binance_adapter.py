@@ -41,6 +41,8 @@ class BinanceAdapter(BaseExchangeAdapter):
             'enableRateLimit': True,
             'options': {
                 'adjustForTimeDifference': True,
+                'defaultType': 'spot',
+                'fetchCurrencies': False
             }
         })
 
@@ -212,7 +214,9 @@ class BinanceAdapter(BaseExchangeAdapter):
             ccxt_sym = self._to_ccxt_symbol(symbol)
             tf_map = {
                 "1": "1m", "5": "5m", "15": "15m", "30": "30m",
-                "60": "1h", "240": "4h", "1440": "1d"
+                "60": "1h", "240": "4h", "1440": "1d",
+                "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+                "1h": "1h", "4h": "4h", "24h": "1d", "1d": "1d", "1D": "1d"
             }
             ccxt_tf = tf_map.get(str(tf), "1m")
             since_ms = int(from_ts * 1000) if from_ts else None

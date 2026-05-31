@@ -45,8 +45,8 @@ const { notifications, remove } = useNotifications()
 .toast {
   pointer-events: auto;
   width: 320px;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-trader);
   border-radius: 10px;
   padding: 12px 16px;
   display: flex;
@@ -58,7 +58,7 @@ const { notifications, remove } = useNotifications()
 
 .toast:hover {
   transform: translateX(-5px);
-  background: #21262d;
+  background: var(--border-light);
 }
 
 .toast-icon {
@@ -82,7 +82,7 @@ const { notifications, remove } = useNotifications()
 
 .toast-msg {
   font-size: 12px;
-  color: #8b949e;
+  color: var(--text-secondary);
   line-height: 1.4;
 }
 

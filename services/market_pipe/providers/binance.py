@@ -44,7 +44,34 @@ class BinanceProvider(IndodaxProvider):
         self._mws.start()
         threading.Thread(target=self._initial_subscriptions, daemon=True).start()
         threading.Thread(target=self._mover_refresh_loop, daemon=True).start()
+        threading.Thread(target=self._depth_broadcast_loop, daemon=True).start()
         logger.info("[BINANCE Provider] Started.")
+
+    # ── Depth Broadcasting ────────────────────────────────────────────────────
+
+    def _depth_broadcast_loop(self) -> None:
+        """Broadcast bid/ask depth for all tickers every 1s via ZMQ as JSON."""
+        import json as _json
+        # Wait for WS to be ready
+        time.sleep(5)
+        while self._running:
+            try:
+                tickers = self._mws.get_tickers() or {}
+                depth_payload = {}
+                for pair, t in tickers.items():
+                    bd = float(t.get('bid_depth', 0))
+                    ad = float(t.get('ask_depth', 0))
+                    if bd > 0 or ad > 0:
+                        depth_payload[pair] = [bd, ad]
+                if depth_payload and self._on_tick is not None:
+                    raw = _json.dumps(depth_payload).encode()
+                    try:
+                        self._on_tick(raw, topic="depth")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("[BINANCE Provider] Depth broadcast error: %s", e)
+            time.sleep(1)
 
     # ── Initial Subscriptions ─────────────────────────────────────────────────
 

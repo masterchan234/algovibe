@@ -73,30 +73,24 @@
           <span class="sentiment-num">{{ stats.market_sentiment_index }}</span>
         </div>
       </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Loose Gates</div>
-        <button
-          class="loose-gates-btn"
-          :class="{ active: stats.dry_run_loose_gates }"
-          :disabled="isTogglingGates"
-          @click="handleToggleLooseGates"
-          :title="stats.dry_run_loose_gates ? 'LOOSE GATES active — click to deactivate' : 'Activate LOOSE GATES (bypass strict filters)'"
-        >{{ isTogglingGates ? '...' : (stats.dry_run_loose_gates ? '🔓 ON' : '🔒 OFF') }}</button>
-      </div>
     </div>
 
-    <!-- UNIFIED EQUITY PERFORMANCE ORACLE -->
-    <div class="intelligence-panel">
+    <!-- UNIFIED EQUITY PERFORMANCE -->
+    <div class="panels-container">
+      <div class="intelligence-panel">
       <div class="intel-header">
         <div class="intel-title">
           <span class="intel-icon">📊</span>
           <span>EQUITY PERFORMANCE</span>
         </div>
         <div class="intel-meta">
-          <div class="tf-selector">
+          <div class="timeframe-selector">
             <button :class="{ active: timeframe === 'live' }" @click="setTimeframe('live')">LIVE</button>
             <button :class="{ active: timeframe === '1h' }" @click="setTimeframe('1h')">1H</button>
-            <button :class="{ active: timeframe === '24h' }" @click="setTimeframe('24h')">24H</button>
+            <button :class="{ active: timeframe === '1d' }" @click="setTimeframe('1d')">1D</button>
+            <button :class="{ active: timeframe === '1w' }" @click="setTimeframe('1w')">1W</button>
+            <button :class="{ active: timeframe === '1m' }" @click="setTimeframe('1m')">1M</button>
+            <button :class="{ active: timeframe === 'all' }" @click="setTimeframe('all')">ALL</button>
           </div>
           <div class="intel-chip" :class="stats.net_pnl >= 0 ? 'bullish' : 'bearish'">
             {{ stats.net_pnl >= 0 ? 'NET GAIN' : 'NET RECOVERY' }}
@@ -135,160 +129,94 @@
           </div>
         </div>
 
-        <!-- Equity Attribution Heatmap (Replacing Table) -->
-        <div class="asset-heatmap" v-if="stats.asset_contributions && stats.asset_contributions.length > 0">
-          <div class="heatmap-header">EQUITY ATTRIBUTION HEATMAP</div>
-          <div class="heatmap-grid">
+
+      </div>
+    </div>
+
+    <!-- NEW MARKET STATUS & HEATMAP PANEL -->
+    <div class="intelligence-panel" style="margin-top: 16px;">
+      <div class="intel-header">
+        <div class="intel-title">
+          <span class="intel-icon">🔥</span>
+          <span>MARKET STATUS & HEATMAP</span>
+        </div>
+        <div class="intel-meta">
+          <span class="heatmap-count" v-if="allHeatmapCoins.length > 0">{{ allHeatmapCoins.length }} coins</span>
+        </div>
+      </div>
+      <div class="intel-body">
+        <!-- Market Status Info -->
+        <div class="market-status-section" v-if="stats.session_awareness">
+          <div class="ms-grid">
+             <div class="ms-card">
+               <span class="ms-label">REGIME</span>
+               <span class="ms-value" :class="'awareness-' + (stats.session_awareness.state || 'UNKNOWN').toLowerCase().replace(/_/g,'-')">{{ stats.session_awareness.state?.replace(/_/g, ' ') || 'UNKNOWN' }}</span>
+             </div>
+             <div class="ms-card ms-wide" v-if="stats.session_awareness.reason">
+               <span class="ms-label">SYSTEM REASONING</span>
+               <span class="ms-text">{{ stats.session_awareness.reason }}</span>
+             </div>
+          </div>
+        </div>
+
+        <div class="asset-heatmap">
+          <!-- Active Positions -->
+          <div class="heatmap-header">ACTIVE POSITIONS</div>
+          <div v-if="activeContributions && activeContributions.length > 0" class="heatmap-grid" style="margin-bottom: 12px;">
             <div 
-              v-for="asset in stats.asset_contributions" 
-              :key="asset.pair" 
-              class="heatmap-tile"
+              v-for="asset in activeContributions"
+              :key="'pos-'+asset.pair"
+              class="heatmap-tile heatmap-tile-active"
               :style="tileStyle(asset.pnl)"
-              :title="`${asset.trades} Trades | ${formatIdr(asset.pnl)}`"
+              :title="`${formatPair(asset.pair)} | PnL: ${formatIdr(asset.pnl)}`"
               @click="onRadarClick(asset)"
             >
-              <span class="tile-label">{{ formatPair(asset.pair) }}</span>
-              <span class="tile-pnl">{{ formatIdr(asset.pnl) }}</span>
+              <div class="tile-pair">{{ formatPair(asset.pair) }}</div>
+              <div class="tile-pnl">{{ formatIdr(asset.pnl) }}</div>
+              <!-- Depth bar -->
+              <div class="depth-bar" v-if="getCoinDepth(asset.pair)">
+                <div class="depth-bid" :style="{ width: getCoinDepth(asset.pair).bidPct + '%' }"></div>
+                <div class="depth-ask" :style="{ width: getCoinDepth(asset.pair).askPct + '%' }"></div>
+              </div>
             </div>
+          </div>
+          <div v-else style="padding: 12px 0; text-align: center; color: #8b949e; font-size: 11px; font-style: italic;">
+            No active positions
+          </div>
+
+          <!-- All Coins -->
+          <div class="heatmap-header">ALL COINS <span class="heatmap-sub">({{ allHeatmapCoins.length }})</span></div>
+          <div v-if="allHeatmapCoins.length > 0" class="heatmap-grid">
+            <div 
+              v-for="coin in allHeatmapCoins" 
+              :key="'hm-'+coin.pair" 
+              class="heatmap-tile"
+              :style="heatmapStyle(coin)"
+              :title="`${formatPair(coin.pair)} | Score: ${(coin.score||0).toFixed(1)} | ${coin.signal || 'HOLD'}`"
+              @click="onRadarClick(coin)"
+              @contextmenu.prevent="onRadarRightClick($event, coin)"
+            >
+              <span class="tile-label">{{ formatPair(coin.pair) }}</span>
+              <span class="tile-score">{{ (coin.score||0).toFixed(0) }}</span>
+              <!-- Depth bar -->
+              <div class="depth-bar" v-if="getCoinDepth(coin.pair)">
+                <div class="depth-bid" :style="{ width: getCoinDepth(coin.pair).bidPct + '%' }"></div>
+                <div class="depth-ask" :style="{ width: getCoinDepth(coin.pair).askPct + '%' }"></div>
+              </div>
+            </div>
+          </div>
+          <div v-else style="padding: 16px 0; text-align: center; color: #8b949e; font-size: 11px; font-style: italic;">
+            Waiting for radar data…
           </div>
         </div>
       </div>
     </div>
-
-    <!-- Top Radar -->
-    <div class="radar-section">
-      <div class="section-label radar-header-row">
-        <span>Signal Radar</span>
-        <span class="radar-total">{{ radarDisplayPairs.held.length + radarDisplayPairs.others.length }}/{{ sortedRadarPairs.length }} Coins</span>
-      </div>
-
-      <!-- BTC Condition Bar -->
-      <div class="btc-condition-bar" :class="btcBarClass">
-        <div class="btc-bar-left">
-          <span class="btc-icon">₿</span>
-          <span class="btc-label">BTC/{{ (stats.btc_price && stats.btc_price < 500000) ? 'USDT' : 'IDR' }}</span>
-          <span class="btc-price">{{ formatPrice(stats.btc_price) }}</span>
-        </div>
-        <div class="btc-bar-mid">
-          <span class="btc-delta" :class="stats.btc_ch_5m >= 0 ? 'delta-up' : 'delta-dn'">
-            5m {{ stats.btc_ch_5m >= 0 ? '+' : '' }}{{ stats.btc_ch_5m.toFixed(2) }}%
-          </span>
-          <span class="btc-delta" :class="stats.btc_ch_1h >= 0 ? 'delta-up' : 'delta-dn'">
-            1h {{ stats.btc_ch_1h >= 0 ? '+' : '' }}{{ stats.btc_ch_1h.toFixed(2) }}%
-          </span>
-          <span class="btc-delta" :class="stats.btc_change_24h >= 0 ? 'delta-up' : 'delta-dn'">
-            24h {{ stats.btc_change_24h >= 0 ? '+' : '' }}{{ stats.btc_change_24h.toFixed(2) }}%
-          </span>
-          <span class="btc-trend-chip" :class="btcTrendChipClass">{{ stats.btc_trend }}</span>
-        </div>
-        <div class="btc-bar-right">
-          <span class="btc-status-badge" :class="btcStatusBadgeClass">{{ btcStatusLabel }}</span>
-          <span class="btc-score-val">S{{ stats.btc_score.toFixed(0) }}</span>
-        </div>
-      </div>
-
-      <div class="radar-toolbar">
-        <div class="radar-filters">
-          <button class="radar-filter-btn" :class="{ active: radarFilter === 'all' }" @click="radarFilter = 'all'">All {{ radarCounts.all }}</button>
-          <button class="radar-filter-btn" :class="{ active: radarFilter === 'tradable' }" @click="radarFilter = 'tradable'">Tradable {{ radarCounts.tradable }}</button>
-          <button class="radar-filter-btn" :class="{ active: radarFilter === 'blocked' }" @click="radarFilter = 'blocked'">Blocked {{ radarCounts.blocked }}</button>
-          <button class="radar-filter-btn" :class="{ active: radarFilter === 'veto' }" @click="radarFilter = 'veto'">AI Veto {{ radarCounts.veto }}</button>
-        </div>
-        <div class="radar-search-wrap">
-          <input
-            v-model="radarSearch"
-            class="radar-search"
-            type="text"
-            placeholder="🔍 Search coin…"
-            spellcheck="false"
-          />
-        </div>
-        <div class="radar-audit-mini" title="24-hour history, not current live status">
-          <span class="audit-label">Audit 24h</span>
-          <span>BUY {{ radarAudit.buy_signals_24h || 0 }}</span>
-          <span>Blocked {{ radarAudit.buy_blocked_total_24h || 0 }}</span>
-          <span>Veto {{ radarAudit.buy_blocked_ai_veto_24h || 0 }}</span>
-        </div>
-      </div>
-      <div class="radar-scroll-wrap">
-        <!-- Held coins group -->
-        <template v-if="radarDisplayPairs.held.length">
-          <div class="radar-group-label">📦 Held ({{ radarDisplayPairs.held.length }})</div>
-          <div class="radar-list">
-            <div
-              v-for="pair in radarDisplayPairs.held"
-              :key="pair.pair"
-              class="radar-item radar-held"
-              :class="{ 'active-radar': chartModalPair === pair.pair }"
-              :style="heatmapStyle(pair)"
-              :title="formatPair(pair.pair) + ' [HELD] · click = chart, right-click = detail'"
-              @click="onRadarClick(pair)"
-              @contextmenu="onRadarRightClick($event, pair)"
-            >
-              <span class="ri-name">
-                {{ formatPair(pair.pair) }}
-                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
-                <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
-              </span>
-            </div>
-          </div>
-        </template>
-
-        <!-- Other coins group -->
-        <template v-if="radarDisplayPairs.others.length">
-          <div v-if="radarDisplayPairs.held.length" class="radar-group-label">📡 Radar ({{ radarDisplayPairs.others.length }})</div>
-          <div class="radar-list">
-            <div
-              v-for="pair in radarDisplayPairs.others"
-              :key="pair.pair"
-              class="radar-item"
-              :class="{ 'active-radar': chartModalPair === pair.pair }"
-              :style="heatmapStyle(pair)"
-              :title="formatPair(pair.pair) + ' · ' + recommendationOf(pair) + ' · S' + (pair.score||0).toFixed(0) + (pair.ai_veto ? ' · AI VETO' : '') + (pair.tradable === false ? ' · BLOCKED' : '') + ' · click = chart, right-click = detail'"
-              @click="onRadarClick(pair)"
-              @contextmenu="onRadarRightClick($event, pair)"
-            >
-              <span class="ri-name">
-                {{ formatPair(pair.pair) }}
-                <span v-if="pair.pair.toUpperCase() === stats.regime_leader.toUpperCase()" class="crown-micro">👑</span>
-                <span v-if="pair.ai_veto" class="ri-veto-dot">!</span>
-              </span>
-            </div>
-          </div>
-        </template>
-
-        <div v-if="radarSearch && !radarDisplayPairs.held.length && !radarDisplayPairs.others.length" class="radar-empty">
-          No coin matches "{{ radarSearch }}"
-        </div>
-      </div>
-
-      <!-- Chart Modal -->
-      <div v-if="showChartModal" class="chart-modal-overlay" @click.self="showChartModal = false">
-        <div class="chart-modal">
-          <div class="chart-modal-header">
-            <span class="chart-modal-title">{{ (chartModalPair || '').replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase() }} / {{ (stats.btc_price && stats.btc_price < 500000) ? 'USDT' : 'IDR' }}</span>
-            <button class="chart-modal-close" @click="showChartModal = false">✕</button>
-          </div>
-          <div class="chart-modal-body">
-            <ChartPanel :forcePair="chartModalPair" />
-          </div>
-        </div>
-      </div>
     </div>
-
-    <RadarDetailModal
-      v-if="showRadarDetail"
-      :show="showRadarDetail"
-      :pair="radarDetailPair"
-      :regimeLeader="stats.regime_leader"
-      :onClose="closeRadarDetail"
-      :onDeepAnalysis="openAiFromDetail"
-    />
 
     <AiAnalysisModal
       v-if="showAiModal"
       :show="showAiModal"
-      :pair="selectedPair"
+      :pair="selectedPairData"
       :onClose="closeAiModal"
       :fetchInsight="fetchAiInsight"
     />
@@ -299,8 +227,6 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTradeStore } from '../stores/trade'
 import AiAnalysisModal from './AiAnalysisModal.vue'
-import RadarDetailModal from './RadarDetailModal.vue'
-import ChartPanel from './ChartPanel.vue'
 
 let echarts = null
 let chartInitialized = false
@@ -311,11 +237,11 @@ async function initializeECharts() {
   try {
     const echartsCore = await import('echarts/core')
     const { LineChart } = await import('echarts/charts')
-    const { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } = await import('echarts/components')
+    const { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, DataZoomComponent } = await import('echarts/components')
     const { CanvasRenderer } = await import('echarts/renderers')
     
     echarts = echartsCore
-    echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, CanvasRenderer])
+    echarts.use([LineChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer])
     chartInitialized = true
   } catch (err) {
     console.error('Failed to load ECharts:', err)
@@ -328,10 +254,40 @@ const store = useTradeStore()
 const { getAuthHeaders } = useAuth()
 const stats = computed(() => store.stats)
 
+const activeContributions = computed(() => {
+  const activePairs = store.positions.map(p => p.pair.toLowerCase());
+  
+  const activeMap = {};
+  store.positions.forEach(p => {
+    activeMap[p.pair.toLowerCase()] = { pair: p.pair, pnl: Number(p.unrealized_pnl_quote || 0), trades: 0 };
+  });
+
+  if (stats.value?.asset_contributions) {
+    stats.value.asset_contributions.forEach(a => {
+      const p = a.pair.toLowerCase();
+      if (activePairs.includes(p)) {
+        activeMap[p] = {
+          pair: a.pair,
+          pnl: activeMap[p].pnl + a.pnl, // Realized + Unrealized
+          trades: a.trades
+        };
+      }
+    });
+  }
+
+  return Object.values(activeMap);
+});
+
+const otherContributions = computed(() => {
+  if (!stats.value?.asset_contributions) return [];
+  const activePairs = store.positions.map(p => p.pair.toLowerCase());
+  return stats.value.asset_contributions.filter(a => !activePairs.includes(a.pair.toLowerCase()));
+});
+
+
 const radarFilter = ref('all')
 const radarSearch = ref('')
-const showChartModal = ref(false)
-const chartModalPair = ref('')
+
 const radarAudit = ref({
   buy_signals_24h: 0,
   buy_blocked_total_24h: 0,
@@ -343,7 +299,7 @@ const radarAudit = ref({
 let radarAuditIntervalId = null
 
 const tileStyle = (pnl) => {
-  if (pnl === 0) return { background: '#161b22', color: '#8b949e' }
+  if (pnl === 0) return { background: 'var(--bg-surface)', color: 'var(--text-secondary)' }
   const isPos = pnl > 0
   const absP = Math.abs(pnl)
   // Scale opacity between 0.1 and 0.8 based on PnL (cap at 1M for max intensity)
@@ -353,7 +309,7 @@ const tileStyle = (pnl) => {
   return {
     background: color,
     border: `1px solid ${borderColor}`,
-    color: opacity > 0.4 ? '#fff' : '#e6edf3'
+    color: opacity > 0.4 ? '#fff' : 'var(--text-primary)'
   }
 }
 
@@ -370,11 +326,7 @@ const historicalPnl = ref([])
 
 async function setTimeframe(tf) {
   timeframe.value = tf
-  if (tf === 'live') {
-    scheduleUpdate()
-  } else {
-    await fetchPnlHistory()
-  }
+  await fetchPnlHistory()
 }
 
 async function fetchPnlHistory() {
@@ -397,6 +349,12 @@ async function fetchPnlHistory() {
       const data = await res.json()
       // Data format: [{time, pnl}, ...]
       historicalPnl.value = data
+      
+      // If live, populate the store so it shows immediately on refresh
+      if (tf === 'live') {
+        store.pnlHistory = data
+      }
+      
       scheduleUpdate()
     }
   } catch (e) {
@@ -414,27 +372,26 @@ const showRadarDetail = ref(false)
 const radarDetailPair = ref(null)
 
 function onRadarClick(pairObj) {
-  // Enrich data if coming from heatmap (which only has {pair: '...'})
   let fullData = pairObj
   if (store.radarPairs && store.radarPairs.length > 0) {
     const match = store.radarPairs.find(p => p.pair === pairObj.pair)
     if (match) fullData = { ...match, ...pairObj }
   }
-  // Right-click (or Ctrl+click) -> open AI detail; normal click -> chart
-  chartModalPair.value = fullData.pair
-  showChartModal.value = true
+  selectedPairData.value = fullData
+  selectedPair.value = fullData.pair
+  showAiModal.value = true
 }
 
 function onRadarRightClick(e, pairObj) {
-  e.preventDefault()
+  if (e && e.preventDefault) e.preventDefault()
   let fullData = pairObj
   if (store.radarPairs && store.radarPairs.length > 0) {
     const match = store.radarPairs.find(p => p.pair === pairObj.pair)
     if (match) fullData = { ...match, ...pairObj }
   }
-  radarDetailPair.value = fullData
-  showRadarDetail.value = true
-  store.socket.emit('watch_pair', { pair: fullData.pair })
+  selectedPairData.value = fullData
+  selectedPair.value = fullData.pair
+  showAiModal.value = true
 }
 
 function closeRadarDetail() {
@@ -455,9 +412,9 @@ function closeAiModal() {
   selectedPair.value = null
 }
 
-async function fetchAiInsight(pair) {
+async function fetchAiInsight(pair, tf = null) {
   if (!pair || !pair.pair) return 'No pair selected.'
-  
+
   const pairName = pair.pair.toLowerCase()
   const backendUrl = import.meta.env.DEV
     ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
@@ -467,7 +424,8 @@ async function fetchAiInsight(pair) {
     // Optional: Trigger fresh analysis
     fetch(`${backendUrl}/api/analyze/${pairName}`, { headers: getAuthHeaders() }).catch(() => {})
 
-    const res = await fetch(`${backendUrl}/api/reasoning/${pairName}`, { headers: getAuthHeaders() })
+    const query = tf ? `?tf=${tf}` : ''
+    const res = await fetch(`${backendUrl}/api/reasoning/${pairName}${query}`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       return data.reasoning || 'No AI intelligence vectors available for this sector currently.'
@@ -475,7 +433,7 @@ async function fetchAiInsight(pair) {
   } catch (e) {
     console.error('Failed to fetch AI insight:', e)
   }
-  return 'Failed to fetch Oracle intelligence data.'
+  return 'Failed to fetch intelligence data.'
 }
 
 const regimeClass = computed(() => {
@@ -517,7 +475,6 @@ const formattedVelocity = computed(() => {
 })
 
 const isUnblocking = ref(false)
-const isTogglingGates = ref(false)
 
 async function toggleHarvestMode() {
   const current = stats.value?.session_mode
@@ -553,34 +510,7 @@ async function toggleBuyGates() {
   }
 }
 
-async function handleToggleLooseGates() {
-  if (isTogglingGates.value) return
-  const current = stats.value?.dry_run_loose_gates ?? false
-  const action = current ? 'deactivate' : 'activate'
-  if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} LOOSE GATES? ${current ? 'Strict entry filters will be reactivated.' : 'All strict entry filters will be bypassed.'}`)) return
-  isTogglingGates.value = true
-  try {
-    const backendUrl = import.meta.env.DEV
-      ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
-      : window.location.origin
-    const res = await fetch(`${backendUrl}/api/bot/toggle-loose-gates`, {
-      method: 'POST',
-      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-      credentials: 'include',
-    })
-    const data = await res.json()
-    if (data.success) {
-      store.stats.dry_run_loose_gates = data.loose_gates
-    } else {
-      alert('Failed to toggle loose gates.')
-    }
-  } catch (err) {
-    console.error('Toggle loose gates error:', err)
-    alert('Error while toggling loose gates.')
-  } finally {
-    isTogglingGates.value = false
-  }
-}
+
 
 async function handleUnblock() {
   if (isUnblocking.value) return
@@ -740,7 +670,7 @@ function scoreColor(s) {
   if (s >= 80) return '#3fb950'
   if (s <= 20) return '#f85149'
   if (s > 50) return '#58a6ff'
-  return '#8b949e'
+  return 'var(--text-secondary)'
 }
 
 const sentimentClass = computed(() => {
@@ -809,6 +739,35 @@ function heatmapStyle(pair) {
   const lit  = Math.round(8  + dist * 10)
   return { background: `hsla(40, ${sat}%, ${lit}%, 0.85)` }
 }
+
+function getCoinDepth(pair) {
+  if (!pair) return null
+  const pName = pair.toLowerCase()
+  const depth = store.marketDepths[pName]
+  if (!depth) return null
+  
+  const bidDepth = depth[0] || 0
+  const askDepth = depth[1] || 0
+  const total = bidDepth + askDepth
+  if (total === 0) return null
+
+  return {
+    bidPct: ((bidDepth / total) * 100).toFixed(1),
+    askPct: ((askDepth / total) * 100).toFixed(1),
+    bidVol: bidDepth,
+    askVol: askDepth
+  }
+}
+
+// All coins for heatmap — NO filtering, directly from radar data
+const allHeatmapCoins = computed(() => {
+  const data = Array.isArray(store.radarPairs) ? store.radarPairs : []
+  const heldSet = new Set((store.positions || []).map(p => (p.pair || '').toLowerCase()))
+  // Exclude coins already shown in active positions
+  const others = data.filter(p => !heldSet.has((p.pair || '').toLowerCase()))
+  // Sort by score descending
+  return [...others].sort((a, b) => (b.score || 0) - (a.score || 0))
+})
 
 function formatPair(pair) {
   if (!pair) return ''
@@ -893,12 +852,31 @@ function buildChartOption() {
 function getCommonOption(times, values, lineColor, label) {
   return {
     backgroundColor: 'transparent',
-    grid: { top: 40, right: 30, bottom: 30, left: 70 },
+    grid: { top: 40, right: 30, bottom: 50, left: 70 },
+    dataZoom: [
+      {
+        type: 'inside',
+        xAxisIndex: 0,
+        filterMode: 'filter'
+      },
+      {
+        type: 'slider',
+        xAxisIndex: 0,
+        height: 12,
+        bottom: 10,
+        borderColor: 'transparent',
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        fillerColor: 'rgba(255,255,255,0.1)',
+        handleStyle: { color: '#8b949e' },
+        textStyle: { color: '#8b949e', fontSize: 10 }
+      }
+    ],
     tooltip: {
       trigger: 'axis',
+      axisPointer: { type: 'cross', lineStyle: { color: '#8b949e', type: 'dashed' } },
       backgroundColor: '#1c2128',
       borderColor: '#30363d',
-      textStyle: { color: '#e6edf3', fontSize: 12 },
+      textStyle: { color: '#c9d1d9', fontSize: 12 },
       formatter: (params) => {
         const p = params[0]
         const n = Number(p.value)
@@ -926,7 +904,7 @@ function getCommonOption(times, values, lineColor, label) {
       type: 'value',
       scale: true,
       axisLine: { show: false },
-      splitLine: { lineStyle: { color: '#21262d', type: 'dashed' } },
+      splitLine: { lineStyle: { color: '#30363d', type: 'dashed' } },
       axisLabel: {
         color: '#8b949e',
         fontSize: 10,
@@ -969,7 +947,7 @@ function getCommonOption(times, values, lineColor, label) {
           symbol: 'none',
           lineStyle: { color: '#30363d', type: 'solid', width: 1 },
           data: [{ yAxis: 0 }],
-        } : null,
+        } : undefined,
       },
     ],
   }
@@ -1007,19 +985,24 @@ watch(() => store.connected, (conn) => {
 onMounted(async () => {
   await initializeECharts()
   if (!chartContainer.value || !echarts) return
+  
   chart = echarts.init(chartContainer.value, null, { renderer: 'canvas' })
   chart.setOption(buildChartOption())
 
   resizeObserver = new ResizeObserver(() => {
-    if (!chart) return
-    if (typeof chart.isDisposed === 'function' && chart.isDisposed()) return
-    chart.resize()
+    if (chart) chart.resize()
   })
   resizeObserver.observe(chartContainer.value)
+
+  window.addEventListener('open-radar-chart', (e) => {
+    onRadarClick(e.detail)
+  })
+  window.addEventListener('open-ai-modal', (e) => {
+    onRadarRightClick({ preventDefault: () => {} }, e.detail)
+  })
 })
 
 onUnmounted(() => {
-
   if (radarAuditIntervalId) {
     clearInterval(radarAuditIntervalId)
     radarAuditIntervalId = null
@@ -1042,10 +1025,10 @@ onUnmounted(() => {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background: #161b22;
+  background: var(--bg-surface);
   border-radius: 12px;
   overflow: hidden;
-  border: 1px solid #30363d;
+  border: 1px solid var(--border-trader);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
@@ -1053,8 +1036,8 @@ onUnmounted(() => {
 .kpi-bar {
   display: flex;
   gap: 0;
-  border-bottom: 1px solid #30363d;
-  background: #0d1117;
+  border-bottom: 1px solid var(--border-trader);
+  background: var(--bg-deep);
   flex-shrink: 0;
   flex-wrap: wrap; /* [Senior Fix] Allow wrapping to prevent cutoff on smaller screens */
 }
@@ -1063,14 +1046,14 @@ onUnmounted(() => {
   flex: 1 1 auto; /* Allow items to grow and shrink as needed */
   min-width: 100px; /* Ensure items have a minimum width to keep labels readable */
   padding: 10px 12px;
-  border-right: 1px solid #21262d;
-  border-bottom: 1px solid #21262d; /* Add bottom border for wrapped items */
+  border-right: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light); /* Add bottom border for wrapped items */
 }
 .kpi-item:last-child { border-right: none; }
 
 .kpi-label {
   font-size: 9px;
-  color: #8b949e;
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 1.2px;
   margin-bottom: 4px;
@@ -1080,7 +1063,7 @@ onUnmounted(() => {
 .kpi-value {
   font-size: 15px;
   font-weight: 800;
-  color: #e6edf3;
+  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
@@ -1118,7 +1101,7 @@ onUnmounted(() => {
 }
 .momentum-velocity {
   font-size: 10px;
-  color: #8b949e;
+  color: var(--text-secondary);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
 }
@@ -1161,7 +1144,7 @@ onUnmounted(() => {
   font-weight: 700;
   letter-spacing: 0.5px;
   background: rgba(139, 148, 158, 0.12);
-  color: #8b949e;
+  color: var(--text-secondary);
   border: 1px solid rgba(139, 148, 158, 0.3);
   border-radius: 4px;
   cursor: pointer;
@@ -1191,7 +1174,7 @@ onUnmounted(() => {
   font-weight: 800;
   letter-spacing: 0.5px;
   background: rgba(139, 148, 158, 0.1);
-  color: #8b949e;
+  color: var(--text-secondary);
   border: 1px solid rgba(139, 148, 158, 0.3);
   border-radius: 4px;
   cursor: pointer;
@@ -1207,7 +1190,7 @@ onUnmounted(() => {
 }
 .kpi-toggle-btn:hover:not(:disabled) {
   background: rgba(139, 148, 158, 0.2);
-  color: #e6edf3;
+  color: var(--text-primary);
   border-color: rgba(139, 148, 158, 0.5);
 }
 .kpi-toggle-btn.active:hover:not(:disabled) {
@@ -1228,12 +1211,12 @@ onUnmounted(() => {
 
 .sentiment-bar {
   position: relative;
-  background: #21262d;
+  background: var(--border-light);
   border-radius: 4px;
   height: 16px;
   overflow: hidden;
   margin-top: 4px;
-  border: 1px solid #30363d;
+  border: 1px solid var(--border-trader);
 }
 .sentiment-fill {
   height: 100%;
@@ -1255,16 +1238,23 @@ onUnmounted(() => {
   text-shadow: 0 1px 2px rgba(0,0,0,0.5);
 }
 
-/* Intelligence Panel (Unified Oracle) */
-.intelligence-panel {
+/* Intelligence Panel */
+.panels-container {
   flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 16px;
+}
+
+.intelligence-panel {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   padding: 16px 20px;
   background: linear-gradient(180deg, rgba(163, 113, 247, 0.04) 0%, rgba(13, 17, 23, 0.4) 100%);
   border-top: 1px solid rgba(163, 113, 247, 0.15);
-  min-height: 0;
-  overflow-y: auto;
+  border-bottom: 1px solid rgba(163, 113, 247, 0.15);
 }
 
 .chart-wrap-integrated {
@@ -1272,7 +1262,7 @@ onUnmounted(() => {
   min-height: 290px;
   position: relative;
   margin: 12px 0 20px;
-  background: #0d1117;
+  background: var(--bg-deep);
   border-radius: 12px;
   border: 1px solid rgba(48, 54, 61, 0.8);
   box-shadow: inset 0 2px 10px rgba(0,0,0,0.3);
@@ -1304,8 +1294,8 @@ onUnmounted(() => {
 
 .tf-selector {
   display: flex;
-  background: #0d1117;
-  border: 1px solid #30363d;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-trader);
   border-radius: 6px;
   padding: 2px;
   gap: 2px;
@@ -1314,7 +1304,7 @@ onUnmounted(() => {
 .tf-selector button {
   background: transparent;
   border: none;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 9px;
   font-weight: 800;
   padding: 3px 8px;
@@ -1325,12 +1315,12 @@ onUnmounted(() => {
 }
 
 .tf-selector button:hover {
-  color: #e6edf3;
+  color: var(--text-primary);
   background: rgba(255, 255, 255, 0.05);
 }
 
 .tf-selector button.active {
-  background: #30363d;
+  background: var(--border-trader);
   color: #58a6ff;
 }
 
@@ -1341,7 +1331,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 13px;
   pointer-events: none;
   gap: 12px;
@@ -1396,9 +1386,9 @@ onUnmounted(() => {
   border-radius: 6px;
   font-size: 10px;
   font-weight: 800;
-  background: #161b22;
-  border: 1px solid #30363d;
-  color: #8b949e;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-trader);
+  color: var(--text-secondary);
 }
 
 .intel-chip.bullish, .intel-chip.up { 
@@ -1420,9 +1410,9 @@ onUnmounted(() => {
   font-weight: 800;
   letter-spacing: 0.05em;
   cursor: default;
-  border: 1px solid #30363d;
-  background: #161b22;
-  color: #8b949e;
+  border: 1px solid var(--border-trader);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
 }
 .awareness-normal           { background: rgba(56,139,253,0.1); color:#58a6ff; border-color:rgba(56,139,253,0.3); }
 .awareness-momentum-chase   { background: rgba(63,185,80,0.15); color:#3fb950; border-color:rgba(63,185,80,0.4); }
@@ -1442,7 +1432,7 @@ onUnmounted(() => {
 }
 
 .intel-reasoning.report-style {
-  color: #e6edf3;
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.4;
   white-space: pre-line;
@@ -1497,7 +1487,7 @@ onUnmounted(() => {
 }
 
 .action-text {
-  color: #e6edf3;
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.4;
@@ -1510,7 +1500,7 @@ onUnmounted(() => {
   gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid #30363d;
+  border-top: 1px solid var(--border-trader);
 }
 
 .pulse-card {
@@ -1522,14 +1512,14 @@ onUnmounted(() => {
 .p-label {
   font-size: 9px;
   font-weight: 800;
-  color: #8b949e;
+  color: var(--text-secondary);
   letter-spacing: 1px;
 }
 
 .p-value {
   font-size: 14px;
   font-weight: 800;
-  color: #e6edf3;
+  color: var(--text-primary);
   font-family: 'JetBrains Mono', monospace;
 }
 
@@ -1563,13 +1553,13 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 3px;
-  max-height: 200px;
+  max-height: 420px;
   overflow-y: auto;
   padding-bottom: 8px;
 }
 
 .heatmap-grid::-webkit-scrollbar { width: 3px; }
-.heatmap-grid::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+.heatmap-grid::-webkit-scrollbar-thumb { background: var(--border-trader); border-radius: 10px; }
 
 .heatmap-tile {
   flex: 0 0 calc(20% - 3px); /* 5 tiles per row for premium spacing */
@@ -1611,11 +1601,65 @@ onUnmounted(() => {
   opacity: 0.85;
 }
 
+.tile-score {
+  display: block;
+  font-size: 7px;
+  font-weight: 700;
+  margin-top: 1px;
+  line-height: 1;
+  opacity: 0.7;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.heatmap-count {
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.heatmap-sub {
+  font-size: 10px;
+  opacity: 0.5;
+  font-weight: 400;
+}
+
+.heatmap-tile-active {
+  border: 1px solid rgba(163, 113, 247, 0.3) !important;
+}
+
+/* Depth bar: thin bar at bottom of tile showing bid/ask pressure */
+.depth-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  display: flex;
+  border-radius: 0 0 5px 5px;
+  overflow: hidden;
+}
+
+.depth-bid {
+  height: 100%;
+  background: rgba(63, 185, 80, 0.7);
+  transition: width 0.5s ease;
+}
+
+.depth-ask {
+  height: 100%;
+  background: rgba(248, 81, 73, 0.7);
+  transition: width 0.5s ease;
+}
+
+.heatmap-tile {
+  position: relative; /* needed for depth-bar absolute positioning */
+}
+
 .intel-loading {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 12px;
   font-style: italic;
 }
@@ -1647,8 +1691,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   max-height: 240px;
-  border-top: 1px solid #30363d;
-  background: #0d1117;
+  border-top: 1px solid var(--border-trader);
+  background: var(--bg-deep);
   padding-bottom: 4px;
 }
 
@@ -1661,23 +1705,23 @@ onUnmounted(() => {
   margin: 0 14px 8px;
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid #30363d;
-  background: #161b22;
+  border: 1px solid var(--border-trader);
+  background: var(--bg-surface);
   font-size: 10px;
   font-weight: 700;
   transition: border-color 0.3s ease, background 0.3s ease;
 }
 .btc-bar-strong {
   border-color: rgba(63, 185, 80, 0.4);
-  background: linear-gradient(90deg, rgba(63, 185, 80, 0.06) 0%, #161b22 100%);
+  background: linear-gradient(90deg, rgba(63, 185, 80, 0.06) 0%, var(--bg-surface) 100%);
 }
 .btc-bar-weak {
   border-color: rgba(210, 153, 34, 0.4);
-  background: linear-gradient(90deg, rgba(210, 153, 34, 0.06) 0%, #161b22 100%);
+  background: linear-gradient(90deg, rgba(210, 153, 34, 0.06) 0%, var(--bg-surface) 100%);
 }
 .btc-bar-crash {
   border-color: rgba(248, 81, 73, 0.5);
-  background: linear-gradient(90deg, rgba(248, 81, 73, 0.08) 0%, #161b22 100%);
+  background: linear-gradient(90deg, rgba(248, 81, 73, 0.08) 0%, var(--bg-surface) 100%);
   animation: btc-crash-pulse 1.5s ease-in-out infinite alternate;
 }
 @keyframes btc-crash-pulse {
@@ -1695,11 +1739,11 @@ onUnmounted(() => {
   color: #f0a500;
 }
 .btc-label {
-  color: #8b949e;
+  color: var(--text-secondary);
   letter-spacing: 0.5px;
 }
 .btc-price {
-  color: #e6edf3;
+  color: var(--text-primary);
   font-size: 11px;
 }
 .btc-bar-mid {
@@ -1725,7 +1769,7 @@ onUnmounted(() => {
 }
 .chip-up      { color: #3fb950; background: rgba(63, 185, 80, 0.12); }
 .chip-dn      { color: #f85149; background: rgba(248, 81, 73, 0.12); }
-.chip-neutral { color: #8b949e; background: rgba(139, 148, 158, 0.1); }
+.chip-neutral { color: var(--text-secondary); background: rgba(139, 148, 158, 0.1); }
 .btc-bar-right {
   display: flex;
   align-items: center;
@@ -1745,7 +1789,7 @@ onUnmounted(() => {
 .badge-crash  { background: rgba(248, 81, 73, 0.15);  color: #f85149; border: 1px solid rgba(248, 81, 73, 0.5);  }
 .btc-score-val {
   font-size: 9px;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-weight: 800;
 }
 .section-label {
@@ -1754,7 +1798,7 @@ onUnmounted(() => {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 
 .radar-header-row {
@@ -1785,9 +1829,9 @@ onUnmounted(() => {
 }
 
 .radar-filter-btn {
-  border: 1px solid #30363d;
-  background: #161b22;
-  color: #8b949e;
+  border: 1px solid var(--border-trader);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
   font-size: 9px;
   font-weight: 800;
   padding: 3px 8px;
@@ -1797,7 +1841,7 @@ onUnmounted(() => {
 }
 
 .radar-filter-btn:hover {
-  color: #e6edf3;
+  color: var(--text-primary);
   border-color: #58a6ff;
 }
 
@@ -1812,7 +1856,7 @@ onUnmounted(() => {
   gap: 8px;
   font-size: 9px;
   font-weight: 800;
-  color: #8b949e;
+  color: var(--text-secondary);
   white-space: nowrap;
 }
 
@@ -1832,7 +1876,7 @@ onUnmounted(() => {
 /* Custom scrollbar for radar */
 .radar-scroll-wrap::-webkit-scrollbar { width: 4px; }
 .radar-scroll-wrap::-webkit-scrollbar-track { background: transparent; }
-.radar-scroll-wrap::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+.radar-scroll-wrap::-webkit-scrollbar-thumb { background: var(--border-trader); border-radius: 10px; }
 .radar-scroll-wrap::-webkit-scrollbar-thumb:hover { background: #a371f7; }
 
 /* === Radar heatmap grid (20 col × N row) === */
@@ -1906,10 +1950,10 @@ onUnmounted(() => {
 .radar-search-wrap { padding: 4px 10px 2px; }
 .radar-search {
   width: 100%;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-trader);
   border-radius: 5px;
-  color: #e6edf3;
+  color: var(--text-primary);
   font-size: 11px;
   padding: 4px 8px;
   outline: none;
@@ -1923,63 +1967,26 @@ onUnmounted(() => {
   padding: 4px 10px 2px;
   font-size: 9px;
   font-weight: 800;
-  color: #8b949e;
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 .radar-held { outline: 1px solid rgba(88,166,255,0.4); }
 
-.radar-empty { padding: 12px 10px; font-size: 11px; color: #6e7681; text-align: center; }
-
-/* Chart Modal */
-.chart-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.65);
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.radar-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
-.chart-modal {
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 10px;
-  width: min(92vw, 860px);
-  height: min(88vh, 620px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
-}
-.chart-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid #21262d;
-  flex-shrink: 0;
-}
-.chart-modal-title { font-size: 14px; font-weight: 800; color: #e6edf3; }
-.chart-modal-close {
-  background: transparent;
-  border: none;
-  color: #8b949e;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.chart-modal-close:hover { background: #21262d; color: #e6edf3; }
-.chart-modal-body { flex: 1; min-height: 0; overflow: hidden; }
 
 .radar-trend { font-size: 7.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; }
 .trend-up   { color: #3fb950; }
 .trend-down { color: #f85149; }
-.trend-neutral { color: #8b949e; }
-.radar-prob { 
-  color: #fff; 
-  font-size: 9px; 
+.trend-neutral { color: var(--text-secondary); }
+.radar-prob {
+  color: #fff;
+  font-size: 9px;
   font-weight: 900;
   background: #a371f7;
   padding: 1px 5px;
@@ -1999,8 +2006,8 @@ onUnmounted(() => {
   }
   .kpi-item {
     padding: 10px;
-    border-right: 1px solid #21262d;
-    border-bottom: 1px solid #21262d;
+    border-right: 1px solid var(--border-light);
+    border-bottom: 1px solid var(--border-light);
   }
   .kpi-item:nth-child(2n) { border-right: none; }
   

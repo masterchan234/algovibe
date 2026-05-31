@@ -139,15 +139,6 @@ class BrainInferenceService:
         # Cache per-pair untuk compute_adaptive_thresholds (TTL 5 menit).
         # Menghindari O(n²) recalculation tiap tick untuk 200+ pair.
         self._adaptive_cache: dict = {}  # {pair: (timestamp, thresholds|None)}
-        # Cache trend filter 15m (TTL 2 menit) agar tidak membanjiri API.
-        self._trend15_cache: dict = {}  # {pair: (timestamp, passed, detail)}
-        self._trend15_stats = {
-            "window_start": time.time(),
-            "checked": 0,
-            "passed": 0,
-            "blocked": 0,
-            "errors": 0,
-        }
 
     async def start(self) -> None:
         self._running = True
@@ -507,94 +498,6 @@ class BrainInferenceService:
             out.append((float(v) * alpha) + (out[-1] * (1.0 - alpha)))
         return out
 
-    def _passes_15m_trend_filter(self, pair: str):
-        now = time.time()
-        cached = self._trend15_cache.get(pair)
-        if cached and (now - cached[0]) < 120:
-            return cached[1], cached[2]
-
-        passed = False
-        detail = "insufficient_data"
-        try:
-            # Get velocity from latest tickers if available
-            ticker = self._tickers.get(pair, {})
-            last_price = float(ticker.get('last', 0))
-            
-            # Use technicals to get velocity for bypass
-            hist = list(self._history.get(pair, []))
-            velocity = 0.0
-            if len(hist) >= 5:
-                # Simple velocity calculation: (now - prev) / prev * 100
-                prev = float(hist[-2])
-                velocity = (last_price - prev) / prev * 100.0 if prev > 0 else 0.0
-
-            # Momentum Bypass: If price is accelerating fast, skip strict trend checks
-            if velocity > 0.25:
-                self._trend15_cache[pair] = (now, True, f"momentum_bypass(vel={velocity:.2f}%)")
-                return True, f"momentum_bypass(vel={velocity:.2f}%)"
-
-            candles = self._adapter.fetch_ohlc(pair, tf=config.TREND_FILTER_TF_MIN, limit=60)
-            closes = [c["close"] for c in candles if float(c.get("close") or 0) > 0]
-
-            if len(closes) >= 50:
-                ema50 = self._ema(closes, 50)
-                ema50_now = ema50[-1]
-                ema50_prev = ema50[-2] if len(ema50) > 1 else ema50_now
-                last = float(closes[-1])
-                ch_15m = ((last - float(closes[-2])) / float(closes[-2]) * 100.0) if len(closes) >= 2 and closes[-2] > 0 else 0.0
-
-                is_above_ema = last >= (ema50_now * 0.998) # 0.2% tolerance
-                is_ema_rising = ema50_now >= (ema50_prev * 0.999) # Allow flat EMA
-                is_change_ok = ch_15m >= (config.TREND_FILTER_MIN_CHANGE_PCT - 0.1)
-
-                passed = bool(is_above_ema and is_ema_rising and is_change_ok)
-                detail = (
-                    f"last={last:.8f}, ema50={ema50_now:.8f}, "
-                    f"ema_slope={'up' if is_ema_rising else 'down'}, ch15={ch_15m:.2f}%"
-                )
-        except Exception as exc:
-            detail = f"error={exc}"
-
-        self._trend15_cache[pair] = (now, passed, detail)
-        return passed, detail
-
-    def _record_trend15_stat(self, pair: str, passed: bool, detail: str):
-        now = time.time()
-        stats = self._trend15_stats
-        stats["checked"] += 1
-
-        if detail.startswith("error="):
-            stats["errors"] += 1
-            if stats["errors"] <= 3:
-                logger.warning("[brain] [WARN] TREND15 ERROR: %s (%s)", pair, detail)
-
-        if passed:
-            stats["passed"] += 1
-        else:
-            stats["blocked"] += 1
-
-        window_sec = max(30, int(getattr(config, "TREND_FILTER_STATS_WINDOW_SEC", 300)))
-        elapsed = now - stats["window_start"]
-        if elapsed >= window_sec:
-            checked = max(1, stats["checked"])
-            pass_rate = (stats["passed"] / checked) * 100.0
-            block_rate = (stats["blocked"] / checked) * 100.0
-            logger.info(
-                "[BRAIN] TREND15 STATS %ds | checked=%d pass=%d (%.1f%%) block=%d (%.1f%%) error=%d",
-                int(elapsed),
-                stats["checked"],
-                stats["passed"], pass_rate,
-                stats["blocked"], block_rate,
-                stats["errors"],
-            )
-            self._trend15_stats = {
-                "window_start": now,
-                "checked": 0,
-                "passed": 0,
-                "blocked": 0,
-                "errors": 0,
-            }
-
     def _scan_for_signals(self, ranked: list):
         """Evaluate ranked candidates for BUY signals and emit to Executive-Core."""
         if not ranked:
@@ -684,52 +587,19 @@ class BrainInferenceService:
 
                 print(f"[DEBUG-BRAIN] {pair} Gate Result: {gate}", flush=True)
 
-                # ── LLM Entry Decision (Hybrid Mode) ──────────────────────────────────────
-                # Build tech dict lengkap dari enriched untuk dikirim ke LLM.
-                # LLM menerima 3 indikator utama HFT + signal teknikal + secondary indicators.
-                try:
-                    _tech_base = dict(enriched.get('tech', {}))
-                    _tech_sig  = enriched.get('tech_sig', {})
-
-                    # Inject signal teknikal dari derive_trade_signal
-                    _tech_base['signal']          = enriched.get('signal_verdict', 'N/A')
-                    _tech_base['verdict']         = enriched.get('signal_verdict', 'N/A')
-                    _tech_base['tech_confidence'] = float(_tech_sig.get('confidence', 0))
-                    _tech_base['sell_score']      = float(_tech_sig.get('sell_score', 0))
-
-                    # Inject buy_pressure dari imbalance ratio (bid/ask ratio → % bid dari total depth)
-                    # imbalance = bid/ask → buy_pressure% = imbalance / (imbalance + 1) * 100
-                    _imb = float(r.get('imbalance', enriched.get('imbalance_ratio', 1.0)) or 1.0)
-                    _tech_base['buy_pressure'] = round(_imb / (_imb + 1.0) * 100.0, 1)
-
-                    llm_decision = self.oracle.request_llm_entry_decision(pair, _tech_base)
-                except Exception as lme:
-                    logger.error('[LLM-ENTRY] %s error: %s', pair, lme)
-                    llm_decision = 'HOLD'
-
-                if llm_decision != 'BUY':
-                    logger.info(
-                        '[LLM-ENTRY] [BLOCK] %s decision=%s vel=%.2f%% vr=%.2f bp=%.1f%% sig=%s',
-                        pair, llm_decision,
-                        float(_tech_base.get('velocity', 0) or 0),
-                        float(_tech_base.get('volume_ratio', 1) or 1),
-                        float(_tech_base.get('buy_pressure', 50)),
-                        _tech_base.get('signal', 'N/A'),
-                    )
-                    # Persist alasan block ke pair_runtime_state agar tampil di dashboard audit
-                    db.upsert_pair_runtime_state(
-                        pair.lower(),
-                        gate_skip_reason=f'LLM_ENTRY_BLOCK:{llm_decision}',
-                        gate_ts=datetime.now(),
-                    )
-                    continue
-
+                # ── LLM Entry Decision (Removed per user request) ──────────────────────────────────────
+                # Skip LLM and proceed with pure technical execution
+                _tech_base = dict(enriched.get('tech', {}))
+                _tech_sig  = enriched.get('tech_sig', {})
+                _tech_base['signal']          = enriched.get('signal_verdict', 'N/A')
+                _tech_base['tech_confidence'] = float(_tech_sig.get('confidence', 0))
+                
                 logger.info(
-                    '[LLM-ENTRY] [PASS] %s BUY confirmed — vel=%.2f%% vr=%.2f bp=%.1f%% sig=%s conf=%.1f%%',
+                    '[TECHNICAL-ENTRY] [PASS] %s BUY confirmed — vel=%.2f%% vr=%.2f bp=%.1f%% sig=%s conf=%.1f%%',
                     pair,
                     float(_tech_base.get('velocity', 0) or 0),
                     float(_tech_base.get('volume_ratio', 1) or 1),
-                    float(_tech_base.get('buy_pressure', 50)),
+                    float(enriched.get('buy_pressure', 50)),
                     _tech_base.get('signal', 'N/A'),
                     float(_tech_base.get('tech_confidence', 0)),
                 )
@@ -747,12 +617,7 @@ class BrainInferenceService:
                     gate_conf = float(gate.get('total_confidence', 0) or 0.0)
                     tq_prob = float(enriched.get('tq_prob', 0.0) or 0.0)
 
-                    # 15m trend guard: only allow entries when higher-timeframe trend supports it.
-                    trend_passed, trend_detail = self._passes_15m_trend_filter(pair)
-                    self._record_trend15_stat(pair, trend_passed, trend_detail)
-                    if not trend_passed:
-                        logger.info("[BRAIN] TREND15 FILTER: %s blocked (%s)", pair, trend_detail)
-                        continue
+
 
                     # FLOW GUARD (REMOVED) - Max momentum responsiveness
 

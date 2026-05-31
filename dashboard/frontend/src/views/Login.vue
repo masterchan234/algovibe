@@ -1,6 +1,10 @@
 <template>
-  <div class="blog-portal">
-    <PortalHeader />
+  <div class="login-page">
+    <div class="stars-bg"></div>
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+
+    <PortalHeader @open-login="openAuthModal" />
 
     <div v-if="selectedArticle" class="article-overlay" @click.self="closeArticle()">
       <div class="article-modal">
@@ -15,7 +19,7 @@
           </nav>
           <div class="art-cat">{{ selectedArticle.category }}</div>
           <h2 class="reader-title">{{ selectedArticle.title }}</h2>
-          <div class="art-meta">{{ formatDate(selectedArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+          <div class="art-meta">{{ formatDate(selectedArticle.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
         </div>
         <div ref="articleBodyRef" class="reader-body">
           <div class="reader-content">
@@ -75,7 +79,7 @@
             <p class="art-cat">{{ heroArticle.category }}</p>
             <h2 id="featured-story-title">{{ heroArticle.title }}</h2>
             <p class="feature-excerpt">{{ stripMarkdown(heroArticle.excerpt) }}</p>
-            <div class="art-meta">{{ formatDate(heroArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+            <div class="art-meta">{{ formatDate(heroArticle.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
           </article>
           <article v-else class="featured-story empty-story">
             <h2 id="featured-story-title">Featured article is being prepared</h2>
@@ -98,7 +102,7 @@
               <div class="art-cat">{{ art.category }}</div>
               <h3 class="art-title">{{ art.title }}</h3>
               <p class="art-excerpt">{{ stripMarkdown(art.excerpt) }}</p>
-              <div class="art-meta">{{ formatDate(art.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+              <div class="art-meta">{{ formatDate(art.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
             </article>
           </div>
         </section>
@@ -317,6 +321,10 @@ const password = ref('')
 const error = ref('')
 const loading = ref(false)
 const activeTab = ref(null)
+
+function openAuthModal() {
+  activeTab.value = 'auth'
+}
 const latency = ref(0)
 const dbState = ref('SYNCING')
 const currentTime = ref('')
@@ -428,6 +436,14 @@ watch(() => landingData.articles, () => {
 watch(() => route.query.showAuth, (val) => {
   if (val === 'true') {
     activeTab.value = 'auth'
+  }
+})
+
+watch(activeTab, (val) => {
+  if (val === null && route.query.showAuth === 'true') {
+    const query = { ...route.query }
+    delete query.showAuth
+    router.replace({ query }).catch(() => {})
   }
 })
 
@@ -686,7 +702,7 @@ function renderStructuredData() {
         url: `${baseUrl}/articles/${article.slug}`,
         author: {
           '@type': 'Organization',
-          name: 'Algovibe Oracle',
+          name: 'Algovibe Analytics',
         },
       })),
     },
@@ -735,7 +751,7 @@ async function handleLogin() {
     const success = await login(username.value, password.value)
     if (success) {
       await syncModeFromBackend()
-      router.push('/mode-select')
+      router.push('/dashboard')
     } else {
       error.value = 'ACCESS_DENIED'
     }
@@ -967,7 +983,45 @@ function stripMarkdown(text) {
 }
 </script>
 
+
 <style scoped>
+.login-page {
+  min-height: 100vh;
+  background: var(--bg-main, #0b0e14);
+  color: var(--text-primary, #ffffff);
+  position: relative;
+  overflow-x: hidden;
+}
+.stars-bg {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: 
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.05) 100%, transparent),
+    radial-gradient(1px 1px at 40% 60%, rgba(255,255,255,0.05) 100%, transparent),
+    radial-gradient(2px 2px at 80% 30%, rgba(255,255,255,0.02) 100%, transparent);
+  background-size: 200px 200px;
+  z-index: 0;
+  pointer-events: none;
+}
+.glow-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  z-index: 0;
+  opacity: 0.15;
+  pointer-events: none;
+}
+.orb-1 {
+  top: -10%; left: -10%;
+  width: 500px; height: 500px;
+  background: rgba(139, 92, 246, 0.4);
+}
+.orb-2 {
+  bottom: -20%; right: -10%;
+  width: 600px; height: 600px;
+  background: rgba(76, 175, 80, 0.2);
+}
+
 .blog-portal {
   width: 100vw;
   height: 100vh;

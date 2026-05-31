@@ -103,7 +103,7 @@ function respond(decision) {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: 8px 12px;
 }
 
 .bec-backdrop {
@@ -119,7 +119,7 @@ function respond(decision) {
   position: relative;
   z-index: 1;
   width: min(480px, 100%);
-  background: #0d1117;
+  background: var(--bg-deep);
   border: 1px solid #f85149;
   border-radius: 14px;
   box-shadow: 0 0 40px rgba(248, 81, 73, 0.3), 0 20px 60px rgba(0, 0, 0, 0.8);
@@ -171,7 +171,7 @@ function respond(decision) {
 
 .bec-subtitle {
   font-size: 10px;
-  color: #8b949e;
+  color: var(--text-secondary);
   letter-spacing: 0.5px;
 }
 
@@ -194,7 +194,7 @@ function respond(decision) {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 1px;
-  color: #8b949e;
+  color: var(--text-secondary);
   text-transform: uppercase;
   padding-top: 2px;
 }
@@ -202,7 +202,7 @@ function respond(decision) {
 .bec-value {
   flex: 1;
   font-size: 13px;
-  color: #e6edf3;
+  color: var(--text-primary);
   word-break: break-word;
 }
 
@@ -219,7 +219,7 @@ function respond(decision) {
 
 .bec-details {
   font-size: 12px;
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 
 .bec-warning {
@@ -246,7 +246,7 @@ function respond(decision) {
   display: flex;
   gap: 12px;
   padding: 16px 20px;
-  border-top: 1px solid #21262d;
+  border-top: 1px solid var(--border-light);
 }
 
 .bec-btn {
@@ -268,7 +268,7 @@ function respond(decision) {
 }
 
 .bec-btn-abort {
-  background: #161b22;
+  background: var(--bg-surface);
   color: #3fb950;
   border: 1px solid #3fb950;
 }

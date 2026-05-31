@@ -86,7 +86,7 @@ def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
                     _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
                 _last = float(p.get('last', 1.0)) or 1.0
                 atr_pct = (_atr / _last) * 100.0
-                _atr_limit = 4.5 if config.DRY_RUN_LOOSE_GATES else 3.0
+                _atr_limit = 3.0
                 atr_ok = atr_pct <= _atr_limit
             except Exception:
                 pass
@@ -103,11 +103,7 @@ def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
         ema_5m = calculate_ema(closes_5m, 10) if len(closes_5m) >= 5 else _last_price
         ema_15m = calculate_ema(closes_15m, 3) if len(closes_15m) >= 2 else _last_price
         
-        # Strictly enforce above both 5m and 15m EMAs unless overridden by loose gates
-        if config.DRY_RUN_LOOSE_GATES:
-            mtfa_ok = True
-        else:
-            mtfa_ok = _last_price >= ema_5m and _last_price >= ema_15m
+        mtfa_ok = _last_price >= ema_5m and _last_price >= ema_15m
 
         if len(history) >= 50:
             try:
@@ -123,6 +119,33 @@ def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
         # 5. Consecutive Losses Halt (Query Postgres db once per minute)
         conlosses = int(db.get_state("consecutive_losses", 0))
         global_pause_ok = conlosses < MAX_CONSECUTIVE_LOSSES
+        
+        # 6. Macro-Regime Filter (BTC 1H Trend Guard - Cached once per minute)
+        btc_macro_ok = True
+        if pair_lower != "btcusdt" and "usdt" in pair_lower: # Don't block BTC itself if it's the target
+            try:
+                btc_cache = _STATE_CACHE.get("macro_btc_1h")
+                if not btc_cache or btc_cache.get('minute') != now_min:
+                    from app.infrastructure.exchange_factory import create_exchange_provider
+                    provider = create_exchange_provider() # default binance
+                    btc_ohlc = provider.fetch_ohlc('btcusdt', tf='1h', limit=55)
+                    if btc_ohlc and len(btc_ohlc) >= 50:
+                        btc_closes = [c['close'] for c in btc_ohlc if c.get('close', 0) > 0]
+                        btc_ema50 = calculate_ema(btc_closes, 50)
+                        btc_last = btc_closes[-1]
+                        btc_macro_ok = btc_last >= btc_ema50
+                    _STATE_CACHE["macro_btc_1h"] = {'minute': now_min, 'ok': btc_macro_ok}
+                else:
+                    btc_macro_ok = btc_cache.get('ok', True)
+            except Exception as e:
+                pass # Default to True if failed so we don't break the bot completely
+
+        # 7. Daily Profit Target Cut-Off (Sleep Mode) - Cached once per minute
+        from datetime import datetime
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        daily_pnl = float(db.get_state(f"daily_pnl_{today_str}", 0.0))
+        target_pnl = config.INITIAL_CAPITAL * (getattr(config, 'DAILY_PROFIT_TARGET_PCT', 5.0) / 100.0)
+        daily_target_reached = daily_pnl >= target_pnl
 
         state_data = {
             'minute': now_min,
@@ -135,6 +158,8 @@ def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
             'adaptive_eg': adaptive_eg,
             'global_pause_ok': global_pause_ok,
             'consecutive_losses': conlosses,
+            'btc_macro_ok': btc_macro_ok,
+            'daily_target_reached': daily_target_reached,
         }
         _STATE_CACHE[pair_lower] = state_data
         return state_data
@@ -149,8 +174,7 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     tq_prob = float(enriched.get('tq_prob', 0) or 0)
     current_vol = float(p.get('volatility', 0) or 0)
     
-    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
-    is_trend_ok = breakout or trend == "UP" or (is_loose and trend == "SIDEWAYS")
+    is_trend_ok = breakout or trend == "UP"
     
     base_thresh = 55.0
     if current_vol > 2.0:
@@ -159,8 +183,7 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
         base_thresh = 50.0
     if trend != "UP":
         base_thresh += 4.0
-    if is_loose:
-        base_thresh -= 8.0
+
     base_thresh = max(35.0, min(75.0, base_thresh))
     
     is_prob_ok = (tq_prob * 100) >= base_thresh
@@ -276,12 +299,29 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # Load State Cache (Heavy calculations, DB lookups, Cooldowns, ATR once per minute)
     states = get_state_monitors(pair, history, bot, p)
 
+    # HUNTING MODE: Jika target belum tercapai, mode agresif aktif
+    is_hunting_mode = not states.get('daily_target_reached', False)
+
     # Write tq_prob dynamically to Redis so isolated knn_worker can read it
     if r_client:
         try:
             r_client.set(f"tq_prob:{pair_lower}", str(tq_prob), ex=60)
         except Exception:
             pass
+
+    #  0. Macro-Regime Guard (BTC 1H Trend Guard)
+    if not states.get('btc_macro_ok', True) and not is_hunting_mode:
+        return reject_with_scorecard(
+            msg=f"[MACRO-GUARD] {pair} REJECTED: BTC 1H Trend is Bearish (Below EMA-50). Scaling back.",
+            note="MACRO_BTC_BEARISH:-100",
+        )
+
+    #  0.b Daily Profit Cut-Off (Sleep Mode)
+    if states.get('daily_target_reached', False):
+        return reject_with_scorecard(
+            msg=f"[SLEEP MODE] {pair} REJECTED: Daily Profit Target Achieved! Bot is resting.",
+            note="DAILY_PROFIT_REACHED:-100",
+        )
 
     #  2. Cooldown Guard (O(1) Trigger Monitor via State Cache)
     if not states['cooldown_ok']:
@@ -331,9 +371,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         regime_profile["tp_mult"] *= 0.85
         regime_profile["sl_mult"] *= 0.90
 
-    if config.DRY_RUN_LOOSE_GATES:
-        regime_profile["entry_threshold"] -= 8.0
-        regime_profile["aggressive_threshold"] -= 8.0
+    if is_hunting_mode:
+        regime_profile["entry_threshold"] -= 30.0
+        regime_profile["aggressive_threshold"] -= 30.0
 
     # Cooldown beda per-regime agar re-entry cadence terkontrol.
     _last_entry_ts = float(db.get_state(f"entry_last_ts_{pair_lower}", 0.0) or 0.0)
@@ -373,7 +413,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
     tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=states['adaptive_eg'], vol_idr_24h=_vol_idr_eg)
 
-    if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
+    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
         return reject_with_scorecard(
             msg=f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})",
             note=f"SELL_BLOCK:{-abs(float(tech_sig.get('sell_score', 0) or 0)):.0f}",
@@ -387,8 +427,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if len(history) >= 14:
         # Bypass trend guards jika extreme Mean Reversion (Bottom-Explosion)
         is_explosion_setup = (
-            (tech.get('rsi', 50.0) < 26.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
-            or tech.get('velocity', 0.0) > 0.2
+            (tech.get('rsi', 50.0) < 35.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
         )
 
     # ML fast-track juga bypass penalti trend score.
@@ -405,7 +444,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         )
 
     #  4d. Vertical Spike / RSI Ceiling Filter (O(1) Trigger Monitor)
-    _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 75.0
+    _rsi_ceiling = 75.0
     _rsi_now = tech.get('rsi', 50.0)
     _velocity = tech.get('velocity', 0.0)
     _vol_ratio = tech.get('volume_ratio', 1.0)
@@ -415,7 +454,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     _is_pump_momentum = _velocity > 0.3 and _vol_ratio > 1.6
     
     _dist_ema9 = 0.0
-    _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.0
+    _dist_limit = 2.0
     if _ema9 > 0:
         _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
 
@@ -449,12 +488,8 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         except Exception:
             pass
 
-    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
     tech_gate_threshold = float(adaptive_cfg['tech_threshold'])
     imb_gate_threshold = float(STRONG_IMBALANCE_RATIO)
-    if is_loose:
-        tech_gate_threshold = max(0.25, tech_gate_threshold - 0.10)
-        imb_gate_threshold = max(1.10, imb_gate_threshold - 0.25)
 
     tech_ready = tq_prob >= tech_gate_threshold
     has_strong_imb = imbalance_ratio >= imb_gate_threshold
@@ -471,11 +506,20 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # EMA50 / MTFA (satu keluarga trend filter)
     if states.get('ema_50_ok'):
         _add_score(10.0, "EMA50_ALIGN")
-    else:
-        _add_score(-8.0, "EMA50_MISS")
+    elif not bypass_trend_check:
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: Harga di bawah EMA-50 (Trend Guard)",
+            note="EMA50_REJECT",
+            threshold=float(regime_profile['entry_threshold']),
+            score=entry_score,
+            regime_lbl=regime_upper,
+            tech_ctx=tech
+        )
 
     if states.get('mtfa_ok'):
         _add_score(8.0, "MTFA_ALIGN")
+    elif is_hunting_mode:
+        _add_score(-15.0, "MTFA_MISS_AGAINST_TREND")
     else:
         _add_score(-6.0, "MTFA_MISS")
 
@@ -508,7 +552,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # RSI / vertical spike quality
     if 45.0 <= _rsi_now <= 68.0:
         _add_score(5.0, "RSI_HEALTHY")
-    elif _rsi_now > _rsi_ceiling and not _is_pump_momentum:
+    elif _rsi_now > _rsi_ceiling and not _is_pump_momentum and not is_hunting_mode:
         _add_score(-8.0, "RSI_CEILING")
 
     if _ema9 > 0 and _dist_ema9 > _dist_limit:
@@ -543,8 +587,7 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         dynamic_threshold = 50.0
     if trend != "UP":
         dynamic_threshold += 3.0
-    if is_loose:
-        dynamic_threshold -= 8.0
+
 
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
@@ -615,8 +658,9 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
     min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
-    if config.DRY_RUN_LOOSE_GATES:
-        min_base_conf = 35.0 if current_vol <= 2.0 else 40.0
+        
+    if is_hunting_mode:
+        min_base_conf = 1.0  # Bypass confidence floor in hunting mode
 
     if base_confidence < min_base_conf:
         msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"

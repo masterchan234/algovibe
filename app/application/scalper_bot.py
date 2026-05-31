@@ -70,7 +70,7 @@ class ScalperBot:
 
         import threading
 
-        self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
+
         self.exit_monitor_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True)
         self.utc_reset_thread = threading.Thread(target=self._utc_reset_monitor_loop, daemon=True)
         self.daily_report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
@@ -428,19 +428,6 @@ class ScalperBot:
                 log_message(f"Error in _exit_monitor_loop: {e}")
             time.sleep(2)
 
-    def _insight_loop(self):
-        while True:
-            try:
-                if config.TECHNICAL_ONLY_MODE:
-                    if not getattr(self, "_technical_only_logged", False):
-                        log_message(" [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
-                        self._technical_only_logged = True
-                    time.sleep(5)
-                    continue
-                self.oracle.process_llm_insights()
-            except Exception as e:
-                log_message(f"Error in _insight_loop: {e}")
-            time.sleep(2)
 
     def _perform_utc_day_reset(self):
         """
@@ -601,7 +588,6 @@ class ScalperBot:
         self.private_ws.start()
 
         log_message("WebSocket clients running. Starting background threads…")
-        self.insight_thread.start()
         self.exit_monitor_thread.start()
         self.utc_reset_thread.start()
         self.daily_report_thread.start()

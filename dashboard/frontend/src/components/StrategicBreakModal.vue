@@ -162,7 +162,7 @@ async function act(action) {
   position: relative;
   z-index: 1;
   width: min(520px, calc(100vw - 32px));
-  background: #0d1117;
+  background: var(--bg-deep);
   border: 1px solid #f85149;
   border-radius: 14px;
   box-shadow: 0 0 40px rgba(248, 81, 73, 0.25), 0 20px 60px rgba(0, 0, 0, 0.85);
@@ -219,7 +219,7 @@ async function act(action) {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 1px;
-  color: #8b949e;
+  color: var(--text-secondary);
   text-transform: uppercase;
   padding-top: 2px;
 }
@@ -227,7 +227,7 @@ async function act(action) {
 .sb-value {
   flex: 1;
   font-size: 13px;
-  color: #e6edf3;
+  color: var(--text-primary);
 }
 
 .sb-highlight { color: #58a6ff; font-weight: 700; }
@@ -235,7 +235,7 @@ async function act(action) {
 .sb-loss      { color: #f85149; font-weight: 600; }
 
 .sb-divider {
-  border-top: 1px dashed #30363d;
+  border-top: 1px dashed var(--border-trader);
   margin: 4px 0;
 }
 
@@ -244,7 +244,7 @@ async function act(action) {
   display: flex;
   gap: 10px;
   padding: 16px 20px;
-  border-top: 1px solid #21262d;
+  border-top: 1px solid var(--border-light);
   flex-wrap: wrap;
 }
 
@@ -269,7 +269,7 @@ async function act(action) {
 .sb-btn:not(:disabled):active { transform: scale(0.96); }
 
 .sb-btn-stop {
-  background: #21262d;
+  background: var(--border-light);
   color: #f85149;
   border: 1px solid #f85149;
 }
@@ -279,7 +279,7 @@ async function act(action) {
 }
 
 .sb-btn-reset {
-  background: #21262d;
+  background: var(--border-light);
   color: #d29922;
   border: 1px solid #d29922;
 }

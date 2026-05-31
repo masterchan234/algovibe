@@ -161,7 +161,7 @@ function respond(decision) {
   position: relative;
   z-index: 1;
   width: min(480px, calc(100vw - 32px));
-  background: #0d1117;
+  background: var(--bg-deep);
   border: 1px solid #f0a500;
   border-radius: 14px;
   box-shadow: 0 0 40px rgba(240, 165, 0, 0.25), 0 20px 60px rgba(0, 0, 0, 0.8);
@@ -258,7 +258,7 @@ function respond(decision) {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 1px;
-  color: #8b949e;
+  color: var(--text-secondary);
   text-transform: uppercase;
   padding-top: 2px;
 }
@@ -266,7 +266,7 @@ function respond(decision) {
 .ag-value {
   flex: 1;
   font-size: 13px;
-  color: #e6edf3;
+  color: var(--text-primary);
   word-break: break-word;
 }
 
@@ -280,7 +280,7 @@ function respond(decision) {
 .ag-loss   { color: #f85149; font-weight: 700; }
 
 .ag-fallback-row {
-  border-top: 1px dashed #30363d;
+  border-top: 1px dashed var(--border-trader);
   padding-top: 10px;
   margin-top: 4px;
 }
@@ -293,7 +293,7 @@ function respond(decision) {
   display: flex;
   gap: 12px;
   padding: 16px 20px;
-  border-top: 1px solid #21262d;
+  border-top: 1px solid var(--border-light);
 }
 
 .ag-btn {
@@ -311,7 +311,7 @@ function respond(decision) {
 .ag-btn:active { transform: scale(0.96); }
 
 .ag-btn-reject {
-  background: #21262d;
+  background: var(--border-light);
   color: #f85149;
   border: 1px solid #f85149;
 }

@@ -260,7 +260,7 @@ onUnmounted(() => {
   background: rgba(255, 51, 102, 0.1);
   border: 1px solid rgba(255, 51, 102, 0.2);
   border-radius: 16px;
-  padding: 16px;
+  padding: 8px 12px;
   display: flex;
   gap: 16px;
   margin-bottom: 24px;
@@ -337,7 +337,7 @@ onUnmounted(() => {
 
 .btn-abort, .btn-confirm {
   flex: 1;
-  padding: 16px;
+  padding: 8px 12px;
   border-radius: 12px;
   font-size: 13px;
   font-weight: 800;

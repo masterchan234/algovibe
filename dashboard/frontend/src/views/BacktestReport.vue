@@ -253,10 +253,14 @@ const loading = ref(true)
 const error = ref(null)
 const summary = ref({ profiles: [], top_pairs: [], total_pairs: 0, exit_reasons: [], equity_curve: [] })
 
+const backendUrl = import.meta.env.DEV
+  ? (import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8080')
+  : window.location.origin
+
 onMounted(async () => {
   document.title = 'Backtest Report | Algovibe Intelligence'
   try {
-    const res = await fetch('/api/backtest/public-summary')
+    const res = await fetch(`${backendUrl}/api/backtest/public-summary`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     summary.value = await res.json()
   } catch (e) {

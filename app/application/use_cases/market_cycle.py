@@ -79,7 +79,7 @@ def run_market_cycle(bot):
         time.sleep(5)
         return
 
-    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime) for item in tickers.items()]) if r]
+    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime, {item[0]: list(bot.price_history.get(item[0], []))}) for item in tickers.items()]) if r]
     ranked.sort(key=lambda x: x['score'], reverse=True)
 
     if not config.TECHNICAL_ONLY_MODE:
@@ -163,6 +163,7 @@ def run_market_cycle(bot):
     db.save_state("heartbeat", time.time())
 
     high_speed = build_high_speed_candidates(bot, ranked, tickers)
+    log_message(f"DEBUG: ranked={len(ranked)}, high_speed={len(high_speed) if high_speed is not None else 'None'}")
     if high_speed is None:
         return
 

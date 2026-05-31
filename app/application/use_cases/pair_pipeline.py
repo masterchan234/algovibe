@@ -84,7 +84,7 @@ def build_high_speed_candidates(bot, ranked, tickers):
             btc_last = 999_999_999
 
     btc_history = db.get_ticker_history(_btc_history_key, limit=20)
-    if btc_history and len(btc_history) >= 20 and not config.DRY_RUN_LOOSE_GATES:
+    if btc_history and len(btc_history) >= 20:
         btc_prices = [h['last'] for h in btc_history]
         btc_sma = sum(btc_prices) / 20
         if btc_last < btc_sma:
@@ -207,16 +207,6 @@ def process_high_speed_candidates(bot, high_speed, tickers, regime, adaptive_cfg
             if gate == _BREAK:
                 break
 
-            # NEW: LLM entry decision – ask external LLM for final BUY/HOLD/AVOID
-            try:
-                llm_decision = bot.oracle.request_llm_entry_decision(p['pair'], enriched['tech'])
-            except Exception as e:
-                log_message(f"[LLM-ENTRY] error for {p.get('pair')}: {e}")
-                llm_decision = 'HOLD'
-            if llm_decision != 'BUY':
-                # Skip non‑BUY decisions; we keep the gate scorecard for diagnostics
-                log_message(f"[LLM-ENTRY] {p.get('pair')} decision {llm_decision} – skipping entry.")
-                continue
 
             # Existing logic expects a gate dict; ensure gate is dict for downstream
             if not isinstance(gate, dict):

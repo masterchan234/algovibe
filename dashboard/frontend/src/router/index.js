@@ -6,9 +6,7 @@ import { useMode } from '../composables/useMode'
 const LoginView       = () => import('../views/Login.vue')
 const AboutView       = () => import('../views/About.vue')
 const BacktestReport  = () => import('../views/BacktestReport.vue')
-const ModeSelector    = () => import('../views/ModeSelector.vue')
-const Dashboard       = () => import('../App.vue')
-const LiveDashboard   = () => import('../views/LiveDashboard.vue')
+const AppDashboard    = () => import('../App.vue')
 const NotFound        = () => import('../views/NotFound.vue')
 
 const routes = [
@@ -41,24 +39,17 @@ const routes = [
     redirect: '/login',
   },
   {
-    // Post-login mode selection screen
-    path: '/mode-select',
-    name: 'mode-select',
-    component: ModeSelector,
-    meta: { requiresAuth: true },
-  },
-  {
     // Dry-run dashboard
-    path: '/dashboard-dry',
+    path: '/dashboard',
     name: 'dry',
-    component: Dashboard,
+    component: AppDashboard,
     meta: { requiresAuth: true, requiresMode: 'dry' },
   },
   {
     // Live member dashboard
     path: '/dashboard-live',
     name: 'live',
-    component: LiveDashboard,
+    component: AppDashboard,
     meta: { requiresAuth: true, requiresMode: 'live' },
   },
   {
@@ -115,18 +106,18 @@ router.beforeEach(async (to) => {
     if (redirectPath) {
       return redirectPath
     }
-    return { name: 'mode-select' }
+    return { name: 'dry' } // Default to dry mode
   }
 
-  // 3. Force mode selection if accessing dashboard without a mode
-  const isDashboardRoute = (to.name === 'live' || to.name === 'dry')
-  if (isDashboardRoute && isAuthenticated.value && !hasModeSelected.value) {
-    return { name: 'mode-select', query: { redirect: to.fullPath } }
+  // 3. Set default mode for authenticated users if not set
+  if (isAuthenticated.value && !hasModeSelected.value) {
+    selectedMode.value = 'dry'
   }
 
   // 4. Ensure mode matches the route (e.g. can't go to /dashboard-live while in dry mode)
   if (to.meta.requiresMode && to.meta.requiresMode !== selectedMode.value) {
-    return { name: 'mode-select', query: { redirect: to.fullPath } }
+    // If they manually navigate to a mode, let the app update the state instead of blocking
+    selectedMode.value = to.meta.requiresMode
   }
 })
 

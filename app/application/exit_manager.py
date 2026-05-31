@@ -133,6 +133,7 @@ class ExitManager:
         # Timestamp when the Net-Zero condition (net_pnl ≤ 0 + dropping velocity) was
         # first detected.  Reset to 0 whenever the condition clears.
         self._net_zero_trigger_ts: float = 0.0
+
         # Session guard: True after the emergency basket exit has fired once, prevents
         # repeated triggers within the same session.
         self._net_zero_fired: bool = False
@@ -154,6 +155,15 @@ class ExitManager:
         except Exception:
             self._peak_net_pnl_session = 0.0
         self._sync_jaring_from_db()
+
+    def _update_daily_pnl(self, pnl: float):
+        from datetime import datetime
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        key = f"daily_pnl_{today}"
+        current = float(db.get_state(key, 0.0))
+        new_val = current + pnl
+        db.save_state(key, new_val)
+        log_message(f" [DAILY PNL] {today} Total: {new_val:.2f}", color="magenta")
 
     def _get_public_adapter(self):
         """Lazy-init IndodaxAdapter tanpa auth untuk public REST API calls."""
@@ -465,6 +475,18 @@ class ExitManager:
     def _is_micro_profit_mode_active(self) -> bool:
         if not MICRO_PROFIT_EXIT_AUTO:
             return False
+            
+        # HUNTING MODE: Force micro-profit (scalping) if daily target not reached
+        from datetime import datetime
+        import config
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        daily_pnl = float(db.get_state(f"daily_pnl_{today_str}", 0.0))
+        target_pnl = config.INITIAL_CAPITAL * (getattr(config, 'DAILY_PROFIT_TARGET_PCT', 5.0) / 100.0)
+        is_hunting_mode = daily_pnl < target_pnl
+        
+        if is_hunting_mode:
+            return True
+            
         return self._get_effective_idr_balance() < float(MICRO_PROFIT_BALANCE_THRESHOLD)
 
     def _evaluate_dust_recovery(
@@ -2222,11 +2244,12 @@ class ExitManager:
 
                 # Dynamic Trailing Stop Loss / Breakeven Lock
                 current_highest = float(data.get('highest_price', 0) or 0)
-                if current_highest >= entry_price * 1.003: # +0.3% gross
-                    # Lock stop loss at breakeven + 0.02% to cover fees
-                    active_sl_price = max(active_sl_price, entry_price * 1.0002)
+                if current_highest >= entry_price * (1 + SMART_BREAK_EVEN_PCT): # e.g. +0.45% gross
+                    # Lock stop loss at breakeven + fee cushion to ensure net-zero profit
+                    fee_cushion = ROUND_TRIP_FEE_PCT + 0.0015 # Ensure cover all fees + larger slippage
+                    active_sl_price = max(active_sl_price, entry_price * (1 + fee_cushion))
                     
-                if current_highest >= entry_price * 1.005: # +0.5% gross
+                if current_highest >= entry_price * (1 + SMART_BREAK_EVEN_PCT + 0.002): # e.g. +0.55% gross
                     # Tight trailing stop loss at 0.2% pullback from peak for slow trades (>=2m)
                     if pos_age_min >= 2.0:
                         active_sl_price = max(active_sl_price, current_highest * (1 - 0.002))
@@ -2474,10 +2497,10 @@ class ExitManager:
 
                 # Momentum Fading Profit Lock: Jika posisi sudah dalam keadaan solid net profit (>0.3% gross),
                 # dan indikator momentum berubah menjadi SELL, tren melemah (confidence < 0.40), atau
-                # trade berjalan lambat (signal != BUY dan usia >= 2.0m), langsung amankan profit!
+                # trade berjalan lambat (signal != BUY dan usia >= 5.0m), langsung amankan profit!
                 is_momentum_fading_exit = False
-                if current_profit_pct >= 0.003:
-                    if (momentum_signal != 'BUY' and pos_age_min >= 2.0) or momentum_signal == 'SELL' or technical_confidence < 0.40:
+                if current_profit_pct >= 0.006:
+                    if (momentum_signal != 'BUY' and pos_age_min >= 10.0) or momentum_signal == 'SELL' or technical_confidence < 0.40:
                         is_momentum_fading_exit = True
                         log_message(
                             f"[MOMENTUM-FADE-LOCK] {pair}: Mengamankan net profit {current_profit_pct*100:.2f}% "
@@ -2564,8 +2587,13 @@ class ExitManager:
                         continue
 
                     reason_sl = "STOP_LOSS"
+                    log_label = "[LOSS]"
+                    if active_sl_price > entry_price:
+                        reason_sl = "BREAKEVEN_STOP"
+                        log_label = "[BREAKEVEN]"
+
                     log_message(
-                        f"[LOSS] [AUTO-SL TRIGGERED] {pair}: Price {format_currency(current_price, is_price=True, signed=False)} hit SL {format_currency(active_sl_price, is_price=True, signed=False)} "
+                        f"{log_label} [AUTO-SL TRIGGERED] {pair}: Price {format_currency(current_price, is_price=True, signed=False)} hit SL {format_currency(active_sl_price, is_price=True, signed=False)} "
                         f"({pnl_pct:+.2f}%). Protecting capital."
                     )
                     order_id = self.execute_exit(pair, amount, current_price, reason_sl,
@@ -2788,7 +2816,7 @@ class ExitManager:
                         )
 
             # Exit selalu market/taker.
-            exit_price = price * (1 - 0.001)  # Buffer tipis untuk estimasi awal
+            exit_price = price  # Harga murni untuk UI (Slippage/Fee dipotong murni dari PnL Net)
             fee_sell_rate = FEE_SELL_TAKER
 
             # [Senior Scaling Fix] PIGGYBACK + SAFETY CLAMP: jangan pernah jual melebihi saldo free.
@@ -3002,12 +3030,19 @@ class ExitManager:
                     current_cl = int(db.get_state("consecutive_losses", 0))
                     if pnl_quote > 0:
                         db.save_state("consecutive_losses", 0)
+                        db.save_state(f"consecutive_losses_{pair}", 0)
                     else:
                         db.save_state("consecutive_losses", current_cl + 1)
-                        self._set_pair_cooldown(pair, minutes=20, reason=reason)
+                        pair_cl = int(db.get_state(f"consecutive_losses_{pair}", 0)) + 1
+                        db.save_state(f"consecutive_losses_{pair}", pair_cl)
+                        if pair_cl >= 2:
+                            self._set_pair_cooldown(pair, minutes=180, reason=f"Anti-Bleed (2x loss)")
+                        else:
+                            self._set_pair_cooldown(pair, minutes=20, reason=reason)
 
                     #  Project Evolution: Learning Loop 
                     db.update_trade_outcome(pair, pnl_quote)
+                    self._update_daily_pnl(pnl_quote)
                     if self.oracle:
                         self.oracle.learn_from_trade(pair, pnl_quote)
 
@@ -3320,11 +3355,18 @@ class ExitManager:
                         current_cl = int(db.get_state("consecutive_losses", 0))
                         if net_pnl_quote > 0:
                             db.save_state("consecutive_losses", 0)
+                            db.save_state(f"consecutive_losses_{p_pair}", 0)
                         else:
                             db.save_state("consecutive_losses", current_cl + 1)
-                            self._set_pair_cooldown(p_pair, minutes=20, reason=reason)
+                            pair_cl = int(db.get_state(f"consecutive_losses_{p_pair}", 0)) + 1
+                            db.save_state(f"consecutive_losses_{p_pair}", pair_cl)
+                            if pair_cl >= 2:
+                                self._set_pair_cooldown(p_pair, minutes=180, reason=f"Anti-Bleed (2x loss)")
+                            else:
+                                self._set_pair_cooldown(p_pair, minutes=20, reason=reason)
                         
                         db.update_trade_outcome(p_pair, net_pnl_quote)
+                        self._update_daily_pnl(net_pnl_quote)
                         if self.oracle: self.oracle.learn_from_trade(p_pair, net_pnl_quote)
                         
                         db.delete_position(p_pair)
@@ -3692,35 +3734,14 @@ class ExitManager:
                 # [Fix] Selalu sync amount dengan bursa jika ada perbedaan (fee/rounding/manual trade)
                 if abs(amount_on_exchange - pos['amount_crypto']) > 1e-12 and amount_on_exchange > 0:
                     old_crypto = pos['amount_crypto']
-                    old_idr = pos.get('amount_quote', 0)
-                    entry_price = pos.get('entry_price', 0)
                     
                     # Update crypto amount
                     pos['amount_crypto'] = amount_on_exchange
                     
-                    # [Senior Fix] Update amount_quote (Cost Basis) proportionally or via entry_price
-                    # Ini mencegah 'modal halusinasi' saat saldo di bursa berubah tapi modal di DB tetap.
-                    if old_crypto > 0 and old_idr > 0:
-                        # Proporsional: jika koin naik 2x, modal dianggap naik 2x (cost basis adjustment)
-                        new_idr = old_idr * (amount_on_exchange / old_crypto)
-                    elif entry_price > 0:
-                        # Fallback: hitung dari entry_price jika modal lama nol/tidak valid
-                        new_idr = amount_on_exchange * entry_price
-                    else:
-                        new_idr = old_idr # No way to calculate, keep as is
-                    
-                    # Sanity check: modal tidak boleh jauh dari (koin * harga_beli)
-                    if entry_price > 0:
-                        expected_idr = amount_on_exchange * entry_price
-                        # Jika selisih modal > 15% dari expected, koreksi ke expected
-                        if abs(new_idr - expected_idr) > (expected_idr * 0.15):
-                            new_idr = expected_idr
-                            
-                    pos['amount_quote'] = new_idr
                     db.upsert_position(pair, pos)
                     log_message(
                         f" [RECONCILE] {pair} amount synced: {old_crypto:.6f} -> {amount_on_exchange:.6f} | "
-                        f"Cost Basis updated: Rp {old_idr:,.0f} -> Rp {new_idr:,.0f}"
+                        f"Cost Basis intact."
                     )
 
                 target_amount = pos.get('amount_crypto') or pos.get('amount', 0)

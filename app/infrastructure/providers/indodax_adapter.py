@@ -232,20 +232,28 @@ class IndodaxAdapter(BaseExchangeAdapter):
         """
         pair_upper = self._normalise_symbol(symbol).upper()
 
+        # Normalize tf to indodax format
+        tf_str = str(tf)
+        tf_map = {
+            "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+            "1h": "60", "4h": "240", "24h": "1D", "1d": "1D", "1D": "1D"
+        }
+        tf_indodax = tf_map.get(tf_str.lower(), tf_str)
+
         # Compute time window when not provided
         now = int(time.time())
         if to_ts is None:
             to_ts = now
         if from_ts is None:
             # Estimate window from limit + timeframe
-            _tf_minutes = {"1": 1, "15": 15, "30": 30, "60": 60, "240": 240,
+            _tf_minutes = {"1": 1, "5": 5, "15": 15, "30": 30, "60": 60, "240": 240,
                            "1D": 1440, "3D": 4320, "1W": 10080}
-            tf_min = _tf_minutes.get(str(tf), 1)
+            tf_min = _tf_minutes.get(tf_indodax, 1)
             from_ts = to_ts - limit * tf_min * 60 - tf_min * 60  # small buffer
 
         params = {
             "symbol": pair_upper,
-            "tf":     str(tf),
+            "tf":     tf_indodax,
             "from":   str(from_ts),
             "to":     str(to_ts),
         }

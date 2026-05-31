@@ -18,9 +18,11 @@
 </template>
 
 <script setup>
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 
 const router = useRouter()
+const route = useRoute()
+const emit = defineEmits(['open-login'])
 
 function goHome() {
   router.push({ name: 'login' }).catch(() => {})
@@ -31,7 +33,11 @@ function goToSection(id) {
 }
 
 function handleLogin() {
-  router.push({ name: 'login', query: { showAuth: 'true' } }).catch(() => {})
+  if (route.name !== 'login') {
+    router.push({ name: 'login', query: { showAuth: 'true' } }).catch(() => {})
+  } else {
+    emit('open-login')
+  }
 }
 </script>
 

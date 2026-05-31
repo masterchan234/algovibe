@@ -60,7 +60,7 @@ def main() -> None:
 
     provider = _Provider(
         on_tick=publisher.send,
-        on_trade=publisher.send,
+        on_trade=lambda *args, **kwargs: None,  # Consumers parse pure Ticks; avoid corrupting the stream
     )
     provider.start()
 

@@ -16,6 +16,7 @@ class RealtimeVolumeTracker:
     def __init__(self):
         self._lock = threading.Lock()
         self._windows = {}  # {pair: deque((timestamp, volume, is_taker_buy))}
+        self._totals = {}   # {pair: {"buy": 0.0, "sell": 0.0}}
         
         try:
             redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -37,33 +38,46 @@ class RealtimeVolumeTracker:
         with self._lock:
             if pair not in self._windows:
                 self._windows[pair] = deque()
+                self._totals[pair] = {"buy": 0.0, "sell": 0.0}
             
             self._windows[pair].append((now, vol, is_taker_buy))
+            if is_taker_buy:
+                self._totals[pair]["buy"] += vol
+            else:
+                self._totals[pair]["sell"] += vol
+
             self._prune(pair, now)
-            
-            # Sync to Redis cache in O(1) complexity
             ratio = self._calculate_ratio(pair)
-            if self.redis:
-                try:
-                    self.redis.set(f"imbalance:{pair}", str(ratio), ex=60)
-                except Exception:
-                    pass
+            
+        # Sync to Redis cache outside the lock to prevent blocking I/O bottlenecks
+        if self.redis:
+            try:
+                self.redis.set(f"imbalance:{pair}", str(ratio), ex=60)
+            except Exception:
+                pass
 
     def _prune(self, pair: str, now: float):
         """Removes trades older than 10 seconds from the deque."""
         window = self._windows[pair]
+        totals = self._totals[pair]
         cutoff = now - 10.0
         while window and window[0][0] < cutoff:
-            window.popleft()
+            _, pop_vol, pop_buy = window.popleft()
+            if pop_buy:
+                totals["buy"] -= pop_vol
+            else:
+                totals["sell"] -= pop_vol
+        totals["buy"] = max(0.0, totals["buy"])
+        totals["sell"] = max(0.0, totals["sell"])
 
     def _calculate_ratio(self, pair: str) -> float:
         """Calculates buy volume / sell volume in the current window."""
-        window = self._windows.get(pair)
-        if not window:
+        totals = self._totals.get(pair)
+        if not totals:
             return 1.0
 
-        buy_vol = sum(vol for _, vol, is_buy in window if is_buy)
-        sell_vol = sum(vol for _, vol, is_buy in window if not is_buy)
+        buy_vol = totals["buy"]
+        sell_vol = totals["sell"]
 
         if sell_vol == 0:
             return 2.5 if buy_vol > 0 else 1.0
