@@ -2130,7 +2130,7 @@ def trigger_backtest():
     try:
         # Run as a non-blocking background process
         # We use sys.executable to ensure we use the same python interpreter
-        cmd = [sys.executable, "-m", "services.backtester.main", "run", "--days", str(days)]
+        cmd = [sys.executable, "-m", "services.backtester.main", "run", "--days", str(days), "--allow-global-fallback"]
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         return jsonify({
