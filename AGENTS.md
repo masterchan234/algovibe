@@ -58,6 +58,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - Reuse existing utilities (`db`, `log_message`, telegram helpers) instead of introducing parallel patterns.
 - `calculate_score` dipanggil dengan 4 arg: `((pair, data), adaptive_cfg, regime, price_history)` — selalu sertakan `price_history` agar tidak fallback ke DB.
 - `get_technical_summary` menerima `volumes` sebagai arg opsional ke-2 — sertakan jika data volume per candle tersedia.
+- **Kontrak price history (brain-inference)**: `_history[pair]` adalah deret close **candle 1 menit**; elemen terakhir = candle berjalan yang di-*update* per tick (lihat `_roll_candle_history`). `_ohlc_highs/_ohlc_lows/_ohlc_vols` sejajar per indeks. JANGAN `append` harga per tick / per siklus evaluasi — semua indikator (RSI, EMA-50, MACD, velocity 4-periode, ATR, MTFA) mengasumsikan satuan candle. Entry hanya dievaluasi untuk pair yang sudah di-seed dari OHLC API (`_candle_ready`).
 
 ## 6) Trading Safety Rules
 - Treat any order-placement path as high risk (`execution`, `main`, `exit_manager`).
@@ -75,6 +76,10 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - For `MICRO_PROFIT_EXIT`, preserve safety cushion behavior — evaluasi di harga `bid`, bukan `last`.
 - JANGAN timpa `amount_quote` (cost basis) di reconcile path. Hanya `amount_crypto` yang boleh disync dari exchange.
 - JANGAN ubah TECHNICAL_ONLY_MODE ke false tanpa instruksi eksplisit dari user.
+- **Stop Loss selalu aktif**, termasuk saat `HARVEST_ONLY` (mode itu hanya memblok BUY baru). Jangan menambahkan `continue` di loop exit per-posisi sebelum blok SL/trailing.
+- **Entry selalu market/taker di harga pasar** (LIVE maupun DRY RUN). Jangan mensimulasikan fill di harga indikator (mis. EMA-9) — itu membuat PnL DRY RUN lebih bagus dari LIVE.
+- **Param order exchange-aware**: gunakan `order_params()` / `cancel_params()` (`exit_manager.py`) atau `_order_params()` (`trade_execution.py`). Binance menolak param tak dikenal (`pair`, `side`, `type`) dan market SELL harus berbasis quantity (`price=None`); floor harga `1.0` hanya berlaku untuk IDR.
+- **Flag kualitas/keamanan** (`config.py`, bisa di-override via env): `HUNTING_MODE_ENABLED` (default off), `REQUIRE_MOMENTUM_BUY_SIGNAL` (default on), `DISCOVERY_ADOPT_ENABLED` (default on untuk Indodax, off untuk Binance — mengatur Active Discovery dan defensive orphan sweep).
 - Never hardcode API keys/secrets or commit credential material.
 
 ## 7) Indikator Teknikal Aktif (`derive_trade_signal` - v3.0)
@@ -90,11 +95,12 @@ Fokus eksklusif pada 3 indikator utama momentum breakout untuk scalping HFT (Tot
 - Gerbang dievaluasi secara asinkron: **State Monitors** (berat: Macro BTC 1H Guard, ATR, EMAs, Cooldowns, consecutive losses) dihitung hanya 1x per menit dalam cache memori, sedangkan **Trigger Monitors** (ringan: RSI, volume imbalance, K-NN verdict dari Redis) dievaluasi instan pada setiap 1s tick.
 - **5s Wick Delay & Retrace Abort Guard**: Menunda eksekusi order selama 5 detik pada lonjakan momentum (`velocity > 0.3%`), membatalkan order jika harga memantul turun (retracement $> 30\%$) dari puncak breakout.
 
-0. **Macro-Regime Guard (BTC 1H Trend Guard)** — reject semua sinyal jika harga BTC berada di bawah EMA-50 pada TF 1 Jam (Kecuali pair BTC itu sendiri).
+0. **Macro-Regime Guard (BTC 1H Trend Guard)** — reject semua sinyal jika harga BTC berada di bawah EMA-50 pada TF 1 Jam (Kecuali pair BTC itu sendiri). Hanya di-bypass bila `HUNTING_MODE_ENABLED=true`.
 1. Open position / blacklist guard
 2. Cooldown guard
 3. Radar recommendation + tracking log
 4. Multi-confluence technical gate (SELL block jika sell_score >= 5.0)
+4a. **Momentum BUY requirement** — reject jika verdict `derive_trade_signal` bukan `BUY` (kecuali setup Bottom-Explosion). Dikontrol `REQUIRE_MOMENTUM_BUY_SIGNAL`.
 4b. **ATR Volatility Filter** — reject jika ATR > 3% harga (4.5% di loose gates)
 4c. **EMA-50 Trend Filter** — reject jika harga < EMA-50.
     - **EXCEPTION (Bottom-Explosion)**: Bypass filter ini jika deteksi Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.

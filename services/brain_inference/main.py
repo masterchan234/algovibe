@@ -89,6 +89,17 @@ class BrainInferenceService:
         self._history = {}  # {symbol: deque([prices], maxlen=200)}
         # Monolith parity: keep exactly the same rolling history depth.
         self._history_maxlen = 100
+        # Kontrak data: `_history[pair]` adalah deret CLOSE CANDLE 1 MENIT — elemen terakhir
+        # adalah candle yang sedang berjalan (di-update tiap tick, bukan di-append).
+        # `_ohlc_highs/_ohlc_lows/_ohlc_vols` sejajar per-indeks dengan deret itu.
+        # Semua indikator (RSI-14, EMA-50, MACD, velocity 4-periode, ATR, MTFA) mengasumsikan
+        # satuan candle; meng-append harga per tick membuat semuanya dihitung di atas noise detik.
+        self._hist_minute: dict = {}       # {pair: epoch-detik awal menit elemen terakhir}
+        self._candle_ready: set = set()    # pair yang history-nya sudah di-seed dari OHLC API
+        self._hist_lock = threading.Lock()
+        self._backfill_queue: deque = deque()
+        self._backfill_pending: set = set()
+        self._backfill_retry_at: dict = {}  # {pair: epoch} — jeda retry bila fetch gagal
         self._pre_load_history()
         
         # Adapter for public REST API backfill (no API key needed)
@@ -149,6 +160,7 @@ class BrainInferenceService:
         # Start Backfill in background
         self._backfill_thread = threading.Thread(target=self._backfill_historical_data, daemon=True)
         self._backfill_thread.start()
+        threading.Thread(target=self._backfill_worker, daemon=True).start()
 
         logger.info("[brain-inference] [OK] Started — subscribing to ticks.")
         
@@ -187,25 +199,15 @@ class BrainInferenceService:
                 symbol = tick.symbol.lower()
                 price = float(tick.price)
                 
-                # Update rolling price history (was created but never appended — bug fix)
-                if symbol not in self._history:
-                    self._history[symbol] = deque(maxlen=self._history_maxlen)
-                self._history[symbol].append(price)
-
                 # Live 1m candle builder — gunakan base-asset 24h volume (tick.volume)
                 # agar delta per-menit menghasilkan volume dalam satuan base-asset (e.g. TRX)
                 # yang konsisten dengan data historis dari Binance klines API.
                 _vol_base = float(tick.volume) if tick.volume else 0.0
                 self._update_live_candle(symbol, price, _vol_base)
 
-                # Sinkronisasi OHLC H/L cache agar panjang == hist (proxy ATR).
-                # Volume TIDAK diisi dari WS tick karena nilai per-candle tidak tersedia;
-                # mengisi dengan 0.0 akan mendilusi data volume asli dari backfill OHLC API.
-                # Volume deque hanya diisi oleh _backfill_historical_data().
-                if symbol in self._ohlc_highs:
-                    self._ohlc_highs[symbol].append(float(tick.high_24h) if tick.high_24h else price)
-                if symbol in self._ohlc_lows:
-                    self._ohlc_lows[symbol].append(float(tick.low_24h) if tick.low_24h else price)
+                # Gulirkan history candle-aligned: tick di menit yang sama meng-update
+                # candle berjalan; menit baru membuka candle baru.
+                self._roll_candle_history(symbol, price)
 
                 # Derive change_24h dari rolling price history WS.
                 # Gunakan nilai dari summaries API jika history WS masih pendek (<60 candle),
@@ -257,7 +259,11 @@ class BrainInferenceService:
             if price < existing["low"]:
                 existing["low"] = price
             existing["close"] = price
-            existing["vol_cur"] = vol_base
+            # Tick depth-only membawa volume 0 — jangan timpa akumulasi volume candle.
+            if vol_base > 0:
+                if existing["vol_start"] <= 0:
+                    existing["vol_start"] = vol_base
+                existing["vol_cur"] = vol_base
         else:
             # Menit berganti — selesaikan candle lama, mulai yang baru
             vol_delta = max(0.0, existing["vol_cur"] - existing["vol_start"])
@@ -272,11 +278,113 @@ class BrainInferenceService:
             }
             with self._candle_buf_lock:
                 self._candle_buf.append(completed)
+            # Candle baru melanjutkan dari pembacaan volume terakhir candle lama agar
+            # volume di sekitar pergantian menit tidak hilang; tick depth-only (volume 0)
+            # tidak boleh menjadi baseline.
+            _vol_anchor = existing["vol_cur"] if existing["vol_cur"] > 0 else vol_base
             self._candles[pair] = {
                 "ts": ts_min, "open": price, "high": price,
                 "low": price, "close": price,
-                "vol_start": vol_base, "vol_cur": vol_base,
+                "vol_start": _vol_anchor,
+                "vol_cur": vol_base if vol_base > 0 else _vol_anchor,
             }
+
+    def _roll_candle_history(self, pair: str, price: float) -> None:
+        """Jaga `_history` + H/L/V tetap berupa deret candle 1m yang sejajar.
+
+        - Menit sama  -> update elemen terakhir (close/high/low/volume candle berjalan).
+        - Menit baru  -> append candle baru; menit yang terlewat (pair sepi) diisi candle
+          datar (close sebelumnya, volume 0) agar jarak antar elemen tetap 1 menit.
+        """
+        ts_min = int(time.time()) // 60 * 60
+        candle = self._candles.get(pair) or {}
+        cur_vol = max(0.0, float(candle.get("vol_cur", 0.0)) - float(candle.get("vol_start", 0.0)))
+        maxlen = self._history_maxlen
+
+        with self._hist_lock:
+            hist = self._history.get(pair)
+            if hist is None:
+                hist = deque(maxlen=maxlen)
+                self._history[pair] = hist
+            highs = self._ohlc_highs.setdefault(pair, deque(maxlen=maxlen))
+            lows = self._ohlc_lows.setdefault(pair, deque(maxlen=maxlen))
+            vols = self._ohlc_vols.setdefault(pair, deque(maxlen=maxlen))
+
+            prev_min = self._hist_minute.get(pair)
+            if hist and prev_min == ts_min:
+                hist[-1] = price
+                if highs:
+                    highs[-1] = max(highs[-1], price)
+                if lows:
+                    lows[-1] = min(lows[-1], price)
+                if vols:
+                    vols[-1] = cur_vol
+                return
+
+            if hist and prev_min is not None and ts_min > prev_min:
+                gap = min(maxlen, int((ts_min - prev_min) // 60) - 1)
+                last_close = hist[-1]
+                for _ in range(max(0, gap)):
+                    hist.append(last_close)
+                    highs.append(last_close)
+                    lows.append(last_close)
+                    vols.append(0.0)
+
+            hist.append(price)
+            highs.append(price)
+            lows.append(price)
+            vols.append(cur_vol)
+            self._hist_minute[pair] = ts_min
+
+    def _seed_candle_history(self, pair: str, candles: list) -> bool:
+        """Ganti history pair dengan candle OHLC dari exchange (sumber otoritatif).
+
+        Candle terakhir dari API klines adalah candle yang sedang berjalan, sehingga
+        tick berikutnya di menit yang sama akan meng-update elemen itu (bukan append).
+        """
+        rows = [c for c in (candles or []) if float(c.get("close") or 0) > 0]
+        if len(rows) < 2:
+            return False
+        maxlen = self._history_maxlen
+        rows = rows[-maxlen:]
+        with self._hist_lock:
+            self._history[pair] = deque((float(c["close"]) for c in rows), maxlen=maxlen)
+            self._ohlc_highs[pair] = deque((float(c["high"]) for c in rows), maxlen=maxlen)
+            self._ohlc_lows[pair] = deque((float(c["low"]) for c in rows), maxlen=maxlen)
+            self._ohlc_vols[pair] = deque((float(c.get("volume") or 0) for c in rows), maxlen=maxlen)
+            self._hist_minute[pair] = int(float(rows[-1].get("time") or time.time())) // 60 * 60
+            self._candle_ready.add(pair)
+        return True
+
+    def _request_backfill(self, pair: str) -> None:
+        """Antrikan seed candle untuk pair yang belum candle-ready (mis. mover baru)."""
+        if pair in self._candle_ready or pair in self._backfill_pending:
+            return
+        if time.time() < self._backfill_retry_at.get(pair, 0.0):
+            return
+        self._backfill_pending.add(pair)
+        self._backfill_queue.append(pair)
+
+    def _backfill_worker(self) -> None:
+        """Seed candle 1m per pair secara berurutan (hemat rate limit public API)."""
+        while self._running:
+            try:
+                pair = self._backfill_queue.popleft()
+            except IndexError:
+                time.sleep(0.5)
+                continue
+            try:
+                candles = self._adapter.fetch_ohlc(pair, tf=config.BACKFILL_TF_MIN, limit=self._history_maxlen)
+                if self._seed_candle_history(pair, candles):
+                    logger.info("[brain-inference] Candle history seeded: %s (%d candles)", pair, len(candles))
+                else:
+                    self._backfill_retry_at[pair] = time.time() + 300
+            except Exception as exc:
+                self._backfill_retry_at[pair] = time.time() + 300
+                logger.debug("[brain-inference] Backfill %s gagal: %s", pair, exc)
+            finally:
+                self._backfill_pending.discard(pair)
+            time.sleep(0.15)
 
     def _pre_load_history(self):
         """Pre-load history from DB on startup."""
@@ -368,10 +476,10 @@ class BrainInferenceService:
 
         try:
             all_idr = self._adapter.fetch_idr_pairs()
-            idr_pairs = [
-                p for p in all_idr
-                if len(self._history.get(p, [])) < 50
-            ]
+            # Selalu seed ulang dari OHLC API: history hasil pre-load DB bisa berisi
+            # sampel per-tick (bukan candle) dari sesi/servis lain, jadi tidak boleh
+            # dipakai untuk indikator sebelum diganti candle asli.
+            idr_pairs = [p for p in all_idr if p not in self._candle_ready]
 
             total_pairs = len(idr_pairs)
             if not idr_pairs:
@@ -387,13 +495,9 @@ class BrainInferenceService:
                     candles = self._adapter.fetch_ohlc(pair_id, tf=config.BACKFILL_TF_MIN, limit=100)
                     if not candles:
                         return None
-                    closes = [c["close"]  for c in candles if c["close"] > 0]
-                    highs  = [c["high"]   for c in candles if c["close"] > 0]
-                    lows   = [c["low"]    for c in candles if c["close"] > 0]
-                    vols   = [c["volume"] for c in candles if c["close"] > 0]
-                    if not closes:
+                    if not self._seed_candle_history(pair_id, candles):
                         return None
-                    return (pair_id, closes, highs, lows, vols)
+                    return pair_id
                 except Exception:
                     return None
 
@@ -404,22 +508,12 @@ class BrainInferenceService:
                     batch = idr_pairs[i:i + batch_size]
                     results = list(pool.map(fetch_one, batch))
 
-                    for res in results:
-                        if not res:
+                    for pair_id in results:
+                        if not pair_id:
                             continue
-                        pair_id, prices, highs, lows, vols = res
-                        if pair_id not in self._history:
-                            self._history[pair_id] = deque(maxlen=self._history_maxlen)
-                        self._history[pair_id].extend(prices)
-
-                        # Simpan H/L dan Volume untuk ATR + OBV/Volume Ratio aktif
-                        if pair_id not in self._ohlc_highs:
-                            self._ohlc_highs[pair_id] = deque(maxlen=self._history_maxlen)
-                            self._ohlc_lows[pair_id]  = deque(maxlen=self._history_maxlen)
-                            self._ohlc_vols[pair_id]  = deque(maxlen=self._history_maxlen)
-                        self._ohlc_highs[pair_id].extend(highs)
-                        self._ohlc_lows[pair_id].extend(lows)
-                        self._ohlc_vols[pair_id].extend(vols)
+                        prices = list(self._history.get(pair_id, []))
+                        if not prices:
+                            continue
 
                         last = prices[-1]
                         ch_5m  = ((last - prices[-5])  / prices[-5]  * 100) if len(prices) >= 5  else 0
@@ -546,8 +640,9 @@ class BrainInferenceService:
                 if history_deque is None:
                     history_deque = deque(maxlen=self._history_maxlen)
                     self.price_history[pair] = history_deque
-                # Monolith parity: append one sample per evaluation cycle.
-                history_deque.append(price)
+                # History sudah candle-aligned dan elemen terakhirnya = harga live
+                # (lihat _roll_candle_history). JANGAN append per siklus evaluasi:
+                # itu mengubah deret candle 1m menjadi deret sampel per-detik.
                 history = list(history_deque)
                 if not history:
                     return "SIDEWAYS", False, []
@@ -565,6 +660,15 @@ class BrainInferenceService:
         
         for r in ranked[:config.MAX_TRACKED_PAIRS]:
             pair = r['pair']
+            # Hanya evaluasi entry di atas history candle asli. Pair yang belum di-seed
+            # (mover baru / backfill belum selesai) diantrikan dan dilewati dulu.
+            if pair not in self._candle_ready:
+                self._request_backfill(pair)
+                continue
+            # Pair tanpa tick baru > 2 menit (ticker hasil seed REST / feed putus):
+            # candle terakhirnya basi, jangan bangkitkan sinyal dari data lama.
+            if time.time() - self._hist_minute.get(pair, 0) > 120:
+                continue
             try:
                 # Prepare mock for enrichment/gates
                 bot_mock.price_history[pair] = self._history.get(pair, deque())

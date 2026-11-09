@@ -39,6 +39,61 @@ def _to_ccxt_symbol(pair: str) -> str:
     return s
 
 
+def _is_binance() -> bool:
+    return os.getenv("EXCHANGE", "binance").lower() == "binance"
+
+
+def _order_params(pair: str) -> dict:
+    """Extra params untuk create_order.
+
+    Indodax (ccxt) butuh `pair` berformat `btc_idr`. Binance MENOLAK parameter yang
+    tidak dikenal (-1104 "Not all sent parameters were read"), jadi harus kosong.
+    """
+    if _is_binance():
+        return {}
+    _p = pair.lower()
+    if _p.endswith("idr"):
+        _p = _p[:-3] + "_idr"
+    return {"pair": _p}
+
+
+def _resolve_buy_fill(order: dict, pair: str, intended_price: float, intended_amount: float):
+    """Ambil (harga rata-rata fill, qty bersih diterima, biaya quote) dari respons order.
+
+    Market order Binance: `price` bisa None — harga eksekusi ada di `average`, dan fee
+    BUY dipotong dari base asset (kecuali dibayar BNB), sehingga koin yang benar-benar
+    masuk wallet = filled - fee. Tanpa koreksi ini cost basis dan qty posisi meleset.
+    """
+    def _f(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    filled = _f(order.get('filled')) or _f(intended_amount)
+    cost = _f(order.get('cost'))
+    avg = _f(order.get('average')) or _f(order.get('price'))
+    if avg <= 0 and cost > 0 and filled > 0:
+        avg = cost / filled
+    if avg <= 0:
+        avg = _f(intended_price)
+    if cost <= 0:
+        cost = avg * filled
+
+    base = pair.upper()
+    for _suffix in ("USDT", "IDR"):
+        if base.endswith(_suffix):
+            base = base[:-len(_suffix)]
+            break
+    fees = order.get('fees') or ([order['fee']] if order.get('fee') else [])
+    fee_base = sum(
+        _f(f.get('cost')) for f in fees
+        if isinstance(f, dict) and str(f.get('currency') or '').upper() == base
+    )
+    net_amount = filled - fee_base if 0 < fee_base < filled else filled
+    return avg, net_amount, cost
+
+
 def format_currency(val, is_price=False):
     is_usdt = os.getenv("EXCHANGE", "indodax").lower() == 'binance'
     prefix = "$" if is_usdt else "Rp "
@@ -375,20 +430,12 @@ def execute_trade(
         history = list(bot.price_history[pair])
         prices = np.array(history, dtype=float)
 
-        if taker or len(prices) < 2:
-            buy_price = price
-            if taker:
-                log_message(f"[EXECUTION] [Taker Execute] Market Buy at {format_currency(buy_price, True)}")
-            else:
-                log_message(f" [Maker Entry] Insufficient history for EMA-9, using current price: {format_currency(buy_price, True)}")
-        else:
-            alpha = 2 / (9 + 1)
-            ema_9 = prices[0]
-            for p_val in prices:
-                ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
-
-            buy_price = ema_9
-            log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: {format_currency(buy_price, True)}")
+        # Entry SELALU market/taker di harga pasar saat ini. Jalur "Maker Entry EMA-9" lama
+        # tidak pernah memasang limit order (LIVE tetap mengirim market order), tetapi di
+        # DRY RUN ia mencatat fill instan di EMA-9 — di bawah harga pasar saat breakout —
+        # sehingga PnL simulasi lebih bagus daripada yang bisa dicapai LIVE.
+        buy_price = price
+        log_message(f"[EXECUTION] [Taker Execute] Market Buy at {format_currency(buy_price, True)}")
 
         symbol = _to_ccxt_symbol(pair)
         amount_crypto = amount_quote / buy_price
@@ -453,17 +500,18 @@ def execute_trade(
             
             log_message(f"[OK] [LIQUIDITY OK] {pair}: {liq_reason}")
 
-            params = {
-                'pair': pair.replace("idr", "_idr"),
-            }
-            # Indodax via ccxt memerlukan price; gunakan ask agar taker-like dan cepat terisi.
-            market_buy_price = max(float(buy_price or 1), 1.0)
+            params = _order_params(pair)
+            # ccxt memakai price * amount sebagai nilai quote market-buy, jadi price harus
+            # harga asli. Floor 1.0 hanya valid untuk IDR; pada USDT ia menggandakan
+            # nilai order untuk koin berharga < $1 (mis. $0.05 -> 20x ukuran).
+            market_buy_price = float(buy_price)
+            if not _is_binance():
+                market_buy_price = max(market_buy_price, 1.0)
             order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, market_buy_price, params)
-            # Update buy_price dengan harga eksekusi asli jika tersedia
-            buy_price = float(order.get('price') or price)
-            
-            # [Audit Fix] Log actual IDR used for live trades
-            actual_idr = float(order.get('cost') or (buy_price * amount_crypto))
+            # Cost basis dari fill asli: harga rata-rata, qty bersih (setelah fee base), biaya quote.
+            buy_price, amount_crypto, actual_idr = _resolve_buy_fill(order, pair, price, amount_crypto)
+            tp_target = buy_price * (1 + final_tp)
+            sl_target = buy_price * (1 + final_sl)
             log_message(
                 f" [LIVE-AUDIT] {pair} order executed. Intended: {format_currency(amount_quote)} | "
                 f"Actual Cost: {format_currency(actual_idr)} | Qty: {amount_crypto:.8f}"
@@ -528,7 +576,12 @@ def execute_trade(
             "amount_quote": amount_quote,
             "timestamp": datetime.now().isoformat(),
             "dry_run": config.DRY_RUN,
-            "status": "OPEN" if config.DRY_RUN else "PENDING_BUY",
+            # Market order yang sudah `closed` langsung OPEN. Menunggu event PrivateWS
+            # rawan race (event fill bisa tiba sebelum baris posisi ditulis) dan posisi
+            # PENDING_BUY tidak dijaga SL/TP oleh exit monitor.
+            "status": "OPEN" if (
+                config.DRY_RUN or str(order.get('status') or '').lower() in ('closed', 'filled')
+            ) else "PENDING_BUY",
             "entry_order_id": order.get('id') if not config.DRY_RUN else None,
             "exit_order_id": None,
             "target_tp_pct": final_tp,

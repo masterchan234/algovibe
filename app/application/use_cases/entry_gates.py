@@ -299,8 +299,13 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     # Load State Cache (Heavy calculations, DB lookups, Cooldowns, ATR once per minute)
     states = get_state_monitors(pair, history, bot, p)
 
-    # HUNTING MODE: Jika target belum tercapai, mode agresif aktif
-    is_hunting_mode = not states.get('daily_target_reached', False)
+    # HUNTING MODE (opt-in): melonggarkan gate selama target harian belum tercapai.
+    # Default OFF — saat aktif, threshold skor turun di bawah skor dasar (50) sehingga
+    # hampir semua kandidat lolos dan BTC macro guard tidak pernah bekerja.
+    is_hunting_mode = (
+        bool(getattr(config, 'HUNTING_MODE_ENABLED', False))
+        and not states.get('daily_target_reached', False)
+    )
 
     # Write tq_prob dynamically to Redis so isolated knn_worker can read it
     if r_client:
@@ -441,6 +446,26 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     elif ml_fast_track:
         log_message(
             f"[GATE] {pair} [ML-FAST-TRACK] ml_prob={ml_prob:.3f} >= 0.68 — bypassing EMA-50/MTFA"
+        )
+
+    #  4a. Momentum BUY requirement — spesifikasi "Syarat BUY: buy_score >= threshold".
+    # Tanpa ini skor gate (dasar 50 + EMA50 + MTFA + ATR) sudah melewati threshold untuk
+    # koin apa pun yang sekadar berada di atas EMA-50, tanpa konfirmasi velocity/volume/OB.
+    if (
+        getattr(config, 'REQUIRE_MOMENTUM_BUY_SIGNAL', True)
+        and tech_sig['verdict'] != 'BUY'
+        and not is_explosion_setup
+    ):
+        return reject_with_scorecard(
+            msg=(
+                f"[GATE] {pair} REJECTED: no momentum BUY signal "
+                f"(buy_score={tech_sig.get('buy_score', 0):.1f})"
+            ),
+            note=f"NO_MOMENTUM_SIGNAL:{float(tech_sig.get('buy_score', 0) or 0):.1f}",
+            score=float(tech_sig.get('buy_score', 0) or 0),
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
         )
 
     #  4d. Vertical Spike / RSI Ceiling Filter (O(1) Trigger Monitor)

@@ -299,6 +299,24 @@ MIN_TRACKING_VOLATILITY = 0.3  # [DRY RUN TEST] Dilonggarkan dari 0.8 → 0.3
 # Imbalance sudah tidak dipakai sebagai primary trigger di backtester, tapi berguna untuk oracle
 STRONG_IMBALANCE_RATIO  = 1.4  
 
+# --- [Entry Quality Guards] ---
+# HUNTING MODE melonggarkan gate entry selama target harian belum tercapai:
+# BTC macro guard dimatikan, threshold skor -30 (di bawah skor dasar 50, jadi praktis
+# semua kandidat lolos), dan floor confidence K-NN dihapus. Default OFF — aktifkan
+# hanya secara sadar (mis. sesi DRY RUN untuk mengumpulkan sampel).
+HUNTING_MODE_ENABLED = os.getenv("HUNTING_MODE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+# Wajibkan verdict BUY dari derive_trade_signal (buy_score >= threshold) sebelum entry,
+# sesuai spesifikasi "Syarat BUY: total_score >= 6.5". Satu-satunya pengecualian adalah
+# setup Bottom-Explosion yang terdokumentasi.
+REQUIRE_MOMENTUM_BUY_SIGNAL = os.getenv("REQUIRE_MOMENTUM_BUY_SIGNAL", "true").lower() in ("1", "true", "yes", "on")
+# Active Discovery mengadopsi SEMUA saldo koin non-debu di akun sebagai posisi bot
+# (lalu dikelola/dijual oleh exit manager). Default: aktif untuk Indodax (perilaku lama),
+# nonaktif untuk Binance agar aset non-bot (mis. BNB untuk fee) tidak ikut terjual.
+DISCOVERY_ADOPT_ENABLED = os.getenv(
+    "DISCOVERY_ADOPT_ENABLED",
+    "false" if os.getenv("EXCHANGE", "binance").lower() == "binance" else "true",
+).lower() in ("1", "true", "yes", "on")
+
 # --- Technical Probability ---
 # Default ideal profile (Loose Gates OFF): lebih ketat untuk kualitas entry.
 TECH_CONFIDENCE_THRESHOLD = 0.50  # Dinaikkan dari 0.45 → sinyal lemah diblokir

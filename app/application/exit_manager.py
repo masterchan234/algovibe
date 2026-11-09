@@ -36,6 +36,21 @@ def to_pair_param(pair: str) -> str:
         return f"{base}_{suffix}"
     return pair
 
+def order_params(pair: str) -> dict:
+    """Extra params untuk create_order.
+
+    Indodax (ccxt) butuh `pair` berformat `btc_idr`. Binance menolak parameter yang
+    tidak dikenal (-1104 "Not all sent parameters were read"), jadi harus kosong.
+    """
+    if get_quote_suffix() == "usdt":
+        return {}
+    return {'pair': to_pair_param(pair)}
+
+def cancel_params(pair: str, **extra) -> dict:
+    """Params cancel_order: pair + field tambahan untuk Indodax, kosong untuk Binance."""
+    base = order_params(pair)
+    return {**base, **extra} if base else {}
+
 def format_currency(val, is_price=False, signed=False) -> str:
     eid = os.getenv("EXCHANGE", "binance").lower()
     is_usdt = (eid == "binance")
@@ -716,7 +731,8 @@ class ExitManager:
     def _cancel_open_sell_orders_for_pair(self, pair, exit_order_id=None):
         """Cancel open sell orders for a pair using the most compatible exchange params."""
         symbol = to_ccxt_symbol(pair)
-        pair_param = to_pair_param(pair)
+        # Indodax butuh pair+type; Binance menolak parameter tak dikenal.
+        _cancel_params = cancel_params(pair, type='sell')
         cancelled = False
 
         # Try the known exit order id first.
@@ -725,7 +741,7 @@ class ExitManager:
                 self.exchange.cancel_order(
                     exit_order_id,
                     symbol,
-                    params={'pair': pair_param, 'type': 'sell'}
+                    params=_cancel_params
                 )
                 cancelled = True
             except Exception as err:
@@ -745,7 +761,7 @@ class ExitManager:
                     self.exchange.cancel_order(
                         oid,
                         symbol,
-                        params={'pair': pair_param, 'type': 'sell'}
+                        params=_cancel_params
                     )
                     cancelled = True
                     log_message(f" [EXIT CANCEL SWEEP] Cancelled lingering sell order {oid} for {pair}")
@@ -1025,18 +1041,21 @@ class ExitManager:
         # --- [ACTIVE DISCOVERY] ---
         # [Senior Fix] Jalankan Discovery di LUAR cek 'if not positions'
         # Agar koin yang ada di exchange tetap terdeteksi meskipun DB kosong.
-        if not self.dry_run and (time.time() - getattr(self, '_last_discovery_ts', 0) > 60):
+        from config import DISCOVERY_ADOPT_ENABLED as _discovery_enabled
+        if _discovery_enabled and not self.dry_run and (time.time() - getattr(self, '_last_discovery_ts', 0) > 60):
             try:
                 bal = self.exchange.fetch_balance()
                 total_bal = bal.get('total', {})
                 tickers = self.oracle.market_ws.get_tickers() if self.oracle else {}
+                _quote_sfx = get_quote_suffix()
                 
                 for coin, amount in total_bal.items():
-                    if coin == 'IDR' or coin == 'info': continue
+                    # Lewati quote asset sesuai exchange aktif (USDT di Binance, IDR di Indodax).
+                    if coin.upper() == _quote_sfx.upper() or coin == 'info': continue
                     amount = float(amount)
                     if amount <= 0: continue
                     
-                    pair = f"{coin.lower()}idr"
+                    pair = f"{coin.lower()}{_quote_sfx}"
                     if pair not in all_positions:
                         # Jangan adopsi jika koin baru saja dijual dalam 60 detik terakhir (menghindari balapan data exchange)
                         recent_exit_ts = self._recently_exited_pairs.get(pair, 0)
@@ -1044,11 +1063,15 @@ class ExitManager:
                             continue
                             
                         price = float(tickers.get(pair, {}).get('last', 0))
-                        value_idr = amount * price if price > 0 else 0
+                        # Tanpa harga live, nilai & entry tidak bisa ditentukan — adopsi buta
+                        # menghasilkan posisi zombie (entry 0) yang memakan slot posisi.
+                        if price <= 0:
+                            continue
+                        value_idr = amount * price
                         
                         # Jangan adopsi aset debu (di bawah minimum trade)
                         from config import MIN_TRADE_IDR as _min_trade
-                        if price > 0 and value_idr < _min_trade:
+                        if value_idr < _min_trade:
                             continue
 
                         # Coba dapatkan harga beli yang lebih akurat dari trade history terbaru.
@@ -2155,7 +2178,7 @@ class ExitManager:
                         try:
                             # [Senior Fix] Standard CCXT Symbol for Validation
                             symbol_cancel = to_ccxt_symbol(pair)
-                            self.exchange.cancel_order(order_id, symbol_cancel, params={'pair': to_pair_param(pair), 'side': 'buy'})
+                            self.exchange.cancel_order(order_id, symbol_cancel, params=cancel_params(pair, side='buy'))
                             # Hapus lokal sebagai fallback jika PrivateWS miss event
                             db.delete_position(pair)
                             
@@ -2391,18 +2414,19 @@ class ExitManager:
                                 f"net {current_net_pct*100:.2f}% < floor {MIN_NET_PROFIT_FLOOR_PCT*100:.1f}% | "
                                 f"Hold until 1.2%+ net (current: {net_pnl_quote:,.0f} IDR)"
                             )
+                            # Hanya exit TIER2 yang ditahan. Jangan `continue`: trailing stop /
+                            # breakeven lock di bawah harus tetap dievaluasi pada siklus ini.
+                        else:
+                            reason_tp = "RAPID_TP_GOOD_PROFIT"
+                            log_message(
+                                f"[GOOD-PROFIT-EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
+                                f"| exit_sig={exit_signal} ({exit_signal_conf:.0%}) "
+                                f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%)"
+                            )
+                            order_id = self.execute_exit(pair, amount, current_price, reason_tp,
+                                                       entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
+                            if order_id: mark_exit_requested(pair, order_id)
                             continue
-                        
-                        reason_tp = "RAPID_TP_GOOD_PROFIT"
-                        log_message(
-                            f"[GOOD-PROFIT-EXIT] {pair}: Profit {current_profit_pct*100:.2f}% "
-                            f"| exit_sig={exit_signal} ({exit_signal_conf:.0%}) "
-                            f"| net_pnl={net_pnl_after_fee:,.0f} IDR (fee={fee_pct_roundtrip:.2f}%)"
-                        )
-                        order_id = self.execute_exit(pair, amount, current_price, reason_tp,
-                                                   entry_price=entry_price, amount_quote=data.get('amount_quote', 0), position_data=data)
-                        if order_id: mark_exit_requested(pair, order_id)
-                        continue
 
                 except Exception as e:
                     log_message(f"[ERROR] Error in Global Tiered TP for {pair}: {e}")
@@ -2581,9 +2605,10 @@ class ExitManager:
 
                 elif current_price <= active_sl_price:
                     # [Senior Strategy] Execute automatic Stop Loss to protect capital.
-                    # Bypass if AUTO_SL_ENABLED is False or HARVEST_ONLY is active.
-                    if not AUTO_SL_ENABLED or harvest_only:
-                        # log_message(f" [SL SUPPRESSED] {pair} hit SL but bypassing per config/mode.")
+                    # SL tetap aktif di HARVEST_ONLY: mode itu hanya memblok BUY baru. Mematikan
+                    # SL (termasuk breakeven/trailing lock) setelah target tercapai membiarkan
+                    # posisi tersisa merugi tanpa batas dan menghapus profit hari itu.
+                    if not AUTO_SL_ENABLED:
                         continue
 
                     reason_sl = "STOP_LOSS"
@@ -2622,6 +2647,12 @@ class ExitManager:
         if self.dry_run:
             return  # No real exchange in dry-run mode
 
+        # Sweep ini membatalkan SEMUA open BUY dan menjual SEMUA saldo koin yang tidak
+        # tercatat di DB. Hanya aman bila akun exchange sepenuhnya milik bot.
+        from config import DISCOVERY_ADOPT_ENABLED as _bot_owns_account
+        if not _bot_owns_account:
+            return
+
         try:
             #  1. Cancel open BUY limit orders 
             try:
@@ -2634,7 +2665,7 @@ class ExitManager:
                             self.exchange.cancel_order(
                                 order['id'],
                                 symbol,
-                                params={'pair': to_pair_param(pair), 'side': 'buy'},
+                                params=cancel_params(pair, side='buy'),
                             )
                             log_message(
                                 f"[DEFENSIVE-CLOSE] Cancelled open BUY order {order['id']} for {symbol}"
@@ -2682,7 +2713,7 @@ class ExitManager:
                         symbol = f"{coin.upper()}/{quote_currency}"
                         self.exchange.create_order(
                             symbol, 'market', 'sell', amount, None,
-                            {'pair': to_pair_param(pair)}
+                            order_params(pair)
                         )
                         currency_prefix = "$" if eid == "binance" else "Rp "
                         val_formatted = f"{currency_prefix}{idr_value:,.2f}" if eid == "binance" else f"Rp {idr_value:,.0f}"
@@ -2873,17 +2904,25 @@ class ExitManager:
                     "symbol": symbol
                 }
             else:
-                params = {'pair': to_pair_param(pair)}
+                params = order_params(pair)
+                _is_binance_exit = get_quote_suffix() == "usdt"
                 # [Final Fix] Market-only sell path
                 try:
-                    # Indodax via ccxt tetap butuh price; pakai bid agresif agar taker-like.
-                    try:
-                        tkr = self.exchange.fetch_ticker(symbol)
-                        taker_sell_price = float(tkr.get('bid') or tkr.get('last') or price or 1)
-                    except Exception:
-                        taker_sell_price = float(price or 1)
-                    if taker_sell_price < 1:
-                        taker_sell_price = 1.0
+                    if _is_binance_exit:
+                        # Binance: market sell berbasis QUANTITY. Jika price ikut dikirim, ccxt
+                        # mengubahnya jadi quoteOrderQty (= amount * price) sehingga jumlah koin
+                        # yang terjual bergeser mengikuti harga (insufficient balance / residu).
+                        # Tidak perlu round-trip fetch_ticker — exit lebih cepat.
+                        taker_sell_price = None
+                    else:
+                        # Indodax via ccxt tetap butuh price; pakai bid agresif agar taker-like.
+                        try:
+                            tkr = self.exchange.fetch_ticker(symbol)
+                            taker_sell_price = float(tkr.get('bid') or tkr.get('last') or price or 1)
+                        except Exception:
+                            taker_sell_price = float(price or 1)
+                        if taker_sell_price < 1:
+                            taker_sell_price = 1.0
 
                     order = self.exchange.create_order(symbol, 'market', 'sell', amount, taker_sell_price, params)
                 except Exception as place_err:
@@ -2967,8 +3006,13 @@ class ExitManager:
                     else:
                         raise place_err
 
-                # Harga eksekusi asli mungkin beda, kita pakai estimasi market untuk pencatatan awal
-                exit_price = order.get('price') or taker_sell_price or price
+                # Harga eksekusi asli: `average` (rata-rata fill market order) lebih akurat
+                # daripada `price`, yang untuk market order bisa None.
+                exit_price = float(order.get('average') or order.get('price') or taker_sell_price or price)
+                # Qty yang benar-benar terjual (partial fill / pembulatan lot) untuk PnL akurat.
+                _filled_exit = float(order.get('filled') or 0)
+                if 0 < _filled_exit < float(amount or 0):
+                    amount = _filled_exit
 
             # Audit log
             db.log_order(pair, "SELL", exit_price, amount, order.get('status'), order)
@@ -3119,20 +3163,22 @@ class ExitManager:
                 )
             else:
                 # DCA entry dipaksa market buy agar eksekusi instan dan konsisten.
-                params = {'pair': to_pair_param(pair)}
+                params = order_params(pair)
                 try:
                     tkr = self.exchange.fetch_ticker(symbol)
                     taker_buy_price = float(tkr.get('ask') or tkr.get('last') or current_price or 1)
                 except Exception:
                     taker_buy_price = float(current_price or 1)
-                if taker_buy_price < 1:
+                # Floor 1.0 hanya valid untuk IDR. Pada USDT, ccxt memakai price*amount sebagai
+                # nilai quote market-buy sehingga floor ini melipatgandakan order koin < $1.
+                if taker_buy_price < 1 and get_quote_suffix() != "usdt":
                     taker_buy_price = 1.0
                 order = self.exchange.create_order(
                     symbol, 'market', 'buy', add_amount_crypto, taker_buy_price, params
                 )
                 # Gunakan nilai aktual dari order response jika tersedia
-                exec_price = float(order.get('price') or current_price)
-                executed_qty = float(order.get('amount') or order.get('executedQty') or 0)
+                exec_price = float(order.get('average') or order.get('price') or current_price)
+                executed_qty = float(order.get('filled') or order.get('amount') or order.get('executedQty') or 0)
                 if executed_qty > 0:
                     add_amount_crypto = executed_qty
                 # Rekonstruksi actual IDR spent berdasarkan harga & qty eksekusi asli
@@ -3939,7 +3985,7 @@ class ExitManager:
                                         # Format Indodax: aih_idr, Format CCXT: AIH/IDR
                                         ccxt_symbol = to_ccxt_symbol(p)
                                         # Indodax cancel_order requires 'type' (buy/sell) and 'pair' (with underscore)
-                                        self.exchange.cancel_order(oid, ccxt_symbol, params={'pair': to_pair_param(p), 'type': 'sell'})
+                                        self.exchange.cancel_order(oid, ccxt_symbol, params=cancel_params(p, type='sell'))
                                         # Revert to OPEN so the main monitor loop can re-process it (now as Taker due to is_emergency)
                                         pos['status'] = "OPEN"
                                         pos['exit_order_id'] = None

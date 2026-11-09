@@ -11,6 +11,38 @@ from utils.logger import log_message
 from .trade_execution import _to_ccxt_symbol
 
 
+_ATR_CANDLES = 20
+
+
+def _resolve_atr_candles(bot, pair, enriched):
+    """Return (highs, lows, closes) 1m candle untuk ATR.
+
+    Urutan sumber:
+      1. Cache candle in-memory milik service (brain-inference: `_ohlc_highs/_ohlc_lows`
+         + history close) — tanpa network call di hot path sinyal.
+      2. REST `fetch_ohlcv` bila bot punya client exchange (monolith / executive-core).
+    Mengembalikan tiga list kosong bila tidak ada sumber yang layak, sehingga caller
+    jatuh ke target K-NN.
+    """
+    highs_map = getattr(bot, 'ohlc_highs', None) or getattr(bot, '_ohlc_highs', None) or {}
+    lows_map = getattr(bot, 'ohlc_lows', None) or getattr(bot, '_ohlc_lows', None) or {}
+    closes = [float(x) for x in list(enriched.get('history') or [])]
+    highs = [float(x) for x in list(highs_map.get(pair, []))]
+    lows = [float(x) for x in list(lows_map.get(pair, []))]
+    # Ketiga deret harus sejajar per-candle; kalau tidak, ATR-nya tidak bermakna.
+    if len(closes) >= 15 and len(highs) == len(closes) and len(lows) == len(closes):
+        return highs[-_ATR_CANDLES:], lows[-_ATR_CANDLES:], closes[-_ATR_CANDLES:]
+
+    exchange = getattr(bot, 'exchange', None)
+    if exchange is not None:
+        ohlcv = exchange.fetch_ohlcv(
+            _to_ccxt_symbol(pair), timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=_ATR_CANDLES
+        )
+        if ohlcv:
+            return [c[2] for c in ohlcv], [c[3] for c in ohlcv], [c[4] for c in ohlcv]
+    return [], [], []
+
+
 def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
     """
     Computes dynamic TP/SL via ATR and decides taker vs maker mode.
@@ -32,12 +64,8 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
     sl_mult = float(gate.get('sl_multiplier', 1.0) or 1.0)
 
     try:
-        symbol_atr = _to_ccxt_symbol(pair)
-        ohlcv_atr = bot.exchange.fetch_ohlcv(symbol_atr, timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=20)
-        if ohlcv_atr:
-            highs = [c[2] for c in ohlcv_atr]
-            lows = [c[3] for c in ohlcv_atr]
-            closes = [c[4] for c in ohlcv_atr]
+        highs, lows, closes = _resolve_atr_candles(bot, pair, enriched)
+        if closes:
             atr_val = calculate_atr(highs, lows, closes)
 
             # --- [Multi-Factor Intelligence Scaling] ---
