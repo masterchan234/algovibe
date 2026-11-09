@@ -1,20 +1,29 @@
 # Algovibe 🌊🤖
 
-**Algovibe** adalah bot trading kripto otomatis (Scalping) untuk platform **Indodax** yang menggunakan arsitektur **Microservices**. Bot ini menggabungkan kecepatan eksekusi algoritma kuantitatif dengan analisis berbasis indikator teknikal murni untuk navigasi market yang presisi.
+**Algovibe** adalah bot trading kripto otomatis (Scalping HFT) untuk platform **Binance Spot** dan **Indodax** yang menggunakan arsitektur **Microservices** berbasis event-driven. Bot ini menggabungkan kecepatan eksekusi algoritma kuantitatif dengan analisis berbasis indikator teknikal murni untuk navigasi market yang presisi pada timeframe 1 menit (1m).
 
 ---
 
 ## 🎯 Fitur Utama
 
-- **Microservice Architecture:** Terbagi menjadi 6 layanan independen (Market-Pipe, Brain-Inference, LiteRT-LM-Decision, Executive-Core, Dashboard-API, News-Maker) untuk skalabilitas dan stabilitas tinggi.
-- **TECHNICAL_ONLY_MODE:** Semua keputusan trading 100% berbasis indikator teknikal (11 indikator, max score ~19.5). LLM hanya aktif untuk article writing.
-- **Live Market Data:** Semua scoring dan sinyal menggunakan in-memory price history dari WebSocket stream — bukan data DB yang bisa stale.
-- **Market Regime Detection:** Oracle sentral mendeteksi fase market (Bullish, Bearish, Choppy, Ranging, Crash) dan menyesuaikan strategi secara dinamis.
-- **ZMQ-Driven Data Bus:** Komunikasi antar-layanan menggunakan ZeroMQ (IPC) untuk latency minimal.
-- **Indodax Tax Compliant:** Kalkulasi PnL akurat termasuk pajak PMK 68/2022 (PPh & PPN) dan fee exchange.
+- **Microservice Architecture:** Terbagi menjadi layanan independen (`market-pipe`, `brain-inference`, `knn-worker`, `executive-core`, `exchange-reconcile`, `dashboard-api`, `news-maker`) yang berjalan dalam container Docker terisolasi untuk skalabilitas dan stabilitas tinggi.
+- **TECHNICAL_ONLY_MODE:** Semua keputusan trading 100% berbasis indikator teknikal murni untuk performa maksimal dan zero latency. LLM (`litert-lm-decision`) dinonaktifkan dan hanya digunakan untuk penulisan artikel pasar otomatis via `news-maker`.
+- **Live Market Data:** Semua scoring dan sinyal menggunakan in-memory price history dari WebSocket stream — bukan data database yang rentan stale.
+- **Market Regime Detection:** Oracle sentral mendeteksi fase market secara global (Bullish, Bearish, Choppy, Ranging, Crash) dan menyesuaikan strategi secara dinamis.
+- **ZMQ-Driven Data Bus:** Komunikasi antar-layanan menggunakan ZeroMQ (IPC) untuk latency minimal (sub-milidetik). Redis digunakan untuk K-NN verdict dan CVD imbalance cache O(1).
+- **Binance Spot Ready:** Kalkulasi PnL akurat yang memperhitungkan fee round-trip exchange secara tepat.
 - **Interactive Dashboard:** Monitoring realtime via Vue.js & SocketIO dengan visualisasi radar market dan eksekusi manual.
-- **RF Auto-Trainer:** Background service yang secara otomatis melatih ulang model RandomForest (Scalper V2) berdasarkan data trade terbaru.
-- **Automated News Engine:** News Maker menghasilkan artikel pasar otomatis (Morning Briefing, Trending Review, Evening Review, Breaking Headlines) berdasarkan sinyal teknikal live.
+- **K-NN Worker:** Background service yang mengklasifikasikan pola DNA harga historis ke dalam Redis secara real-time.
+- **ML Fast-Track Gate:** Model ML per-pair (RandomForest) memberikan jalur bypass untuk gate EMA-50/MTFA, gate teknikal (5), dan gate sideways (6) jika `ml_prob >= 0.68` — memungkinkan entry pada setup yang secara statistik terbukti profitable meski kondisi tren tidak ideal.
+- **Live Market Universe:** `BinanceProvider` secara otomatis berlangganan top gainers + losers + high-volume dari Binance public API saat startup, dan me-refresh setiap 5 menit — memastikan bot selalu fokus pada pair yang paling aktif bergerak.
+- **Dedicated Exchange Reconcile:** Service terpisah (`exchange-reconcile`) yang secara berkala menyelaraskan state bot dengan kondisi wallet dan order aktual di exchange. Auto-reconcile dilengkapi guard terhadap ticker stale (harga=0) — posisi tidak akan dihapus kecuali harga valid tersedia, mencegah false-delete pada saat feed WebSocket terputus sementara.
+- **Safe Exit Timeout Override:** Saat limit sell gagal fill, bot membatalkan order lama dan melakukan market sell pengganti — dengan verifikasi cancel terkonfirmasi terlebih dahulu sebelum order baru dikirim, mencegah double-fill.
+- **Multi-Tier Capital Protection:** Sistem berlapis — Basket Harvest, Momentum Equity Protection, Net-Zero Survival Guard — melindungi modal dari drawdown beruntun.
+- **Dynamic TP/SL/Profit Scaling:** Target TP, SL, dan minimum profit menyesuaikan otomatis dengan pertumbuhan modal (2.0%–3.5% TP). Maksimum 6 posisi terbuka serentak (`MAX_OPEN_POSITIONS = 6`).
+- **Daily Profit Target System:** Oracle menghitung target profit harian secara dinamis berdasarkan saldo aktif (1%–5% balance, floor $5). Session multiplier menyesuaikan target berdasarkan sesi Binance WIB (US session peak 20–24 WIB: ×1.3, Europe peak 15–20 WIB: ×1.1, Asia quiet 00–08 WIB: ×0.8). Setelah target tercapai, bot masuk mode `HARVEST_ONLY`.
+- **Target Pursuit Phase:** Adaptive config oracle memantau progres harian secara real-time. Jika bot tertinggal jauh dari target dan waktu hampir habis (`PROTECT`), threshold entry dinaikkan. Jika masih banyak waktu tersisa (`PURSUE`), threshold sedikit diturunkan untuk mengejar target.
+- **Session Awareness Engine:** Evaluator kondisi bot terpadu yang mengklasifikasikan sesi trading ke dalam 7 state strategi (`HALT` → `RECOVERY_CRISIS` → `RECOVERY_DAILY` → `RECOVERY_ALLTIME` → `CAUTIOUS` → `NORMAL` → `MOMENTUM_CHASE`). Setiap state mendefinisikan threshold teknikal, ukuran posisi, dan batas pair secara otomatis sesuai kondisi PnL dan regime market.
+- **Automated News Engine:** News Maker menghasilkan artikel analisis pasar otomatis (Morning Briefing, Trending Review, Evening Review, Breaking Headlines) dengan dukungan LLM lokal maupun cloud provider.
 
 ---
 
@@ -22,17 +31,17 @@
 
 ```mermaid
 graph TD
-    ID[Indodax WebSocket] -- WebSocket --> MP[Market Pipe]
+    WS[Binance WS] -- WebSocket --> MP[Market Pipe]
     MP -- ZMQ PUB ipc:market_stream.ipc --> BI[Brain Inference]
     MP -- ZMQ PUB ipc:market_stream.ipc --> NM[News Maker]
     MP -- ZMQ PUB --> EC[Executive Core]
 
     BI -- in-memory price history --> BI
-    BI -- 11-indikator scoring live --> BI
+    BI -- 3-indikator scoring live --> BI
     BI -- ZMQ PUB ipc:signal_stream.ipc --> EC
     BI -- ZMQ PUB ipc:signal_stream.ipc --> NM
 
-    EC -- Risk Check & Order Execution --> ID
+    EC -- Risk Check & Order Execution --> WS
     EC -- PnL & Order Status --> DB[(PostgreSQL/TimescaleDB)]
 
     NM -- Articles & Briefings --> DB
@@ -41,46 +50,110 @@ graph TD
     DB -- Shared State --> DA[Dashboard API]
     DA -- Web UI --> User((Trader))
 
-    LLM[LiteRT-LM-Decision] -- Article Writing only --> DB
+    Redis[(Redis Cache)] -- K-NN Verdict & CVD Imbalance --> EC
+    Redis -- K-NN Verdict & CVD Cache --> KNN[K-NN Worker]
+    KNN -- DNA Pattern Classification --> Redis
+    ER[Exchange Reconcile] -- Wallet & Order Sync --> DB
+    ER -- Reconcile --> WS
+    MD[Model Downloader] -. Init: Download LLM .-> NM
 ```
 
 ---
+w
+## 🧠 Cara Kerja (Technical Engine - v3.0)
 
-## 🧠 Cara Kerja (Technical Engine)
+Algovibe menggunakan sistem **HFT Momentum Breakout Confluence** dengan 3 indikator utama berkecepatan tinggi:
 
-Algovibe menggunakan sistem **Multi-Confluence Technical Scoring** dengan 11 indikator:
+| # | Indikator | Bobot | Catatan / Kondisi |
+|---|-----------|-------|-------------------|
+| 1 | **Price Velocity** | 3.5 | Kenaikan/penurunan harga cepat 4-periode; >0.4% = skor penuh (+3.5), >0.15% = skor sedang (+1.5) |
+| 2 | **Volume Ratio** | 3.5 | Volume saat ini dibanding MA-20; >=2.0x = skor penuh (+3.5), >=1.4x = skor sedang (+1.5) |
+| 3 | **Order Book Pressure** | 3.0 | Rasio Bid/Ask depth volume; >=65% Bid = skor penuh (+3.0), >=55% Bid = skor sedang (+1.5) |
 
-| # | Indikator | Bobot | Catatan |
-|---|-----------|-------|---------|
-| 1 | RSI-14 | 3.0 | Wilder smoothing |
-| 2 | MACD Histogram | 2.5 | Price-normalized (x1000) |
-| 3 | Bollinger %B | 2.0 | Posisi relatif band |
-| 4 | Stochastic RSI | 2.0 | K/D + crossover |
-| 5 | EMA 9/21 Crossover | 1.5 | Trend jangka menengah |
-| 6 | Williams %R | 1.5 | Oversold/overbought independent |
-| 7 | Slope/Momentum | 1.0 | Linear regression slope |
-| 8 | ROC-10 | 1.0 | Rate of Change, mean-reversion |
-| 9 | Order Book Pressure | 2.0 | Fallback ke Volume Ratio jika OB tidak ada |
-| 10 | Volume Ratio | 1.5 | Vol sekarang / MA-20; spike = breakout valid |
-| 11 | OBV Slope | 1.5 | Akumulasi/distribusi diam-diam |
+*   **Syarat BUY:** `total_score >= 6.5` (Max score: 10.0).
+*   **Syarat SELL Block:** `sell_score >= 7.0` (Mencegah entry jika tekanan jual tinggi).
 
-Syarat BUY: `buy_score >= 6.0` dan `sell_score < 4.0`. Max score ~19.5.
+### ⚡ Entry Gate Sequence (`entry_gates.py`)
 
-### Entry Gate Sequence (`entry_gates.py`)
+Gerbang dievaluasi secara **Asinkron** untuk menghemat CPU dan menurunkan latensi:
+*   **State Monitors (Berat):** Dihitung hanya 1x per menit saat kline ditutup dan disimpan di memori (EMA-50, ATR, MTFA, Cooldown, Consecutive Losses).
+*   **Trigger Monitors (Ringan):** Dievaluasi instan pada setiap tick 1s (RSI, Velocity, CVD Imbalance, K-NN Verdict dari Redis).
 
-1. Open position / blacklist guard
-2. Cooldown guard
-3. Radar recommendation + tracking log
-4. Multi-confluence technical gate (SELL block jika `sell_score >= 5.0`)
-5. **ATR Volatility Filter (4b)** — reject jika ATR > 3% harga (4.5% di loose gates)
-6. **EMA-50 Trend Filter (4c)** — reject jika harga < EMA-50 (dilewati di loose gates)
-7. Technical probability + imbalance threshold
-8. Trend / breakout requirement
-9. Radar recommendation guard
-10. Dynamic threshold based on volatility + trend
-11. Consecutive-loss halt / Shadow Recovery
-12. K-NN pattern scoring
-13. Final confidence threshold
+1.  **Open position / blacklist guard**
+2.  **Cooldown guard**
+3.  **Radar recommendation + tracking log**
+4.  **Multi-confluence technical gate** (SELL block jika `sell_score >= 5.0`)
+    *   **ATR Volatility Filter (4b):** Reject jika ATR > 3% harga (4.5% di loose gates).
+    *   **EMA-50 Trend Filter (4c):** Reject jika harga < EMA-50.
+        *   *Bottom-Explosion Exception:* Bypass jika Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.
+        *   *ML Fast-Track Exception:* Bypass jika `ml_prob >= 0.68` (model RandomForest per-pair yakin tinggi).
+    *   **MTFA Alignment (Multi-Timeframe):** Harga harus berada di atas EMA-50 pada timeframe 5m dan 15m (approx dari history 1m). Juga di-bypass oleh ML fast-track.
+5.  **Technical probability & CVD imbalance threshold** (Mengambil data imbalance real-time dari Redis). Di-bypass oleh ML fast-track.
+6.  **Trend / breakout requirement** (Di-bypass oleh ML fast-track pada kondisi SIDEWAYS dengan momentum kuat).
+7.  **Radar recommendation guard**
+8.  **Dynamic threshold based on volatility + trend**
+9.  **Consecutive-loss halt / Shadow Recovery**
+10. **K-NN Isolated pattern scoring** (Mengambil keputusan pola dari Redis dengan fallback synchronous).
+11. **Final confidence threshold**
+12. **5s Wick Delay & Retrace Abort Guard:** Menunda eksekusi order selama 5 detik pada lonjakan momentum (`velocity > 0.3%`), membatalkan order jika harga memantul turun (retracement $> 30\%$) dari puncak breakout.
+
+---
+
+## 🧭 Session Awareness Engine (`session_awareness.py`)
+
+Evaluator kondisi bot terpadu yang berjalan setiap siklus scan. Mengklasifikasikan sesi ke dalam **7 state strategi** secara otomatis berdasarkan PnL harian, PnL all-time, regime market, dan consecutive losses. Setiap state meng-inject parameter risiko langsung ke `brain-inference` dan `pair-pipeline`.
+
+| State | Ukuran Posisi | Max Pair | Score Threshold | Kondisi Trigger |
+|---|---|---|---|---|
+| `HALT` | 0% | 0 | — | Consecutive losses mencapai batas maksimum |
+| `RECOVERY_CRISIS` | 25% | 1 | 8.0 | All-time loss > 3× daily limit (~$90) |
+| `RECOVERY_DAILY` | 40% | 1 | 7.5 | Daily loss limit terpenuhi |
+| `RECOVERY_ALLTIME` | 65% | 2 | 7.0 | All-time PnL negatif |
+| `CAUTIOUS` | 80% | 3 | 6.8 | Regime BEARISH/CHOPPY atau daily loss > 50% |
+| `NORMAL` | 100% | 5 | 6.5 | Kondisi default |
+| `MOMENTUM_CHASE` | 115% | 6 | 6.2 | Regime BULLISH + sesi profitable |
+
+*   State disimpan ke `bot_state` (PostgreSQL) dan dipublikasikan ke Redis (TTL 30s) untuk konsumsi lintas service.
+*   Dashboard menampilkan **badge warna** real-time sesuai severity state (hijau → merah berkedip untuk HALT).
+*   Transisi ke state kritis (`HALT`, `RECOVERY_CRISIS`, `RECOVERY_DAILY`) mengirimkan notifikasi Telegram otomatis.
+
+---
+
+## 🛡️ Exit Strategy & Profit Protection Suite (`exit_manager.py`)
+
+Untuk mencegah erosi keuntungan akibat whipsaw pada timeframe 1m, Exit Manager menerapkan pengamanan berlapis secara dinamis:
+
+*   **TTP Target Floor Lock (Anti Profit Erosion):** Jika puncak harga melampaui target Take Profit (`tp_price`), batas trailing stop otomatis **dikunci minimal setara `tp_price`**. Posisi dijamin tidak akan keluar di bawah profit target awal meskipun harga berbalik arah.
+*   **Dynamic Trailing Stop (Adaptive Delta):** Delta trailing stop menyesuaikan otomatis dengan level profit:
+    *   Profit < 1% dari entry: trail **0.5%** dari puncak — lebih longgar untuk menghindari false exit akibat spread bid-ask.
+    *   Profit ≥ 1% dari entry: trail diperketat ke **0.4%** dari puncak untuk mengunci gain secara agresif.
+    *   `highest_price` di-inisialisasi dari `entry_price` saat service restart, mencegah trailing stop aktif di harga 0.
+*   **Dynamic Breakeven & Hyper-Tight Trailing SL:**
+    *   Menggeser Stop Loss (SL) ke level breakeven (+ 0.02% cushion biaya transaksi) segera setelah profit mencapai $\ge +0.3\%$ gross.
+    *   Menggeser SL ke trailing stop ketat **0.2% dari puncak harga** jika profit mencapai $\ge +0.5\%$ dan posisi telah berjalan $\ge 2$ menit (Slow Trade).
+*   **Momentum Fading Profit Lock (Exit Pasar Agresif):** Jika posisi sudah net-profit ($\ge +0.3\%$ gross) dan durasi posisi mencapai $\ge 2$ menit, bot akan langsung mengeksekusi **Market Sell** jika momentum melemah (verdict != `BUY`, atau sinyal `SELL`, atau keyakinan/confidence < 0.40).
+*   **Micro Profit Exit:** Evaluasi exit pada harga `bid` riil (bukan harga terakhir `last`) untuk memastikan profit bersih aman setelah dipotong spread pasar. Auto-aktif jika balance di bawah threshold (`MICRO_PROFIT_BALANCE_THRESHOLD = $300`). TP ceiling saat micro profit mode: 1.5% (`MICRO_PROFIT_TP_PCT`).
+*   **Dynamic TP/SL/Min-Profit Tiers:** Target TP dan minimum profit bersih menyesuaikan otomatis dengan saldo aktif:
+    *   Balance ≤ $100: TP 2.0%, min profit 0.01%
+    *   Balance $100–$250: TP 2.2%, min profit 0.05%
+    *   Balance $250–$1000: TP 2.5%, min profit 0.1%
+    *   Balance > $1000: TP 3.5%, min profit 0.2%
+
+### 💰 Basket Harvest & Portfolio Protection
+
+*   **Basket Harvest (Guaranteed Profit Harvester):** Trigger close semua posisi secara bersamaan ketika combined net PnL mencapai ~1.5% modal (min $15 USDT), bahkan jika semua posisi masih profit.
+*   **HWM Pullback Trigger:** Jika combined PnL turun > 30% dari peak session, eksekusi basket exit otomatis.
+*   **BTC Crash Kill Switch:** Drop BTC > 2% dalam 5 menit memicu emergency basket exit tanpa menunggu gate profit.
+*   **Guaranteed Profit Harvest (BTC Correlation):** Trigger BTC-weakening hanya aktif jika penurunan portofolio dari HWM sudah mencapai **> 20%** (bukan sekadar 1 tick di bawah puncak), mencegah harvest terlalu dini saat posisi masih tumbuh.
+*   **HARVEST_ONLY Selective Re-entry:** Setelah harvest tercapai, bot hanya mengizinkan 1 posisi baru dengan kriteria sangat ketat (confidence ≥ 78–82%, tq_prob ≥ 0.68–0.72).
+
+### 🛑 Net-Zero Survival Guard
+
+Guard darurat yang mencegah sesi trading berakhir rugi parah akibat correlated drawdown:
+*   Aktif saat PnL portfolio jatuh di bawah floor DAN velocity PnL < $-0.5$ USDT/detik.
+*   Floor dihitung dari **realized PnL harian (24 jam terakhir)** + unrealized saat ini — bukan all-time PnL. Ini mencegah guard terlalu sensitif di sesi baru jika bot sudah punya profit histori besar sebelumnya.
+*   Memiliki hysteresis 3 detik untuk mencegah false trigger. Bypass langsung jika velocity < $-1.2$ USDT/detik (collapse).
+*   Auto-reset setelah 10 detik jika PnL pulih di atas floor.
 
 ---
 
@@ -94,38 +167,45 @@ Algovibe dilengkapi dengan mesin backtesting performa tinggi untuk memvalidasi s
 - **High-Fidelity Simulation:**
     - **Slippage & Spread Simulation:** Mensimulasikan harga eksekusi di *bid/ask* spread untuk estimasi profit yang realistis.
     - **Portfolio Layer:** Mensimulasikan batasan modal riil dengan parameter `max_open_positions` global lintas pair.
-- **Advanced Quantitative Metrics:**
-    - **Sortino Ratio:** Mengukur performa terhadap risiko *downside*.
-    - **Recovery Factor & Calmar Ratio:** Mengukur kemampuan strategi pulih dari *drawdown*.
-    - **Kelly Criterion:** Memberikan rekomendasi ukuran posisi optimal.
-    - **Expectancy:** Menghitung rata-rata profit yang diharapkan per trade dalam IDR.
+- **Advanced Quantitative Metrics:** Sortino Ratio, Recovery Factor, Calmar Ratio, Kelly Criterion, dan Expectancy.
+- **USDT-Native:** Semua parameter (balance, PnL, position sizing) berbasis USDT. Default `--balance 1000` USDT, `--target-daily-pnl 5` USDT.
+- **Binance Spot Data:** Fetch OHLCV 1m langsung dari Binance via ccxt. Default fetch semua ~435 pair USDT aktif; gunakan `--top N` untuk membatasi.
 
-### Operasional Backtest:
+### Operasional Backtest (Pipeline Lengkap):
 
 ```bash
-# 1. Fetch data historis (default 90 hari terakhir)
-docker compose run --rm backtester fetch
+# 1. Fetch data historis semua pair USDT di Binance Spot (default: semua ~435 pair, 30 hari)
+docker compose run --rm backtester fetch-binance --days 30
 
-# 2. Jalankan backtest untuk semua profil aktif
+# Atau fetch top 50 pair by volume
+docker compose run --rm backtester fetch-binance --days 30 --top 50
+
+# Atau pair spesifik
+docker compose run --rm backtester fetch-binance --days 30 --pairs btcusdt,ethusdt,solusdt
+
+# 2. Analisis statistik OHLCV per coin, generate per-coin setup ke DB
+docker compose run --rm backtester analyze --days 30
+
+# 3. Jalankan backtest untuk semua profil aktif (strict per-coin setup)
 docker compose run --rm backtester run
 
-# 3. Jalankan backtest dengan filter pair tertentu
-docker compose run --rm backtester run --days 30 --pairs BTC-IDR,ETH-IDR
+# Atau dengan global fallback jika coin belum punya setup
+docker compose run --rm backtester run --allow-global-fallback
 
 # 4. Lihat laporan ringkasan terakhir
 docker compose run --rm backtester report
 
-# 5. Rekursif Optimasi (Auto-Tuning) — Loop 5 generasi
-# Sistem akan berhenti otomatis jika target profit harian tercapai
+# 5. Analisis + buat profil otomatis dari top kandidat + langsung backtest
+docker compose run --rm backtester analyze --days 30 \
+  --create-profile-from-analysis \
+  --auto-select-top 5 \
+  --backtest-optimized \
+  --activate-new-profile \
+  --run-after-create
+
+# 6. Rekursif Optimasi (Auto-Tuning) — Loop 5 generasi
 docker compose run --rm backtester optimize --generations 5
 ```
-
-> [!TIP]
-> Anda dapat menetapkan target harian (misal: 10rb/hari) di tabel `backtest_profiles` kolom `target_pnl_idr` untuk mengaktifkan fitur *Early Exit*.
-
-Dokumentasi teknis lengkap tersedia di: [Functional Specification Document (Backtesting)](docs/backtesting_fsd.md)
-
-Data historis disimpan di tabel `ohlcv_1m` pada database `algovibe` (TimescaleDB).
 
 ---
 
@@ -133,29 +213,34 @@ Data historis disimpan di tabel `ohlcv_1m` pada database `algovibe` (TimescaleDB
 
 ```
 services/
-├── market_pipe/        # Ingress: Indodax WS -> ZMQ Protobuf
-├── brain_inference/    # Scoring & Oracle: live in-memory history, 11 indikator
-├── litert_lm_decision/ # LLM: TECHNICAL_ONLY_MODE=true (article writing only)
-├── executive_core/     # Execution: Risk Checks, P&L, Order Placement
+├── market_pipe/        # Ingress: Exchange WS -> ZMQ Protobuf; provider dipilih via env EXCHANGE
+│   └── providers/
+│       ├── binance.py  # BinanceProvider: live top gainers+losers+vol, auto-refresh 5 menit
+│       └── indodax.py  # IndodaxProvider: subscribe dari DB ticker_history
+├── brain_inference/    # Scoring & Oracle: live in-memory history, 3 indikator v3.0
+├── executive_core/     # Execution: Risk Checks, P&L, Order Placement, Exit Manager
+├── exchange_reconcile/ # Reconcile: sinkronisasi wallet & order state dari exchange ke DB
+├── knn_worker/         # K-NN Worker: Standardisasi DNA & pre-scoring ke Redis
 ├── news_maker/         # Automated Editorial Engine: briefings, headlines, trending review
-└── dashboard_api/      # UI: Flask Server + SocketIO
-
+├── backtester/         # On-demand: fetch OHLCV, run backtest, optimize strategy
+└── litert_lm_decision/ # LLM service (DINONAKTIFKAN — trading path di-guard TECHNICAL_ONLY_MODE)
 app/
 ├── application/
-│   ├── entry_gates.py          # Gerbang filter entry (11 gate + ATR + EMA50)
+│   ├── entry_gates.py          # Asynchronous Entry Gates, MTFA, Wick Delay, ML Fast-Track bypass
+│   ├── session_awareness.py    # 7-state strategy ladder: HALT → MOMENTUM_CHASE; injects risk params ke brain-inference & pair-pipeline
 │   ├── use_cases/
 │   │   ├── trade_execution.py  # BUY execution, fee-trap pure-% guard
 │   │   └── candidate_enrichment.py
-│   ├── oracle.py               # Market regime & K-NN pattern scoring
-│   └── exit_manager.py         # TP/SL/Trailing; amount_idr tidak ditimpa saat reconcile
+│   ├── oracle.py               # Market regime, K-NN scoring, daily profit target & adaptive config (Target Pursuit Phase)
+│   └── exit_manager.py         # TP/SL/Trailing, Dynamic Breakeven, Basket Harvest, Net-Zero Guard
 ├── domain/
-│   ├── technicals.py   # 11 indikator: RSI, MACD, BB, StochRSI, EMA, WilliamsR,
-│   │                   # Slope, ROC, OB Pressure, Volume Ratio, OBV Slope
+│   ├── technicals.py   # 3 indikator v3.0 (Velocity, Volume Ratio, OB Pressure) + 15 helper indicators
 │   ├── scoring.py      # Radar scoring; terima price_history (live) sebagai arg ke-4
-│   └── predictor.py    # ML model inference (Scalper V2, blend tech+ML)
+│   └── predictor.py    # ML model inference (Scalper V2); get_raw_ml_prob() untuk fast-track gate
 └── infrastructure/
     ├── database.py     # PostgreSQL/TimescaleDB connector
     ├── ws_market.py    # WebSocket market stream + in-memory ticker/OB cache
+    ├── volume_tracker.py # Real-time CVD sliding volume tracker (aggTrades)
     └── auto_trainer.py # Loop self-training model
 ```
 
@@ -163,156 +248,130 @@ app/
 
 ## 🚀 Cara Menjalankan
 
-### Docker (Rekomendasi - Production)
+### Orchestrator (Rekomendasi - Host-side)
 
 ```bash
 # 1. Setup Environment
 cp .env-example .env
-nano .env  # isi INDODAX_API_KEY dan INDODAX_API_SECRET
+nano .env  # Isi EXCHANGE (binance/indodax) dan API Credentials
 
-# 2. Jalankan Stack
+# 2. Jalankan Instalasi & Build Otomatis (Host)
+chmod +x install.sh
+./install.sh --prod  # Atau --dev untuk Development
+```
+
+### Operasional Kontainer - Development (Docker Compose)
+
+```bash
+# Menyalakan stack microservices secara background (dev mode dengan host mount)
 docker compose up -d
 
-# 3. Cek Status
-docker compose ps
-docker compose logs -f brain-inference executive-core
+# Restart layanan tertentu setelah perubahan kode
+docker compose restart executive-core dashboard-api
+
+# Melihat live logs untuk memantau trading
+docker compose logs -f executive-core market-pipe
 ```
 
-### Catatan Operasional Penting
+### Operasional Kontainer - Production (Host-Mount-Free)
 
-- Jika ada perubahan di `.env` atau kode, lakukan restart/recreate yang sesuai:
+Untuk deployment di server production, **sangat direkomendasikan** menggunakan `docker-compose-prod.yml` yang beroperasi **100% tanpa mounting host**. Seluruh kode aplikasi dan skema database dibake langsung ke dalam Docker image untuk menjamin isolasi, keamanan, portabilitas tinggi, dan performa optimal.
+
+#### 1. Keunggulan Arsitektur Produksi:
+* **Image Aplikasi**: Dibuild langsung ke target image `algovibe-binance:latest` (menggunakan `Dockerfile`).
+* **Image Database**: Menggunakan image kustom `algovibe-timescaledb:latest` (menggunakan `Dockerfile.db`) yang menyertakan script inisialisasi skema database tanpa mounting.
+* **Storage & RAM IPC**: Menggunakan Docker Named Volumes dan RAM-disk (`tmpfs` volume `algovibe_ipc` sebesar 64MB) untuk komunikasi latensi ultra-rendah antar kontainer.
+* **Resource Priority**: Service `executive-core` diberikan CPU shares tinggi (`cpu_shares: 2048`) untuk mengutamakan eksekusi order exit penting.
+* **Model Downloader**: Init service `model-downloader` men-download model AI (~2.5 GB) ke named volume satu kali. Jika model sudah ada dan valid, service langsung exit.
+* **Redis**: Cache service (`algovibe-redis`) untuk K-NN verdict dan CVD imbalance — digunakan oleh `knn-worker`, `executive-core`, dan `entry_gates`.
+
+#### 2. Proses Build Image Production:
+
+Proses build pada spesifikasi production ini memanfaatkan arsitektur build yang sangat bersih dan teroptimasi:
+
+*   **Image Aplikasi (`Dockerfile`) - Multi-Stage Build**:
+    *   **Stage 1 (Frontend Builder)**: Menggunakan Node.js (`node:20-slim`) untuk mengompilasi kode sumber Dashboard SPA (Vue.js) yang berlokasi di `dashboard/frontend` menjadi berkas static web siap saji di `/app/dashboard/static/dist`.
+    *   **Stage 2 (Python Runtime)**: Berbasis `python:3.12-slim` dengan zona waktu Jakarta (`Asia/Jakarta`). Menginstal dependensi Python dari `requirements.txt`, menyalin aset Dashboard terkompilasi dari Stage 1, serta menyalin seluruh modul kode aplikasi. Dibuat user non-root aman `algovibe` untuk eksekusi container. Target tag: `algovibe-binance:latest`.
+*   **Image Database (`Dockerfile.db`)**:
+    *   Berbasis `timescale/timescaledb:latest-pg15` yang secara otomatis menyalin `init-pg.sh` ke `/docker-entrypoint-initdb.d/init-pg.sh` dan memberikan izin eksekusi. Target tag: `algovibe-timescaledb:latest`.
+
+#### 3. Perintah Operasional:
+
+##### A. Build Image Manual (Menggunakan Native Docker CLI):
+Jika Anda ingin membangun image satu per satu secara terpisah (misalnya untuk kebutuhan CI/CD pipeline):
+```bash
+# Build image aplikasi utama terkompilasi (algovibe-binance:latest)
+docker build -t algovibe-binance:latest -f Dockerfile.prod .
+
+# Build image database kustom (algovibe-timescaledb:latest)
+docker build -t algovibe-timescaledb:latest -f Dockerfile.db .
+```
+
+##### B. Build Image Menggunakan Docker Compose (Direkomendasikan):
+```bash
+# Build semua image kustom production secara otomatis (Aplikasi + DB)
+docker compose -f docker-compose-prod.yml build
+
+# Alternatif: Build salah satu service secara spesifik jika diinginkan
+docker compose -f docker-compose-prod.yml build market-pipe   # Mem-build image aplikasi utama
+docker compose -f docker-compose-prod.yml build timescaledb   # Mem-build image database TimescaleDB
+```
+
+##### C. Manajemen Kontainer & Deployment:
+```bash
+# 1. Buat network external reverse proxy jika menggunakan Nginx Proxy Manager (NPM)
+docker network create npm_default
+
+# 2. Jalankan seluruh stack microservices production secara background
+docker compose -f docker-compose-prod.yml up -d
+
+# 3. Memantau logs kontainer production
+docker compose -f docker-compose-prod.yml logs -f executive-core dashboard-api
+
+# 4. Menghentikan stack production
+docker compose -f docker-compose-prod.yml down
+```
+
+### 🗄️ Sinkronisasi Database Local → Production
+
+Untuk mendorong semua data dari lokal ke server production (full overwrite — termasuk `algovibe`, `algovibe_dryrun`, `algovibe_live`):
 
 ```bash
-# Setelah perubahan kode:
-docker compose restart brain-inference executive-core
+# Preview tanpa eksekusi:
+./scripts/sync_db_to_prod.sh --dry-run
 
-# Setelah perubahan env/config:
-docker compose up -d --force-recreate brain-inference executive-core litert-lm-decision dashboard-api
+# Full sync (akan meminta konfirmasi sebelum dijalankan):
+./scripts/sync_db_to_prod.sh
 ```
 
-- **TECHNICAL_ONLY_MODE = true** — LLM tidak akan membuat keputusan trading. Untuk mengaktifkan kembali LLM trading, set `technical_only_mode=false` di tabel `bot_state` DB dan ubah flag di `config.py`.
-- `MIN_TRADE_IDR` (default: **10000**) — pastikan konsisten di semua container.
-- Fee-trap guard menggunakan pure-percentage (0.5% dari nilai trade), bukan hard floor.
-- `MICRO_PROFIT_EXIT` dievaluasi di harga `bid` (bukan `last`) dengan safety cushion.
-- Cost basis (`amount_idr`) **tidak pernah** ditimpa saat reconcile — hanya `amount_crypto` yang disync dari exchange.
+Script ini otomatis: dump → SCP → `docker cp` ke container → stop bot services production → drop/recreate DB dengan prosedur TimescaleDB (`pre_restore` → `pg_restore` → `post_restore`) → restart services → verifikasi row count.
 
-### Native (Development / Debugging)
-
-```bash
-python3 -m services.market_pipe.main        # Terminal 1
-python3 -m services.brain_inference.main    # Terminal 2
-python3 -m services.executive_core.main     # Terminal 3
-python3 -m services.litert_lm_decision.main # Terminal 4 (article writing only)
-python3 -m services.news_maker.main         # Terminal 5 (news engine)
-python3 -m dashboard.server                 # Terminal 6
-```
-
----
-
-## 💾 Database Backup & Restore Tool
-
-Algovibe dilengkapi dengan utilitas pencadangan (*backup*) dan pemulihan (*restore*) database PostgreSQL/TimescaleDB tingkat produksi di [db_backup_restore.sh](file:///root/algovibe/scripts/db_backup_restore.sh).
-
-### Fitur Utama:
-- **Health Check Otomatis:** Memastikan kontainer database `algovibe-timescaledb` menyala dan berstatus *healthy* sebelum melakukan query.
-- **Kredensial Dinamis:** Mengekstrak kredensial PostgreSQL langsung dari `docker-compose.yml` saat runtime untuk menghindari hardcoded password.
-- **Format Biner Kustom (`-Fc`):** Menghasilkan cadangan database terkompresi secara native yang aman untuk metadata TimescaleDB.
-- **TimescaleDB Safeties:** Menjamin inisialisasi ulang ekstensi `timescaledb` dan pemutusan koneksi aktif (`pg_terminate_backend`) sebelum melakukan pemulihan data untuk menghindari kegagalan restorasi.
-- **Kebijakan Retensi:** Otomatis menghapus cadangan lama yang berumur lebih dari 7 hari.
-
-### Operasional Database Tool:
-
-```bash
-# 1. Backup semua database (live, dryrun, backtest)
-./scripts/db_backup_restore.sh backup all
-
-# 2. Backup database tertentu saja (misal: live)
-./scripts/db_backup_restore.sh backup algovibe_live
-
-# 3. Lihat daftar file backup yang tersedia
-./scripts/db_backup_restore.sh list
-
-# 4. Restore database (Interaktif & Aman)
-./scripts/db_backup_restore.sh restore ./backups/algovibe_dryrun_20260518_060000.dump algovibe_dryrun
-
-# 5. Restore database (Bypass konfirmasi - untuk otomatisasi cron/CI)
-./scripts/db_backup_restore.sh restore ./backups/algovibe_dryrun_20260518_060000.dump algovibe_dryrun --yes
-```
-
-> [!IMPORTANT]
-> **Peringatan Keamanan:** Selalu pastikan Anda me-restore ke database target yang tepat. Pemulihan ke `algovibe_live` saat bot trading aktif sangat berisiko. Matikan bot terlebih dahulu (`docker compose stop executive-core`) sebelum memulihkan database live.
-
-Dokumentasi detail & panduan otomatisasi menggunakan **Cron** tersedia di: [db_backup_restore_guide.md](file:///root/.gemini/antigravity/brain/ba037321-7323-4e3f-a8a2-697cc3b1c13d/db_backup_restore_guide.md)
+> **PERINGATAN:** Operasi ini menimpa semua data di production. Gunakan hanya bila yakin. SSH alias target: `wiraworks-srv`, project path: `/root/algovibe`.
 
 ---
 
 ## 📰 News Maker (Automated Editorial Engine)
 
-`services/news_maker/` adalah layanan AI editorial yang menghasilkan artikel pasar kripto secara otomatis dalam Bahasa Indonesia, berdasarkan data live dari WebSocket stream dan sinyal teknikal dari Brain Inference.
+`services/news_maker/` menghasilkan artikel pasar kripto otomatis dalam Bahasa Indonesia berdasarkan data live WebSocket stream dan sinyal teknikal.
 
-### Jadwal Otomatis
+### LLM Provider:
+Mendukung tiga mode provider yang dikonfigurasi via env var `NEWS_LLM_PROVIDER`:
+*   `local` (default): Menggunakan model Gemma 4 E2B (`gemma-4-E2B-it.litertlm`) yang di-download oleh `model-downloader`.
+*   `huggingface`: Menggunakan Hugging Face Inference API (`NEWS_HF_API_URL`, `NEWS_HF_API_TOKEN`).
+*   `cloudflare`: Menggunakan Cloudflare Workers AI (`NEWS_CF_API_URL`, `NEWS_CF_API_TOKEN`).
 
-| Trigger | Waktu / Kondisi | Tipe Artikel | Kategori DB |
-| :--- | :--- | :--- | :--- |
-| Scheduler | **08:00 WIB** setiap hari | Morning Briefing | `MORNING_BRIEF` |
-| Scheduler | **14:00 WIB** setiap hari | Daily Trending Review (top 7 coins) | `TRENDING_REVIEW` |
-| Scheduler | **20:00 WIB** setiap hari | Evening Market Review | `EVENING_REVIEW` |
-| Realtime monitor (setiap 30s) | Coin bergerak >3% in 1h atau >10% in 24h | Breaking Headline | `REALTIME_HEADLINE` |
-| Realtime monitor (setiap ~3 menit) | Top gainer >2% + volume >30M IDR | Headline | `REALTIME_HEADLINE` |
-| **Signal-triggered** | Brain Inference kirim BUY/SELL dengan confidence ≥ 75% | Headline | `REALTIME_HEADLINE` |
+### Jadwal Otomatis:
+*   **08:00 WIB** $\rightarrow$ Morning Briefing (`MORNING_BRIEF`).
+*   **14:00 WIB** $\rightarrow$ Daily Trending Review (`TRENDING_REVIEW`).
+*   **20:00 WIB** $\rightarrow$ Evening Market Review (`EVENING_REVIEW`).
+*   **Realtime** $\rightarrow$ Breaking Headlines jika koin bergerak $>3\%$ dalam 1 jam, atau sinyal `BUY/SELL` dengan keyakinan $\ge 75\%$.
 
-### Generate Manual
-
+### Generate Manual:
 ```bash
-# Dari host — semua mode tersedia:
 ./generate_news.sh morning
 ./generate_news.sh evening
 ./generate_news.sh headline BTC
-./generate_news.sh brief
-./generate_news.sh landing [COIN] [COUNT]
 ```
-
-Script otomatis mendeteksi apakah container `news-maker` sedang berjalan dan mengeksekusi di dalamnya; jika tidak, berjalan native. Dilengkapi progress bar + elapsed time.
-
-### Konfigurasi News Maker (`.env`)
-
-```env
-NEWS_LLM_PROVIDER=local          # local | hf | cf | auto
-NEWS_LLM_TIMEOUT_SEC=45           # timeout LLM local (default 45s)
-NEWS_TRENDING_REVIEW_HOUR=14      # jam trending review WIB (default 14)
-NEWS_SIGNAL_CONFIDENCE_MIN=0.75   # min confidence sinyal untuk trigger headline
-NEWS_MIN_CONTENT_CHARS=2000       # minimum panjang konten artikel
-
-# Remote provider (opsional — fallback jika local model timeout)
-NEWS_HF_API_URL=https://...
-NEWS_HF_API_TOKEN=hf_...
-NEWS_CF_API_URL=https://...
-NEWS_CF_API_TOKEN=...
-```
-
-### LLM Fallback Strategy
-
-```
-Local Engine (timeout 45s)
-  └─ timeout → Remote Provider (CF atau HF, timeout 60s)
-        └─ gagal → artikel tidak dibuat (skip, tidak crash)
-```
-
-Artikel disimpan ke tabel `intelligence_reports`. Deduplication: headline untuk pair yang sama tidak dibuat ulang dalam 20 menit.
-
----
-
-## 🎭 Market Regimes (Oracle)
-
-Oracle mendeteksi kondisi pasar global dan menyesuaikan strategi secara dinamis:
-
-| Regime | Deskripsi | Perilaku Bot |
-| :--- | :--- | :--- |
-| **BULLISH** | Tren naik, volume tinggi. | **Agresif**: Threshold diturunkan. |
-| **BEARISH** | Tren turun, risiko tinggi. | **Defensif**: Filter diperketat. |
-| **RANGING** | Harga sideways dalam range. | **Mean Reversion**: Fokus pada pullback. |
-| **CHOPPY** | Sideways tajam/acak. | **Selective**: Cooldown diperpanjang. |
-| **CRASH** | Penurunan tajam tak terkendali. | **Emergency Stop**: Berhenti otomatis. |
 
 ---
 

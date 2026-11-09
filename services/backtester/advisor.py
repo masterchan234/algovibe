@@ -4,10 +4,11 @@ import numpy as _np
 
 from services.backtester.db_backtest import get_connection, transaction
 from services.backtester.runtime import (
-    DEFAULT_DAILY_TARGET_PNL_IDR,
-    DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    DEFAULT_MIN_PRICE_IDR,
-    MIN_TRADE_IDR,
+    DEFAULT_BALANCE_USDT,
+    DEFAULT_DAILY_TARGET_PNL_USDT,
+    DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    DEFAULT_MIN_PRICE_USDT,
+    MIN_TRADE_USDT,
     OHLCV_DAYS,
     RSI_OVERBOUGHT_BASE,
     RSI_OVERBOUGHT_MAX,
@@ -34,18 +35,18 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
             print(f"   [WARN] [NO DATA] {p['profile_name']} has no backtest_result row yet; skip tuning.")
             return "no_data"
 
-        total_pnl = res["total_pnl_idr"]
+        total_pnl = res["total_pnl_quote"]
         total_roi = res["total_pnl_pct"]
         w_start = res["window_start"]
         w_end = res["window_end"]
         days_tested = (w_end - w_start).total_seconds() / 86400.0 if w_end and w_start and w_end > w_start else 90.0
 
         target_roi_daily = float(p.get("target_roi_pct", 0.0) or 0.0)
-        target_pnl_daily = float(p.get("target_pnl_idr", 0.0) or 0.0)
+        target_pnl_daily = float(p.get("target_pnl_quote", 0.0) or 0.0)
         if target_daily_pnl is not None and target_daily_pnl > 0:
             target_pnl_daily = float(target_daily_pnl)
         elif target_pnl_daily <= 0:
-            target_pnl_daily = DEFAULT_DAILY_TARGET_PNL_IDR
+            target_pnl_daily = DEFAULT_DAILY_TARGET_PNL_USDT
 
         avg_daily_pnl = total_pnl / days_tested
         avg_daily_roi = total_roi / days_tested
@@ -53,11 +54,11 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
         reached_roi = target_roi_daily > 0 and avg_daily_roi >= target_roi_daily
 
         if reached_pnl or reached_roi:
-            status = f"Rp {avg_daily_pnl:,.0f}/hari" if reached_pnl else f"{avg_daily_roi:.2f}%/hari"
+            status = f"$ {avg_daily_pnl:,.2f}/hari" if reached_pnl else f"{avg_daily_roi:.2f}%/hari"
             print(f"   [WIN] [DAILY TARGET REACHED] {p['profile_name']} ({status})")
             return "target_reached"
 
-        logger.info("[ADVISOR] Analyzing: Avg Rp {0:,.0f}/day (Target: {1:,.0f})".format(avg_daily_pnl, target_pnl_daily))
+        logger.info("[ADVISOR] Analyzing: Avg $ {0:,.2f}/day (Target: {1:,.2f})".format(avg_daily_pnl, target_pnl_daily))
 
         new_p = dict(p)
         for k in ["id", "created_at", "updated_at"]:
@@ -68,7 +69,7 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
         m = re.search(r"_v(\d+)$", p["profile_name"])
         v = int(m.group(1)) + 1 if m else 2
         new_p["profile_name"] = f"{p['profile_name'].split('_v')[0]}_v{v}"
-        new_p["target_pnl_idr"] = target_pnl_daily
+        new_p["target_pnl_quote"] = target_pnl_daily
 
         changes = []
         param_diffs = []
@@ -104,11 +105,11 @@ def tune_profile(profile_id: int, target_daily_pnl: float | None = None) -> str:
             _set_if_changed("dca_enabled", False, "Recovery mode: disable DCA while expectancy negative")
             _set_if_changed("cooldown_seconds", int(min(1800, max(300, int(float(p.get("cooldown_seconds", 300))) + 120))), "Recovery mode: increase cooldown to reduce overtrading")
         elif target_gap > 0 and win_rate >= 0.5 and pf >= 1.2:
-            current_cap = float(p.get("initial_capital_idr", 1000000.0) or 1000000.0)
-            current_pos = float(p.get("max_position_idr", 100000.0) or 100000.0)
+            current_cap = float(p.get("initial_capital_quote", 1000.0) or 1000.0)
+            current_pos = float(p.get("max_position_quote", 120.0) or 120.0)
             cap_limit = current_cap * 0.35
-            bumped_pos = round(min(cap_limit, max(current_pos + MIN_TRADE_IDR, current_pos * 1.2)), 2)
-            _set_if_changed("max_position_idr", bumped_pos, "Growth mode: increase position sizing toward daily target")
+            bumped_pos = round(min(cap_limit, max(current_pos + MIN_TRADE_USDT, current_pos * 1.2)), 2)
+            _set_if_changed("max_position_quote", bumped_pos, "Growth mode: increase position sizing toward daily target")
             _set_if_changed("buy_threshold", round(max(4.0, float(p["buy_threshold"]) - 0.1), 2), "Growth mode: slightly loosen threshold for more valid entries")
             _set_if_changed("target_tp_pct", round(min(0.06, float(p["target_tp_pct"]) + 0.003), 4), "Growth mode: modestly increase TP to lift payoff ratio")
 
@@ -155,8 +156,8 @@ def _build_coin_recommendation(
     edge_trade_raw: float,
     edge_trade_effective: float,
     trades_needed_full_cap: float,
-    balance_idr: float,
-    max_position_idr: float,
+    balance_usdt: float,
+    max_position_usdt: float,
     max_open_positions: int,
     buy_threshold: float,
     tp_pct: float,
@@ -173,10 +174,10 @@ def _build_coin_recommendation(
     edge_conf = _clamp(edge_trade_effective / 0.01, 0.0, 1.0)
     pressure = _clamp((trades_needed_full_cap - 3.0) / 12.0, 0.0, 1.0)
 
-    buy_score_threshold = _clamp(6.1 - (0.55 * edge_conf) + (0.35 * pressure) + (0.45 * (1.0 - q)) + (0.20 * (1.0 - acf_norm)), 5.0, 7.3)
-    sell_score_threshold = _clamp(5.6 + (0.40 * noise_regime) - (0.20 * prob_conf) + (0.25 * (1.0 - q)), 5.0, 7.1)
-    opposing_max = _clamp(3.8 + (0.45 * noise_regime) + (0.25 * (1.0 - acf_norm)) - (0.20 * edge_conf), 3.3, 4.9)
-    sell_block_threshold = _clamp(4.9 + (0.45 * noise_regime) - (0.25 * trend_bias) + (0.20 * (1.0 - q)), 4.4, 6.3)
+    buy_score_threshold = _clamp(6.1 - (0.55 * edge_conf) + (0.35 * pressure) + (0.45 * (1.0 - q)) + (0.20 * (1.0 - acf_norm)), 6.5, 7.5)  # v3.0 min 6.5
+    sell_score_threshold = _clamp(5.6 + (0.40 * noise_regime) - (0.20 * prob_conf) + (0.25 * (1.0 - q)), 6.5, 7.5)  # v3.0 min 6.5
+    opposing_max = _clamp(3.8 + (0.45 * noise_regime) + (0.25 * (1.0 - acf_norm)) - (0.20 * edge_conf), 5.0, 5.5)  # live bot entry gate ≥5.0
+    sell_block_threshold = _clamp(4.9 + (0.45 * noise_regime) - (0.25 * trend_bias) + (0.20 * (1.0 - q)), 5.0, 6.3)  # min 5.0
 
     mean_reversion = _clamp((0.55 * (1.0 - q)) + (0.45 * noise_regime), 0.0, 1.0)
     trend_strength = _clamp((0.45 * q) + (0.30 * acf_norm) + (0.25 * max(0.0, trend_bias)), 0.0, 1.0)
@@ -225,9 +226,9 @@ def _build_coin_recommendation(
     obv_mild = _clamp(obv_strong * 0.4, 1.5, 4.0)
 
     return {
-        "initial_capital_idr": float(balance_idr),
-        "min_position_idr": float(MIN_TRADE_IDR),
-        "max_position_idr": round(max_position_idr, 2),
+        "initial_capital_quote": float(balance_usdt),
+        "min_position_quote": float(MIN_TRADE_USDT),
+        "max_position_quote": round(max_position_usdt, 2),
         "max_open_positions": int(max_open_positions),
         "buy_threshold": round(buy_threshold, 2),
         "sell_block_threshold": round(sell_block_threshold, 3),
@@ -279,7 +280,7 @@ def _build_coin_recommendation(
     }
 
 
-def _apply_backtest_optimized_overrides(recommendation: dict, balance_idr: float, target_daily_pnl: float) -> dict:
+def _apply_backtest_optimized_overrides(recommendation: dict, balance_usdt: float, target_daily_pnl: float) -> dict:
     rec = dict(recommendation)
     rec["buy_threshold"] = round(_clamp(float(rec.get("buy_threshold", 6.0)) - 0.8, 4.0, 7.0), 2)
     rec["buy_score_threshold"] = round(_clamp(float(rec.get("buy_score_threshold", 6.0)) - 0.5, 5.0, 7.0), 3)
@@ -292,16 +293,16 @@ def _apply_backtest_optimized_overrides(recommendation: dict, balance_idr: float
     rec["max_hold_minutes"] = int(_clamp(float(rec.get("max_hold_minutes", 240)), 45, 240))
     rec["ema_trend_filter_enabled"] = False
     rec["atr_max_pct"] = round(_clamp(float(rec.get("atr_max_pct", 3.0)) + 0.7, 2.5, 5.0), 3)
-    est_trades = max(2, min(12, int(round(target_daily_pnl / max(1.0, balance_idr * 0.0035)))))
+    est_trades = max(2, min(12, int(round(target_daily_pnl / max(1.0, balance_usdt * 0.0035)))))
     pos_target = target_daily_pnl / max(1e-9, est_trades * 0.0035)
-    rec["max_position_idr"] = round(_clamp(pos_target, MIN_TRADE_IDR, balance_idr * 0.30), 2)
-    rec["max_open_positions"] = 2 if rec["max_position_idr"] <= (0.2 * balance_idr) else 1
+    rec["max_position_quote"] = round(_clamp(pos_target, MIN_TRADE_USDT, balance_usdt * 0.30), 2)
+    rec["max_open_positions"] = 2 if rec["max_position_quote"] <= (0.2 * balance_usdt) else 1
     rec["dca_enabled"] = False
     rec["dca_max_tiers"] = 1
     return rec
 
 
-def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_daily_pnl: float, balance_idr: float, rows: list[dict]) -> None:
+def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_daily_pnl: float, balance_usdt: float, rows: list[dict]) -> None:
     if not rows:
         return
 
@@ -318,13 +319,13 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     window_start, window_end, pair, n_candles, n_days,
                     mu_1m, sigma_1m, mad_1m, up_ratio, jump_1pct_ratio, acf1,
                     avg_day_range, sigma_day, mu_day, sharpe_day_like, momentum_quality,
-                    target_daily_pnl, balance_idr,
+                    target_daily_pnl, balance_quote,
                     fee_rt, p_hat, breakeven_p, win_net, loss_net, edge_trade, trades_needed_full_cap,
                     edge_trade_raw, edge_trade_effective,
                     rec_buy_threshold, rec_sell_block_threshold, rec_target_tp_pct, rec_target_sl_pct,
                     rec_buy_score_threshold, rec_sell_score_threshold, rec_opposing_max,
                     rec_cooldown_seconds, rec_max_hold_minutes, rec_ema_trend_filter_enabled, rec_atr_max_pct,
-                    rec_max_position_idr, rec_max_open_positions, rec_dca_enabled, rec_dca_max_tiers,
+                    rec_max_position_quote, rec_max_open_positions, rec_dca_enabled, rec_dca_max_tiers,
                     rec_rsi_oversold, rec_rsi_overbought,
                     rec_bb_extreme_low, rec_bb_low, rec_bb_high, rec_bb_extreme_high,
                     rec_stoch_k_oversold, rec_stoch_d_oversold, rec_stoch_k_overbought, rec_stoch_d_overbought,
@@ -357,7 +358,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     %s,%s,%s,%s,
                     NOW()
                 )
-                ON CONFLICT (pair, window_start, window_end, target_daily_pnl, balance_idr)
+                ON CONFLICT (pair, window_start, window_end, target_daily_pnl, balance_quote)
                 DO UPDATE SET
                     n_candles = EXCLUDED.n_candles,
                     n_days = EXCLUDED.n_days,
@@ -392,7 +393,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     rec_max_hold_minutes = EXCLUDED.rec_max_hold_minutes,
                     rec_ema_trend_filter_enabled = EXCLUDED.rec_ema_trend_filter_enabled,
                     rec_atr_max_pct = EXCLUDED.rec_atr_max_pct,
-                    rec_max_position_idr = EXCLUDED.rec_max_position_idr,
+                    rec_max_position_quote = EXCLUDED.rec_max_position_quote,
                     rec_max_open_positions = EXCLUDED.rec_max_open_positions,
                     rec_dca_enabled = EXCLUDED.rec_dca_enabled,
                     rec_dca_max_tiers = EXCLUDED.rec_dca_max_tiers,
@@ -450,7 +451,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     _py(r["sharpe_day_like"]),
                     _py(r["momentum_quality"]),
                     _py(target_daily_pnl),
-                    _py(balance_idr),
+                    _py(balance_usdt),
                     _py(r["math"]["fee_rt"]),
                     _py(r["math"]["p_hat"]),
                     _py(r["math"]["breakeven_p"]),
@@ -471,7 +472,7 @@ def _upsert_coin_analysis(window_start: datetime, window_end: datetime, target_d
                     _py(r["recommendation"]["max_hold_minutes"]),
                     _py(r["recommendation"]["ema_trend_filter_enabled"]),
                     _py(r["recommendation"]["atr_max_pct"]),
-                    _py(r["recommendation"]["max_position_idr"]),
+                    _py(r["recommendation"]["max_position_quote"]),
                     _py(r["recommendation"]["max_open_positions"]),
                     _py(r["recommendation"]["dca_enabled"]),
                     _py(r["recommendation"]["dca_max_tiers"]),
@@ -530,9 +531,9 @@ def _create_profile_from_analysis(
 
     payload = {
         "profile_name": effective_name,
-        "initial_capital_idr": float(recommendation["initial_capital_idr"]),
-        "min_position_idr": float(recommendation["min_position_idr"]),
-        "max_position_idr": float(recommendation["max_position_idr"]),
+        "initial_capital_quote": float(recommendation["initial_capital_quote"]),
+        "min_position_quote": float(recommendation["min_position_quote"]),
+        "max_position_quote": float(recommendation["max_position_quote"]),
         "max_open_positions": int(recommendation["max_open_positions"]),
         "timeframe_minutes": int(max(1, timeframe_minutes)),
         "strategy_mode": "backtest_optimized" if backtest_optimized else str(strategy_mode),
@@ -546,7 +547,7 @@ def _create_profile_from_analysis(
         "atr_max_pct": float(recommendation["atr_max_pct"]),
         "dca_enabled": bool(recommendation["dca_enabled"]),
         "dca_max_tiers": int(recommendation["dca_max_tiers"]),
-        "target_pnl_idr": float(target_daily_pnl),
+        "target_pnl_quote": float(target_daily_pnl),
         "target_roi_pct": 0.0,
         "is_active": bool(activate_new_profile),
     }
@@ -599,12 +600,12 @@ def _sort_auto_selection_candidates(rows: list[dict]) -> list[dict]:
 
 
 def analyze_ohlcv_target_setup(
-    target_daily_pnl: float = DEFAULT_DAILY_TARGET_PNL_IDR,
-    balance_idr: float = 100000.0,
+    target_daily_pnl: float = DEFAULT_DAILY_TARGET_PNL_USDT,
+    balance_usdt: float = DEFAULT_BALANCE_USDT,
     days: int = OHLCV_DAYS,
     pairs_filter: str | None = None,
-    min_liquidity_24h_idr: float = DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    min_price_idr: float = DEFAULT_MIN_PRICE_IDR,
+    min_liquidity_24h_usdt: float = DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    min_price_usdt: float = DEFAULT_MIN_PRICE_USDT,
 ) -> dict:
     end = _get_latest_ohlcv_ts()
     if end is None:
@@ -732,9 +733,9 @@ def analyze_ohlcv_target_setup(
                 end,
                 start,
                 end,
-                float(min_liquidity_24h_idr),
-                float(min_price_idr),
-                float(min_price_idr),
+                float(min_liquidity_24h_usdt),
+                float(min_price_usdt),
+                float(min_price_usdt),
             ),
         )
         rows = cur.fetchall()
@@ -798,11 +799,11 @@ def analyze_ohlcv_target_setup(
     ranked = sorted(universe, key=lambda x: (x["momentum_quality"], x["sharpe_day_like"], x["up_ratio"]), reverse=True)
     top_k = ranked[: min(5, len(ranked))]
 
-    fee_buy = 0.002111
-    fee_sell = 0.004211
-    slippage_in = 0.001
-    slippage_out = 0.001
-    fee_rt = fee_buy + fee_sell + slippage_in + slippage_out
+    fee_buy = 0.001          # Binance Spot taker 0.1%
+    fee_sell = 0.001         # Binance Spot taker 0.1%
+    slippage_in = 0.0005     # config.py FEE_SLIPPAGE_BUFFER 0.05%
+    slippage_out = 0.0005    # 0.05% market impact
+    fee_rt = fee_buy + fee_sell + slippage_in + slippage_out  # 0.3% round-trip
     per_coin = []
     for c in ranked:
         q = float(c["momentum_quality"])
@@ -821,15 +822,15 @@ def analyze_ohlcv_target_setup(
         edge_trade_raw = (p_hat * win_net) - ((1.0 - p_hat) * loss_net)
         edge_trade = edge_trade_raw if edge_trade_raw > 0 else 0.0035
         edge_trade_effective = edge_trade
-        trades_needed_full_cap = max(0.0, target_daily_pnl / max(1.0, balance_idr * edge_trade))
-        buy_threshold = _clamp(7.0 - (3.2 * q), 3.8, 7.5)
+        trades_needed_full_cap = max(0.0, target_daily_pnl / max(1.0, balance_usdt * edge_trade))
+        buy_threshold = _clamp(7.5 - (1.0 * q), 6.5, 7.5)  # v3.0: best coin→6.5, worst→7.5
         cooldown_seconds = int(_clamp(900 - (600 * q), 240, 900))
         atr_max_pct = _clamp(day_range * 100.0 * 0.45, 2.0, 4.5)
-        max_hold_minutes = int(_clamp((tp_pct / max(sigma_day, 1e-6)) * 1440.0 * 0.6, 120, 1440))
+        max_hold_minutes = 10  # live bot fixed: MAX_HOLD_MINUTES=10 (config.py)
         target_trades_day = int(_clamp(_np.ceil(trades_needed_full_cap), 1, 12))
         needed_position = target_daily_pnl / max(1e-9, target_trades_day * edge_trade)
-        max_position_idr = float(_clamp(needed_position, MIN_TRADE_IDR, balance_idr))
-        max_open_positions = int(1 if max_position_idr >= (0.6 * balance_idr) else 2)
+        max_position_usdt = float(_clamp(needed_position, MIN_TRADE_USDT, balance_usdt))
+        max_open_positions = int(1 if max_position_usdt >= (0.6 * balance_usdt) else 2)
 
         recommendation = _build_coin_recommendation(
             q=q,
@@ -842,8 +843,8 @@ def analyze_ohlcv_target_setup(
             edge_trade_raw=edge_trade_raw,
             edge_trade_effective=edge_trade_effective,
             trades_needed_full_cap=trades_needed_full_cap,
-            balance_idr=balance_idr,
-            max_position_idr=max_position_idr,
+            balance_usdt=balance_usdt,
+            max_position_usdt=max_position_usdt,
             max_open_positions=max_open_positions,
             buy_threshold=buy_threshold,
             tp_pct=tp_pct,
@@ -874,11 +875,11 @@ def analyze_ohlcv_target_setup(
     print("\n[ANALYSIS] OHLCV_1M QUANT ANALYSIS (DATA-DRIVEN)")
     print(
         f"Window: {days} hari | Pair dianalisis: {len(universe)} | "
-        f"Target: Rp {target_daily_pnl:,.0f}/hari | Balance: Rp {balance_idr:,.0f} | "
-        f"Min Avg Daily Notional: Rp {float(min_liquidity_24h_idr):,.0f}"
+        f"Target: $ {target_daily_pnl:,.2f}/hari | Balance: $ {balance_usdt:,.2f} | "
+        f"Min Avg Daily Notional: $ {float(min_liquidity_24h_usdt):,.2f}"
     )
-    if float(min_price_idr) > 0:
-        print(f"Min Price filter aktif: Rp {float(min_price_idr):,.0f}")
+    if float(min_price_usdt) > 0:
+        print(f"Min Price filter aktif: $ {float(min_price_usdt):,.4f}")
     print("\nTop momentum-quality pairs:")
     for i, p in enumerate(top_k, start=1):
         print(
@@ -903,6 +904,6 @@ def analyze_ohlcv_target_setup(
     if best["math"]["trades_needed_full_cap"] > 6:
         print("\n[WARN] Feasibility warning: target 5000/hari kemungkinan sangat agresif untuk balance ini pada edge historis saat ini.")
 
-    _upsert_coin_analysis(window_start=start, window_end=end, target_daily_pnl=float(target_daily_pnl), balance_idr=float(balance_idr), rows=per_coin)
+    _upsert_coin_analysis(window_start=start, window_end=end, target_daily_pnl=float(target_daily_pnl), balance_usdt=float(balance_usdt), rows=per_coin)
     print(f"\n Saved {len(per_coin)} row(s) to backtest_coin_analysis.")
     return {"top_pairs": top_k, "recommendation": recommendation, "math": best["math"], "per_coin": per_coin}

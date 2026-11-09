@@ -1,1 +1,9 @@
 Generic single-database configuration.
+
+---
+
+### Algovibe Note
+Untuk pembaruan *logic* pada file Python (`.py`) seperti `config.py`, `entry_gates.py`, atau `exit_manager.py`, Anda **tidak perlu melakukan rebuild ulang (docker compose build)**. 
+Karena file kode di-mount secara langsung ke dalam kontainer melalui volume, Anda hanya perlu melakukan **Restart Kontainer** agar *service* membaca perubahan *logic* terbaru:
+
+`docker compose restart executive-core market-pipe`

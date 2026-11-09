@@ -1,0 +1,77 @@
+# ─── STAGE 1: Frontend Builder ───
+FROM node:20-slim AS frontend-builder
+WORKDIR /app/dashboard/frontend
+
+# Install dependencies first (better caching)
+COPY dashboard/frontend/package*.json ./
+RUN npm install --frozen-lockfile
+
+# Copy source and build
+COPY dashboard/frontend/ .
+RUN npm run build
+
+# ─── STAGE 2: Python Compiler (Builder) ───
+FROM python:3.12-slim AS compiler
+
+# Install build essential dependencies (gcc, python3-dev)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc build-essential python3-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir cython setuptools
+
+# Copy code
+COPY . .
+
+# Run Cython compiler to convert all core logic (.py) into binary shared libraries (.so)
+RUN python3 compile_prod.py && rm compile_prod.py
+
+# Clean up source code .py files and C files that we compiled
+# leaving only the compiled .so binaries and package structures!
+RUN find . -name "*.py" ! -name "__init__.py" ! -name "main.py" -path "./app/*" -o -path "./services/*" -o -path "./shared/*" -o -path "./utils/*" -delete && \
+    find . -name "*.c" -delete && \
+    find . -name "*.pyc" -delete && \
+    find . -name "__pycache__" -type d -exec rm -rf {} +
+
+# ─── STAGE 3: Secure Light Runtime ───
+FROM python:3.12-slim
+
+# Timezone & System Deps
+ENV TZ=Asia/Jakarta
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata curl ca-certificates && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python production runtime dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all compiled code and assets from compiler stage
+COPY --from=compiler /app /app
+
+# Copy built frontend assets from Stage 1
+COPY --from=frontend-builder /app/dashboard/static/dist /app/dashboard/static/dist
+
+# Ensure runtime directories exist with correct permissions
+RUN mkdir -p /app/data/logs /app/models/cache
+
+# Security: Create non-root user
+RUN useradd -m -u 1000 algovibe && \
+    chown -R algovibe:algovibe /app
+
+# Switch to non-root user
+USER algovibe
+
+# Dashboard port
+EXPOSE 8080
+
+# Run core engine as default CMD (now runs fully compiled .so files!)
+CMD ["python", "-m", "services.executive_core.main"]

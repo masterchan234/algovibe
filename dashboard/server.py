@@ -32,8 +32,8 @@ from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
 import ccxt
 import config as cfg
 import utils.logger # Ensure central logging config is applied
-from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND, IPC_SIGNAL
-from shared.algovibe_pb2 import EquityUpdate, Tick, Trade, ExchangeId  # type: ignore[attr-defined]
+from shared.transport import IPC_EQUITY, IPC_MARKET, IPC_COMMAND
+from shared.algovibe_pb2 import EquityUpdate, Tick, Trade  # type: ignore[attr-defined]
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- [ZMQ COMMAND PUBLISHER] ---
@@ -50,7 +50,13 @@ def broadcast_command(action, payload=None):
     logging.info(f" [IPC] Broadcasted command: {action}")
 
 # Public adapter untuk data pasar (OHLCV, ticker_all, market movers) — tidak butuh auth
-_public_adapter = IndodaxAdapter('', '')
+eid = os.getenv("EXCHANGE", "binance").lower()
+if eid == "binance":
+    from app.infrastructure.providers.binance_adapter import BinanceAdapter
+    _public_adapter = BinanceAdapter('', '')
+else:
+    from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
+    _public_adapter = IndodaxAdapter('', '')
 
 app = Flask(__name__, static_folder='static/dist', static_url_path='/static')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -406,17 +412,20 @@ def _fetch_all_tickers_rest():
 
 def _fetch_real_idr_balance_bundle():
     """
-    Fetch real IDR balance bundle (free/used/total) + all non-IDR coins.
+    Fetch real balance bundle (free/used/total) + all non-quote coins.
     [Senior Logic] ALWAYS FETCH FRESH from DB (no cache) to keep dashboard in sync with bot.
     """
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    quote_asset = "USDT" if eid == "binance" else "IDR"
+    
     # ALWAYS fetch fresh from Database (no caching — balance changes every cycle)
     try:
         db_bal = db.get_balances()
-        if db_bal and 'IDR' in db_bal:
-            idr_data = db_bal['IDR']
+        if db_bal and quote_asset in db_bal:
+            idr_data = db_bal[quote_asset]
             coins = {}
             for asset, data in db_bal.items():
-                if asset == 'IDR': continue
+                if asset == quote_asset: continue
                 total_val = float(data.get('total', 0))
                 if total_val > 0: # Tampilkan semua koin > 0
                     coins[asset] = total_val
@@ -438,18 +447,26 @@ def _fetch_real_idr_balance_bundle():
             return None
 
         import ccxt
-        ex = ccxt.indodax({
-            'apiKey': user['api_key'],
-            'secret': user['api_secret'],
-            'enableRateLimit': True
-        })
+        if eid == "binance":
+            ex = ccxt.binance({
+                'apiKey': user['api_key'] or os.getenv('BINANCE_API_KEY', ''),
+                'secret': user['api_secret'] or os.getenv('BINANCE_API_SECRET', ''),
+                'enableRateLimit': True,
+                'options': {'adjustForTimeDifference': True}
+            })
+        else:
+            ex = ccxt.indodax({
+                'apiKey': user['api_key'] or os.getenv('INDODAX_API_KEY', ''),
+                'secret': user['api_secret'] or os.getenv('INDODAX_API_SECRET', ''),
+                'enableRateLimit': True
+            })
         balance = ex.fetch_balance()
-        idr = balance.get('IDR', {})
+        idr = balance.get(quote_asset, {})
         total_data = balance.get('total', {})
         
         coins = {}
         for coin, val in total_data.items():
-            if coin == 'IDR' or coin == 'info': continue
+            if coin == quote_asset or coin == 'info': continue
             amount = float(val or 0)
             if amount > 0: # Tampilkan semua koin > 0
                 coins[coin] = amount
@@ -480,21 +497,23 @@ def _get_cached_real_balance_bundle():
     return None
 
 def _get_cached_real_balance():
-    """Backward-compatible helper returning only free IDR."""
+    """Backward-compatible helper returning only free quote balance."""
     val = _get_cached_real_balance_bundle()
     return val.get("free") if val else None
 
 def _get_coin_equity_idr(coins: dict, ws_tickers: dict) -> float:
     """
-    Hitung total nilai IDR dari semua koin non-IDR yang dipegang di exchange.
+    Hitung total nilai quote dari semua koin non-quote yang dipegang di exchange.
     coins: {"AXL": 7.94, "DRX": 98.0, ...}
     ws_tickers: hasil mws.get_tickers()
     """
     total = 0.0
     rest_tickers = None
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    suffix = "usdt" if eid == "binance" else "idr"
     
     for coin, amount in coins.items():
-        pair_key = f"{coin.lower()}idr"
+        pair_key = f"{coin.lower()}{suffix}"
         
         # 1. Coba ambil dari WebSocket (Paling cepat)
         price = 0
@@ -513,21 +532,29 @@ def _get_coin_equity_idr(coins: dict, ws_tickers: dict) -> float:
             
     return total
 
-def _get_pair_technicals(pair):
-    """Ambil histori harga dari JSON blob dan hitung technical summary."""
+def _get_pair_technicals(pair, tf='1m'):
+    """Ambil histori harga dan hitung technical summary sesuai timeframe."""
     conn = get_db_connection()
     try:
-        # 1. Price-based technicals (Diberikan sebagai JSON list di tabel ini)
-        row = conn.execute(
-            "SELECT history_json FROM ticker_history WHERE pair = %s",
-            (pair,)
-        ).fetchone()
-        
-        prices = []
-        if row and row['history_json']:
-            prices = json.loads(row['history_json'])
-        
-        tech = get_technical_summary(prices)
+        if tf == '1m':
+            # Price-based technicals (Diberikan sebagai JSON list di tabel ini)
+            row = conn.execute(
+                "SELECT history_json FROM ticker_history WHERE pair = %s",
+                (pair,)
+            ).fetchone()
+
+            prices = []
+            if row and row['history_json']:
+                prices = json.loads(row['history_json'])
+
+            tech = get_technical_summary(prices)
+        else:
+            # OHLCV-based technicals
+            from dashboard.server import _fetch_ohlcv_data
+            ohlcv_data = _fetch_ohlcv_data(pair, tf)
+            prices = [candle[4] for candle in ohlcv_data] if ohlcv_data else []
+            volumes = [candle[5] for candle in ohlcv_data] if ohlcv_data else []
+            tech = get_technical_summary(prices, volumes=volumes)
         
         # 2. Orderbook-based technicals (Imbalance & Spread)
         depth = conn.execute("SELECT price, vol, is_bid FROM market_depth WHERE pair = %s", (pair,)).fetchall()
@@ -563,29 +590,31 @@ def _get_trade_history_summary():
     try:
         conn = get_db_connection()
         dry_val = 1 if cfg.DRY_RUN else 0
-        row = conn.execute("""
+        exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
+        
+        row = conn.execute(f"""
             SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl_idr <= 0 THEN 1 ELSE 0 END) as losses,
-                ROUND(AVG(CASE WHEN pnl_idr > 0 THEN pnl_pct END), 3) as avg_win_pct,
-                ROUND(AVG(CASE WHEN pnl_idr <= 0 THEN pnl_pct END), 3) as avg_loss_pct,
-                ROUND(MAX(pnl_idr), 0) as best_trade,
-                ROUND(MIN(pnl_idr), 0) as worst_trade,
-                ROUND(SUM(pnl_idr), 0) as total_pnl,
+                SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_quote <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(AVG(CASE WHEN pnl_quote > 0 THEN pnl_pct END), 3) as avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl_quote <= 0 THEN pnl_pct END), 3) as avg_loss_pct,
+                ROUND(MAX(pnl_quote), 0) as best_trade,
+                ROUND(MIN(pnl_quote), 0) as worst_trade,
+                ROUND(SUM(pnl_quote), 0) as total_pnl,
                 ROUND(AVG(duration_seconds)/60.0, 1) as avg_hold_min
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
         """, (bool(dry_val),)).fetchone()
 
-        exits = conn.execute("""
+        exits = conn.execute(f"""
             SELECT reason, COUNT(*) as cnt, ROUND(AVG(pnl_pct), 2) as avg_pct
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             GROUP BY reason ORDER BY cnt DESC LIMIT 6
         """, (bool(dry_val),)).fetchall()
 
-        top_pairs = conn.execute("""
-            SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_idr), 0) as total_pnl
-            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST'
+        top_pairs = conn.execute(f"""
+            SELECT pair, COUNT(*) as trades, ROUND(SUM(pnl_quote), 0) as total_pnl
+            FROM trade_history WHERE dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
             GROUP BY pair ORDER BY total_pnl DESC LIMIT 5
         """, (bool(dry_val),)).fetchall()
 
@@ -622,119 +651,6 @@ _last_equity_llm_ts = 0.0  # In-process cooldown — cegah flooding LLM dari pus
 _last_market_brief_llm_ts = 0.0
 _last_market_brief_payload_hash = ""
 _latest_exchange_latency = 0.0  # Measured in [MARKET-PIPE] from Indodax epoch
-
-# Binance Lead-Lag: rolling (timestamp_ms, price) buffer per symbol
-_BINANCE_DASH_HISTORY: dict = {}   # {symbol: deque(maxlen=500)}
-_BINANCE_DASH_MAXLEN = 500          # Naik dari 60 → 500 agar window 5s tersedia
-_LEAD_LAG_TAU: dict = {}            # {b_symbol: tau_ms} — realtime dari brain-inference via ZMQ
-_TIER1_PAIRS = {"btcidr", "ethidr", "solidr", "xrpidr", "dogeidr", "adaidr", "suiidr"}
-_TIER2_PAIRS = {
-    "nearidr", "avaxidr", "opidr", "arbidr", "filidr", "dotidr", "linkidr", "maticidr",
-    "bnbidr", "trxidr", "ltcidr", "atomidr", "ftmidr",
-}
-
-
-def _indodax_to_binance(pair_lower: str) -> str:
-    """Map Indodax pair → Binance symbol. Sama persis dengan entry_gates.py."""
-    _overrides = {"rndridr": "renderusdt", "wbtcidr": "wbtcusdt", "kndyidr": ""}
-    if pair_lower in _overrides:
-        return _overrides[pair_lower]
-    if pair_lower.endswith("idr"):
-        return pair_lower[:-3] + "usdt"
-    return ""
-
-
-def _compute_latency_snapshot(window_ms: float = 5000.0) -> list:
-    """Hitung per-pair Binance return untuk dashboard latency strip.
-
-    Window default 5000ms (5 detik) — lebih panjang dari signal gate (400ms) agar
-    pergerakan harga terlihat nyata di dashboard. Urutan: Tier1 dulu, lalu Tier2,
-    keduanya diurutkan by |b_return| descending (paling aktif tampil pertama).
-    Hanya pair yang memiliki data di _BINANCE_DASH_HISTORY yang ditampilkan.
-
-    Returns list of dicts: {pair, base, b_return, actual_ms, b_last, tier, status, freeze_remaining}
-    """
-    result = []
-    now_ms = time.time() * 1000
-
-    # Kandidat: Tier1 + Tier2, hanya yang sudah ada data Binance
-    all_candidates = [(p, 1) for p in sorted(_TIER1_PAIRS)] + \
-                     [(p, 2) for p in sorted(_TIER2_PAIRS)]
-
-    for pair, tier in all_candidates:
-        b_symbol = _indodax_to_binance(pair)
-        if not b_symbol:
-            continue
-        hist = list(_BINANCE_DASH_HISTORY.get(b_symbol, []))
-        if not hist:
-            continue  # Jangan tampilkan pair yang belum ada data Binance
-
-        b_return = 0.0
-        actual_ms = 0.0
-        b_last = 0.0
-        if len(hist) >= 2:
-            last_ts, b_last = hist[-1]
-            ref_ts, ref_price = hist[0]
-            for ts, price in hist:
-                if now_ms - ts <= window_ms:
-                    ref_ts, ref_price = ts, price
-                    break
-            actual_ms = last_ts - ref_ts
-            if ref_price > 0 and actual_ms >= 0:
-                b_return = (b_last - ref_price) / ref_price * 100.0
-        elif len(hist) == 1:
-            b_last = hist[0][1]
-
-        # Status badge — threshold dikalibrasi untuk window 5s (bukan 400ms gate)
-        if b_return <= -0.50:
-            status = "TOXIC"
-        elif b_return >= 0.65:
-            status = "FAST-TRACK"
-        elif b_return >= 0.20:
-            status = "BREAKOUT"
-        elif b_return >= 0.07:
-            status = "RISING"
-        elif b_return <= -0.20:
-            status = "DECLINING"
-        elif b_return <= -0.07:
-            status = "FADING"
-        else:
-            status = "NEUTRAL"
-
-        # Check toxic freeze (stored in DB by entry_gates)
-        freeze_remaining = 0
-        try:
-            freeze_until = float(db.get_state(f"toxic_freeze_{pair}") or 0)
-            remaining = freeze_until - time.time()
-            if remaining > 0:
-                freeze_remaining = round(remaining, 1)
-                status = "FROZEN"
-        except Exception:
-            pass
-
-        tau_ms = _LEAD_LAG_TAU.get(b_symbol, 0)
-
-        result.append({
-            "pair":             pair,
-            "base":             pair.replace("idr", "").upper(),
-            "b_return":         round(b_return, 4),
-            "actual_ms":        round(actual_ms, 0),
-            "b_last":           round(b_last, 4),
-            "tier":             tier,
-            "status":           status,
-            "freeze_remaining": freeze_remaining,
-            "tau_ms":           tau_ms,
-        })
-
-    # Sort global (semua tier) — paling aktif kiri, NEUTRAL paling kanan
-    _STATUS_PRIORITY = {
-        "FAST-TRACK": 0, "TOXIC": 1, "BREAKOUT": 2,
-        "RISING": 3, "FADING": 4, "DECLINING": 5, "FROZEN": 6, "NEUTRAL": 7,
-    }
-    def _sort_key(r):
-        return (_STATUS_PRIORITY.get(r["status"], 9), -abs(r["b_return"]))
-
-    return sorted(result, key=_sort_key)
 
 
 
@@ -923,44 +839,45 @@ def _generate_technical_reasoning(pair, tech, last_price=None):
 
     analysis = []
 
-    # 1. Analisa Momentum & RSI
+    # 1. Momentum & RSI Analysis
     if rsi < 30:
         if slope > -0.001:
-            analysis.append(f"Terdeteksi 'Bullish Divergence' minor; RSI {rsi} menunjukkan jenuh jual sementara momentum penurunan mulai melandai.")
+            analysis.append(f"Minor 'Bullish Divergence' detected; RSI {rsi} indicates oversold conditions while downside momentum is flattening.")
         else:
-            analysis.append(f"Harga berada dalam tekanan 'Oversold' yang kuat (RSI {rsi}). Penurunan masih memiliki momentum negatif yang tajam.")
+            analysis.append(f"Price is under strong 'Oversold' pressure (RSI {rsi}). Downward trajectory still exhibits sharp negative momentum.")
     elif rsi > 70:
-        analysis.append(f"Kondisi 'Overbought' (RSI {rsi}) terdeteksi. Risiko 'Trend Exhaustion' meningkat, waspada pembalikan arah mendadak.")
+        analysis.append(f"'Overbought' condition (RSI {rsi}) detected. Risk of 'Trend Exhaustion' is elevated; monitor for sudden reversals.")
     else:
-        analysis.append(f"RSI berada di zona netral ({rsi}). Tidak ada indikasi deviasi harga yang ekstrim saat ini.")
+        analysis.append(f"RSI is in the neutral zone ({rsi}). No extreme price deviations indicated currently.")
 
-    # 2. Analisa Liquidity & Orderbook (Imbalance)
+    # 2. Liquidity & Orderbook Analysis (Imbalance)
     if bp < 40:
         if slope < 0:
-            analysis.append(f"Dominasi 'Sell-Side' ({100-bp:.1f}%) memperkuat tren turun. Likuiditas pembeli terlihat menipis di area ini.")
+            analysis.append(f"'Sell-Side' dominance ({100-bp:.1f}%) reinforces the downtrend. Buyer liquidity appears thin in this area.")
         else:
-            analysis.append(f"Divergence terdeteksi: Harga mencoba naik namun tertahan 'Wall' penjual yang dominan ({100-bp:.1f}%).")
+            analysis.append(f"Divergence detected: Price attempting to rise but stalled by a dominant seller 'Wall' ({100-bp:.1f}%).")
     elif bp > 60:
-        analysis.append(f"Terjadi 'Absorption' oleh pembeli; akumulasi di sisi Bid ({bp:.1f}%) memberikan bantalan harga yang kuat.")
+        analysis.append(f"'Absorption' by buyers occurring; accumulation on the Bid side ({bp:.1f}%) provides a structural floor.")
 
-    # 3. Analisa Volatilitas & Estimasi Target (gunakan last_price yang sudah ada)
+    # 3. Volatility & Resistance/Support Projection (using provided last_price)
     if last_price and last_price > 0:
         target_pct = max(0.2, vol * 0.5)
         up_target  = last_price * (1 + target_pct / 100)
         down_target = last_price * (1 - target_pct / 100)
-        # ETA: jarak target / kecepatan per menit (vol per 5 menit ÷ 5)
         eta_mins = max(2, int(target_pct / (max(0.01, vol) / 5)))
+        
+        # We use 'usdt' or fallback formatting, avoiding IDR currency hardcodes since this supports Binance as well
         if slope > 0:
-            analysis.append(f"Target kenaikan teknikal terdekat di Rp {up_target:,.2f} (+{target_pct:.2f}%). Estimasi waktu capai: ~{eta_mins} menit.")
+            analysis.append(f"Nearest technical resistance projected at {up_target:,.4f} (+{target_pct:.2f}%). Historical volatility suggests reaching this level in ~{eta_mins} mins.")
         else:
-            analysis.append(f"Waspada koreksi teknikal ke area Rp {down_target:,.2f} (-{target_pct:.2f}%). Estimasi waktu capai: ~{eta_mins} menit.")
+            analysis.append(f"Monitor for technical correction to support zone {down_target:,.4f} (-{target_pct:.2f}%). Historical volatility suggests reaching this level in ~{eta_mins} mins.")
 
     if vol > 1.2:
-        analysis.append(f"Volatilitas tinggi ({vol:.2f}%) menyarankan penggunaan Risk/Reward ratio 1:1.5.")
+        analysis.append(f"High volatility ({vol:.2f}%) observed; a 1:1.5 Risk/Reward ratio is structurally optimal.")
     if spread > 0.08:
-        analysis.append(f"Spread melebar ({spread:.3f}%); pertimbangkan harga limit untuk eksekusi.")
+        analysis.append(f"Spread is widening ({spread:.3f}%); limit orders are recommended for execution precision.")
 
-    return " ".join(analysis) if analysis else "Fase konsolidasi; belum ada target pergerakan signifikan terdeteksi."
+    return " ".join(analysis) if analysis else "Consolidation phase; no significant directional bias detected currently."
 
 @app.route('/mobile.html')
 def mobile_dashboard():
@@ -1088,8 +1005,9 @@ def public_landing_data():
 
         # 2. Market Stats — BTC price selalu dari live WS, fallback ke bot_state DB
         sentiment = int(db.get_state("market_sentiment_index") or 50)
-        _btc_live = ws_tickers_snap.get('btcidr', {})
-        btc_price = float(_btc_live.get('last') or 0) or float(db.get_state("last_price_btcidr") or 0)
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_live = ws_tickers_snap.get(btc_pair, {})
+        btc_price = float(_btc_live.get('last') or 0) or float(db.get_state(f"last_price_{btc_pair}") or db.get_state("last_price_btcidr") or 0)
         regime = db.get_state("current_market_regime") or "SCANNING"
 
         # 3. MARKET INTELLIGENCE BRIEF (LLM-backed, real-data variables)
@@ -1122,11 +1040,15 @@ def public_landing_data():
                     mid = (high + low) / 2.0
                     return round(((last - mid) / mid) * 100.0, 2)
                 return float(v.get('change_24h') or 0)
-            _scored_fb = [(k.upper().replace('IDR', ''), _mid_ch_fb(v)) for k, v in _crypto_fb]
+            _scored_fb = [(k.upper().replace('USDT', '').replace('IDR', ''), _mid_ch_fb(v)) for k, v in _crypto_fb]
             _fb_gainer = max(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
             _fb_loser = min(_scored_fb, key=lambda x: x[1], default=("N/A", 0.0))
             _fb_trend = max(_scored_fb, key=lambda x: abs(x[1]), default=("N/A", 0.0))
-            btc_str = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            btc_lbl = "BTC/USDT" if eid == "binance" else "BTC/IDR"
+            if eid == "binance":
+                btc_str = f" | {btc_lbl} ${btc_price:,.2f}" if btc_price and btc_price > 0 else ""
+            else:
+                btc_str = f" | {btc_lbl} {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
             regime_lbl = "Warming up" if regime == "SCANNING" else regime
             movers_fb = " | ".join(p for p in [
                 f"↑ {_fb_gainer[0]} {_fb_gainer[1]:+.2f}%" if _fb_gainer[0] != "N/A" else "",
@@ -1145,7 +1067,83 @@ def public_landing_data():
                 }
             ]
         
-        # 4. Intelligence Reports
+        # 4. Performance Stats (7-day window) — untuk landing page public
+        perf_stats = {"wins": 0, "losses": 0, "win_rate": 0.0, "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "net_avg_pct": 0.0, "window_days": 7, "coin_attribution": []}
+        try:
+            dry_val = bool(cfg.DRY_RUN)
+            exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
+            
+            import datetime as _dt
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            seven_days_ago = (now_utc - _dt.timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+
+            perf_row = conn.execute(f"""
+                SELECT
+                    SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN pnl_quote <= 0 THEN 1 ELSE 0 END) AS losses,
+                    ROUND(AVG(CASE WHEN pnl_quote > 0 THEN pnl_pct ELSE NULL END)::numeric, 2) AS avg_win_pct,
+                    ROUND(AVG(CASE WHEN pnl_quote <= 0 THEN pnl_pct ELSE NULL END)::numeric, 2) AS avg_loss_pct,
+                    ROUND(AVG(pnl_pct)::numeric, 2) AS net_avg_pct,
+                    MIN(created_at) AS first_trade
+                FROM trade_history
+                WHERE created_at >= %s
+                AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
+            """, (seven_days_ago, dry_val)).fetchone()
+            coin_rows = conn.execute(f"""
+                SELECT
+                    UPPER(REPLACE(REPLACE(pair, 'usdt', ''), 'idr', '')) AS coin,
+                    COUNT(*) AS trades,
+                    SUM(pnl_quote) AS total_pnl
+                FROM trade_history
+                WHERE created_at >= %s
+                AND dry_run = %s AND reason != 'BACKTEST' {exchange_filter}
+                GROUP BY coin
+                ORDER BY SUM(pnl_quote) DESC LIMIT 6
+            """, (seven_days_ago, dry_val)).fetchall()
+            if perf_row:
+                wins = int(perf_row['wins'] or 0)
+                losses = int(perf_row['losses'] or 0)
+                total = wins + losses
+                # Hitung window aktual dari trade pertama, bukan hardcode 7 hari
+                window_days = 7
+                if perf_row['first_trade'] and total > 0:
+                    first_str = perf_row['first_trade']
+                    if isinstance(first_str, str):
+                        try:
+                            first = _dt.datetime.fromisoformat(first_str.replace('Z', '+00:00'))
+                        except ValueError:
+                            first = now_utc
+                    else:
+                        first = first_str
+                        
+                    if hasattr(first, 'tzinfo') and first.tzinfo is None:
+                        first = first.replace(tzinfo=_dt.timezone.utc)
+                    delta_days = max(1, round((now_utc - first).total_seconds() / 86400))
+                    window_days = min(delta_days, 7)
+                
+                total_pnl = sum(float(r['total_pnl'] or 0) for r in coin_rows)
+                
+                perf_stats = {
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                    "avg_win_pct": float(perf_row['avg_win_pct'] or 0),
+                    "avg_loss_pct": float(perf_row['avg_loss_pct'] or 0),
+                    "net_avg_pct": float(perf_row['net_avg_pct'] or 0),
+                    "window_days": window_days,
+                    "coin_attribution": [
+                        {
+                            "coin": r['coin'],
+                            "trades": int(r['trades']),
+                            "attr_pct": int(round((float(r['total_pnl'] or 0) / total_pnl) * 100)) if total_pnl else 0,
+                        }
+                        for r in coin_rows
+                    ],
+                }
+        except Exception as e:
+            logging.error(f"Error in landing page stats: {e}")
+
+        # 5. Intelligence Reports
         art_rows = conn.execute(
             "SELECT title, excerpt, content, category, created_at FROM intelligence_reports "
             "ORDER BY created_at DESC LIMIT 5"
@@ -1172,11 +1170,15 @@ def public_landing_data():
             else:
                 ch = 0.0
             vol = float(data.get('vol_idr') or 0)
-            pair_label = pair_key.upper().replace('IDR', '')
+            pair_label = pair_key.upper().replace('USDT', '').replace('IDR', '')
             trend_label = 'UP' if ch > 1.0 else ('DOWN' if ch < -1.0 else 'SIDEWAYS')
+            if eid == "binance":
+                vol_str = f"Vol ${vol/1e3:.1f}K" if vol < 1e6 else f"Vol ${vol/1e6:.1f}M"
+            else:
+                vol_str = f"Vol IDR {vol/1e6:.1f}M"
             public_logs.append({
                 "time": stream_ts,
-                "message": f"Live: {pair_label} {ch:+.2f}% vs midrange | Vol IDR {vol/1e6:.1f}M | {trend_label}"
+                "message": f"Live: {pair_label} {ch:+.2f}% vs midrange | {vol_str} | {trend_label}"
             })
 
         response = jsonify({
@@ -1185,6 +1187,7 @@ def public_landing_data():
             "insights": insights,
             "articles": articles,
             "public_logs": public_logs,
+            "performance": perf_stats,
             "market": {
                 "sentiment": int(sentiment),
                 "btc_price": float(btc_price),
@@ -1244,7 +1247,7 @@ def login():
     })
 
 @app.route('/api/logout', methods=['POST'])
-@login_required
+#@login_required
 def logout_api():
     payload = _get_current_user_payload()
     if payload and payload.get("session_id"):
@@ -1254,7 +1257,7 @@ def logout_api():
     return jsonify({"success": True})
 
 @app.route('/api/check-auth')
-@login_required
+#@login_required
 def check_auth():
     payload = _get_current_user_payload()
     if payload:
@@ -1275,13 +1278,13 @@ def refresh_token():
     return jsonify({"success": True, "token": new_token})
 
 @app.route('/api/view-token')
-@login_required
+#@login_required
 def get_view_token():
     """Expose short-lived token for guest Socket.IO handshake."""
     return jsonify({"token": generate_view_token()})
 
 @app.route('/api/user/settings', methods=['GET', 'POST'])
-@login_required
+#@login_required
 def user_settings():
     username = session.get('username')
     if request.method == 'GET':
@@ -1302,7 +1305,7 @@ def user_settings():
     return jsonify({"success": False, "message": "Failed to update settings"}), 500
 
 @app.route('/api/stats')
-@login_required
+#@login_required
 def get_stats():
     """
     Endpoint utama untuk KPI dashboard. 
@@ -1315,16 +1318,218 @@ def get_stats():
         logging.error(f"Error in get_stats route: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/entry-scorecards')
+#@login_required
+def get_entry_scorecards():
+    """Audit endpoint for score-based entry decisions and factor breakdowns."""
+    conn = get_db_connection()
+    try:
+        limit = min(max(int(request.args.get('limit', 200)), 20), 1000)
+        pair_filter = str(request.args.get('pair', '') or '').strip().lower()
+        hours = min(max(int(request.args.get('hours', 24) or 24), 1), 168)
+
+        where_sql = "WHERE signal LIKE 'ENTRY_GATE_%%'"
+        params = []
+        if pair_filter:
+            where_sql += " AND pair = %s"
+            params.append(pair_filter)
+        where_sql += " AND created_at >= NOW() - (%s || ' hours')::interval"
+        params.append(str(hours))
+
+        totals_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_PASS') AS pass_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_REJECT') AS reject_count
+            FROM signals_log
+            {where_sql}
+            """,
+            tuple(params)
+        ).fetchone() or {}
+
+        rows = conn.execute(
+            f"""
+            SELECT created_at, pair, signal, buy_score, sell_score, confidence, regime, trade_id
+            FROM signals_log
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            tuple(params + [limit])
+        ).fetchall()
+
+        decisions = []
+        factor_stats = {}
+
+        for r in rows:
+            signal = str(r.get('signal') or '')
+            is_pass = signal.endswith('_PASS')
+
+            notes_raw = ""
+            trade_id = str(r.get('trade_id') or '')
+            if trade_id.startswith('scorecard:'):
+                notes_raw = trade_id.split('scorecard:', 1)[1]
+
+            notes = [n.strip() for n in notes_raw.split('|') if n.strip()]
+            for n in notes:
+                if ':' in n:
+                    factor, points = n.rsplit(':', 1)
+                else:
+                    factor, points = n, '+0'
+
+                rec = factor_stats.setdefault(
+                    factor,
+                    {
+                        "factor": factor,
+                        "count": 0,
+                        "pass_count": 0,
+                        "reject_count": 0,
+                        "sum_points": 0.0,
+                    },
+                )
+                rec['count'] += 1
+                if is_pass:
+                    rec['pass_count'] += 1
+                else:
+                    rec['reject_count'] += 1
+                try:
+                    rec['sum_points'] += float(points)
+                except Exception:
+                    pass
+
+            decisions.append({
+                "created_at": str(r.get('created_at') or ''),
+                "pair": str(r.get('pair') or ''),
+                "decision": 'PASS' if is_pass else 'REJECT',
+                "entry_score": float(r.get('buy_score') or 0.0),
+                "entry_threshold": float(r.get('sell_score') or 0.0),
+                "confidence": float(r.get('confidence') or 0.0),
+                "regime": str(r.get('regime') or 'UNKNOWN'),
+                "score_notes": notes,
+            })
+
+        factors = []
+        for v in factor_stats.values():
+            c = max(1, int(v['count']))
+            factors.append({
+                "factor": v['factor'],
+                "count": v['count'],
+                "pass_count": v['pass_count'],
+                "reject_count": v['reject_count'],
+                "avg_points": round(float(v['sum_points']) / c, 3),
+                "pass_rate_pct": round((v['pass_count'] / c) * 100.0, 2),
+            })
+
+        factors.sort(key=lambda x: (x['count'], abs(x['avg_points'])), reverse=True)
+        total_count = int(totals_row.get('total_count') or 0)
+        pass_count = int(totals_row.get('pass_count') or 0)
+        reject_count = int(totals_row.get('reject_count') or 0)
+        pass_rate = round((pass_count / max(1, total_count)) * 100.0, 2)
+
+        trend_rows = conn.execute(
+            f"""
+            SELECT
+                date_trunc('hour', created_at) AS bucket,
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE signal = 'ENTRY_GATE_PASS') AS pass_count
+            FROM signals_log
+            {where_sql}
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """,
+            tuple(params)
+        ).fetchall()
+
+        trend_series = []
+        for row in trend_rows:
+            total = int(row.get('total_count') or 0)
+            pass_in_bucket = int(row.get('pass_count') or 0)
+            bucket_ts = row.get('bucket')
+            bucket_epoch = 0
+            bucket_label = ''
+            if bucket_ts:
+                try:
+                    bucket_epoch = int(bucket_ts.timestamp())
+                    bucket_label = bucket_ts.strftime('%H:%M')
+                except Exception:
+                    bucket_label = str(bucket_ts)
+            trend_series.append({
+                "t": bucket_epoch,
+                "label": bucket_label,
+                "total": total,
+                "pass_rate": round((pass_in_bucket / max(1, total)) * 100.0, 2),
+            })
+
+        latest_snapshots = conn.execute(
+            """
+            SELECT key, value, updated_at
+            FROM bot_state
+            WHERE key LIKE 'entry_scorecard_%%'
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+
+        pair_rows = conn.execute(
+            """
+            SELECT pair, COUNT(*) AS n
+            FROM signals_log
+            WHERE signal LIKE 'ENTRY_GATE_%%'
+              AND created_at >= NOW() - (%s || ' hours')::interval
+            GROUP BY pair
+            ORDER BY n DESC
+            LIMIT 100
+            """,
+            (str(hours),)
+        ).fetchall()
+        pair_options = [str(r.get('pair') or '') for r in pair_rows if r.get('pair')]
+
+        snapshots = []
+        for row in latest_snapshots:
+            raw = row.get('value')
+            parsed = None
+            try:
+                parsed = json.loads(raw) if raw else None
+            except Exception:
+                parsed = None
+            snapshots.append({
+                "key": row.get('key'),
+                "updated_at": str(row.get('updated_at') or ''),
+                "payload": parsed,
+            })
+
+        return jsonify({
+            "summary": {
+                "pair": pair_filter or None,
+                "hours": hours,
+                "sample_size": total_count,
+                "recent_sample_size": len(decisions),
+                "pass_count": pass_count,
+                "reject_count": reject_count,
+                "pass_rate_pct": pass_rate,
+            },
+            "pair_options": pair_options,
+            "factors": factors[:30],
+            "recent_decisions": decisions,
+            "trend_series": trend_series,
+            "latest_scorecards": snapshots,
+        })
+    except Exception as e:
+        logging.warning(f"[/api/entry-scorecards] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/api/positions')
-@login_required
+#@login_required
 def get_positions():
     """Dedicated endpoint untuk open positions dengan unrealized PnL."""
     conn = get_db_connection()
     try:
-        dr_val = _is_dry_run()
         positions = conn.execute(
-            "SELECT pair, entry_price, amount_crypto, amount_idr, status, timestamp FROM positions WHERE dry_run = %s",
-            (dr_val,)
+            "SELECT * FROM positions"
         ).fetchall()
 
         results = []
@@ -1333,12 +1538,12 @@ def get_positions():
             pair = pos['pair']
             entry_price = float(pos['entry_price'] or 0)
             amount_crypto = float(pos['amount_crypto'] or 0)
-            amount_idr = float(pos['amount_idr'] or 0)
+            amount_quote = float(pos['amount_quote'] or 0)
 
             # Harga live dari ticker_history
             last_price = entry_price
             bid_price = 0.0  # best bid — sama dengan yang dipakai bot untuk TP evaluation
-            pnl_idr = 0.0
+            pnl_quote = 0.0
             pnl_pct = 0.0
             try:
                 row = conn.execute(
@@ -1348,7 +1553,7 @@ def get_positions():
                     history = json.loads(row['history_json'])
                     if history and entry_price > 0:
                         last_price = float(history[-1])
-                        pnl_idr = (last_price - entry_price) * amount_crypto
+                        pnl_quote = (last_price - entry_price) * amount_crypto
                         pnl_pct = ((last_price - entry_price) / entry_price) * 100
             except Exception:
                 pass
@@ -1356,6 +1561,15 @@ def get_positions():
             # Ambil bid price dari market WS (sama persis dengan logika bot)
             try:
                 md = (mws.get_tickers() or {}).get(pair) or {}
+                
+                # Gunakan harga live murni dari WebSocket/IPC (ticks per millisecond)
+                # untuk menghindari lag UI akibat ticker_history (1-minute snapshot)
+                live_last = float(md.get('last') or md.get('price') or 0)
+                if live_last > 0 and entry_price > 0:
+                    last_price = live_last
+                    pnl_quote = (last_price - entry_price) * amount_crypto
+                    pnl_pct = ((last_price - entry_price) / entry_price) * 100
+
                 bid_price = float(md.get('buy') or md.get('bid') or 0)
             except Exception:
                 pass
@@ -1364,11 +1578,11 @@ def get_positions():
 
             # NET EXIT EST: hitung dari bid price (sama dengan bot), bukan orderbook depth simulation
             # Ini mencegah outlier bid di depth menggelembungkan estimasi P&L
-            fee_buy  = amount_idr * cfg.FEE_BUY_TAKER
+            fee_buy  = amount_quote * cfg.FEE_BUY_TAKER
             fee_sell = (bid_price * amount_crypto) * cfg.FEE_SELL_TAKER
             pnl_net_idr = (bid_price - entry_price) * amount_crypto - fee_buy - fee_sell
             # Cost basis dari entry_price × amount agar % konsisten dengan pnl_pct
-            cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else amount_idr
+            cost_basis = (entry_price * amount_crypto) if (entry_price > 0 and amount_crypto > 0) else amount_quote
             pnl_net_pct = (pnl_net_idr / cost_basis * 100) if cost_basis > 0 else 0.0
 
             # Durasi posisi (gunakan datetime yang sudah di-import di atas)
@@ -1387,14 +1601,18 @@ def get_positions():
                 "last_price": last_price,
                 "bid_price": round(bid_price, 8),
                 "amount_crypto": amount_crypto,
-                "amount_idr": amount_idr,
-                "pnl_idr": round(pnl_idr, 0),
-                "pnl_net_idr": round(pnl_net_idr, 0),
+                "amount_quote": amount_quote,
+                "pnl_quote": round(pnl_quote, 4 if eid == 'binance' else 0),
+                "pnl_net_idr": round(pnl_net_idr, 4 if eid == 'binance' else 0),
                 "pnl_pct": round(pnl_pct, 3),
                 "pnl_net_pct": round(pnl_net_pct, 3),
+                "target_tp": abs(float(pos.get('target_tp_pct') or 0.05)) * 100,
+                "target_sl": abs(float(pos.get('target_sl_pct') or 0.015)) * 100,
                 "status": pos['status'],
                 "duration_sec": duration_sec,
-                "opened_at": str(pos['timestamp'])
+                "opened_at": str(pos['timestamp']),
+                "bid_depth": float(md.get('bid_depth', 0) if isinstance(md, dict) else 0),
+                "ask_depth": float(md.get('ask_depth', 0) if isinstance(md, dict) else 0)
             })
 
         return jsonify(results)
@@ -1406,7 +1624,7 @@ def get_positions():
         conn.close()
 
 
-def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_idr, depth_limit=20):
+def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_quote, depth_limit=20):
     """Estimate full-fill market sell PnL from live bid depth.
 
     Mirrors the bot-side exit guard: consume the bid stack from best bid down,
@@ -1415,8 +1633,8 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
     import config as cfg
 
     amount = float(amount or 0)
-    entry
-    amount_idr = float(amount_idr or 0)
+    entry_price = float(entry_price or 0)
+    amount_quote = float(amount_quote or 0)
     if amount <= 0 or entry_price <= 0:
         return {
             "ok": False,
@@ -1424,7 +1642,7 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
+            "net_pnl_quote": 0.0,
             "fee_buy": 0.0,
             "fee_sell": 0.0,
         }
@@ -1450,8 +1668,8 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": 0.0,
         }
 
@@ -1477,8 +1695,8 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": 0.0,
             "avg_price": 0.0,
             "sell_value": 0.0,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": 0.0,
         }
 
@@ -1489,16 +1707,16 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
             "filled_amount": filled,
             "avg_price": sell_value / filled,
             "sell_value": sell_value,
-            "net_pnl_idr": 0.0,
-            "fee_buy": amount_idr * cfg.FEE_BUY_TAKER,
+            "net_pnl_quote": 0.0,
+            "fee_buy": amount_quote * cfg.FEE_BUY_TAKER,
             "fee_sell": sell_value * cfg.FEE_SELL_TAKER,
         }
 
     avg_price = sell_value / filled
-    fee_buy = amount_idr * cfg.FEE_BUY_TAKER
+    fee_buy = amount_quote * cfg.FEE_BUY_TAKER
     fee_sell = sell_value * cfg.FEE_SELL_TAKER
     gross_pnl = (avg_price - entry_price) * filled
-    net_pnl_idr = gross_pnl - (fee_buy + fee_sell)
+    net_pnl_quote = gross_pnl - (fee_buy + fee_sell)
 
     return {
         "ok": True,
@@ -1506,62 +1724,75 @@ def _estimate_market_sell_net_from_orderbook(pair, amount, entry_price, amount_i
         "filled_amount": filled,
         "avg_price": avg_price,
         "sell_value": sell_value,
-        "net_pnl_idr": net_pnl_idr,
+        "net_pnl_quote": net_pnl_quote,
         "fee_buy": fee_buy,
         "fee_sell": fee_sell,
     }
 
 
 @app.route('/api/llm-decisions')
-@login_required
+#@login_required
 def get_llm_decisions():
     """Riwayat keputusan LiteRT-LM (LLM_EXIT_SIGNAL dari system_events)."""
     return jsonify(_build_llm_decisions_payload())
 
 
 @app.route('/api/pnl-history/<tf>')
-@login_required
+#@login_required
 def get_pnl_history_api(tf):
     """
-    Menyusun histori ekuitas (PnL kumulatif) dari database trade_history.
+    Menyusun histori ekuitas (PnL kumulatif) dari database equity_performance.
     """
     conn = get_db_connection()
     try:
-        dr_bool = _is_dry_run()  # True/False — langsung pakai boolean untuk PostgreSQL
+        import config as cfg
+        dr_val = True if _is_dry_run() else False
+        import os
+        eid = os.getenv("EXCHANGE", "binance").lower()
         
-        tf_map = {
-            '1h': '-1 hours',
-            '24h': '-24 hours',
-            '7d': '-7 days'
-        }
-        interval = tf_map.get(tf, '-24 hours')
-        
-        base_row = conn.execute(
-            "SELECT SUM(pnl_idr) as total FROM trade_history WHERE created_at < NOW() + (%s)::interval AND (dry_run = %s OR is_manual = true) AND reason != 'BACKTEST'",
-            (interval, dr_bool)
-        ).fetchone()
-        current_pnl = float(base_row['total'] or 0.0)
-        
-        trades = conn.execute(
-            "SELECT pnl_idr, created_at FROM trade_history WHERE created_at >= NOW() + (%s)::interval AND (dry_run = %s OR is_manual = true) AND reason != 'BACKTEST' ORDER BY created_at ASC",
-            (interval, dr_bool)
-        ).fetchall()
+        # Configure buckets based on timeframe
+        if tf == 'live':
+            interval = '-2 hours'
+            bucket = '1 minute'
+        elif tf == '1h':
+            interval = '-1 hours'
+            bucket = '1 minute'
+        elif tf == '1d' or tf == '24h':
+            interval = '-24 hours'
+            bucket = '15 minutes'
+        elif tf == '1w' or tf == '7d':
+            interval = '-7 days'
+            bucket = '2 hours'
+        elif tf == '1m' or tf == '30d':
+            interval = '-30 days'
+            bucket = '12 hours'
+        elif tf == 'all':
+            interval = '-3650 days'
+            bucket = '1 day'
+        else:
+            interval = '-24 hours'
+            bucket = '15 minutes'
+            
+        rows = conn.execute(f"""
+            SELECT 
+                time_bucket(%s, ts) as bucket_time, 
+                AVG(realized_pnl_total + unrealized_pnl) as net_pnl 
+            FROM equity_performance 
+            WHERE ts >= NOW() + (%s)::interval AND dry_run = %s AND exchange = %s
+            GROUP BY bucket_time 
+            ORDER BY bucket_time ASC
+        """, (bucket, interval, dr_val, eid)).fetchall()
         
         results = []
-        results.append({
-            "time": "Start",
-            "pnl": round(current_pnl, 0)
-        })
-        
-        for t in trades:
-            current_pnl += float(t['pnl_idr'] or 0.0)
-            ts = t['created_at']
-            try:
-                dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                time_str = dt.strftime("%M:%S") if tf == '1h' else dt.strftime("%H:%M")
-            except:
-                time_str = ts
-            results.append({"time": time_str, "pnl": round(current_pnl, 0)})
+        for r in rows:
+            ts = r['bucket_time']
+            dt = ts if isinstance(ts, datetime.datetime) else datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S%z" if "+" in str(ts) else "%Y-%m-%d %H:%M:%S")
+            time_str = dt.strftime("%M:%S") if tf in ('live', '1h') else (dt.strftime("%d %b") if tf in ('1w', '7d', '1m', '30d', 'all') else dt.strftime("%H:%M"))
+            results.append({
+                "time": time_str,
+                "pnl": round(float(r['net_pnl'] or 0.0), 4 if eid == 'binance' else 0)
+            })
+            
         return jsonify(results)
     except Exception as e:
         import traceback
@@ -1572,7 +1803,7 @@ def get_pnl_history_api(tf):
         conn.close()
 
 @app.route('/api/debug/positions-summary')
-@login_required
+#@login_required
 def get_positions_summary():
     """Ringkasan cepat status posisi + unrealized PnL untuk audit exit flow."""
     import config as cfg
@@ -1606,7 +1837,7 @@ def get_positions_summary():
                 status = "OTHER"
 
             status_counts[status] += 1
-            if bool(pos['dry_run']):
+            if int(pos['dry_run'] or 0) == 1:
                 mode_counts['dry_run'] += 1
             else:
                 mode_counts['live'] += 1
@@ -1633,8 +1864,8 @@ def get_positions_summary():
             "positions_total": len(rows),
             "mode_counts": mode_counts,
             "status_counts": status_counts,
-            "unrealized_by_status": {k: round(v, 0) for k, v in unrealized_by_status.items()},
-            "unrealized_total": round(sum(unrealized_by_status.values()), 0),
+            "unrealized_by_status": {k: round(v, 4 if eid == 'binance' else 0) for k, v in unrealized_by_status.items()},
+            "unrealized_total": round(sum(unrealized_by_status.values()), 4 if eid == 'binance' else 0),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1642,13 +1873,13 @@ def get_positions_summary():
         conn.close()
 
 @app.route('/api/chart/<pair>')
-@login_required
+#@login_required
 def get_chart_data(pair):
     """Fetch OHLC candles + technical indicators untuk pair yang dipegang."""
     tf = request.args.get('tf', '15')
     limit = min(int(request.args.get('limit', 100)), 300)
     try:
-        adapter = IndodaxAdapter('', '')
+        adapter = _public_adapter
         candles = adapter.fetch_ohlc(pair, tf=tf, limit=limit)
         if not candles:
             return jsonify({"success": False, "message": "Tidak ada data OHLC"}), 404
@@ -1677,7 +1908,7 @@ def get_chart_data(pair):
 
 
 @app.route('/api/wallet/sync', methods=['POST'])
-@login_required
+#@login_required
 def sync_wallet():
     """Reconcile dieksekusi oleh service khusus exchange-reconcile agar sinkron
     dengan engine bot (single source of truth).
@@ -1698,7 +1929,7 @@ def sync_wallet():
 
 
 @app.route('/api/orders')
-@login_required
+#@login_required
 def get_orders():
     """Return recent live order activity, falling back to positions/trade history when order_book is empty."""
     try:
@@ -1714,14 +1945,14 @@ def get_orders():
             return jsonify(payload)
 
         position_rows = live_conn.execute(
-            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_idr, status, timestamp "
+            "SELECT pair, entry_order_id, entry_price, amount_crypto, amount_quote, status, timestamp "
             "FROM positions "
             "WHERE UPPER(COALESCE(status, '')) IN ('OPEN', 'EXITING', 'PENDING_BUY') "
             "ORDER BY timestamp DESC LIMIT 20"
         ).fetchall()
 
         trade_rows = live_conn.execute(
-            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_idr, reason, created_at "
+            "SELECT pair, exit_order_id, exit_price, amount_crypto, amount_quote, reason, created_at "
             "FROM trade_history "
             "WHERE COALESCE(exit_order_id, '') <> '' AND COALESCE(dry_run, false) = false "
             "ORDER BY created_at DESC LIMIT 20"
@@ -1735,7 +1966,7 @@ def get_orders():
                 "pair": row['pair'],
                 "side": "buy",
                 "price": row['entry_price'],
-                "amount": row['amount_crypto'] or row['amount_idr'],
+                "amount": row['amount_crypto'] or row['amount_quote'],
                 "status": row['status'] or 'OPEN',
                 "created_at": str(row['timestamp'] or ''),
                 "updated_at": str(row['timestamp'] or ''),
@@ -1748,7 +1979,7 @@ def get_orders():
                 "pair": row['pair'],
                 "side": "sell",
                 "price": row['exit_price'],
-                "amount": row['amount_crypto'] or row['amount_idr'],
+                "amount": row['amount_crypto'] or row['amount_quote'],
                 "status": row['reason'] or 'CLOSED',
                 "created_at": str(row['created_at'] or ''),
                 "updated_at": str(row['created_at'] or ''),
@@ -1763,7 +1994,7 @@ def get_orders():
 
 
 @app.route('/api/live/state')
-@login_required
+#@login_required
 def get_live_state():
     """Return persistent live-engine state for dashboard state-recovery on page load.
 
@@ -1851,7 +2082,7 @@ def get_dry_positions():
     return get_positions()
 
 @app.route('/api/live/positions')
-@login_required
+#@login_required
 def get_live_positions():
     """Positions from live DB (auth required)."""
     g._dry_run_override = False
@@ -1864,7 +2095,7 @@ def get_dry_pnl_history(tf):
     return get_pnl_history_api(tf)
 
 @app.route('/api/live/pnl-history/<tf>')
-@login_required
+#@login_required
 def get_live_pnl_history(tf):
     """PnL history from live DB (auth required)."""
     g._dry_run_override = False
@@ -1873,7 +2104,7 @@ def get_live_pnl_history(tf):
 #  Backtest Endpoints 
 
 @app.route('/api/backtest/profiles', methods=['GET'])
-@login_required
+#@login_required
 def get_backtest_profiles():
     try:
         conn = get_backtest_db_connection()
@@ -1887,7 +2118,7 @@ def get_backtest_profiles():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/backtest/run', methods=['POST'])
-@login_required
+#@login_required
 def trigger_backtest():
     """Trigger the backtester service in the background."""
     import subprocess
@@ -1899,7 +2130,7 @@ def trigger_backtest():
     try:
         # Run as a non-blocking background process
         # We use sys.executable to ensure we use the same python interpreter
-        cmd = [sys.executable, "-m", "services.backtester.main", "run", "--days", str(days)]
+        cmd = [sys.executable, "-m", "services.backtester.main", "run", "--days", str(days), "--allow-global-fallback"]
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         return jsonify({
@@ -1914,7 +2145,7 @@ def trigger_backtest():
 
 
 @app.route('/api/backtest/results', methods=['GET'])
-@login_required
+#@login_required
 def get_backtest_results():
     try:
         profile_id = request.args.get('profile_id')
@@ -1942,7 +2173,7 @@ def get_backtest_results():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/backtest/results/<int:result_id>', methods=['GET'])
-@login_required
+#@login_required
 def get_backtest_result_detail(result_id):
     try:
         conn = get_backtest_db_connection()
@@ -1971,15 +2202,118 @@ def get_backtest_result_detail(result_id):
 # 
 
 
+@app.route('/api/backtest/public-summary', methods=['GET'])
+def get_backtest_public_summary():
+    """Public endpoint — aggregate backtest metrics for landing page. No auth required."""
+    try:
+        conn = get_backtest_db_connection()
+        cur = conn.cursor()
+
+        # Aggregate across all profiles (latest run per profile)
+        cur.execute("""
+            WITH latest AS (
+                SELECT DISTINCT ON (profile_id)
+                    r.profile_id, r.id AS result_id, r.window_start, r.window_end,
+                    p.profile_name
+                FROM backtest_results r
+                JOIN backtest_profiles p ON r.profile_id = p.id
+                WHERE r.pair IS NULL
+                ORDER BY profile_id, r.created_at DESC
+            )
+            SELECT
+                l.profile_name,
+                l.window_start,
+                l.window_end,
+                r.total_trades,
+                r.winning_trades,
+                r.losing_trades,
+                r.win_rate,
+                r.total_pnl_idr AS total_pnl_quote,
+                r.total_pnl_pct,
+                r.profit_factor,
+                r.sharpe_ratio,
+                r.max_drawdown_pct,
+                r.avg_trade_duration_sec,
+                r.initial_capital_idr,
+                r.final_capital_idr,
+                r.max_consecutive_wins,
+                r.max_consecutive_losses,
+                l.result_id
+            FROM latest l
+            JOIN backtest_results r ON r.id = l.result_id
+            ORDER BY r.total_pnl_pct DESC
+        """)
+        profiles = [dict(row) for row in cur.fetchall()]
+
+        # Top pairs by win_rate (across all profiles, pair-level results)
+        cur.execute("""
+            SELECT pair, 
+                   AVG(win_rate) AS avg_win_rate,
+                   SUM(total_trades) AS trades,
+                   SUM(total_pnl_pct) AS total_pnl_pct
+            FROM backtest_results
+            WHERE pair IS NOT NULL AND total_trades >= 2
+            GROUP BY pair
+            ORDER BY avg_win_rate DESC, trades DESC
+            LIMIT 10
+        """)
+        top_pairs = [dict(row) for row in cur.fetchall()]
+
+        # Total distinct pairs analyzed (from latest analyze run)
+        cur.execute("""
+            SELECT COUNT(DISTINCT pair) AS cnt
+            FROM backtest_coin_analysis
+        """)
+        total_pairs = (cur.fetchone() or {"cnt": 0})["cnt"] or 0
+
+        # Exit reason breakdown
+        cur.execute("""
+            SELECT exit_reason, COUNT(*) AS cnt
+            FROM backtest_trades
+            GROUP BY exit_reason
+            ORDER BY cnt DESC
+        """)
+        exit_reasons = [dict(row) for row in cur.fetchall()]
+
+        # Monthly equity curve (approximate from trade PnL cumsum)
+        cur.execute("""
+            SELECT DATE_TRUNC('day', entry_time) AS day,
+                   SUM(pnl_pct) AS daily_pnl_pct,
+                   COUNT(*) AS trades
+            FROM backtest_trades
+            WHERE pnl_pct IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1
+        """)
+        equity_curve = [dict(row) for row in cur.fetchall()]
+        for row in equity_curve:
+            if row.get('day'):
+                row['day'] = row['day'].isoformat()
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "profiles": profiles,
+            "top_pairs": top_pairs,
+            "total_pairs": total_pairs,
+            "exit_reasons": exit_reasons,
+            "equity_curve": equity_curve,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/market-context/<pair>')
-@login_required
+#@login_required
 def get_market_context(pair):
     """
     Menyediakan konteks pasar lengkap untuk modal ORACLE:
     Orderbook, Technicals, dan Market Stats.
     """
     pair = pair.lower()
-    tech = _get_pair_technicals(pair)
+    tf = request.args.get('tf', '1m')
+    tech = _get_pair_technicals(pair, tf)
     
     # Ambil orderbook depth dari DB
     conn = get_db_connection()
@@ -2019,7 +2353,7 @@ _MARKET_MOVERS_CACHE: dict = {"data": {}, "last_check": 0.0}
 _MARKET_MOVERS_TTL = 300  # 5 menit
 
 @app.route('/api/market-movers')
-@login_required
+#@login_required
 def get_market_movers():
     """Kembalikan top gainer, loser, trending, dan momentum 7d dari Indodax.
 
@@ -2078,17 +2412,34 @@ def get_market_movers():
 
 
 @app.route('/api/analyze/<pair>')
-@login_required
+#@login_required
 def trigger_analysis(pair):
     """Trigger LLM analysis for a specific pair on-demand."""
     db.save_state("trigger_analysis_pair", pair.lower())
     return jsonify({"status": "requested", "pair": pair})
 
 @app.route('/api/reasoning/<pair>')
-@login_required
+#@login_required
 def get_pair_reasoning(pair):
-    """Ambil nalar AI/LLM terbaru untuk koin tertentu."""
+    """Ambil nalar AI/LLM terbaru untuk koin tertentu, atau buat analisis teknikal dinamis jika timeframe diminta."""
     p = pair.lower().strip()
+    tf = request.args.get('tf')
+    
+    # Generate dynamic technical reasoning if a specific timeframe is requested
+    if tf:
+        try:
+            from app.domain.technicals import get_technical_summary
+            candles = _public_adapter.fetch_ohlc(p, tf=tf, limit=100)
+            if candles:
+                closes = [c['close'] for c in candles]
+                volumes = [c['volume'] for c in candles]
+                tech = get_technical_summary(closes, volumes)
+                reasoning = _generate_technical_reasoning(p, tech)
+                return jsonify({"pair": p, "reasoning": reasoning, "tf": tf})
+        except Exception as e:
+            logging.error(f"[reasoning] Gagal generate technical summary tf {tf}: {e}")
+            
+    # Fallback to LLM reasoning (1m default)
     reasoning = db.get_state(f"llm_reasoning_{p}")
     if not reasoning:
         # Fallback ke technical reasoning jika LLM belum ada
@@ -2106,14 +2457,14 @@ def get_pair_reasoning(pair):
     return jsonify({"pair": p, "reasoning": reasoning})
 
 @app.route('/api/exit/<pair>', methods=['POST'])
-@login_required
+#@login_required
 def manual_exit(pair):
     """Force an emergency exit for a specific pair via dashboard."""
     db.save_state("trigger_exit_pair", pair.lower())
     return jsonify({"status": "exit_requested", "pair": pair})
 
 @app.route('/api/trade/manual-exit', methods=['POST'])
-@login_required
+#@login_required
 def trade_manual_exit():
     """Instant manual exit for an active position.
 
@@ -2134,7 +2485,7 @@ def trade_manual_exit():
     # --- Guard: hanya izinkan exit saat Net PnL < 0.1% ---
     entry_price  = float(pos.get('entry_price') or 0)
     amount_crypto = float(pos.get('amount_crypto') or 0)
-    amount_idr   = float(pos.get('amount_idr') or 0)
+    amount_quote   = float(pos.get('amount_quote') or 0)
 
     # Ambil harga terakhir: WS > ticker_history > entry_price
     last_price = float(mws.get_tickers().get(pair, {}).get('last', 0))
@@ -2155,27 +2506,27 @@ def trade_manual_exit():
         last_price = entry_price
 
     raw_pnl   = (last_price - entry_price) * amount_crypto
-    fee_buy   = amount_idr * cfg.FEE_BUY_TAKER
+    fee_buy   = amount_quote * cfg.FEE_BUY_TAKER
     fee_sell  = (last_price * amount_crypto) * cfg.FEE_SELL_TAKER
     pnl_net   = raw_pnl - fee_buy - fee_sell
 
     # Hanya izinkan manual exit jika Net PnL < MANUAL_EXIT_MAX_NET_PCT (0.1%).
     # Ini mencegah exit prematur di posisi yang masih menguntungkan.
-    pnl_net_pct = pnl_net / amount_idr if amount_idr > 0 else 0
+    pnl_net_pct = pnl_net / amount_quote if amount_quote > 0 else 0
     if pnl_net_pct >= cfg.MANUAL_EXIT_MAX_NET_PCT:
         return jsonify({
             "error": f"Manual exit hanya diizinkan saat Net PnL < {cfg.MANUAL_EXIT_MAX_NET_PCT*100:.1f}%. "
                      "Biarkan bot mengelola exit saat posisi untung.",
-            "pnl_net_idr": round(pnl_net, 0),
+            "pnl_net_idr": round(pnl_net, 4 if eid == 'binance' else 0),
             "pnl_net_pct": round(pnl_net_pct * 100, 4)
         }), 400
 
     db.save_state("trigger_exit_pair", pair)
-    logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net,0)} IDR)")
+    logging.info(f"[Manual Exit] Dashboard triggered instant market exit for {pair} (pnl_net={round(pnl_net, 4 if eid == 'binance' else 0)} {'USDT' if eid == 'binance' else 'IDR'})")
     return jsonify({"status": "exit_requested", "pair": pair})
 
 @app.route('/api/mode/current')
-@login_required
+#@login_required
 def get_current_mode():
     """Return the engine's active mode directly from DB — the single source of truth.
     Frontend calls this on login to sync localStorage with actual engine state."""
@@ -2199,9 +2550,20 @@ def select_mode():
     import config as cfg
     data = request.get_json()
     mode = data.get('mode') # 'LIVE' or 'DRY'
+    password = data.get('password')
     
     if mode not in ['LIVE', 'DRY']:
         return jsonify({"success": False, "message": "Invalid mode selection"}), 400
+        
+    if mode == 'LIVE':
+        payload = _get_current_user_payload()
+        if not payload:
+            return jsonify({"success": False, "message": "Unauthorized"}), 401
+            
+        username = payload.get('username')
+        user = db.verify_user(username, password)
+        if not user:
+            return jsonify({"success": False, "message": "Invalid password"}), 403
     
     target_dry_run = (mode == 'DRY')
     
@@ -2230,7 +2592,7 @@ def select_mode():
     })
 
 @app.route('/api/dryrun/reset', methods=['POST'])
-@login_required
+#@login_required
 def reset_dryrun_data_api():
     """
     Destructive reset of ALL dry-run data.
@@ -2259,22 +2621,8 @@ def reset_dryrun_data_api():
     except Exception as e:
         logging.error(f"[Dashboard] Reset API failed: {e}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/bot/toggle-loose-gates', methods=['POST'])
-@login_required
-def toggle_loose_gates():
-    """Toggle mode LOOSE GATES untuk testing."""
-    import config as cfg
-    current_val = db.get_state("dry_run_loose_gates") == "true"
-    new_val = not current_val
-    
-    db.save_state("dry_run_loose_gates", str(new_val).lower())
-    cfg.clear_dry_run_cache() # Gunakan cache yang sama untuk sinkronisasi
-    logging.info(f" [DYNAMIC GATES] User changed loose gates to: {new_val}")
-    return jsonify({"success": True, "loose_gates": new_val})
-
 @app.route('/api/bot/toggle-technical-only', methods=['POST'])
-@login_required
+#@login_required
 def toggle_technical_only_mode():
     """Toggle TECHNICAL_ONLY_MODE runtime via bot_state (no restart required)."""
     data = request.get_json(silent=True) or {}
@@ -2297,7 +2645,7 @@ def toggle_technical_only_mode():
     return jsonify({"success": True, "technical_only_mode": new_val})
 
 @app.route('/api/bot/unblock', methods=['POST'])
-@login_required
+#@login_required
 def unblock_bot():
     """Reset consecutive_losses counter to lift GLOBAL PAUSE and allow new entries."""
     try:
@@ -2315,7 +2663,7 @@ def unblock_bot():
         logging.error(f"[Dashboard] Unblock failed: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 @app.route('/api/bot/update-state', methods=['POST'])
-@login_required
+#@login_required
 def update_bot_state():
     """Manual override for bot state (Harvest Only, reset losses, etc)."""
     data = request.json
@@ -2332,12 +2680,17 @@ def update_bot_state():
             try:
                 stats = _build_stats_payload()
                 current_pnl = float(stats.get('net_pnl', 0))
-                # Add a buffer (Rp 10k or 0.1% of capital, whichever is higher)
-                new_target = current_pnl + 10000 
+                # Add a buffer (Rp 10k / $1.0 USDT or 0.1% of capital, whichever is higher)
+                if eid == 'binance':
+                    new_target = current_pnl + 1.0
+                    label = f"${new_target:,.2f}"
+                else:
+                    new_target = current_pnl + 10000
+                    label = f"Rp {new_target:,.0f}"
                 db.save_state("daily_profit_target", str(new_target))
                 db.save_state("session_mode", "SCALPING")
                 db.save_state("session_latched", "false")
-                logging.info(f"[TARGET] [Manual Target Reset] Moving target to Rp {new_target:,.0f} and resuming SCALPING.")
+                logging.info(f"[TARGET] [Manual Target Reset] Moving target to {label} and resuming SCALPING.")
             except Exception as _re:
                 logging.warning(f"Could not move goalpost during reset: {_re}")
 
@@ -2351,7 +2704,7 @@ def update_bot_state():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/bot-status')
-@login_required
+#@login_required
 def get_bot_status():
     """Status bot: online/offline/dry_run, uptime, last trade."""
     conn = get_db_connection()
@@ -2412,7 +2765,7 @@ def get_bot_status():
         conn.close()
 
 @app.route('/api/history/<pair>')
-@login_required
+#@login_required
 def get_pair_history(pair):
     conn = get_db_connection()
     try:
@@ -2425,12 +2778,9 @@ def get_pair_history(pair):
     finally:
         conn.close()
 
-@app.route('/api/ohlcv/<pair>/<tf>')
-@login_required
-def get_ohlcv(pair, tf):
-    """Ambil data OHLCV dari bursa untuk timeframe tertentu (via native adapter)."""
+def _fetch_ohlcv_data(pair, tf):
+    """Internal helper untuk mengambil OHLCV list"""
     try:
-        # Mapping timeframe (dashboard UI → TradingView resolution)
         tf_map = {
             '1m':  '1',
             '5m':  '5',
@@ -2442,13 +2792,10 @@ def get_ohlcv(pair, tf):
             '1d':  '1D',
         }
         target_tf = tf_map.get(tf, '60')
-
         candles = _public_adapter.fetch_ohlc(pair, tf=target_tf, limit=100)
-        # Convert ke format ccxt-compatible [[ts_ms, o, h, l, c, v], ...]
-        # agar frontend chart tidak perlu perubahan
         ohlcv = [
             [
-                int(c['time']) * 1000,  # seconds → ms
+                int(c['time']) * 1000,
                 c['open'],
                 c['high'],
                 c['low'],
@@ -2457,13 +2804,19 @@ def get_ohlcv(pair, tf):
             ]
             for c in candles
         ]
-        return jsonify(ohlcv)
+        return ohlcv
     except Exception as e:
         logging.warning(f"Error fetching OHLCV for {pair}/{tf}: {e}")
-        return jsonify([])
+        return []
+
+@app.route('/api/ohlcv/<pair>/<tf>')
+#@login_required
+def get_ohlcv(pair, tf):
+    """Ambil data OHLCV dari bursa untuk timeframe tertentu (via native adapter)."""
+    return jsonify(_fetch_ohlcv_data(pair, tf))
 
 @app.route('/api/trades/sync', methods=['POST'])
-@login_required
+#@login_required
 def trigger_full_sync():
     """Trigger mass trade sync via bot background process."""
     # Simpan jumlah trade saat ini agar frontend bisa deteksi kapan sync selesai
@@ -2479,7 +2832,7 @@ def trigger_full_sync():
     return jsonify({"success": True, "message": "Sync dimulai. Ledger akan otomatis terupdate setelah sync selesai."})
 
 @app.route('/api/trades/sync/status')
-@login_required
+#@login_required
 def sync_trades_status():
     """Cek apakah sync sudah selesai dengan membandingkan jumlah trade."""
     try:
@@ -2503,41 +2856,86 @@ def sync_trades_status():
         return jsonify({"is_running": False, "new_trades": 0, "done": True})
 
 @app.route('/api/trades')
-@login_required
+#@login_required
 def get_trades():
     return jsonify(_build_trades_payload())
 
+
+# Global cache for 24h change
+_ch24h_cache = {}
+_ch24h_last_update = 0
+
+def get_cached_ch24h(pair):
+    global _ch24h_cache, _ch24h_last_update
+    import time
+    import requests
+    # Update every 60 seconds
+    if time.time() - _ch24h_last_update > 60:
+        try:
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            if eid == "binance":
+                res = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=5).json()
+                for t in res:
+                    _ch24h_cache[t["symbol"].lower()] = float(t.get("priceChangePercent", 0.0))
+            else:
+                res = requests.get("https://indodax.com/api/summaries", timeout=5).json()
+                for pair_key, t in res.get("tickers", {}).items():
+                    _ch24h_cache[pair_key.replace("_", "").lower()] = float(t.get("price_24h_percent", 0.0))
+            _ch24h_last_update = time.time()
+        except Exception as e:
+            logging.warning(f"Failed to fetch 24hr ticker: {e}")
+    return _ch24h_cache.get(pair.lower(), 0.0)
+
 @app.route('/api/radar')
-@login_required
+#@login_required
+
 def get_radar_data():
     conn = get_db_connection()
+    ws_tickers = mws.get_tickers()
     try:
         rows = conn.execute(
             "SELECT pair, trend, prediction_prob, ch_5m, ch_15m, ch_1h, volatility, score, history_json, updated_at "
             "FROM ticker_history"
         ).fetchall()
+        
+        history_map = {row['pair'].lower(): dict(row) for row in rows}
         results = []
-        for row in rows:
-            try:
-                history = json.loads(row['history_json'] or '[]')
-                if not history: continue
-                last = float(history[-1])
-                prev = float(history[-2]) if len(history) > 1 else last
-                change = ((last - prev) / prev) * 100 if prev > 0 else 0
-                
-                results.append({
-                    "pair": row['pair'],
-                    "price": last,
-                    "change": round(change, 2),
-                    "ch_5m": float(row['ch_5m'] or 0),
-                    "ch_15m": float(row['ch_15m'] or 0),
-                    "ch_1h": float(row['ch_1h'] or 0),
-                    "volatility": float(row['volatility'] or 0),
-                    "score": float(row['score'] or 0),
-                    "prediction": float(row['prediction_prob'] or 0.0),
-                    "trend": row['trend'] if row['trend'] not in ('BACKFILLED', None, '') else 'N/A'
-                })
-            except: continue
+        
+        for k, v in ws_tickers.items():
+            pair = k.lower()
+            last = float(v.get('last') or 0)
+            if last == 0: continue
+            
+            row = history_map.get(pair, {})
+            score = float(row.get('score') or 0)
+            
+            history = json.loads(row.get('history_json') or '[]')
+            prev = float(history[-2]) if len(history) > 1 else last
+            change = ((last - prev) / prev) * 100 if prev > 0 else 0
+            
+            trend = row.get('trend')
+            if trend in ('BACKFILLED', None, ''):
+                trend = "UP" if float(v.get('change_24h') or 0) > 0 else "DOWN"
+
+            results.append({
+                "pair": pair.upper(),
+                "price": last,
+                "change": round(change, 2),
+                "ch_5m": float(row.get('ch_5m') or 0),
+                "ch_15m": float(row.get('ch_15m') or 0),
+                "ch_1h": float(row.get('ch_1h') or 0),
+                "ch_24h": round(get_cached_ch24h(pair) or float(v.get('change_24h') or 0), 2),
+                "volatility": float(row.get('volatility') or 0),
+                "vol_idr_raw": float(v.get("vol_idr") or 0),
+                "vol_usdt_raw": float(v.get("vol_usdt") or 0),
+                "quoteVolume": float(v.get("quoteVolume") or 0),
+                "vol_coin_raw": float(v.get("vol_coin") or 0),
+                "volume": float(v.get('vol_idr') or v.get('quoteVolume') or v.get('vol_usdt') or 0),
+                "score": score,
+                "prediction": float(row.get('prediction_prob') or 0.0),
+                "trend": trend
+            })
+            
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2546,7 +2944,7 @@ def get_radar_data():
 
 
 @app.route('/api/radar-audit')
-@login_required
+#@login_required
 def get_radar_audit():
     conn = None
     try:
@@ -2673,7 +3071,7 @@ def get_radar_audit():
             conn.close()
 
 @app.route('/api/logs')
-@login_required
+#@login_required
 def get_logs():
     conn = get_db_connection()
     try:
@@ -2787,7 +3185,7 @@ def _fetch_rss_titles(url: str, source: str, limit: int = 8) -> list:
 
 
 @app.route('/api/news')
-@login_required
+#@login_required
 def api_news():
     global _news_cache
     now = time.time()
@@ -2960,11 +3358,35 @@ def _derive_trend_from_history(history):
     except Exception:
         return "N/A"
 
+def _parse_awareness(raw):
+    """Parse session_awareness JSON dari bot_state. Kembalikan dict aman untuk frontend."""
+    _default = {
+        "state": "UNKNOWN",
+        "reason": "",
+        "description": "Waiting for first evaluation cycle...",
+        "params": {},
+        "context": {},
+    }
+    if not raw:
+        return _default
+    try:
+        import json as _json
+        d = _json.loads(raw)
+        return {
+            "state":       d.get("state", "UNKNOWN"),
+            "reason":      d.get("reason", ""),
+            "description": d.get("description", ""),
+            "params":      d.get("params", {}),
+            "context":     d.get("context", {}),
+        }
+    except Exception:
+        return _default
+
 def _build_stats_payload(force_dry=None):
     """Bangun payload stats langsung tanpa melalui Flask request context."""
     import config as cfg
     # Determine which mode we are building for
-    dr_val = force_dry if force_dry is not None else bool(cfg.DRY_RUN)
+    dr_val = force_dry if force_dry is not None else _is_dry_run()
     
     # Use the appropriate DB instance
     db_inst = db.dryrun if dr_val else db.live
@@ -2984,13 +3406,13 @@ def _build_stats_payload(force_dry=None):
 
         # 3. BACKTEST STATS (AI Knowledge / DNA)
         dna_row = conn.execute(
-            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_idr > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_idr) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
+            "SELECT COUNT(*) as trades, SUM(CASE WHEN pnl_quote > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl_quote) as total_pnl FROM trade_history WHERE reason = 'BACKTEST'"
         ).fetchone()
         # Convert row to standard dict format for consistency
         dna_stats = {
             'total_trades': dna_row['trades'] if dna_row else 0,
             'win_count': dna_row['wins'] if dna_row else 0,
-            'total_pnl_idr': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
+            'total_pnl_quote': float(dna_row['total_pnl'] or 0) if dna_row else 0.0
         } if dna_row else {}
 
         win_rate = (live_stats['win_count'] / live_stats['total_trades'] * 100) if (live_stats and live_stats['total_trades'] > 0) else 0
@@ -3006,10 +3428,10 @@ def _build_stats_payload(force_dry=None):
         total_used_idr = 0.0
         for pos in positions:
             if bool(pos['dry_run']) == dr_val:
-                total_used_idr += float(pos['amount_idr'] or 0)
+                total_used_idr += float(pos['amount_quote'] or 0)
 
-        realized_pnl_dry = float(dry_stats['total_pnl_idr'] or 0)
-        realized_pnl_live = float(live_stats['total_pnl_idr'] or 0)
+        realized_pnl_dry = float(dry_stats['total_pnl_quote'] or 0)
+        realized_pnl_live = float(live_stats['total_pnl_quote'] or 0)
 
         if dr_val:
             available_idr = cfg.INITIAL_CAPITAL + realized_pnl_dry - total_used_idr
@@ -3026,7 +3448,7 @@ def _build_stats_payload(force_dry=None):
                 # available_idr tetap menampilkan 'free' untuk info dana siap pakai di UI
                 available_idr = float(real_bal.get("free", 0) or 0)
                 idr_used = float(real_bal.get("used", 0) or 0)
-                idr_total = float(real_bal.get("total", 0) or 0)
+                quote_total = float(real_bal.get("total", 0) or 0)
                 
                 # Hitung nilai market semua koin non-IDR
                 coin_equity_idr = _get_coin_equity_idr(
@@ -3034,7 +3456,7 @@ def _build_stats_payload(force_dry=None):
                 )
                 
                 # [Senior Fix] Total Equity LIVE = Total IDR (Free+Used) + Nilai Koin saat ini.
-                total_equity_val = idr_total + coin_equity_idr
+                total_equity_val = quote_total + coin_equity_idr
                 
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
@@ -3042,11 +3464,11 @@ def _build_stats_payload(force_dry=None):
                 # Fallback jika cache kosong
                 available_idr = float(_REAL_BALANCE_CACHE.get("free") or 0)
                 idr_used = float(_REAL_BALANCE_CACHE.get("used") or 0)
-                idr_total = float(_REAL_BALANCE_CACHE.get("total") or 0)
+                quote_total = float(_REAL_BALANCE_CACHE.get("total") or 0)
                 coin_equity_idr = _get_coin_equity_idr(
                     _REAL_BALANCE_CACHE.get("coins", {}), ws_tickers_for_equity
                 )
-                total_equity_val = idr_total + coin_equity_idr
+                total_equity_val = quote_total + coin_equity_idr
                 active_pnl = realized_pnl_live
                 active_win_rate = win_rate
 
@@ -3080,7 +3502,7 @@ def _build_stats_payload(force_dry=None):
 
             if last_price > 0:
                 gross = (last_price - ep) * float(pos['amount_crypto'] or 0)
-                fee_buy = float(pos['amount_idr'] or 0) * cfg.FEE_BUY_TAKER
+                fee_buy = float(pos['amount_quote'] or 0) * cfg.FEE_BUY_TAKER
                 fee_sell = float(pos['amount_crypto'] or 0) * last_price * cfg.FEE_SELL_TAKER
                 unrealized_pnl += gross - fee_buy - fee_sell
 
@@ -3134,27 +3556,29 @@ def _build_stats_payload(force_dry=None):
 
         # PnL & Win Rate Selection (Live vs Dry Run) — strict by mode.
         if dr_val:
-            active_pnl = float(dry_stats['total_pnl_idr'] or 0) if dry_stats else 0
+            active_pnl = float(dry_stats['total_pnl_quote'] or 0) if dry_stats else 0
             active_win_rate = dry_win_rate
         else:
-            active_pnl = float(live_stats['total_pnl_idr'] or 0) if live_stats else 0
+            active_pnl = float(live_stats['total_pnl_quote'] or 0) if live_stats else 0
             active_win_rate = win_rate
 
         # Net PnL for dashboard headline should include open-position unrealized PnL.
         net_total_pnl = float(active_pnl) + float(unrealized_pnl)
 
         # Cari Top Pair, Best Trade & Asset Contributions (Overall)
-        top_pair_row = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s "
-            "GROUP BY pair ORDER BY total_pnl DESC LIMIT 1", (dr_val,)
-        ).fetchone()
+        exchange_filter = "AND pair LIKE '%%usdt'" if eid == 'binance' else "AND pair LIKE '%%idr'"
         
-        contribution_rows = conn.execute(
-            "SELECT pair, SUM(pnl_idr) as total_pnl, COUNT(*) as tx_count FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s "
-            "GROUP BY pair ORDER BY total_pnl DESC", (dr_val,)
-        ).fetchall()
+        top_pair_row = conn.execute(f"""
+            SELECT pair, SUM(pnl_quote) as total_pnl FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
+            GROUP BY pair ORDER BY total_pnl DESC LIMIT 1
+        """, (dr_val,)).fetchone()
+        
+        contribution_rows = conn.execute(f"""
+            SELECT pair, SUM(pnl_quote) as total_pnl, COUNT(*) as tx_count FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter} 
+            GROUP BY pair ORDER BY total_pnl DESC
+        """, (dr_val,)).fetchall()
         
         asset_contributions = []
         for row in contribution_rows:
@@ -3164,10 +3588,10 @@ def _build_stats_payload(force_dry=None):
                 "trades": row['tx_count']
             })
 
-        best_trade_row = conn.execute(
-            "SELECT MAX(pnl_idr) FROM trade_history "
-            "WHERE reason != 'BACKTEST' AND dry_run = %s", (bool(dr_val),)
-        ).fetchone()
+        best_trade_row = conn.execute(f"""
+            SELECT MAX(pnl_quote) FROM trade_history 
+            WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
+        """, (bool(dr_val),)).fetchone()
         
         top_pair = top_pair_row['pair'] if top_pair_row and top_pair_row['total_pnl'] > 0 else None
         best_trade = float(best_trade_row[0] or 0)
@@ -3238,11 +3662,11 @@ def _build_stats_payload(force_dry=None):
         # --- Recent Trades for History Tab ---
         recent_trades = []
         try:
-            recent_trades_rows = conn.execute("""
-                SELECT pair, entry_price, exit_price, amount_crypto, amount_idr,
-                       pnl_idr, pnl_pct, reason, duration_seconds, created_at, ai_confidence
+            recent_trades_rows = conn.execute(f"""
+                SELECT pair, entry_price, exit_price, amount_crypto, amount_quote,
+                       pnl_quote, pnl_pct, reason, duration_seconds, created_at, ai_confidence
                 FROM trade_history
-                WHERE reason != 'BACKTEST' AND dry_run = %s
+                WHERE reason != 'BACKTEST' AND dry_run = %s {exchange_filter}
                 ORDER BY created_at DESC LIMIT 20
             """, (bool(dr_val),)).fetchall()
             for r in recent_trades_rows:
@@ -3252,8 +3676,8 @@ def _build_stats_payload(force_dry=None):
                     "entry_price": float(r['entry_price'] or 0),
                     "exit_price":  float(r['exit_price'] or 0),
                     "amount":      float(r['amount_crypto'] or 0),
-                    "amount_idr":  float(r['amount_idr'] or 0),
-                    "pnl_idr":     float(r['pnl_idr'] or 0),
+                    "amount_quote":  float(r['amount_quote'] or 0),
+                    "pnl_quote":     float(r['pnl_quote'] or 0),
                     "pnl_pct":     float(r['pnl_pct'] or 0),
                     "reason":      r['reason'],
                     "created_at":  str(r['created_at'] or ''),
@@ -3266,13 +3690,14 @@ def _build_stats_payload(force_dry=None):
         #  BTC Condition (for Signal Radar UX) 
         # Realtime-first: price/24h from WS summary. If interval metrics are
         # empty or stale in DB, recompute from the latest BTC history snapshot.
-        _btc_ticker = ws_tickers.get('btcidr', {}) or {}
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_ticker = ws_tickers.get(btc_pair, {}) or {}
         btc_price = float(_btc_ticker.get('last', 0))
         btc_change_24h = float(_btc_ticker.get('change_24h', 0))
         try:
             _btc_row = conn.execute(
                 "SELECT ch_5m, ch_15m, ch_1h, trend, score, history_json, updated_at "
-                "FROM ticker_history WHERE pair = 'btcidr'"
+                "FROM ticker_history WHERE pair = %s", (btc_pair,)
             ).fetchone()
         except Exception:
             _btc_row = None
@@ -3339,9 +3764,9 @@ def _build_stats_payload(force_dry=None):
         btc_crash_flag     = btc_ch_5m < -2.0  # proxy for crash kill-switch territory
 
         payload = {
-            "available_idr": round(available_idr, 0),
-            "idr_used": round(idr_used, 0),
-            "total_equity": round(total_equity, 0),
+            "available_idr": round(available_idr, 4 if eid == 'binance' else 0),
+            "idr_used": round(idr_used, 4 if eid == 'binance' else 0),
+            "total_equity": round(total_equity, 4 if eid == 'binance' else 0),
             "utilization": round(utilization_pct, 1),
             "recent_trades": recent_trades,
             "first_trade_ts": first_trade_ts,
@@ -3356,14 +3781,14 @@ def _build_stats_payload(force_dry=None):
             "dry_win_rate": round(dry_win_rate, 2),
             "dry_trades_count": dry_stats['total_trades'] if dry_stats else 0,
             "total_trades_live": live_stats['total_trades'] if live_stats else 0,
-            "live_pnl": float(live_stats['total_pnl_idr'] or 0) if live_stats else 0,
+            "live_pnl": float(live_stats['total_pnl_quote'] or 0) if live_stats else 0,
             "live_win_rate": round(win_rate, 2),
             "live_trades_count": live_stats['total_trades'] if live_stats else 0,
-            "backtest_pnl": float(dna_stats.get('total_pnl_idr') or 0) if dna_stats else 0,
+            "backtest_pnl": float(dna_stats.get('total_pnl_quote') or 0) if dna_stats else 0,
             "backtest_win_rate": round(dna_win_rate, 2),
             "backtest_trades_count": dna_stats.get('total_trades', 0) if dna_stats else 0,
             "active_positions": open_count,
-            "unrealized_pnl": round(unrealized_pnl, 0),
+            "unrealized_pnl": round(unrealized_pnl, 4 if eid == 'binance' else 0),
             "regime": stats_dict.get('market_regime', 'CHOPPY'),
             "regime_leader": stats_dict.get('regime_leader', ''),
             "latest_whale": stats_dict.get('latest_whale', ''),
@@ -3395,10 +3820,11 @@ def _build_stats_payload(force_dry=None):
             "entry_gate_reason": stats_dict.get('entry_gate_reason', ''),
             "entry_gate_at": stats_dict.get('entry_gate_at', ''),
             "dry_run": bool(dr_val),
-            "dry_run_loose_gates": stats_dict.get('dry_run_loose_gates', 'false').lower() == 'true',
+
             "technical_only_mode": bool(cfg.TECHNICAL_ONLY_MODE),
             "momentum_state": db.get_state("momentum_state") or "STALLING",
             "net_pnl_velocity": float(db.get_state("net_pnl_velocity") or 0),
+            "session_awareness": _parse_awareness(stats_dict.get("session_awareness")),
             
             # --- BTC Condition — used by Signal Radar UX ---
             "btc_price":      round(btc_price, 0),
@@ -3410,6 +3836,7 @@ def _build_stats_payload(force_dry=None):
             "btc_score":      round(btc_score, 1),
             "btc_weakening":  btc_weakening_flag,
             "btc_crash":      btc_crash_flag,
+            "exchange":       eid,
             "btc_data_source": btc_data_source,
             "btc_updated_age_sec": btc_updated_age_sec,
         }
@@ -3430,11 +3857,7 @@ def _build_radar_payload():
         ).fetchall()
 
         db_by_pair = {str(r['pair']).lower(): r for r in rows if r['pair']}
-        # Hanya tampilkan IDR pairs — filter non-IDR (USDT, BTC, ETH-based dari Indodax WS)
-        all_pairs = set(
-            p for p in (set(db_by_pair.keys()) | {str(p).lower() for p in ws_tickers.keys()})
-            if p.endswith('idr')
-        )
+        all_pairs = set(db_by_pair.keys()) | {str(p).lower() for p in ws_tickers.keys()}
 
         def _clamp(v, lo, hi):
             return max(lo, min(hi, v))
@@ -3541,6 +3964,10 @@ def _build_radar_payload():
                     "ch_15m":     float(row['ch_15m'] or 0) if row else 0.0,
                     "ch_1h":      float(row['ch_1h'] or 0) if row else 0.0,
                     "volatility": float(row['volatility'] or 0) if row else 0.0,
+                    "vol_idr_raw": float(ws_data.get("vol_idr") or 0),
+                    "vol_usdt_raw": float(ws_data.get("vol_usdt") or 0),
+                    "quoteVolume": float(ws_data.get("quoteVolume") or 0),
+                    "vol_coin_raw": float(ws_data.get("vol_coin") or 0),
                     "score":      float(score),
                     "prediction": float(prediction),
                     "trend":      trend,
@@ -3608,7 +4035,7 @@ def _build_trades_payload():
 
                 if last_price <= 0: last_price = entry_price
 
-                pnl_idr = (last_price - entry_price) * amount_crypto
+                pnl_quote = (last_price - entry_price) * amount_crypto
                 pnl_pct = ((last_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
 
                 # Beri label reason yang jelas berdasarkan status nyata posisi
@@ -3624,20 +4051,22 @@ def _build_trades_payload():
                 stored_sl_pct = float(p.get('target_sl_pct') or 0)
                 
                 # SL dynamic calculation
-                trailing_sl_price = float(p.get('trailing_sl_price') or 0)
-                if trailing_sl_price > 0 and entry_price > 0:
-                    current_sl_pct = (trailing_sl_price - entry_price) / entry_price
-                else:
-                    current_sl_pct = stored_sl_pct
+                # Gunakan target_sl_pct (hard SL aktual yang ditegakkan bot) untuk display.
+                # trailing_sl_price adalah field untuk TTP mechanism, bukan hard SL — jangan dipakai di sini.
+                current_sl_pct = stored_sl_pct
 
-                # Dynamic TP: Hitung dari harga tertinggi yang pernah dicapai (Trailing TP)
-                highest_price = float(p.get('highest_price') or 0)
-                if highest_price > 0 and entry_price > 0:
-                    current_tp_pct = (highest_price - entry_price) / entry_price
-                else:
-                    current_tp_pct = stored_tp_pct
+                # Dynamic TP: The UI expects the target TP to show what the take-profit target is.
+                # If we use highest_price, it just shows the highest profit achieved so far, not the target.
+                current_tp_pct = stored_tp_pct
 
-                _amount_idr = float(p.get('amount_idr') or 0)
+                _amount_idr = float(p.get('amount_quote') or 0)
+
+                # Dynamic subscribe to depth for live open positions if missing
+                if pair not in mws._ob_subscribed:
+                    try:
+                        mws._subscribe_specific_ob(pair)
+                    except Exception:
+                        pass
 
                 # Bid price dari market WS (sama dengan logika bot untuk TP evaluation)
                 _bid_price = 0.0
@@ -3660,23 +4089,26 @@ def _build_trades_payload():
                     "id":           f"pos_{pair}",
                     "pair":         pair,
                     "reason":       display_reason,
-                    "pnl_idr":      round(pnl_idr, 0),
-                    "pnl_net_idr":  round(pnl_net_idr, 0),
+                    "pnl_quote":      round(pnl_quote, 4 if eid == 'binance' else 0),
+                    "pnl_net_idr":  round(pnl_net_idr, 4 if eid == 'binance' else 0),
                     "pnl_pct":      round(pnl_pct, 2),
                     "pnl_net_pct":  round(pnl_net_pct, 2),
                     "entry_price":  entry_price,
                     "exit_price":   _bid_price if _bid_price > 0 else last_price,
+                    "last_price":   last_price,
                     "target_tp":    current_tp_pct * 100,
                     "target_sl":    current_sl_pct * 100,
                     "confidence":   int(p.get('ai_confidence') or 0),
-                    "amount_idr":   _amount_idr,
+                    "amount_quote":   _amount_idr,
                     "amount_coin":  amount_crypto,
                     "duration":     0,
                     "created_at":   str(p.get('timestamp') or ''),
                     "status":       pos_status,
                     "pos_status":   pos_status,
                     "is_manual":    0,
-                    "is_fast_opportunity": bool(is_fast_opp)
+                    "is_fast_opportunity": bool(is_fast_opp),
+                    "bid_depth":    float(_md.get('bid_depth', 0) if isinstance(_md, dict) else 0),
+                    "ask_depth":    float(_md.get('ask_depth', 0) if isinstance(_md, dict) else 0)
                 })
             except Exception as e:
                 print(f"Error processing position {p.get('pair')}: {e}")
@@ -3780,11 +4212,12 @@ def _build_logs_payload():
             if ts_ms <= 0:
                 ts_ms = int(time.time() * 1000)
             created_at = datetime.datetime.fromtimestamp(ts_ms / 1000.0).isoformat()
+            price_str = f"${price:,.4f}" if eid == "binance" else f"Rp {int(price):,}".replace(',', '.')
             results.append({
                 "created_at": created_at,
                 "pair": pair,
                 "side": side,
-                "price": f"Market {side} | {amount:.6f} @ Rp {int(price):,}".replace(',', '.'),
+                "price": f"Market {side} | {amount:.6f} @ {price_str}",
                 "status": "LIVE",
                 "level": "INFO",
                 "source": "MARKET_WS",
@@ -3811,7 +4244,8 @@ def _build_llm_decisions_payload(limit: int = 20):
         # Ambil snapshot live tickers dari IPC/WS bridge
         live_tickers = mws.get_tickers()
 
-        _btc_live = live_tickers.get('btcidr', {})
+        btc_pair = 'btcusdt' if eid == 'binance' else 'btcidr'
+        _btc_live = live_tickers.get(btc_pair, {})
         btc_price = float(_btc_live.get('last') or 0) or None
 
         _active_pairs = [
@@ -3931,11 +4365,17 @@ def _build_llm_decisions_payload(limit: int = 20):
         else:
             # Synthesize brief dari live market data saat LLM belum merespons.
             # Tidak menggunakan persisted_brief dari DB agar konten selalu fresh dan valid.
-            btc_part = f" | BTC/IDR {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
+            btc_lbl = "BTC/USDT" if eid == "binance" else "BTC/IDR"
+            if eid == "binance":
+                btc_part = f" | {btc_lbl} ${btc_price:,.2f}" if btc_price and btc_price > 0 else ""
+            else:
+                btc_part = f" | {btc_lbl} {btc_price:,.0f}" if btc_price and btc_price > 0 else ""
             regime_label = "Warming up" if regime == "SCANNING" else regime
-            gainer_part = f"↑ {top_gainer[0]} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
-            loser_part = f"↓ {top_loser[0]} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
-            trend_part = f"{top_trending[0]} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
+            def _clean_p(p):
+                return str(p or '').upper().replace('USDT', '').replace('IDR', '')
+            gainer_part = f"↑ {_clean_p(top_gainer[0])} {top_gainer[1]:+.2f}%" if top_gainer[0] != "N/A" else ""
+            loser_part = f"↓ {_clean_p(top_loser[0])} {top_loser[1]:+.2f}%" if top_loser[0] != "N/A" else ""
+            trend_part = f"{_clean_p(top_trending[0])} {top_trending[1]:+.2f}%" if top_trending[0] != "N/A" else ""
             movers = " | ".join(p for p in [gainer_part, loser_part, trend_part] if p)
             brief_message = (
                 f"Market live: {len(_active_pairs)} pair aktif"
@@ -4044,6 +4484,21 @@ def push_data_loop():
                 "trades": _build_market_trades_payload()
             })
 
+            # Fast: Broadcast realtime depth from mws (fed by ZMQ IPC from market-pipe)
+            try:
+                tickers = mws.get_tickers() or {}
+                depth_payload = {}
+                for p, t in tickers.items():
+                    bd = float(t.get('bid_depth', 0))
+                    ad = float(t.get('ask_depth', 0))
+                    if bd > 0 or ad > 0:
+                        depth_payload[p] = [bd, ad]
+                if depth_payload:
+                    socketio.emit('depth_update', depth_payload, to='public')
+                    socketio.emit('depth_update', depth_payload, to='authenticated')
+            except Exception as _de:
+                pass
+
             #  Supreme Commander: forward pending approval to frontend 
             try:
                 raw_approval = db.get_state("pending_approval")
@@ -4107,15 +4562,7 @@ def push_data_loop():
             except Exception as _bece:
                 logging.warning(f"[BracketExit] Error forwarding bracket_exit_confirm: {_bece}")
 
-            # Fast: regime + latency pulse setiap 1s (low-latency)
-            try:
-                _latency_snap = _compute_latency_snapshot()
-                if _latency_snap:
-                    socketio.emit('latency_pulse', {"pairs": _latency_snap}, to='public')
-                    socketio.emit('latency_pulse', {"pairs": _latency_snap}, to='authenticated')
-            except Exception as _lpe:
-                logging.warning(f"[push_data_loop] latency_pulse error: {_lpe}")
-
+            # Fast: regime update setiap 1s (low-latency)
             try:
                 _regime_now = db.get_state("market_regime") or "CHOPPY"
                 _sentiment_now = int(db.get_state("market_sentiment_index") or 50)
@@ -4230,7 +4677,7 @@ def handle_bracket_exit_response(data):
 
 
 @app.route('/api/session/status', methods=['GET'])
-@login_required
+#@login_required
 def session_status():
     """
     Returns the current session mode and strategic break payload so the frontend
@@ -4264,7 +4711,7 @@ def session_status():
 
 
 @app.route('/api/session/action', methods=['POST'])
-@login_required
+#@login_required
 def session_action():
     """
     Strategic Break user action endpoint.
@@ -4359,7 +4806,7 @@ def session_action():
 
 
 @app.route('/api/resilience/status', methods=['GET'])
-@login_required
+#@login_required
 def get_resilience_status():
     """
     Returns the current resilience / circuit-breaker state so the frontend
@@ -4464,17 +4911,6 @@ def _zmq_market_bridge():
                     tick = Tick()
                     tick.ParseFromString(raw)
                     pair = str(tick.symbol or '').lower()
-
-                    # Route Binance ticks ke buffer latency — JANGAN masuk ke mws._tickers
-                    if tick.exchange_id == ExchangeId.Value("EXCHANGE_BINANCE"):
-                        if pair not in _BINANCE_DASH_HISTORY:
-                            from collections import deque as _deque
-                            _BINANCE_DASH_HISTORY[pair] = _deque(maxlen=_BINANCE_DASH_MAXLEN)
-                        ts_ms = tick.timestamp if tick.timestamp else int(time.time() * 1000)
-                        _BINANCE_DASH_HISTORY[pair].append((ts_ms, tick.price))
-                        continue  # Jangan proses lebih lanjut sebagai Indodax ticker
-
-                    # Indodax ticks only from here
                     with mws._lock:
                         if pair not in mws._tickers:
                             mws._tickers[pair] = {
@@ -4493,14 +4929,14 @@ def _zmq_market_bridge():
                             if tick.low_24h > 0: t["low"] = tick.low_24h
                             if tick.vol_idr > 0: t["vol_idr"] = tick.vol_idr
 
-                    if pair == 'btcidr':
+                    if pair == ('btcusdt' if eid == 'binance' else 'btcidr'):
                         _append_btc_tick(tick.timestamp, tick.price)
                 
                 elif topic == "trade":
-                    logging.info(f"[ZMQ] Received trade for {pair if 'pair' in locals() else 'unknown'}")
                     trade = Trade()
                     trade.ParseFromString(raw)
                     pair = trade.symbol.lower()
+                    logging.info(f"[ZMQ] Received trade for {pair}")
                     # Format for dashboard: [pair, timestamp, sequence, side, price, vol_idr, vol_coin]
                     t_fmt = [
                         pair,
@@ -4517,6 +4953,34 @@ def _zmq_market_bridge():
                         mws._trades[pair].insert(0, t_fmt)
                         mws._trades[pair] = mws._trades[pair][:50]
 
+                elif topic == "depth":
+                    # JSON-encoded depth map: {"btcusdt": [bidDepth, askDepth], ...}
+                    try:
+                        import json as _djson
+                        depth_map = _djson.loads(raw)
+                        with mws._lock:
+                            for dpair, depths in depth_map.items():
+                                dpair = str(dpair).lower()
+                                if dpair in mws._tickers:
+                                    mws._tickers[dpair]["bid_depth"] = depths[0]
+                                    mws._tickers[dpair]["ask_depth"] = depths[1]
+                                else:
+                                    mws._tickers[dpair] = {
+                                        "last": 0, "buy": 0, "sell": 0,
+                                        "high": 0, "low": 0, "open": 0,
+                                        "vol_idr": 0, "vol_coin": "0",
+                                        "bid_depth": depths[0], "ask_depth": depths[1],
+                                        "bids_list": [], "asks_list": []
+                                    }
+                    except Exception as _de:
+                        logging.debug(f"[ZMQ] Depth parse error: {_de}")
+                    
+                    try:
+                        socketio.emit('depth_update', depth_map, to='public')
+                        socketio.emit('depth_update', depth_map, to='authenticated')
+                    except Exception as _emit_err:
+                        logging.debug(f"[ZMQ] Depth emit error: {_emit_err}")
+
             except Exception as _m_err:
                 logging.warning(f"[ZMQ] Market bridge error: {_m_err}")
                 eventlet.sleep(_err_delay)
@@ -4525,29 +4989,6 @@ def _zmq_market_bridge():
         sub.close(linger=0)
 
 socketio.start_background_task(_zmq_market_bridge)
-
-def _zmq_tau_bridge():
-    """Subscribe ke IPC_SIGNAL, cache tau updates dari brain-inference."""
-    import json as _json
-    ctx = zmq_eventlet.Context.instance()
-    sub = ctx.socket(zmq_eventlet.SUB)
-    sub.setsockopt(zmq_eventlet.SUBSCRIBE, b"tau")
-    sub.connect(IPC_SIGNAL)
-    logging.info(f"[ZMQ] Tau bridge connected to {IPC_SIGNAL}")
-    while True:
-        try:
-            parts = sub.recv_multipart()
-            if len(parts) >= 2:
-                data = _json.loads(parts[1].decode())
-                sym = data.get("symbol")
-                tau = data.get("tau_ms")
-                if sym and tau is not None:
-                    _LEAD_LAG_TAU[sym] = int(tau)
-        except Exception as _e:
-            logging.warning(f"[ZMQ] Tau bridge error: {_e}")
-            eventlet.sleep(1)
-
-socketio.start_background_task(_zmq_tau_bridge)
 
 #  Inject SocketIO emit into the shared EmergencyNotifier 
 try:
@@ -4574,15 +5015,23 @@ def _background_wallet_sync_loop():
                 continue
 
             user = db.get_user('admin')
-            api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
-            api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            if eid == "binance":
+                api_key = (user['api_key'] if user else None) or os.getenv('BINANCE_API_KEY', '')
+                api_secret = (user['api_secret'] if user else None) or os.getenv('BINANCE_API_SECRET', '')
+            else:
+                api_key = (user['api_key'] if user else None) or os.getenv('INDODAX_API_KEY', '')
+                api_secret = (user['api_secret'] if user else None) or os.getenv('INDODAX_API_SECRET', '')
 
             if not api_key or not api_secret:
                 socketio.sleep(300)
                 continue
 
             import ccxt as _ccxt
-            ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
+            if eid == "binance":
+                ex = _ccxt.binance({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True, 'options': {'adjustForTimeDifference': True}})
+            else:
+                ex = _ccxt.indodax({'apiKey': api_key, 'secret': api_secret, 'enableRateLimit': True})
             balance = ex.fetch_balance()
             total_bal = balance.get('total', {})
 
@@ -4604,7 +5053,7 @@ def _background_wallet_sync_loop():
 
             # Ghost removal
             for pair, pos in list(current_positions.items()):
-                coin = pair[:-3].upper()  # Semua pair format '{coin}idr'; slice -3 hapus suffix 'idr'
+                coin = pair[:-4].upper() if eid == "binance" else pair[:-3].upper()
                 amount_on_exchange = float(total_bal.get(coin, 0) or 0)
                 if amount_on_exchange < 1e-8:
                     db.delete_position(pair)
@@ -4637,7 +5086,7 @@ def _background_wallet_sync_loop():
                     "entry_price": price,
                     "amount": amount_f,
                     "amount_crypto": amount_f,
-                    "amount_idr": value_idr,
+                    "amount_quote": value_idr,
                     "timestamp": datetime.datetime.now().isoformat(),
                     "dry_run": False,
                     "status": "OPEN",

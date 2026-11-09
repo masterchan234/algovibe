@@ -5,7 +5,7 @@ services:
     container_name: algovibe-timescaledb
     restart: always
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
     environment:
       - POSTGRES_USER=algovibe
       - POSTGRES_PASSWORD=secretpassword
@@ -13,7 +13,7 @@ services:
       - algovibe_pgdata:/var/lib/postgresql/data
       - ./init-pg.sh:/docker-entrypoint-initdb.d/init-pg.sh
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready"]
+      test: ["CMD-SHELL", "pg_isready -U algovibe"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -144,6 +144,8 @@ services:
         condition: service_started
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
@@ -153,6 +155,7 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_ipc:/tmp           # Same IPC volume as market-pipe
+      - ./models:/app/scalp_models:ro  # Per-pair RandomForest scalp classifiers
       - ./services:/app/services
       - ./app:/app/app
       - ./shared:/app/shared
@@ -165,7 +168,8 @@ services:
     cpu_shares: 2048               # 2× the default 1024 — highest priority among services
     command: ["python", "-m", "services.executive_core.main"]
     healthcheck:
-      test: ["CMD", "python3", "-c", "import os; os.kill(1, 0)"]
+      test: ["CMD", "python3", "-c",
+             "import os; f=open('data/algovibe_bot.pid'); pid=int(f.read()); os.kill(pid,0)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -199,6 +203,8 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
       - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
@@ -208,7 +214,7 @@ services:
     volumes:
       - algovibe_data:/app/data
       - algovibe_models:/app/models
-      - ./models:/app/models_coin:ro
+      - ./models:/app/scalp_models:ro  # Per-pair RandomForest scalp classifiers
       - algovibe_ipc:/tmp           # Same IPC volume
       - ./services:/app/services
       - ./app:/app/app
@@ -455,6 +461,68 @@ services:
       - default
       - npm_external
 
+  redis:
+    image: redis:alpine
+    container_name: algovibe-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - algovibe_redis_data:/data
+    networks:
+      - default
+
+  knn-worker:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-knn-worker
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_LIVE=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_live
+      - DATABASE_URL_DRYRUN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe_dryrun
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - algovibe_data:/app/data
+      - ./models:/app/models
+      - ./services:/app/services
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    command: ["python", "-m", "services.knn_worker.main"]
+    networks:
+      - default
+
+  auto-trainer:
+    image: ${REGISTRY_IP:-80.241.217.181}:5000/algovibe:latest
+    container_name: algovibe-auto-trainer
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL_BACKTEST=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+      - DATABASE_URL_TRAIN=postgresql://algovibe:secretpassword@timescaledb:5432/algovibe
+    volumes:
+      - algovibe_data:/app/data
+      - ./models:/app/models
+      - ./app:/app/app
+      - ./shared:/app/shared
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+    command: ["python", "-m", "app.infrastructure.auto_trainer"]
+    networks:
+      - default
+
 networks:
   default:
     driver: bridge
@@ -466,6 +534,7 @@ volumes:
   algovibe_data:
   algovibe_models:
   algovibe_pgdata:
+  algovibe_redis_data:
   # Shared /tmp volume — mounts as /tmp in every service so ZMQ IPC sockets
   # (ipc:///tmp/*.ipc) are accessible across all containers.
   # Security: this is a Docker-managed named tmpfs volume, NOT the host /tmp.
@@ -477,3 +546,4 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=64m,mode=1777"
+

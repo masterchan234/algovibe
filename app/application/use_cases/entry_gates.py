@@ -1,5 +1,5 @@
 """
-entry_gates.py
+app/application/use_cases/entry_gates.py
 
 All pre-entry gate checks for a candidate pair:
   - open position / blacklist guard
@@ -9,16 +9,19 @@ All pre-entry gate checks for a candidate pair:
   - technical probability threshold (pure, no AI bias)
   - K-NN pattern scoring and confidence threshold
 
-All AI/LLM influence has been removed from the decision path.
-Every gate is based exclusively on price-derived technical indicators.
-
-Returns a gate result dict when all gates pass, None to skip the pair,
-or the string "BREAK" to abort the entire candidate loop (consecutive-loss halt).
+Refactored for HFT Low-Latency:
+  - Event-Driven State Monitors (ATR, EMA-50, Cooldowns, Global Pause) cached in-memory once per minute.
+  - Multi-Timeframe Alignment (MTFA) checking price against 5m and 15m EMAs.
+  - Redis O(1) CVD volume imbalance ratio integration.
+  - Redis O(1) K-NN Isolated worker verdict retrieval.
 """
 
 import time
-
+import os
+import json
+import threading
 import numpy as np
+import redis
 
 from config import (
     MAX_CONSECUTIVE_LOSSES,
@@ -32,15 +35,134 @@ from app.domain.technicals import (
     calculate_atr, compute_adaptive_thresholds,
     _MACD_NORM_FACTOR,
 )
-from app.domain.predictor import get_coin_indicator_weights
 from utils.logger import log_message
-from app.domain.lead_lag import (
-    evaluate_lead_lag,
-    compute_implied_spread,
-    USDT_IDR_FALLBACK,
-)
 
 _BREAK = "BREAK"  # sentinel value returned to caller
+
+# Thread-safe in-memory cache for State Monitors
+_STATE_CACHE = {}
+_STATE_LOCK = threading.Lock()
+
+# Initialize Redis client for fast O(1) lookups
+redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+if "redis://" not in redis_url:
+    redis_url = "redis://redis:6379/0"
+try:
+    r_client = redis.from_url(redis_url)
+except Exception:
+    r_client = None
+
+
+def get_state_monitors(pair: str, history: list, bot, p: dict) -> dict:
+    """Calculates and caches heavy State Monitors once per minute."""
+    now_min = int(time.time() // 60)
+    pair_lower = pair.lower()
+
+    with _STATE_LOCK:
+        cached = _STATE_CACHE.get(pair_lower)
+        if cached and cached.get('minute') == now_min:
+            return cached
+
+        # 1. Cooldown Guard — read from pair_runtime_state (normalized table)
+        try:
+            prs = db.get_pair_runtime_state(pair_lower)
+            cooldown_until = float(prs.get('cooldown_until') or 0)
+        except Exception:
+            cooldown_until = 0.0
+        now_ts = time.time()
+        cooldown_ok = now_ts >= cooldown_until
+
+        # 2. ATR Volatility Filter (Calculated once per minute)
+        atr_ok = True
+        atr_pct = 0.0
+        if len(history) >= 15:
+            try:
+                _prices_arr = history[-15:]
+                _raw_highs = list(getattr(bot, 'ohlc_highs', {}).get(pair, []))
+                _raw_lows  = list(getattr(bot, 'ohlc_lows',  {}).get(pair, []))
+                if len(_raw_highs) >= 15 and len(_raw_lows) >= 15:
+                    _atr = calculate_atr(_raw_highs[-15:], _raw_lows[-15:], _prices_arr, period=14)
+                else:
+                    _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
+                _last = float(p.get('last', 1.0)) or 1.0
+                atr_pct = (_atr / _last) * 100.0
+                _atr_limit = 3.0
+                atr_ok = atr_pct <= _atr_limit
+            except Exception:
+                pass
+
+        # 3. EMA-50 Trend & MTFA Alignment (Calculated once per minute)
+        ema_50_ok = True
+        _last_price = float(p.get('last', 0.0))
+        
+        # MTFA: Price must reside above 5m EMA-50 and 15m EMA-50
+        # In a 1m history list, 5m closes can be approximated by sampling every 5th element
+        closes_5m = history[-1::-5][::-1]
+        closes_15m = history[-1::-15][::-1]
+        
+        ema_5m = calculate_ema(closes_5m, 10) if len(closes_5m) >= 5 else _last_price
+        ema_15m = calculate_ema(closes_15m, 3) if len(closes_15m) >= 2 else _last_price
+        
+        mtfa_ok = _last_price >= ema_5m and _last_price >= ema_15m
+
+        if len(history) >= 50:
+            try:
+                _ema50 = calculate_ema(history, 50)
+                if _last_price > 0 and _last_price < _ema50:
+                    ema_50_ok = False
+            except Exception:
+                pass
+
+        # 4. Adaptive Config (Cached once per minute)
+        adaptive_eg = db.get_coin_indicator_setup(pair) or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
+
+        # 5. Consecutive Losses Halt (Query Postgres db once per minute)
+        conlosses = int(db.get_state("consecutive_losses", 0))
+        global_pause_ok = conlosses < MAX_CONSECUTIVE_LOSSES
+        
+        # 6. Macro-Regime Filter (BTC 1H Trend Guard - Cached once per minute)
+        btc_macro_ok = True
+        if pair_lower != "btcusdt" and "usdt" in pair_lower: # Don't block BTC itself if it's the target
+            try:
+                btc_cache = _STATE_CACHE.get("macro_btc_1h")
+                if not btc_cache or btc_cache.get('minute') != now_min:
+                    from app.infrastructure.exchange_factory import create_exchange_provider
+                    provider = create_exchange_provider() # default binance
+                    btc_ohlc = provider.fetch_ohlc('btcusdt', tf='1h', limit=55)
+                    if btc_ohlc and len(btc_ohlc) >= 50:
+                        btc_closes = [c['close'] for c in btc_ohlc if c.get('close', 0) > 0]
+                        btc_ema50 = calculate_ema(btc_closes, 50)
+                        btc_last = btc_closes[-1]
+                        btc_macro_ok = btc_last >= btc_ema50
+                    _STATE_CACHE["macro_btc_1h"] = {'minute': now_min, 'ok': btc_macro_ok}
+                else:
+                    btc_macro_ok = btc_cache.get('ok', True)
+            except Exception as e:
+                pass # Default to True if failed so we don't break the bot completely
+
+        # 7. Daily Profit Target Cut-Off (Sleep Mode) - Cached once per minute
+        from datetime import datetime
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        daily_pnl = float(db.get_state(f"daily_pnl_{today_str}", 0.0))
+        target_pnl = config.INITIAL_CAPITAL * (getattr(config, 'DAILY_PROFIT_TARGET_PCT', 5.0) / 100.0)
+        daily_target_reached = daily_pnl >= target_pnl
+
+        state_data = {
+            'minute': now_min,
+            'cooldown_ok': cooldown_ok,
+            'cooldown_until': cooldown_until,
+            'atr_ok': atr_ok,
+            'atr_pct': atr_pct,
+            'ema_50_ok': ema_50_ok,
+            'mtfa_ok': mtfa_ok,
+            'adaptive_eg': adaptive_eg,
+            'global_pause_ok': global_pause_ok,
+            'consecutive_losses': conlosses,
+            'btc_macro_ok': btc_macro_ok,
+            'daily_target_reached': daily_target_reached,
+        }
+        _STATE_CACHE[pair_lower] = state_data
+        return state_data
 
 
 def _derive_radar_recommendation(p, enriched, adaptive_cfg):
@@ -50,49 +172,28 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     breakout = enriched.get('breakout', False)
     score = float(p.get('score', 0) or 0)
     tq_prob = float(enriched.get('tq_prob', 0) or 0)
-    imbalance_ratio = float(enriched.get('imbalance_ratio', 1.0) or 1.0)
-    tech_threshold = float(adaptive_cfg.get('tech_threshold', 0.6) or 0.6)
-
-    #  1. Sell Block 
-    if signal_v == 'SELL' and (score <= 45 or trend != 'UP'):
-        return "SELL", f"signal={signal_v}, score={score:.0f}, trend={trend}"
-
-    #  2. BUY Filter (Sync with check_entry_gates) 
-    # Radar hanya boleh bilang BUY jika kriteria trend dan probabilitas terpenuhi
-    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
-    is_trend_ok = breakout or trend == "UP" or (is_loose and trend == "SIDEWAYS")
-    
-    # Mirroring Step 9: Dynamic threshold based on volatility
     current_vol = float(p.get('volatility', 0) or 0)
+    
+    is_trend_ok = breakout or trend == "UP"
+    
     base_thresh = 55.0
     if current_vol > 2.0:
-        base_thresh = 62.0
+        base_thresh = 65.0
     elif current_vol < 0.6:
-        base_thresh = 48.0
+        base_thresh = 50.0
     if trend != "UP":
-        base_thresh += 3.0
-    if is_loose:
-        base_thresh -= 13.0
-    base_thresh = max(30.0, min(70.0, base_thresh))
+        base_thresh += 4.0
+
+    base_thresh = max(35.0, min(75.0, base_thresh))
     
-    # tq_prob is 0.0-1.0, threshold is 0-100
     is_prob_ok = (tq_prob * 100) >= base_thresh
 
-    if is_loose:
-        # Mode longgar: izinkan sinyal HOLD/BUY asalkan trend OK, prob OK, dan tidak aktif SELL
-        if is_trend_ok and is_prob_ok and signal_v != 'SELL':
-            return "BUY", (
-                f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
-                f"vol={current_vol:.2f}% [LOOSE]"
-            )
-    else:
-        if signal_v == 'BUY' and is_trend_ok and is_prob_ok:
-            return "BUY", (
-                f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
-                f"vol={current_vol:.2f}%"
-            )
+    if signal_v == 'BUY' and is_trend_ok and is_prob_ok:
+        return "BUY", (
+            f"signal={signal_v}, tq_prob={tq_prob * 100:.0f}%, trend={trend}, "
+            f"vol={current_vol:.2f}%"
+        )
 
-    #  3. Fallback to HOLD 
     reason = "HOLD"
     if not is_trend_ok:
         reason = f"Trend {trend} (no breakout)"
@@ -102,214 +203,209 @@ def _derive_radar_recommendation(p, enriched, adaptive_cfg):
     return "HOLD", f"signal={signal_v} | {reason}"
 
 
-# Tabel override untuk koin yang nama basenya berbeda antara Indodax dan Binance.
-# Format: {indodax_pair_lower: binance_symbol_lower}
-_INDODAX_TO_BINANCE_OVERRIDE = {
-    "rndridr":  "renderusdt",   # Render Network: Indodax=RNDR, Binance=RENDER
-    "wbtcidr":  "wbtcusdt",     # Wrapped BTC: konsisten
-    "kndyidr":  "",             # Hanya listing lokal, tidak ada di Binance
-}
-
-
-def _get_binance_symbol(indodax_pair: str) -> str:
-    """Helper to dynamically map Indodax pair to lowercase Binance counterpart.
-    
-    Mendukung tabel override eksplisit untuk koin yang nama basenya berbeda
-    antara Indodax dan Binance (contoh: rndridr → renderusdt).
-    Jika pair tidak ada mapping Binance, kembalikan string kosong.
-    """
-    pair_lower = indodax_pair.lower()
-    # Cek override eksplisit lebih dulu
-    if pair_lower in _INDODAX_TO_BINANCE_OVERRIDE:
-        return _INDODAX_TO_BINANCE_OVERRIDE[pair_lower]
-    # Generic: strip akhiran 'idr', tambah 'usdt'
-    if pair_lower.endswith("idr"):
-        base = pair_lower[:-3]
-        return f"{base}usdt"
-    return ""
-
-
 def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     """
-    Runs all pre-entry gate checks in sequence.
-
-    Returns:
-        dict   — all gates passed; contains scoring data for downstream use
-        None   — pair should be skipped (continue)
-        "BREAK"— consecutive-loss halt; caller should break the pair loop
+    Runs all HFT-optimized pre-entry gate checks in sequence.
     """
     from datetime import datetime
     
     pair = p.get('pair', 'UNKNOWN')
+    pair_lower = pair.lower()
 
     def save_gate_state(msg):
-        db.save_state(f"gate_skip_{pair}", msg)
-        db.save_state(f"gate_ts_{pair}", datetime.now().isoformat())
+        # Write to normalized pair_runtime_state (replaces KV bot_state entries)
+        db.upsert_pair_runtime_state(
+            pair_lower,
+            gate_skip_reason=msg,
+            gate_ts=datetime.now(),
+        )
 
-    trend = enriched['trend']
+    def persist_scorecard(decision: str, score: float, threshold: float, notes: list,
+                          total_conf: float = 0.0, aggressive: bool = False,
+                          regime_lbl: str = "UNKNOWN", tech_ctx: dict = None):
+        """Persist entry score telemetry for institutional audit trail."""
+        try:
+            safe_notes = [str(n).strip() for n in (notes or []) if str(n).strip()]
+            payload = {
+                "pair": pair,
+                "decision": decision,
+                "entry_score": round(float(score), 2),
+                "entry_threshold": round(float(threshold), 2),
+                "aggressive": bool(aggressive),
+                "market_regime": regime_lbl,
+                "total_confidence": round(float(total_conf), 2),
+                "notes": safe_notes[:32],
+                "ts": datetime.now().isoformat(),
+            }
+            db.save_state(f"entry_scorecard_{pair_lower}", json.dumps(payload))
+
+            _tech = tech_ctx or {}
+            # Keep more gate evidence in the audit row so dashboard gate cards
+            # can map statuses from the latest decision without losing late-stage factors.
+            score_notes_compact = "|".join(safe_notes)[:1800]
+            db.insert_signal_log(
+                pair=pair_lower,
+                exchange=os.getenv("EXCHANGE", "binance").lower(),
+                signal=f"ENTRY_GATE_{decision}",
+                buy_score=float(score),
+                sell_score=float(threshold),
+                confidence=float(total_conf if total_conf > 0 else score),
+                price=float(p.get('last', 0.0) or 0.0),
+                volume_ratio=float(_tech.get('volume_ratio', 0.0) or 0.0),
+                rsi=float(_tech.get('rsi', 50.0) or 50.0),
+                regime=str(regime_lbl),
+                executed=False,
+                trade_id=f"scorecard:{score_notes_compact}",
+                dry_run=bool(config.DRY_RUN),
+            )
+        except Exception:
+            pass
+
+    def reject_with_scorecard(msg: str, note: str, score: float = 0.0,
+                              threshold: float = 0.0, regime_lbl: str = "UNKNOWN",
+                              total_conf: float = 0.0, tech_ctx: dict = None):
+        log_message(msg)
+        save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=score,
+            threshold=threshold,
+            notes=[note],
+            total_conf=total_conf,
+            aggressive=False,
+            regime_lbl=regime_lbl,
+            tech_ctx=tech_ctx,
+        )
+        return None
+
+    trend = str(enriched['trend']).upper()
     breakout = enriched['breakout']
     history = enriched['history']
     tq_prob = enriched['tq_prob']
-    whale_boost = enriched['whale_boost']
-    sector_boost = enriched['sector_boost']
-    imbalance_ratio = enriched['imbalance_ratio']
+    current_vol = p['volatility']
 
-    #  1. Skip pairs already held or blacklisted 
+    # ML Fast-Track: jika model per-pair sangat yakin (>= 0.68), bypass gate 4c/5/6.
+    # Model sudah belajar dari 90 hari histori pair ini — lebih tahu dari threshold statis.
+    ml_prob       = enriched.get('ml_prob')  # None jika tidak ada model
+    ml_fast_track = ml_prob is not None and ml_prob >= 0.68
+
+    #  1. Skip pairs already held or blacklisted (O(1) Trigger Monitor)
     if pair in open_positions or pair in bot.blacklist:
-        return None
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: already open or blacklisted",
+            note="POSITION_OR_BLACKLIST:-20",
+        )
 
-    #  2. Cooldown guard 
-    cooldown_until_raw = db.get_state(f"pair_cooldown_until_{pair}", "0")
-    try:
-        cooldown_until = float(cooldown_until_raw or 0)
-    except Exception:
-        cooldown_until = 0.0
-    now_ts = time.time()
-    if cooldown_until > now_ts:
-        log_message(f"[GATE] {pair} REJECTED: Cooldown active until {cooldown_until}")
-        return None
+    # Load State Cache (Heavy calculations, DB lookups, Cooldowns, ATR once per minute)
+    states = get_state_monitors(pair, history, bot, p)
 
-    #  3. Radar recommendation + tracking log 
-    final_score = p['score']
+    # HUNTING MODE (opt-in): melonggarkan gate selama target harian belum tercapai.
+    # Default OFF — saat aktif, threshold skor turun di bawah skor dasar (50) sehingga
+    # hampir semua kandidat lolos dan BTC macro guard tidak pernah bekerja.
+    is_hunting_mode = (
+        bool(getattr(config, 'HUNTING_MODE_ENABLED', False))
+        and not states.get('daily_target_reached', False)
+    )
 
+    # Write tq_prob dynamically to Redis so isolated knn_worker can read it
+    if r_client:
+        try:
+            r_client.set(f"tq_prob:{pair_lower}", str(tq_prob), ex=60)
+        except Exception:
+            pass
+
+    #  0. Macro-Regime Guard (BTC 1H Trend Guard)
+    if not states.get('btc_macro_ok', True) and not is_hunting_mode:
+        return reject_with_scorecard(
+            msg=f"[MACRO-GUARD] {pair} REJECTED: BTC 1H Trend is Bearish (Below EMA-50). Scaling back.",
+            note="MACRO_BTC_BEARISH:-100",
+        )
+
+    #  0.b Daily Profit Cut-Off (Sleep Mode)
+    if states.get('daily_target_reached', False):
+        return reject_with_scorecard(
+            msg=f"[SLEEP MODE] {pair} REJECTED: Daily Profit Target Achieved! Bot is resting.",
+            note="DAILY_PROFIT_REACHED:-100",
+        )
+
+    #  2. Cooldown Guard (O(1) Trigger Monitor via State Cache)
+    if not states['cooldown_ok']:
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: Cooldown active until {states['cooldown_until']}",
+            note="COOLDOWN_ACTIVE:-18",
+        )
+
+    # Regime routing untuk profile entry institusional
+    market_regime = "SIDEWAYS"
+    if current_vol >= 2.2 or states.get('atr_pct', 0.0) >= 2.8:
+        market_regime = "VOLATILE"
+    elif trend == "UP" and breakout:
+        market_regime = "TRENDING"
+
+    regime_profile = {
+        "TRENDING": {
+            "entry_threshold": 60.0,
+            "aggressive_threshold": 80.0,
+            "tp_mult": 1.10,
+            "sl_mult": 1.00,
+            "cooldown_sec": 30,
+            "size_mult": 1.00,
+        },
+        "SIDEWAYS": {
+            "entry_threshold": 62.0,
+            "aggressive_threshold": 82.0,
+            "tp_mult": 0.90,
+            "sl_mult": 0.92,
+            "cooldown_sec": 90,
+            "size_mult": 0.90,
+        },
+        "VOLATILE": {
+            "entry_threshold": 68.0,
+            "aggressive_threshold": 86.0,
+            "tp_mult": 0.82,
+            "sl_mult": 0.86,
+            "cooldown_sec": 150,
+            "size_mult": 0.78,
+        },
+    }[market_regime]
+
+    # CHOPPY handling: tidak membunuh entry, tapi perketat manajemen risiko.
+    regime_upper = str(regime or "RANGING").upper()
+    if regime_upper == "CHOPPY":
+        regime_profile["size_mult"] *= 0.80
+        regime_profile["tp_mult"] *= 0.85
+        regime_profile["sl_mult"] *= 0.90
+
+    if is_hunting_mode:
+        regime_profile["entry_threshold"] -= 30.0
+        regime_profile["aggressive_threshold"] -= 30.0
+
+    # Cooldown beda per-regime agar re-entry cadence terkontrol.
+    _last_entry_ts = float(db.get_state(f"entry_last_ts_{pair_lower}", 0.0) or 0.0)
+    _elapsed = time.time() - _last_entry_ts
+    if _elapsed < regime_profile["cooldown_sec"]:
+        wait_left = int(regime_profile["cooldown_sec"] - _elapsed)
+        msg = f"[GATE] {pair} REJECTED: Regime cooldown {wait_left}s ({market_regime})"
+        return reject_with_scorecard(
+            msg=msg,
+            note="REGIME_COOLDOWN:-15",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+        )
+
+    #  3. Radar recommendation + tracking log (O(1) Trigger Monitor)
     radar_rec, radar_reason = _derive_radar_recommendation(p, enriched, adaptive_cfg)
     db.save_state(f"radar_reco_{pair}", radar_rec)
     db.save_state(f"radar_reco_reason_{pair}", radar_reason)
 
-    prob_display = f"{tq_prob * 100:.0f}%" if tq_prob >= 0 else "WARMUP"
-    
     log_message(
         f"[GATE] [TRACKING] {pair}: recommendation={radar_rec} | reason={radar_reason}"
     )
 
-    #  Binance Lead-Lag / Latency Arbitrage & Toxic-Flow Guard
-    # Menggunakan app.domain.lead_lag — implementasi formula kuantitatif lengkap.
-    binance_return = 0.0
-    try:
-        binance_symbol = _get_binance_symbol(pair)
-
-        # Determine dynamic Tier
-        pair_lower = pair.lower()
-        tier = 3
-        if pair_lower in getattr(config, 'TIER_1_PAIRS', set()):
-            tier = 1
-        elif pair_lower in getattr(config, 'TIER_2_PAIRS', set()):
-            tier = 2
-
-        # TIER 3 (Pure Technical / Domestik): Bypass latency gate
-        if tier == 3:
-            binance_symbol = ""
-
-        if binance_symbol and hasattr(bot, "binance_history") and hasattr(bot, "binance_tickers"):
-            b_hist_raw = list(bot.binance_history.get(binance_symbol, []))
-
-            # Baca kurs USDT/IDR live
-            usdt_price = USDT_IDR_FALLBACK
-            if hasattr(bot, "_tickers") and "usdtidr" in bot._tickers:
-                usdt_price = float(bot._tickers["usdtidr"].get("last", USDT_IDR_FALLBACK) or USDT_IDR_FALLBACK)
-            elif hasattr(bot, "tickers") and "usdtidr" in bot.tickers:
-                usdt_price = float(bot.tickers["usdtidr"].get("last", USDT_IDR_FALLBACK) or USDT_IDR_FALLBACK)
-
-            indodax_price = float(p.get('last', 0.0) or 0.0)
-
-            # Ambil τ* dari kalibrasi periodik brain_inference (jika tersedia)
-            tau_star_ms = int(getattr(bot, '_lead_lag_tau', {}).get(binance_symbol, 0) or 0)
-            peak_corr = float(getattr(bot, '_lead_lag_corr', {}).get(binance_symbol, 0.0) or 0.0)
-
-            # --- Formula 1-5: evaluate_lead_lag (lead_lag.py) ---
-            ll = evaluate_lead_lag(
-                b_hist_raw=b_hist_raw,
-                indodax_price=indodax_price,
-                usdt_idr_rate=usdt_price,
-                tier=tier,
-                tau_star_ms=tau_star_ms,
-                peak_corr=peak_corr,
-            )
-            binance_return = ll.r_b
-
-            # Log berdasarkan tier
-            should_log = (tier == 1) or (tier == 2 and abs(ll.r_b) >= 0.05)
-            if should_log and ll.signal != "NO_DATA":
-                log_message(ll.to_log_str(pair) + f" (Tier {tier})")
-
-            # 1. Toxic-Flow Guard (Flash Crash Protection)
-            if ll.is_toxic():
-                db.save_state(f"toxic_freeze_{pair}", time.time() + 3.0)
-                msg = f"[GATE] {pair} REJECTED: {ll.reason}"
-                log_message(msg)
-                save_gate_state(msg)
-                return None
-
-            # Check active toxic freeze
-            freeze_until = float(db.get_state(f"toxic_freeze_{pair}", "0") or 0.0)
-            if time.time() < freeze_until:
-                msg = f"[GATE] {pair} REJECTED: Binance Toxic-Flow Freeze active"
-                log_message(msg)
-                save_gate_state(msg)
-                return None
-
-            # 2. Fast-Track Entry Gate (Breakout Bypass)
-            if ll.is_fast_track():
-                # Guard 1: Indodax bid-ask spread tidak boleh terlalu lebar
-                indodax_bid = float(p.get('bid', 0.0) or 0.0)
-                indodax_ask = float(p.get('ask', 0.0) or 0.0)
-                fast_track_ok = False
-                if indodax_ask > 0 and indodax_bid > 0 and indodax_price > 0:
-                    indodax_spread_pct = (indodax_ask - indodax_bid) / indodax_price * 100.0
-                    max_allowed_spread = getattr(config, f'TIER_{tier}_MAX_SPREAD', 1.5)
-                    if indodax_spread_pct > max_allowed_spread:
-                        log_message(
-                            f"[GATE] {pair} FAST-TRACK BLOCKED: Indodax spread too wide "
-                            f"({indodax_spread_pct:.2f}% > {max_allowed_spread:.2f}%)"
-                        )
-                    else:
-                        # Guard 2: data Indodax tidak boleh stale (> 30 detik)
-                        indodax_ts = float(bot._tickers.get(pair_lower, {}).get('timestamp', 0) or 0) \
-                                     if hasattr(bot, '_tickers') else 0.0
-                        data_age_sec = (time.time() * 1000 - indodax_ts) / 1000.0 if indodax_ts > 0 else 999.0
-                        if data_age_sec > 30.0:
-                            log_message(
-                                f"[GATE] {pair} FAST-TRACK BLOCKED: Indodax data stale "
-                                f"({data_age_sec:.1f}s old)"
-                            )
-                        else:
-                            fast_track_ok = True
-
-                if fast_track_ok:
-                    log_message(
-                        f"[GATE] {pair} [SPECIAL]: Binance Fast-Track breakout! "
-                        f"Return={ll.r_b:+.2f}% in {ll.actual_window_ms:.0f}ms "
-                        f"(Tier {tier}, spread={ll.spread_pct:+.2f}%). "
-                        f"Indodax spread OK ({indodax_spread_pct:.2f}%), data fresh ({data_age_sec:.1f}s)."
-                    )
-
-                    _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
-                    dummy_tech = get_technical_summary(
-                        history, _candle_vols if len(_candle_vols) == len(history) else None
-                    )
-
-                    res = {
-                        "mode": "SHADOW" if (int(db.get_state("consecutive_losses", 0)) >= config.MAX_CONSECUTIVE_LOSSES) else "LIVE",
-                        "radar_rec": "BUY",
-                        "radar_reason": f"Binance Fast-Track Breakout ({ll.r_b:+.2f}% in {ll.actual_window_ms:.0f}ms)",
-                        "rsi_val": dummy_tech.get('rsi', 50.0),
-                        "total_confidence": ll.confidence,
-                        "tq_prob": ll.confidence / 100.0,
-                        "dynamic_threshold": 50.0,
-                        "knn_decision": {"verdict": "CONFIRM", "confidence": ll.confidence},
-                        "lead_lag_tau_ms": ll.tau_star_ms,
-                        "lead_lag_corr": ll.peak_corr,
-                        "implied_spread_pct": ll.spread_pct,
-                    }
-                    log_message(f"[GATE] {pair} FAST-TRACK PASSED! conf={ll.confidence:.1f}%")
-                    return res
-    except Exception as e:
-        log_message(f"[GATE-WARN] Error in Binance Lead-Lag Gate for {pair}: {e}")
-
-    #  4. Multi-Confluence Technical Gate 
-
+    #  4. Multi-Confluence Technical Gate (O(1) Trigger Monitor)
     _candle_vols = list(getattr(bot, 'ohlc_vols', {}).get(pair, []))
     tech = get_technical_summary(history, _candle_vols if len(_candle_vols) == len(history) else None)
+    
     depth_data = db.get_market_depth(pair)
     if depth_data['bids'] and depth_data['asks']:
         total_bid = sum(b['vol'] for b in depth_data['bids'])
@@ -317,216 +413,255 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
         total_depth = total_bid + total_ask
         if total_depth > 0:
             tech['buy_pressure'] = round((total_bid / total_depth) * 100, 1)
-    _sector_eg = config.SECTOR_MAP.get(pair.lower())
-    _adaptive_eg = db.get_coin_indicator_setup(pair) or (compute_adaptive_thresholds(history) if len(history) >= 30 else None)
+
+    _sector_eg = config.SECTOR_MAP.get(pair_lower)
     _vol_idr_eg = float((p or {}).get('vol_idr') or 0) or None
-    _coin_weights_eg = get_coin_indicator_weights(pair)
-    tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=_adaptive_eg, vol_idr_24h=_vol_idr_eg, coin_weights=_coin_weights_eg)
+    tech_sig = derive_trade_signal(tech, sector=_sector_eg, adaptive_thresholds=states['adaptive_eg'], vol_idr_24h=_vol_idr_eg)
 
-    if not config.DRY_RUN_LOOSE_GATES and tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
-        msg = (
-            f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})"
+    if tech_sig['verdict'] == 'SELL' and tech_sig.get('sell_score', 0) >= 5.0:
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: SELL BLOCK (score={tech_sig.get('sell_score',0):.1f})",
+            note=f"SELL_BLOCK:{-abs(float(tech_sig.get('sell_score', 0) or 0)):.0f}",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
         )
-        log_message(msg)
-        save_gate_state(msg)
-        return None
 
-    #  4b. ATR Volatility Filter 
-    if len(history) >= 15:
-        try:
-            _prices_arr = history[-15:]
-            _raw_highs = list(getattr(bot, 'ohlc_highs', {}).get(pair, []))
-            _raw_lows  = list(getattr(bot, 'ohlc_lows',  {}).get(pair, []))
-            if len(_raw_highs) >= 15 and len(_raw_lows) >= 15:
-                _atr = calculate_atr(_raw_highs[-15:], _raw_lows[-15:], _prices_arr, period=14)
-            else:
-                _atr = calculate_atr(_prices_arr, _prices_arr, _prices_arr, period=14)
-            _last = float(p.get('last', 1.0)) or 1.0
-            _atr_pct = (_atr / _last) * 100.0
-            _atr_limit = 6.0 if config.DRY_RUN_LOOSE_GATES else 4.0
-            if _atr_pct > _atr_limit:
-                msg = f"[GATE] {pair} REJECTED: ATR Volatility {_atr_pct:.2f}% > {_atr_limit:.1f}% limit"
-                log_message(msg)
-                save_gate_state(msg)
-                return None
-        except Exception:
-            pass
-
-    #  4c. EMA-50 Trend Filter (with Momentum / Explosion Exception) 
-    # [PROFESSIONAL] Di bawah EMA-50 biasanya downtrend, tapi momentum kencang 
-    # seringkali memotong EMA-50 dari bawah. Kita buat pengecualian jika velocity kuat.
+    #  4c. EMA-50 Trend & MTFA Alignment (O(1) Trigger Monitor via State Cache)
     is_explosion_setup = False
     if len(history) >= 14:
-        # Pengecualian: RSI sangat rendah + Buy Pressure kuat + Volume meledak
-        # ATAU Velocity kencang (percepatan harga nyata)
+        # Bypass trend guards jika extreme Mean Reversion (Bottom-Explosion)
         is_explosion_setup = (
-            (tech.get('rsi', 50.0) < 26.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
-            or tech.get('velocity', 0.0) > 0.2  # Momentum percepatan harga (lowered from 0.4)
+            (tech.get('rsi', 50.0) < 35.0 and tech.get('buy_pressure', 50.0) >= 66.0 and tech.get('volume_ratio', 1.0) >= 2.1)
         )
 
-    if not config.DRY_RUN_LOOSE_GATES and not is_explosion_setup and len(history) >= 50:
-        try:
-            _ema50 = calculate_ema(history, 50)
-            _last_price = float(p.get('last', 0.0))
-            # Toleransi 0.3% — harga noise/konsolidasi tipis bukan downtrend
-            _ema50_floor = _ema50 * 0.997
-            if _last_price > 0 and _last_price < _ema50_floor:
-                msg = f"[GATE] {pair} REJECTED: Price {_last_price:.4f} < EMA-50 {_ema50:.4f} (>{(_ema50 - _last_price)/_ema50*100:.2f}% below)"
-                log_message(msg)
-                save_gate_state(msg)
-                return None
-        except Exception:
-            pass
+    # ML fast-track juga bypass penalti trend score.
+    bypass_trend_check = is_explosion_setup or ml_fast_track
 
     if is_explosion_setup:
         log_message(
-            f"[GATE] {pair} [SPECIAL]: Momentum/Explosion detected (Vel={tech.get('velocity'):.2f}%, "
-            f"VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50."
+            f"[GATE] {pair} [SPECIAL]: Bottom-Explosion setup (Vel={tech.get('velocity'):.2f}%, "
+            f"VR={tech.get('volume_ratio'):.1f}). Bypassing EMA-50/MTFA trend filters."
+        )
+    elif ml_fast_track:
+        log_message(
+            f"[GATE] {pair} [ML-FAST-TRACK] ml_prob={ml_prob:.3f} >= 0.68 — bypassing EMA-50/MTFA"
         )
 
-    #  (Binance Lead-Lag / Toxic-Flow Guard moved to top of check_entry_gates for high-priority evaluation)
+    #  4a. Momentum BUY requirement — spesifikasi "Syarat BUY: buy_score >= threshold".
+    # Tanpa ini skor gate (dasar 50 + EMA50 + MTFA + ATR) sudah melewati threshold untuk
+    # koin apa pun yang sekadar berada di atas EMA-50, tanpa konfirmasi velocity/volume/OB.
+    if (
+        getattr(config, 'REQUIRE_MOMENTUM_BUY_SIGNAL', True)
+        and tech_sig['verdict'] != 'BUY'
+        and not is_explosion_setup
+    ):
+        return reject_with_scorecard(
+            msg=(
+                f"[GATE] {pair} REJECTED: no momentum BUY signal "
+                f"(buy_score={tech_sig.get('buy_score', 0):.1f})"
+            ),
+            note=f"NO_MOMENTUM_SIGNAL:{float(tech_sig.get('buy_score', 0) or 0):.1f}",
+            score=float(tech_sig.get('buy_score', 0) or 0),
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
-    #  4d. Vertical Spike / RSI Ceiling Filter 
-    _rsi_ceiling = 82.0 if config.DRY_RUN_LOOSE_GATES else 78.0
+    #  4d. Vertical Spike / RSI Ceiling Filter (O(1) Trigger Monitor)
+    _rsi_ceiling = 75.0
     _rsi_now = tech.get('rsi', 50.0)
     _velocity = tech.get('velocity', 0.0)
     _vol_ratio = tech.get('volume_ratio', 1.0)
     _ema9 = tech.get('ema9', 0.0)
     _last = float(p.get('last', 0.0))
     
-    # Bypass Ceiling jika momentum murni (Velocity + Volume) kuat
-    _is_pump_momentum = _velocity > 0.15 and _vol_ratio > 1.3
+    _is_pump_momentum = _velocity > 0.3 and _vol_ratio > 1.6
     
-    if _rsi_now > _rsi_ceiling and not _is_pump_momentum:
-        msg = f"[GATE] {pair} REJECTED: RSI Ceiling {_rsi_now:.1f} > {_rsi_ceiling:.1f}"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
-
+    _dist_ema9 = 0.0
+    _dist_limit = 2.0
     if _ema9 > 0:
         _dist_ema9 = (_last - _ema9) / _ema9 * 100.0
-        _dist_limit = 4.0 if config.DRY_RUN_LOOSE_GATES else 2.5
-        if _dist_ema9 > _dist_limit:
-            msg = f"[GATE] {pair} REJECTED: Vertical Spike {_dist_ema9:.2f}% > EMA-9 limit"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
 
-    #  4e. Resistance-Guard (Double-Top Prevention) 
+    #  4e. Resistance-Guard (Double-Top Prevention) (O(1) Trigger Monitor)
+    is_near_resistance = False
     if len(history) >= 20:
         _recent_high = max(history)
         _threshold_high = _recent_high * 0.993
         _stoch_k = tech.get('stoch_k', 50.0)
-        _velocity = tech.get('velocity', 0.0)
-        
-        # Izinkan menembus High jika velocity kencang (Breakout momentum)
-        if _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout and _velocity < 0.2:
-            msg = f"[GATE] {pair} REJECTED: Resistance-Guard Price {_last:.0f} near High {_recent_high:.0f}"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
+        is_near_resistance = (
+            _last >= _threshold_high and (_rsi_now > 60.0 or _stoch_k > 70.0) and not breakout and _velocity < 0.2
+        )
 
-    #  5. Technical probability + imbalance threshold 
+    #  5. Technical probability & CVD imbalance threshold (O(1) Trigger Monitor via Redis)
     if tq_prob < 0:
-        msg = "[GATE] WARMUP: Insufficient data for TQ_Prob"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
+        return reject_with_scorecard(
+            msg="[GATE] WARMUP: Insufficient data for TQ_Prob",
+            note="TQ_WARMUP:-12",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
-    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
+    # Retrieve real-time CVD imbalance ratio from Redis (zero-latency)
+    imbalance_ratio = 1.0
+    if r_client:
+        try:
+            imb_raw = r_client.get(f"imbalance:{pair_lower}")
+            if imb_raw:
+                imbalance_ratio = float(imb_raw)
+        except Exception:
+            pass
+
     tech_gate_threshold = float(adaptive_cfg['tech_threshold'])
     imb_gate_threshold = float(STRONG_IMBALANCE_RATIO)
-    if is_loose:
-        tech_gate_threshold = max(0.25, tech_gate_threshold - 0.10)
-        imb_gate_threshold = max(1.10, imb_gate_threshold - 0.25)
 
     tech_ready = tq_prob >= tech_gate_threshold
     has_strong_imb = imbalance_ratio >= imb_gate_threshold
-    if not tech_ready and not has_strong_imb:
-        msg = f"[GATE] {pair} REJECTED: Tech prob {tq_prob * 100:.0f}% < {tech_gate_threshold * 100:.0f}%"
-        log_message(msg)
-        save_gate_state(msg)
-        return None
 
-    #  6. Trend / breakout requirement 
-    if not breakout and trend != "UP":
-        _velocity = tech.get('velocity', 0.0)
-        _vol_ratio = tech.get('volume_ratio', 1.0)
-        
-        # Izinkan SIDEWAYS jika ada tanda-tanda awal ledakan (Velocity + Volume)
-        # Di LOOSE mode: cukup prob >= 0.40, tanpa syarat imbalance ketat
-        if is_loose:
-            sideway_relaxed_ok = tq_prob >= max(tech_gate_threshold, 0.40)
-        else:
-            sideway_relaxed_ok = (
-                (trend == "SIDEWAYS" and _velocity > 0.12 and _vol_ratio > 1.2)
-                and tq_prob >= max(tech_gate_threshold, 0.45)
-                and imbalance_ratio >= 1.05
-            )
-        if not sideway_relaxed_ok:
-            msg = f"[GATE] {pair} REJECTED: No trend/breakout support (trend={trend})"
-            log_message(msg)
-            save_gate_state(msg)
-            return None
+    # PRIORITAS 1: model scoring institusional (mengganti mayoritas hard gate).
+    entry_score = 50.0
+    score_notes = []
 
-    #  7. Radar recommendation guard 
-    if radar_rec != "BUY":
-        msg = f"[BLOCK] RADAR BLOCK: rekomendasi {radar_rec} ({radar_reason})"
-        print(f"[DEBUG-GATE] {pair} REJECTED: RADAR {radar_rec} ({radar_reason})", flush=True)
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+    def _add_score(points: float, reason: str):
+        nonlocal entry_score
+        entry_score += points
+        score_notes.append(f"{reason}:{points:+.0f}")
 
-    #  9. Dynamic threshold based on volatility + trend 
-    current_vol = p['volatility']
-    is_loose = bool(config.DRY_RUN_LOOSE_GATES)
+    # EMA50 / MTFA (satu keluarga trend filter)
+    if states.get('ema_50_ok'):
+        _add_score(10.0, "EMA50_ALIGN")
+    elif not bypass_trend_check:
+        return reject_with_scorecard(
+            msg=f"[GATE] {pair} REJECTED: Harga di bawah EMA-50 (Trend Guard)",
+            note="EMA50_REJECT",
+            threshold=float(regime_profile['entry_threshold']),
+            score=entry_score,
+            regime_lbl=regime_upper,
+            tech_ctx=tech
+        )
 
-    # OFF: ideal (lebih ketat), ON: lebih longgar tapi tetap terkontrol.
+    if states.get('mtfa_ok'):
+        _add_score(8.0, "MTFA_ALIGN")
+    elif is_hunting_mode:
+        _add_score(-15.0, "MTFA_MISS_AGAINST_TREND")
+    else:
+        _add_score(-6.0, "MTFA_MISS")
+
+    # Orderflow / imbalance
+    if has_strong_imb:
+        _add_score(15.0, "STRONG_IMBALANCE")
+    elif imbalance_ratio >= 1.05:
+        _add_score(6.0, "IMBALANCE_OK")
+    else:
+        _add_score(-6.0, "IMBALANCE_WEAK")
+
+    # Breakout / trend support
+    if breakout:
+        _add_score(20.0, "BREAKOUT")
+    elif trend == "UP":
+        _add_score(8.0, "TREND_UP")
+    elif trend == "SIDEWAYS":
+        _add_score(-2.0, "SIDEWAYS")
+    else:
+        _add_score(-10.0, "TREND_AGAINST")
+
+    # TQ probability
+    if tech_ready:
+        _add_score(12.0, "TECH_PROB_OK")
+    elif tq_prob >= max(0.40, tech_gate_threshold - 0.05):
+        _add_score(3.0, "TECH_PROB_NEAR")
+    else:
+        _add_score(-12.0, "TECH_PROB_LOW")
+
+    # RSI / vertical spike quality
+    if 45.0 <= _rsi_now <= 68.0:
+        _add_score(5.0, "RSI_HEALTHY")
+    elif _rsi_now > _rsi_ceiling and not _is_pump_momentum and not is_hunting_mode:
+        _add_score(-8.0, "RSI_CEILING")
+
+    if _ema9 > 0 and _dist_ema9 > _dist_limit:
+        _add_score(-8.0, "VERTICAL_SPIKE")
+
+    if is_near_resistance:
+        _add_score(-10.0, "RESISTANCE_NEAR")
+
+    # Volatility quality
+    if states['atr_ok']:
+        _add_score(4.0, "ATR_OK")
+    else:
+        _add_score(-8.0, "ATR_HIGH")
+
+    # Radar hanya informational score (bukan hard gate)
+    if radar_rec == "BUY":
+        _add_score(6.0, "RADAR_BUY")
+    elif radar_rec == "SELL":
+        _add_score(-6.0, "RADAR_SELL")
+
+    # CHOPPY tidak dipenalti dua kali: no hard block/no extra score penalty.
+    if bypass_trend_check:
+        _add_score(6.0, "BYPASS_SIGNAL")
+
+    entry_score = max(0.0, min(100.0, entry_score))
+
+    #  9. Dynamic threshold based on volatility + trend (O(1) Trigger Monitor)
     dynamic_threshold = 55.0
     if current_vol > 2.0:
-        dynamic_threshold = 62.0
+        dynamic_threshold = 65.0
     elif current_vol < 0.6:
-        dynamic_threshold = 48.0
+        dynamic_threshold = 50.0
     if trend != "UP":
         dynamic_threshold += 3.0
-    if is_loose:
-        dynamic_threshold -= 13.0
+
 
     entry_policy = bot.oracle.get_entry_policy(regime, dynamic_threshold)
     dynamic_threshold = entry_policy['dynamic_threshold']
 
-    #  10. Consecutive-loss halt / Shadow Recovery 
-    bot.consecutive_losses = int(db.get_state("consecutive_losses", 0))
-    is_shadow_mode = bot.consecutive_losses >= MAX_CONSECUTIVE_LOSSES
-    if is_shadow_mode:
-        msg = f"  GLOBAL PAUSE ({bot.consecutive_losses} losses): Evaluating for SHADOW PROBE."
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+    #  10. Consecutive-loss halt (O(1) Trigger Monitor via State Cache)
+    if not states['global_pause_ok']:
+        msg = f"  GLOBAL PAUSE ({states['consecutive_losses']} losses): Evaluating for SHADOW PROBE."
+        return reject_with_scorecard(
+            msg=f"{msg} [{pair}]",
+            note="GLOBAL_PAUSE:-25",
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
-    #  11. K-NN pattern scoring 
+    #  11. K-NN Isolated pattern scoring (O(1) Redis Retrieval with Safe Fallback)
     rsi_val = calculate_rsi(history)
+    knn_decision = None
 
-    if len(history) >= 20:
-        prices = np.array(history, dtype=float)
-        alpha = 2 / (20 + 1)
-        ema_20 = prices[0]
-        for price_v in prices[1:]:
-            ema_20 = (price_v * alpha) + (ema_20 * (1 - alpha))
-        ema_dist = round((p['last'] - ema_20) / ema_20, 6)
-    else:
-        ema_dist = 0.0
+    if r_client:
+        try:
+            knn_raw = r_client.get(f"knn_verdict:{pair_lower}")
+            if knn_raw:
+                knn_decision = json.loads(knn_raw)
+        except Exception:
+            pass
 
-    current_dna = {
-        "tq_prob": tq_prob,             # technical probability (pure)
-        "bb_pct": tech.get('bb_pct', 0.5),          # Bollinger %B (posisi harga di band)
-        "macd_norm": abs(tech.get('macd_hist', 0)) / max(1.0, float(p['last'])) * _MACD_NORM_FACTOR,
-        "imbalance": imbalance_ratio,
-        "volatility": current_vol,
-        "rsi": rsi_val,
-        "ema_dist": ema_dist,
-    }
-    knn_decision = bot.oracle.find_winning_pattern(pair, current_dna)
+    # Safe Fallback to synchronous calculation if Redis value is missing or client failed
+    if not knn_decision:
+        if len(history) >= 20:
+            prices = np.array(history, dtype=float)
+            alpha = 2 / (20 + 1)
+            ema_20 = prices[0]
+            for price_v in prices[1:]:
+                ema_20 = (price_v * alpha) + (ema_20 * (1 - alpha))
+            ema_dist = round((p['last'] - ema_20) / ema_20, 6)
+        else:
+            ema_dist = 0.0
+
+        current_dna = {
+            "tq_prob": tq_prob,
+            "bb_pct": tech.get('bb_pct', 0.5),
+            "macd_norm": abs(tech.get('macd_hist', 0)) / max(1.0, float(p['last'])) * _MACD_NORM_FACTOR,
+            "imbalance": imbalance_ratio,
+            "volatility": current_vol,
+            "rsi": rsi_val,
+            "ema_dist": ema_dist,
+        }
+        knn_decision = bot.oracle.find_winning_pattern(pair, current_dna)
 
     scalper_boost = 0.0
     if imbalance_ratio > 1.8:
@@ -537,35 +672,104 @@ def check_entry_gates(bot, p, enriched, regime, adaptive_cfg, open_positions):
     if knn_decision.get('verdict') == "AVOID":
         msg = "[BLOCK] [K-NN Avoid]: pola historis buruk, skip."
         print(f"[DEBUG-GATE] {pair} REJECTED: K-NN AVOID", flush=True)
-        log_message(f"{msg} [{pair}]")
-        save_gate_state(msg)
-        return None
+        return reject_with_scorecard(
+            msg=f"{msg} [{pair}]",
+            note="KNN_AVOID:-18",
+            score=entry_score,
+            threshold=float(regime_profile['entry_threshold']),
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
 
     base_confidence = float(knn_decision.get('confidence', 0.0))
-    # OFF: ideal floor; ON: diturunkan tapi tidak nol agar kualitas tetap terjaga.
     min_base_conf = 50.0 if current_vol <= 2.0 else 55.0
-    if config.DRY_RUN_LOOSE_GATES:
-        min_base_conf = 35.0 if current_vol <= 2.0 else 40.0
+        
+    if is_hunting_mode:
+        min_base_conf = 1.0  # Bypass confidence floor in hunting mode
 
     if base_confidence < min_base_conf:
         msg = f"SKIP: base_conf {base_confidence:.1f}% < floor {min_base_conf:.1f}%"
         print(f"[DEBUG-GATE] {pair} REJECTED: Base Confidence {base_confidence:.1f}% < Floor {min_base_conf:.1f}%", flush=True)
         log_message(f"{msg} [{pair}]")
         save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=entry_score,
+            threshold=float(regime_profile['entry_threshold']),
+            notes=score_notes + [f"BASE_CONF:{base_confidence:.1f}"],
+            total_conf=base_confidence,
+            aggressive=False,
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
         return None
 
-    #  13. Final Confidence threshold 
+    # Final score gate
+    entry_threshold = float(regime_profile['entry_threshold'])
+    aggressive_threshold = float(regime_profile['aggressive_threshold'])
+    if ml_fast_track:
+        entry_threshold = max(50.0, entry_threshold - 6.0)
+        aggressive_threshold = max(70.0, aggressive_threshold - 4.0)
+
+    if entry_score < entry_threshold:
+        msg = (
+            f"[GATE] {pair} REJECTED: score {entry_score:.1f} < {entry_threshold:.1f} "
+            f"({market_regime}) [{', '.join(score_notes[:6])}]"
+        )
+        log_message(msg)
+        save_gate_state(msg)
+        persist_scorecard(
+            decision="REJECT",
+            score=entry_score,
+            threshold=entry_threshold,
+            notes=score_notes,
+            total_conf=base_confidence,
+            aggressive=False,
+            regime_lbl=market_regime,
+            tech_ctx=tech,
+        )
+        return None
+
+    #  13. Final Confidence threshold
     boost_credit = min(scalper_boost, 6.0)
     total_confidence = base_confidence + boost_credit
 
+    aggressive_entry = entry_score >= aggressive_threshold
+    entry_size_factor = float(regime_profile['size_mult'])
+    if aggressive_entry:
+        entry_size_factor *= 1.20
+
+    db.save_state(f"entry_last_ts_{pair_lower}", str(time.time()))
+    persist_scorecard(
+        decision="PASS",
+        score=entry_score,
+        threshold=entry_threshold,
+        notes=score_notes,
+        total_conf=total_confidence,
+        aggressive=aggressive_entry,
+        regime_lbl=market_regime,
+        tech_ctx=tech,
+    )
+
     res = {
-        "mode": "SHADOW" if is_shadow_mode else "LIVE",
+        "mode": "SHADOW" if (states['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES) else "LIVE",
         "radar_rec": radar_rec,
         "radar_reason": radar_reason,
         "rsi_val": rsi_val,
         "total_confidence": total_confidence,
+        "entry_score": float(entry_score),
+        "entry_threshold": entry_threshold,
+        "aggressive_threshold": aggressive_threshold,
+        "aggressive_entry": aggressive_entry,
+        "entry_size_factor": entry_size_factor,
+        "market_regime": market_regime,
+        "regime_cooldown_sec": int(regime_profile['cooldown_sec']),
+        "tp_multiplier": float(regime_profile['tp_mult']),
+        "sl_multiplier": float(regime_profile['sl_mult']),
         "dynamic_threshold": dynamic_threshold,
         "knn_decision": knn_decision,
+        "velocity": float(_velocity),
+        "baseline_price": float(min(history[-5:])) if len(history) >= 5 else float(p.get('last', 1.0)) * 0.99,
     }
     print(f"[DEBUG-GATE] {pair} PASSED ALL GATES! Result: {res}", flush=True)
 

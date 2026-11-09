@@ -3,7 +3,7 @@
 Agent instructions for this repository. Keep changes small, safe, and trading-aware.
 
 ## 1) Project Purpose
-- Crypto scalping bot for Indodax with WebSocket-driven market/private streams and microservice architecture.
+- Crypto scalping bot for Indodax and Binance Spot with WebSocket-driven market/private streams and microservice architecture.
 - Primary runtime uses Docker Compose services (`market-pipe`, `brain-inference`, `litert-lm-decision`, `executive-core`, `dashboard-api`).
 - Persistence runtime utama menggunakan PostgreSQL/TimescaleDB (container `algovibe-timescaledb`) dengan state sync lintas service.
 - **TECHNICAL_ONLY_MODE = true** (default dan sudah di-set di DB `bot_state`). LLM (`litert-lm-decision`) hanya digunakan untuk article writing; semua keputusan trading 100% dari indikator teknikal.
@@ -11,6 +11,9 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 ## 2) Setup and Run
 - Install deps (opsional untuk native debugging): `pip install -r requirements.txt`
 - Required env vars in `.env`:
+  - `EXCHANGE` (either `binance` or `indodax`)
+  - `BINANCE_API_KEY`
+  - `BINANCE_API_SECRET`
   - `INDODAX_API_KEY`
   - `INDODAX_API_SECRET`
 - Primary runtime (recommended): Docker Compose
@@ -31,12 +34,14 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 
 ## 4) Architecture Map
 - `services/market_pipe/main.py`: ingress market WS -> IPC stream.
+- `services/knn_worker/main.py`: background K-NN classifier worker; standardizes technical DNA and writes verdicts to Redis.
+- `app/infrastructure/volume_tracker.py`: real-time CVD sliding volume tracker parsing aggTrades from WebSocket.
 - `services/brain_inference/main.py`: scoring, oracle, inference, publish signal; menggunakan in-memory price history (bukan DB) untuk RSI/MACD agar tidak stale.
 - `services/litert_lm_decision/main.py`: LLM service — trading signal path dinonaktifkan (TECHNICAL_ONLY_MODE); tetap UP untuk article writing.
 - `services/executive_core/main.py`: execution engine, reconciliation, position lifecycle; LLM signal path diberi guard TECHNICAL_ONLY_MODE.
 - `config.py`: central strategy/risk constants and paths.
-- `app/infrastructure/ws_market.py`: market stream cache + IPC subscriber bridge.
-- `app/infrastructure/ws_private.py`: private/order updates feed.
+- `app/infrastructure/ws_market.py`: market stream cache + IPC subscriber bridge (supports dynamic Indodax/Binance feeds).
+- `app/infrastructure/ws_private.py`: private/order updates feed (handles Binance listenKeys and executionReport mappings).
 - `app/application/exit_manager.py`: open-position monitoring and exits. Cost basis (`amount_idr`) TIDAK boleh ditimpa saat reconcile.
 - `app/application/use_cases/entry_gates.py`: semua pre-entry gate checks; berisi ATR filter (gate 4b) dan EMA-50 trend filter (gate 4c).
 - `app/application/use_cases/trade_execution.py`: BUY execution; fee-trap guard menggunakan pure-percentage (0.5%), bukan hard floor.
@@ -53,6 +58,7 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - Reuse existing utilities (`db`, `log_message`, telegram helpers) instead of introducing parallel patterns.
 - `calculate_score` dipanggil dengan 4 arg: `((pair, data), adaptive_cfg, regime, price_history)` — selalu sertakan `price_history` agar tidak fallback ke DB.
 - `get_technical_summary` menerima `volumes` sebagai arg opsional ke-2 — sertakan jika data volume per candle tersedia.
+- **Kontrak price history (brain-inference)**: `_history[pair]` adalah deret close **candle 1 menit**; elemen terakhir = candle berjalan yang di-*update* per tick (lihat `_roll_candle_history`). `_ohlc_highs/_ohlc_lows/_ohlc_vols` sejajar per indeks. JANGAN `append` harga per tick / per siklus evaluasi — semua indikator (RSI, EMA-50, MACD, velocity 4-periode, ATR, MTFA) mengasumsikan satuan candle. Entry hanya dievaluasi untuk pair yang sudah di-seed dari OHLC API (`_candle_ready`).
 
 ## 6) Trading Safety Rules
 - Treat any order-placement path as high risk (`execution`, `main`, `exit_manager`).
@@ -60,35 +66,41 @@ Agent instructions for this repository. Keep changes small, safe, and trading-aw
 - Keep default-safe behavior intact unless asked:
   - `DRY_RUN` behavior must remain predictable.
   - Risk caps and thresholds in `config.py` should not be altered incidentally.
-- Keep minimum trade threshold consistent across containers (`MIN_TRADE_IDR=10000`).
+- **Quote / DB Alignment**:
+  - Codebase saat ini mendukung dual exchange (Binance & Indodax). Gunakan field agnostik seperti `amount_quote`, `pnl_quote`, atau `vol_quote` untuk nilai nominal fiat/stablecoin. IDR murni digunakan untuk Indodax, dan USDT untuk Binance. Jangan gunakan field legacy `amount_idr` jika konteksnya adalah Binance.
+- Keep minimum trade threshold consistent across containers (`MIN_TRADE_IDR=10000` untuk Indodax / `MIN_TRADE_USDT=10` untuk Binance).
   - If threshold appears stale in logs, force-recreate related containers.
+- **TTP Target Floor Lock**: Jika puncak harga melampaui `tp_price`, batas trailing stop wajib dikunci minimal setara `tp_price` untuk mencegah profit erosion.
+- **Dynamic Breakeven & Trailing SL**: Menggeser SL ke breakeven + fee cushion saat profit $\ge +0.35\%$ gross (SMART_BREAK_EVEN_PCT). Jika profit $\ge +0.55\%$ dan durasi $\ge 2$ menit, SL digeser ke trailing stop 0.2% dari puncak.
+- **Momentum Fading Profit Lock**: Jika posisi sudah net-profit ($\ge +0.3\%$ gross) dan momentum melemah (signal != `BUY` saat durasi $\ge 2$ menit, atau signal `SELL`/confidence < 0.40), bot langsung mengeksekusi Market Sell.
 - For `MICRO_PROFIT_EXIT`, preserve safety cushion behavior — evaluasi di harga `bid`, bukan `last`.
-- JANGAN timpa `amount_idr` (cost basis) di reconcile path. Hanya `amount_crypto` yang boleh disync dari exchange.
+- JANGAN timpa `amount_quote` (cost basis) di reconcile path. Hanya `amount_crypto` yang boleh disync dari exchange.
 - JANGAN ubah TECHNICAL_ONLY_MODE ke false tanpa instruksi eksplisit dari user.
+- **Stop Loss selalu aktif**, termasuk saat `HARVEST_ONLY` (mode itu hanya memblok BUY baru). Jangan menambahkan `continue` di loop exit per-posisi sebelum blok SL/trailing.
+- **Entry selalu market/taker di harga pasar** (LIVE maupun DRY RUN). Jangan mensimulasikan fill di harga indikator (mis. EMA-9) — itu membuat PnL DRY RUN lebih bagus dari LIVE.
+- **Param order exchange-aware**: gunakan `order_params()` / `cancel_params()` (`exit_manager.py`) atau `_order_params()` (`trade_execution.py`). Binance menolak param tak dikenal (`pair`, `side`, `type`) dan market SELL harus berbasis quantity (`price=None`); floor harga `1.0` hanya berlaku untuk IDR.
+- **Flag kualitas/keamanan** (`config.py`, bisa di-override via env): `HUNTING_MODE_ENABLED` (default off), `REQUIRE_MOMENTUM_BUY_SIGNAL` (default on), `DISCOVERY_ADOPT_ENABLED` (default on untuk Indodax, off untuk Binance — mengatur Active Discovery dan defensive orphan sweep).
 - Never hardcode API keys/secrets or commit credential material.
 
-## 7) Indikator Teknikal Aktif (`derive_trade_signal`)
-Total 11 indikator, max score ~19.5 (BUY atau SELL). Threshold BUY/SELL: score >= 6.0, opposing < 4.0.
+## 7) Indikator Teknikal Aktif (`derive_trade_signal` - v3.0)
+Fokus eksklusif pada 3 indikator utama momentum breakout untuk scalping HFT (Total Max Score: 10.0, Threshold BUY >= 6.5, Threshold SELL >= 7.0):
 
-| # | Indikator | Bobot | Catatan |
-|---|-----------|-------|---------|
-| 1 | RSI-14 | 3.0 | Wilder smoothing |
-| 2 | MACD Histogram | 2.5 | Price-normalized (x1000) |
-| 3 | Bollinger %B | 2.0 | Posisi relatif band |
-| 4 | Stochastic RSI | 2.0 | K/D + crossover |
-| 5 | EMA 9/21 Crossover | 1.5 | Trend jangka menengah |
-| 6 | Williams %R | 1.5 | Oversold/overbought independent |
-| 7 | Slope/Momentum | 1.0 | Linear regression slope |
-| 8 | ROC-10 | 1.0 | Rate of Change, mean-reversion |
-| 9 | Order Book Pressure | 2.0 | Fallback ke Volume Ratio jika OB tidak ada |
-| 10 | Volume Ratio | 1.5 | Vol sekarang / MA-20; spike = breakout valid |
-| 11 | OBV Slope | 1.5 | Akumulasi/distribusi diam-diam |
+| # | Indikator | Bobot | Catatan / Kondisi |
+|---|-----------|-------|-------------------|
+| 1 | Price Velocity | 3.5 | Kenaikan/penurunan harga cepat 4-periode; >0.4% = skor penuh (+3.5), >0.15% = skor sedang (+1.5) |
+| 2 | Volume Ratio | 3.5 | Volume saat ini dibanding MA-20; >=2.0x = skor penuh (+3.5), >=1.4x = skor sedang (+1.5) |
+| 3 | Order Book Pressure | 3.0 | Rasio Bid/Ask depth volume; >=65% Bid = skor penuh (+3.0), >=55% Bid = skor sedang (+1.5) |
 
 ## 8) Entry Gate Sequence (`entry_gates.py`)
+- Gerbang dievaluasi secara asinkron: **State Monitors** (berat: Macro BTC 1H Guard, ATR, EMAs, Cooldowns, consecutive losses) dihitung hanya 1x per menit dalam cache memori, sedangkan **Trigger Monitors** (ringan: RSI, volume imbalance, K-NN verdict dari Redis) dievaluasi instan pada setiap 1s tick.
+- **5s Wick Delay & Retrace Abort Guard**: Menunda eksekusi order selama 5 detik pada lonjakan momentum (`velocity > 0.3%`), membatalkan order jika harga memantul turun (retracement $> 30\%$) dari puncak breakout.
+
+0. **Macro-Regime Guard (BTC 1H Trend Guard)** — reject semua sinyal jika harga BTC berada di bawah EMA-50 pada TF 1 Jam (Kecuali pair BTC itu sendiri). Hanya di-bypass bila `HUNTING_MODE_ENABLED=true`.
 1. Open position / blacklist guard
 2. Cooldown guard
 3. Radar recommendation + tracking log
 4. Multi-confluence technical gate (SELL block jika sell_score >= 5.0)
+4a. **Momentum BUY requirement** — reject jika verdict `derive_trade_signal` bukan `BUY` (kecuali setup Bottom-Explosion). Dikontrol `REQUIRE_MOMENTUM_BUY_SIGNAL`.
 4b. **ATR Volatility Filter** — reject jika ATR > 3% harga (4.5% di loose gates)
 4c. **EMA-50 Trend Filter** — reject jika harga < EMA-50.
     - **EXCEPTION (Bottom-Explosion)**: Bypass filter ini jika deteksi Mean Reversion ekstrim: `RSI < 26` + `Buy Pressure > 66%` + `Volume Ratio > 2.1`.

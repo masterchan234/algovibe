@@ -19,7 +19,8 @@ class DeadmanSwitch:
         self.api_secret = api_secret
         self.running = False
         self.thread = None
-        self.pairs = "btc_idr,eth_idr" # Default safe pairs, updated by ScalperBot
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        self.pairs = "btc_usdt,eth_usdt" if eid == "binance" else "btc_idr,eth_idr" # Default safe pairs, updated by ScalperBot
         self.endpoint = "https://indodax.com/tapi/countdownCancelAll"
 
     def set_pairs(self, pairs_list):
@@ -54,6 +55,11 @@ class DeadmanSwitch:
 
     def send_heartbeat(self):
         """Send a single heartbeat request."""
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            logger.debug(f"[Deadman] Binance Spot soft heartbeat active. Pairs monitored: {self.pairs}")
+            return True
+            
         try:
             timestamp = int(time.time() * 1000)
             params = {

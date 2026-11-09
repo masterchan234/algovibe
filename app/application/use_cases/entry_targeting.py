@@ -8,6 +8,39 @@ Runs only after all entry gates have passed.
 import config
 from app.domain.technicals import calculate_atr
 from utils.logger import log_message
+from .trade_execution import _to_ccxt_symbol
+
+
+_ATR_CANDLES = 20
+
+
+def _resolve_atr_candles(bot, pair, enriched):
+    """Return (highs, lows, closes) 1m candle untuk ATR.
+
+    Urutan sumber:
+      1. Cache candle in-memory milik service (brain-inference: `_ohlc_highs/_ohlc_lows`
+         + history close) — tanpa network call di hot path sinyal.
+      2. REST `fetch_ohlcv` bila bot punya client exchange (monolith / executive-core).
+    Mengembalikan tiga list kosong bila tidak ada sumber yang layak, sehingga caller
+    jatuh ke target K-NN.
+    """
+    highs_map = getattr(bot, 'ohlc_highs', None) or getattr(bot, '_ohlc_highs', None) or {}
+    lows_map = getattr(bot, 'ohlc_lows', None) or getattr(bot, '_ohlc_lows', None) or {}
+    closes = [float(x) for x in list(enriched.get('history') or [])]
+    highs = [float(x) for x in list(highs_map.get(pair, []))]
+    lows = [float(x) for x in list(lows_map.get(pair, []))]
+    # Ketiga deret harus sejajar per-candle; kalau tidak, ATR-nya tidak bermakna.
+    if len(closes) >= 15 and len(highs) == len(closes) and len(lows) == len(closes):
+        return highs[-_ATR_CANDLES:], lows[-_ATR_CANDLES:], closes[-_ATR_CANDLES:]
+
+    exchange = getattr(bot, 'exchange', None)
+    if exchange is not None:
+        ohlcv = exchange.fetch_ohlcv(
+            _to_ccxt_symbol(pair), timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=_ATR_CANDLES
+        )
+        if ohlcv:
+            return [c[2] for c in ohlcv], [c[3] for c in ohlcv], [c[4] for c in ohlcv]
+    return [], [], []
 
 
 def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
@@ -27,14 +60,12 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
     tq_prob = enriched['tq_prob']
     current_vol = p['volatility']
     knn_decision = gate['knn_decision']
+    tp_mult = float(gate.get('tp_multiplier', 1.0) or 1.0)
+    sl_mult = float(gate.get('sl_multiplier', 1.0) or 1.0)
 
     try:
-        symbol_atr = pair.upper().replace("IDR", "/IDR")
-        ohlcv_atr = bot.exchange.fetch_ohlcv(symbol_atr, timeframe=config.SIGNAL_CANDLE_TIMEFRAME, limit=20)
-        if ohlcv_atr:
-            highs = [c[2] for c in ohlcv_atr]
-            lows = [c[3] for c in ohlcv_atr]
-            closes = [c[4] for c in ohlcv_atr]
+        highs, lows, closes = _resolve_atr_candles(bot, pair, enriched)
+        if closes:
             atr_val = calculate_atr(highs, lows, closes)
 
             # --- [Multi-Factor Intelligence Scaling] ---
@@ -86,6 +117,10 @@ def calculate_entry_target(bot, p, enriched, gate, adaptive_cfg):
             log_message(f"[WARN] ATR Calculation fallback: {e}")
         final_dyn_tp = knn_decision['target_tp']
         final_dyn_sl = knn_decision['target_sl']
+
+    # Regime-aware overlay (TRENDING/SIDEWAYS/VOLATILE)
+    final_dyn_tp = max(0.006, min(0.20, float(final_dyn_tp) * tp_mult))
+    final_dyn_sl = -max(0.005, min(0.050, abs(float(final_dyn_sl)) * sl_mult))
 
     # [Scalp Optimization] Selalu gunakan TAKER (Market Order) untuk kecepatan eksekusi
     use_taker = True

@@ -55,6 +55,8 @@ def _load_adapters():
     """Lazily import all known adapter modules so they can register."""
     from app.infrastructure.providers.indodax_adapter import IndodaxAdapter  # noqa: F401
     _REGISTRY.setdefault("indodax", IndodaxAdapter)
+    from app.infrastructure.providers.binance_adapter import BinanceAdapter  # noqa: F401
+    _REGISTRY.setdefault("binance", BinanceAdapter)
 
 
 #  TradingBridge 
@@ -85,15 +87,15 @@ class TradingBridge:
         resolved_id = (
             exchange_id
             or self._read_exchange_id_from_db()
-            or os.getenv("EXCHANGE", "indodax")
+            or os.getenv("EXCHANGE", "binance")
         ).lower()
 
         if resolved_id not in _REGISTRY:
             logger.warning(
-                "[TradingBridge] Unknown exchange '%s', falling back to 'indodax'.",
+                "[TradingBridge] Unknown exchange '%s', falling back to 'binance'.",
                 resolved_id,
             )
-            resolved_id = "indodax"
+            resolved_id = "binance"
 
         adapter_cls = _REGISTRY[resolved_id]
 
@@ -181,9 +183,9 @@ class TradingBridge:
         -------
         dict
             {
-                "gross_pnl_idr":   float,   # raw price difference × amount
+                "gross_pnl_quote":   float,   # raw price difference × amount
                 "fee_idr":         float,   # total fee cost in IDR
-                "net_pnl_idr":     float,   # profit after fees
+                "net_pnl_quote":     float,   # profit after fees
                 "net_pnl_pct":     float,   # fraction relative to cost basis
                 "break_even_pct":  float,   # minimum gross % to be profitable
                 "is_profitable":   bool,
@@ -206,9 +208,9 @@ class TradingBridge:
         net_pnl_pct  = (net_pnl / cost_basis) if cost_basis > 0 else 0.0
 
         return {
-            "gross_pnl_idr":  round(gross_pnl,   2),
+            "gross_pnl_quote":  round(gross_pnl,   2),
             "fee_idr":        round(fee_idr,      2),
-            "net_pnl_idr":    round(net_pnl,      2),
+            "net_pnl_quote":    round(net_pnl,      2),
             "net_pnl_pct":    round(net_pnl_pct,  6),
             "break_even_pct": round(break_even_pct, 6),
             "is_profitable":  net_pnl > 0,
@@ -421,7 +423,7 @@ class TradingBridge:
         result = {**order, "pnl": pnl}
         logger.info(
             "[TradingBridge] Position closed: %s | Net PnL: Rp %.2f (%.4f%%)",
-            pair.upper(), pnl["net_pnl_idr"], pnl["net_pnl_pct"] * 100,
+            pair.upper(), pnl["net_pnl_quote"], pnl["net_pnl_pct"] * 100,
         )
         return result
 
@@ -528,7 +530,7 @@ class TradingBridge:
                 pair=pair.lower(),
                 event_type="BRIDGE_CLOSE",
                 message=(
-                    f"Net PnL: Rp {pnl['net_pnl_idr']:.2f} "
+                    f"Net PnL: Rp {pnl['net_pnl_quote']:.2f} "
                     f"({pnl['net_pnl_pct']*100:.4f}%) | "
                     f"Fee: Rp {pnl['fee_idr']:.2f}"
                 ),

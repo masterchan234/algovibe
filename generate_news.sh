@@ -14,14 +14,14 @@ COIN="${2:-}"
 COUNT="${3:-3}"
 
 if [[ -z "$MODE" ]]; then
-  echo "Usage: $0 [morning|evening|headline <COIN>|brief|landing [COIN] [COUNT]]"
+  echo "Usage: $0 [morning|evening|headline <COIN>|brief|landing [COIN] [COUNT]|tech_deep_dive [COIN]|whale_tracking [COIN]|risk_warning [COIN]]"
   exit 1
 fi
 
 case "$MODE" in
-  morning|evening|headline|brief|landing) ;;
+  morning|evening|headline|brief|landing|tech_deep_dive|whale_tracking|risk_warning) ;;
   *)
-    echo "Usage: $0 [morning|evening|headline <COIN>|brief|landing [COIN] [COUNT]]"
+    echo "Usage: $0 [morning|evening|headline <COIN>|brief|landing [COIN] [COUNT]|tech_deep_dive [COIN]|whale_tracking [COIN]|risk_warning [COIN]]"
     exit 1
     ;;
 esac
@@ -47,6 +47,9 @@ fi
 if [[ "$MODE" == "landing" ]]; then
   [[ -n "$COIN" ]] && CMD+=(--coin "${COIN,,}")
   CMD+=(--count "$COUNT")
+fi
+if [[ "$MODE" == "tech_deep_dive" || "$MODE" == "whale_tracking" || "$MODE" == "risk_warning" ]]; then
+  [[ -n "$COIN" ]] && CMD+=(--coin "${COIN,,}")
 fi
 
 # ── Colors (disabled when not a tty or NO_COLOR=1) ───────────────────────────
@@ -114,12 +117,15 @@ printf "\n%s\n\n" "$_SEP"
 
 # ── Spinner label ─────────────────────────────────────────────────────────────
 case "$MODE" in
-  morning)  _LBL="Generating Morning Briefing..." ;;
-  evening)  _LBL="Generating Evening Review..." ;;
-  headline) _LBL="Generating Headline — ${COIN^^}..." ;;
-  brief)    _LBL="Generating Market Intelligence Brief..." ;;
-  landing)  _LBL="Generating Landing Content Pack..." ;;
-  *)        _LBL="Generating..." ;;
+  morning)          _LBL="Generating Morning Briefing..." ;;
+  evening)          _LBL="Generating Evening Review..." ;;
+  headline)         _LBL="Generating Headline — ${COIN^^}..." ;;
+  brief)            _LBL="Generating Market Intelligence Brief..." ;;
+  landing)          _LBL="Generating Landing Content Pack..." ;;
+  tech_deep_dive)   _LBL="Generating Technical Deep Dive — ${COIN^^:-TOP}..." ;;
+  whale_tracking)   _LBL="Generating Whale Tracking — ${COIN^^:-TOP}..." ;;
+  risk_warning)     _LBL="Generating Risk Warning — ${COIN^^:-TOP}..." ;;
+  *)                _LBL="Generating..." ;;
 esac
 
 _start_spinner "$_LBL"

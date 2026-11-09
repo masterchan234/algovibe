@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,7 @@ from config import (
     MIN_BALANCE_THRESHOLD,
     MIN_TRADE_IDR,
     CAPITAL_PER_TRADE_PCT,
+    CAPITAL_PER_TRADE_PCT_HIGH_OPP,
     MAX_OPEN_POSITIONS,
     MIN_VOLUME_FILTER,
     LIQUIDITY_MULTIPLIER,
@@ -26,6 +28,84 @@ from config import (
     SMALL_ACCOUNT_CLAMP_TIER2_PCT,
     SMALL_ACCOUNT_CLAMP_TIER3_PCT,
 )
+
+def _to_ccxt_symbol(pair: str) -> str:
+    """Convert internal pair id (e.g. 'solusdt' / 'solidr') to CCXT symbol ('SOL/USDT' / 'SOL/IDR')."""
+    s = pair.upper()
+    if s.endswith("USDT"):
+        return f"{s[:-4]}/USDT"
+    if s.endswith("IDR"):
+        return f"{s[:-3]}/IDR"
+    return s
+
+
+def _is_binance() -> bool:
+    return os.getenv("EXCHANGE", "binance").lower() == "binance"
+
+
+def _order_params(pair: str) -> dict:
+    """Extra params untuk create_order.
+
+    Indodax (ccxt) butuh `pair` berformat `btc_idr`. Binance MENOLAK parameter yang
+    tidak dikenal (-1104 "Not all sent parameters were read"), jadi harus kosong.
+    """
+    if _is_binance():
+        return {}
+    _p = pair.lower()
+    if _p.endswith("idr"):
+        _p = _p[:-3] + "_idr"
+    return {"pair": _p}
+
+
+def _resolve_buy_fill(order: dict, pair: str, intended_price: float, intended_amount: float):
+    """Ambil (harga rata-rata fill, qty bersih diterima, biaya quote) dari respons order.
+
+    Market order Binance: `price` bisa None — harga eksekusi ada di `average`, dan fee
+    BUY dipotong dari base asset (kecuali dibayar BNB), sehingga koin yang benar-benar
+    masuk wallet = filled - fee. Tanpa koreksi ini cost basis dan qty posisi meleset.
+    """
+    def _f(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    filled = _f(order.get('filled')) or _f(intended_amount)
+    cost = _f(order.get('cost'))
+    avg = _f(order.get('average')) or _f(order.get('price'))
+    if avg <= 0 and cost > 0 and filled > 0:
+        avg = cost / filled
+    if avg <= 0:
+        avg = _f(intended_price)
+    if cost <= 0:
+        cost = avg * filled
+
+    base = pair.upper()
+    for _suffix in ("USDT", "IDR"):
+        if base.endswith(_suffix):
+            base = base[:-len(_suffix)]
+            break
+    fees = order.get('fees') or ([order['fee']] if order.get('fee') else [])
+    fee_base = sum(
+        _f(f.get('cost')) for f in fees
+        if isinstance(f, dict) and str(f.get('currency') or '').upper() == base
+    )
+    net_amount = filled - fee_base if 0 < fee_base < filled else filled
+    return avg, net_amount, cost
+
+
+def format_currency(val, is_price=False):
+    is_usdt = os.getenv("EXCHANGE", "indodax").lower() == 'binance'
+    prefix = "$" if is_usdt else "Rp "
+    val_float = float(val or 0.0)
+    if is_usdt:
+        if is_price:
+            return f"{prefix}{val_float:,.4f}"
+        return f"{prefix}{val_float:,.2f}"
+    else:
+        if is_price and val_float < 1000:
+            return f"{prefix}{val_float:,.2f}"
+        return f"{prefix}{val_float:,.0f}"
 
 #  Per-pair minimum trade IDR cache (dari fetch_pairs() API) 
 # Di-refresh setiap jam, sehingga jarang hit API dan tidak memblokir eksekusi.
@@ -74,7 +154,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
         - bid_depth_idr: total IDR available at bid side for our order
     """
     try:
-        symbol = pair.upper().replace("IDR", "/IDR")
+        symbol = _to_ccxt_symbol(pair)
         orderbook = exchange_client.fetch_order_book(symbol, limit=20)
         
         if not orderbook or 'bids' not in orderbook or 'asks' not in orderbook:
@@ -107,7 +187,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
         # We need at least 3x our order size in bid depth untuk cukup liquid
         required_depth = order_size_idr * 3.0
         if bid_depth_idr < required_depth:
-            return False, f"Bid depth Rp {bid_depth_idr:,.0f} < required Rp {required_depth:,.0f}", bid_depth_idr
+            return False, f"Bid depth {format_currency(bid_depth_idr)} < required {format_currency(required_depth)}", bid_depth_idr
         
         # 3. Check if top 2 bids have meaningful volume
         if best_bid_vol < order_size_idr / best_bid_price * 0.5:
@@ -117,7 +197,7 @@ def check_live_liquidity(exchange_client, pair, order_size_idr, max_spread_pct=0
                 if (best_bid_vol + second_bid_vol) < order_size_idr / best_bid_price * 0.5:
                     return False, f"Top bids volume too low for order size", bid_depth_idr
         
-        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth Rp {bid_depth_idr:,.0f})", bid_depth_idr
+        return True, f"Liquid (spread {spread_pct*100:.3f}%, bid depth {format_currency(bid_depth_idr)})", bid_depth_idr
         
     except Exception as e:
         log_message(f"[WARN] Liquidity check error for {pair}: {e}")
@@ -136,6 +216,7 @@ def execute_trade(
     volatility=0.0,
     dynamic_tp=None,
     dynamic_sl=None,
+    entry_size_factor=1.0,
     taker=False,
 ):
     try:
@@ -198,7 +279,7 @@ def execute_trade(
         
         # 1. Global Minimum check
         if vol_24h < MIN_VOLUME_FILTER:
-            log_message(f"[WARN] SKIP {pair}: Volume 24h (Rp {vol_24h:,.0f}) below Min Filter (Rp {MIN_VOLUME_FILTER:,.0f})")
+            log_message(f"[WARN] SKIP {pair}: Volume 24h ({format_currency(vol_24h)}) below Min Filter ({format_currency(MIN_VOLUME_FILTER)})")
             _mark_gate(f"24h volume below minimum filter: {vol_24h:,.0f}")
             return False
 
@@ -222,11 +303,11 @@ def execute_trade(
             # (parity requirement: must mirror the LIVE balance-based sizing path).
             try:
                 dry_stats = db.get_daily_stats()
-                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
+                realized_pnl_dry = float(dry_stats.get("total_pnl_quote") or 0.0)
                 open_pos = db.get_open_positions()
                 pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
                 used_idr = sum(
-                    float(p.get("amount_idr", 0))
+                    float(p.get("amount_quote", 0))
                     for p in pos_iter
                     if int(p.get("dry_run", 0)) == 1
                 )
@@ -248,8 +329,9 @@ def execute_trade(
                 _mark_gate("Dry usable capital exhausted after reserve buffer")
                 return False
 
-            target_amount = dry_balance * CAPITAL_PER_TRADE_PCT * multiplier
-            amount_idr = min(target_amount, usable_capital)
+            active_pct = CAPITAL_PER_TRADE_PCT_HIGH_OPP if is_high_opportunity_fast else CAPITAL_PER_TRADE_PCT
+            target_amount = dry_balance * active_pct * multiplier
+            amount_quote = min(target_amount, usable_capital)
         else:
             balance = getattr(bot, 'cached_balance', 0)
             if balance < MIN_BALANCE_THRESHOLD:
@@ -257,7 +339,8 @@ def execute_trade(
                 _mark_gate(f"Live balance below threshold ({balance:.0f})")
                 return False
             # Use real balance as the basis for sizing in LIVE mode
-            target_amount = balance * CAPITAL_PER_TRADE_PCT * multiplier
+            active_pct = CAPITAL_PER_TRADE_PCT_HIGH_OPP if is_high_opportunity_fast else CAPITAL_PER_TRADE_PCT
+            target_amount = balance * active_pct * multiplier
 
             # [Small Account Optimization]
             # If the calculated size is too small for the exchange but the account can afford it,
@@ -275,7 +358,7 @@ def execute_trade(
 
                     log_message(
                         f"[EXECUTIVE] [Intelligent Sizing] Tiered clamp {pair}: "
-                        f"Rp {target_amount:,.0f} -> Rp {clamp_target:,.0f}"
+                        f"{format_currency(target_amount)} -> {format_currency(clamp_target)}"
                     )
                     target_amount = clamp_target
 
@@ -289,29 +372,37 @@ def execute_trade(
                 _mark_gate("Live usable capital exhausted after reserve buffer")
                 return False
 
-            amount_idr = min(target_amount, usable_capital)
+            amount_quote = min(target_amount, usable_capital)
 
         # [Recovery Mode] Kurangi ukuran posisi 50% saat bot dalam mode pemulihan setelah loss limit
         recovery_factor = getattr(bot, '_recovery_size_factor', 1.0)
         if recovery_factor < 1.0:
-            amount_idr *= recovery_factor
+            amount_quote *= recovery_factor
             log_message(
                 f"[SELL] [RECOVERY SIZING] {pair}: Ukuran posisi dikurangi menjadi "
-                f"Rp {amount_idr:,.0f} ({recovery_factor*100:.0f}% dari normal)"
+                f"{format_currency(amount_quote)} ({recovery_factor*100:.0f}% dari normal)"
+            )
+
+        # Regime-aware sizing factor dari scoring gate.
+        entry_size_factor = max(0.30, min(1.50, float(entry_size_factor or 1.0)))
+        if abs(entry_size_factor - 1.0) > 1e-6:
+            amount_quote *= entry_size_factor
+            log_message(
+                f"[EXECUTIVE] [REGIME SIZING] {pair}: size_factor={entry_size_factor:.2f} -> {format_currency(amount_quote)}"
             )
 
         # 2. Dynamic check (Participation Rate)
         # Kita tidak ingin trade kita > 1/Multiplier (e.g. 1/50 = 2%) dari volume harian
-        required_vol = amount_idr * LIQUIDITY_MULTIPLIER
+        required_vol = amount_quote * LIQUIDITY_MULTIPLIER
         if vol_24h < required_vol:
-            log_message(f"[WARN] SKIP {pair}: Insufficient Liquidity. Need Rp {required_vol:,.0f} vol, but only has Rp {vol_24h:,.0f}")
+            log_message(f"[WARN] SKIP {pair}: Insufficient Liquidity. Need {format_currency(required_vol)} vol, but only has {format_currency(vol_24h)}")
             _mark_gate(f"Insufficient liquidity: need {required_vol:,.0f}, got {vol_24h:,.0f}")
             return False
 
         _pair_min_idr = _get_pair_min_idr(bot, pair)
-        if amount_idr < _pair_min_idr:
-            log_message(f"SKIP: Capital {amount_idr:.0f} IDR below Min Trade {_pair_min_idr:.0f} (pair-specific)")
-            _mark_gate(f"Capital below minimum trade ({amount_idr:.0f} < {_pair_min_idr:.0f})")
+        if amount_quote < _pair_min_idr:
+            log_message(f"SKIP: Capital {amount_quote:.0f} IDR below Min Trade {_pair_min_idr:.0f} (pair-specific)")
+            _mark_gate(f"Capital below minimum trade ({amount_quote:.0f} < {_pair_min_idr:.0f})")
             return False
 
         from config import TP_PCT, SL_PCT, ROUND_TRIP_FEE_PCT
@@ -325,18 +416,12 @@ def execute_trade(
         # sehingga guard proporsional di semua ukuran akun dan tidak memblokir trade
         # kecil yang secara matematis sudah menghasilkan profit bersih setelah fee.
         _fee_rt = ROUND_TRIP_FEE_PCT
-        _max_net_profit = amount_idr * (final_tp - _fee_rt)
-        
-        # Jika mode micro profit aktif, turunkan batas profit kelayakan menjadi 0.1%
-        _min_viable_pct = 0.005
-        if bot.exit_manager and bot.exit_manager._is_micro_profit_mode_active():
-            _min_viable_pct = 0.001
-            
-        _min_viable_net = amount_idr * _min_viable_pct
+        _max_net_profit = amount_quote * (final_tp - _fee_rt)
+        _min_viable_net = amount_quote * 0.005  # 0.5% dari trade size, proporsional
         if _max_net_profit < _min_viable_net:
             log_message(
-                f"[WARN] SKIP {pair}: Fee-trap! Max net profit Rp {_max_net_profit:.0f} "
-                f"< Rp {_min_viable_net:.0f} (trade=Rp{amount_idr:.0f}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
+                f"[WARN] SKIP {pair}: Fee-trap! Max net profit {format_currency(_max_net_profit)} "
+                f"< {format_currency(_min_viable_net)} (trade={format_currency(amount_quote)}, fee={_fee_rt*100:.4f}%, TP={final_tp*100:.1f}%). "
                 f"Perlu trade lebih besar atau TP lebih tinggi."
             )
             _mark_gate("Fee viability guard blocked trade")
@@ -345,38 +430,28 @@ def execute_trade(
         history = list(bot.price_history[pair])
         prices = np.array(history, dtype=float)
 
-        if taker or len(prices) < 2:
-            buy_price = price
-            if taker:
-                log_message(f"[EXECUTION] [Taker Execute] Market Buy at Rp {buy_price:,.2f}")
-            else:
-                log_message(f" [Maker Entry] Insufficient history for EMA-9, using current price: Rp {buy_price:,.2f}")
-        else:
-            alpha = 2 / (9 + 1)
-            ema_9 = prices[0]
-            for p_val in prices:
-                ema_9 = (p_val * alpha) + (ema_9 * (1 - alpha))
+        # Entry SELALU market/taker di harga pasar saat ini. Jalur "Maker Entry EMA-9" lama
+        # tidak pernah memasang limit order (LIVE tetap mengirim market order), tetapi di
+        # DRY RUN ia mencatat fill instan di EMA-9 — di bawah harga pasar saat breakout —
+        # sehingga PnL simulasi lebih bagus daripada yang bisa dicapai LIVE.
+        buy_price = price
+        log_message(f"[EXECUTION] [Taker Execute] Market Buy at {format_currency(buy_price, True)}")
 
-            buy_price = ema_9
-            log_message(f" [Maker Entry] Memasang jaring beli di EMA-9: Rp {buy_price:,.2f}")
-
-        symbol = pair.upper().replace("IDR", "/IDR")
-        amount_crypto = amount_idr / buy_price
+        symbol = _to_ccxt_symbol(pair)
+        amount_crypto = amount_quote / buy_price
 
         tp_target = buy_price * (1 + final_tp)
         sl_target = buy_price * (1 + final_sl)
 
         if config.DRY_RUN:
-            # Apply the same slippage_buffer the live adapter models (0.21%) so
-            # the simulated entry price is not unrealistically tight.
-            _sim_slippage = 0.0021  # mirrors IndodaxAdapter.fee_structure['slippage_buffer']
-            sim_fill_price = buy_price * (1 + _sim_slippage)
-            buy_price = sim_fill_price   # update buy_price so PnL calc uses realistic entry
-            amount_crypto = amount_idr / buy_price  # recalculate amount at simulated fill
+            # Simulate fees/slippage purely by reducing the amount of coins received, 
+            # keeping the entry price (buy_price) perfectly aligned with the market ticker.
+            _sim_slippage = 0.0021  # 0.21% taker fee + slippage penalty
+            amount_crypto = (amount_quote / buy_price) * (1 - _sim_slippage)
             order = {
                 'id': f"DRY-{int(time.time())}",
                 'status': 'closed',
-                'price': buy_price,   # [SIMULATION] pre-computed price + 0.21% slippage
+                'price': buy_price,   # [SIMULATION] 100% pure market price
                 'amount': amount_crypto,
                 'symbol': symbol,
                 'timestamp': datetime.now().isoformat(),
@@ -392,10 +467,10 @@ def execute_trade(
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
                 f"Rationale: _{bot.oracle.get_rationale(pair, 'BUY')}_{predator_msg}\n"
-                f"Price: Rp {buy_price:,.2f}\n"
+                f"Price: {format_currency(buy_price, True)}\n"
                 f"Qty: {amount_crypto:.8f}\n"
-                f"Target TP: Rp {tp_target:,.2f}\n"
-                f"Target SL: Rp {sl_target:,.2f}"
+                f"Target TP: {format_currency(tp_target, True)}\n"
+                f"Target SL: {format_currency(sl_target, True)}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
@@ -404,10 +479,10 @@ def execute_trade(
                 f"[RECOVERY] *LIVE BUY* [RECOVERY]\n"
                 f"Pair: `{pair}`\n"
                 f"Reason: `{trend}` (Prob: {tq_prob*100:.1f}%)\n"
-                f"Price: Rp {buy_price:,.2f}\n"
+                f"Price: {format_currency(buy_price, True)}\n"
                 f"Qty: {amount_crypto:.8f}\n"
-                f"Target TP: Rp {tp_target:,.2f}\n"
-                f"Target SL: Rp {sl_target:,.2f}"
+                f"Target TP: {format_currency(tp_target, True)}\n"
+                f"Target SL: {format_currency(sl_target, True)}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
@@ -415,7 +490,7 @@ def execute_trade(
             # --- [LIVE LIQUIDITY CHECK] Validate order book depth before entry ---
             from config import MAX_ALLOWED_SPREAD_PCT
             is_liquid, liq_reason, bid_depth = check_live_liquidity(
-                bot.exchange, pair, amount_idr, max_spread_pct=MAX_ALLOWED_SPREAD_PCT
+                bot.exchange, pair, amount_quote, max_spread_pct=MAX_ALLOWED_SPREAD_PCT
             )
             
             if not is_liquid:
@@ -425,24 +500,25 @@ def execute_trade(
             
             log_message(f"[OK] [LIQUIDITY OK] {pair}: {liq_reason}")
 
-            params = {
-                'pair': pair.replace("idr", "_idr"),
-            }
-            # Indodax via ccxt memerlukan price; gunakan ask agar taker-like dan cepat terisi.
-            market_buy_price = max(float(buy_price or 1), 1.0)
+            params = _order_params(pair)
+            # ccxt memakai price * amount sebagai nilai quote market-buy, jadi price harus
+            # harga asli. Floor 1.0 hanya valid untuk IDR; pada USDT ia menggandakan
+            # nilai order untuk koin berharga < $1 (mis. $0.05 -> 20x ukuran).
+            market_buy_price = float(buy_price)
+            if not _is_binance():
+                market_buy_price = max(market_buy_price, 1.0)
             order = bot.exchange.create_order(symbol, 'market', 'buy', amount_crypto, market_buy_price, params)
-            # Update buy_price dengan harga eksekusi asli jika tersedia
-            buy_price = float(order.get('price') or price)
-            
-            # [Audit Fix] Log actual IDR used for live trades
-            actual_idr = float(order.get('cost') or (buy_price * amount_crypto))
+            # Cost basis dari fill asli: harga rata-rata, qty bersih (setelah fee base), biaya quote.
+            buy_price, amount_crypto, actual_idr = _resolve_buy_fill(order, pair, price, amount_crypto)
+            tp_target = buy_price * (1 + final_tp)
+            sl_target = buy_price * (1 + final_sl)
             log_message(
-                f" [LIVE-AUDIT] {pair} order executed. Intended IDR: Rp {amount_idr:,.0f} | "
-                f"Actual Cost: Rp {actual_idr:,.0f} | Qty: {amount_crypto:.8f}"
+                f" [LIVE-AUDIT] {pair} order executed. Intended: {format_currency(amount_quote)} | "
+                f"Actual Cost: {format_currency(actual_idr)} | Qty: {amount_crypto:.8f}"
             )
             # Use actual cost if available from exchange
             if actual_idr > 0:
-                amount_idr = actual_idr
+                amount_quote = actual_idr
 
         _rsi_dna = None
         _ema_dist_dna = None
@@ -467,7 +543,7 @@ def execute_trade(
                 db.log_order(p, "BUY", b_p, d.get("amount_crypto", 0), o.get('status'), o)
                 db.log_system_event(
                     p, "BUY",
-                    f"{m_label} | Prob:{t_prob*100:.1f}% | Rp {b_p:,.0f} | TP:{f_tp*100:.1f}% SL:{f_sl*100:.1f}%",
+                    f"{m_label} | Prob:{t_prob*100:.1f}% | {format_currency(b_p, True)} | TP:{f_tp*100:.1f}% SL:{f_sl*100:.1f}%",
                     'INFO'
                 )
             except Exception as ex:
@@ -497,10 +573,15 @@ def execute_trade(
             "entry_price": buy_price,
             "amount": amount_crypto,
             "amount_crypto": amount_crypto,
-            "amount_idr": amount_idr,
+            "amount_quote": amount_quote,
             "timestamp": datetime.now().isoformat(),
             "dry_run": config.DRY_RUN,
-            "status": "OPEN" if config.DRY_RUN else "PENDING_BUY",
+            # Market order yang sudah `closed` langsung OPEN. Menunggu event PrivateWS
+            # rawan race (event fill bisa tiba sebelum baris posisi ditulis) dan posisi
+            # PENDING_BUY tidak dijaga SL/TP oleh exit monitor.
+            "status": "OPEN" if (
+                config.DRY_RUN or str(order.get('status') or '').lower() in ('closed', 'filled')
+            ) else "PENDING_BUY",
             "entry_order_id": order.get('id') if not config.DRY_RUN else None,
             "exit_order_id": None,
             "target_tp_pct": final_tp,
@@ -509,7 +590,7 @@ def execute_trade(
             "ai_confidence": tq_prob * 100,
             "is_high_opportunity_fast": 1 if is_high_opportunity_fast else 0,
             "highest_price": buy_price,              # [FIX] Initialize highest_price for TTP tracking
-            "trailing_sl_price": buy_price * (1 - config.TRAILING_TP_DELTA_PCT),  # [FIX] Initialize trailing stop from config
+            "trailing_sl_price": buy_price * (1 - 0.007),  # [FIX] Initialize trailing stop (0.7% from entry)
         }
 
         db.upsert_position(pair, data)
@@ -530,7 +611,7 @@ def execute_trade(
 def execute_basket_exit_live(exchange_client, positions: list) -> dict:
     """Issue simultaneous market sell orders for all given live positions.
 
-    Each position dict must contain at least: pair, amount_crypto, entry_price, amount_idr.
+    Each position dict must contain at least: pair, amount_crypto, entry_price, amount_quote.
     Orders are placed in parallel via a ThreadPoolExecutor.  After a successful fill
     the position is deleted from the DB and the order is recorded in order_book.
 
@@ -546,12 +627,12 @@ def execute_basket_exit_live(exchange_client, positions: list) -> dict:
         pair = pos.get("pair", "")
         amount_crypto = float(pos.get("amount_crypto") or 0)
         entry_price   = float(pos.get("entry_price") or 0)
-        amount_idr    = float(pos.get("amount_idr") or 0)
+        amount_quote    = float(pos.get("amount_quote") or 0)
 
         if amount_crypto <= 0 or not pair:
             return {"pair": pair, "ok": False, "error": "invalid position data"}
 
-        symbol = pair.upper().replace("IDR", "/IDR")
+        symbol = _to_ccxt_symbol(pair)
         # Build Indodax param: ensure suffix is exactly '_idr', not mid-string
         _pair_param = pair.lower()
         if _pair_param.endswith("idr"):

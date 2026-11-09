@@ -79,7 +79,7 @@ def run_market_cycle(bot):
         time.sleep(5)
         return
 
-    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime) for item in tickers.items()]) if r]
+    ranked = [r for r in bot.pool.map(calculate_score, [(item, adaptive_cfg, regime, {item[0]: list(bot.price_history.get(item[0], []))}) for item in tickers.items()]) if r]
     ranked.sort(key=lambda x: x['score'], reverse=True)
 
     if not config.TECHNICAL_ONLY_MODE:
@@ -129,15 +129,16 @@ def run_market_cycle(bot):
             _net = target_status['current_pnl']
             _t = target_status['target_idr']
             target_str = (
-                f"Net PnL: Rp{_net:+,.0f} "
-                f"(Realized: Rp{_r:+,.0f}, Unrealized: Rp{_u:+,.0f}) | "
-                f"Target: Rp{_t:,.0f} | Status: HARVEST_ONLY"
+                f"Net PnL: ${_net:+.2f} "
+                f"(R:${_r:+.2f}, U:${_u:+.2f}) | "
+                f"Target: ${_t:.2f} | Status: HARVEST_ONLY"
             )
         elif target_status['target_idr'] > 0:
+            _pnl = target_status['current_pnl']
+            _tgt = target_status['target_idr']
+            _prog = target_status['progress_pct']
             target_str = (
-                f"Target: Rp{target_status['target_idr']/1000:.0f}k | "
-                f"PnL: Rp{target_status['current_pnl']/1000:+.0f}k "
-                f"({target_status['progress_pct']:.0f}%)"
+                f"Target: ${_tgt:.2f} | PnL: ${_pnl:+.2f} ({_prog:.0f}%)"
             )
             if session_mode == "TRAILING":
                 target_str += " | TRAILING"
@@ -162,6 +163,7 @@ def run_market_cycle(bot):
     db.save_state("heartbeat", time.time())
 
     high_speed = build_high_speed_candidates(bot, ranked, tickers)
+    log_message(f"DEBUG: ranked={len(ranked)}, high_speed={len(high_speed) if high_speed is not None else 'None'}")
     if high_speed is None:
         return
 

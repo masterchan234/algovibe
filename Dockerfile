@@ -38,9 +38,6 @@ COPY --from=frontend-builder /app/dashboard/static/dist /app/dashboard/static/di
 # Ensure runtime directories exist with correct permissions
 RUN mkdir -p /app/data/logs /app/models/cache
 
-# Startup script permissions
-RUN chmod +x /app/start.sh
-
 # Security: Create non-root user
 RUN useradd -m -u 1000 algovibe && \
     chown -R algovibe:algovibe /app
@@ -51,5 +48,5 @@ USER algovibe
 # Dashboard port
 EXPOSE 8080
 
-# Run bot + dashboard
-CMD ["/app/start.sh"]
+# Run core engine as default CMD
+CMD ["python", "-m", "services.executive_core.main"]

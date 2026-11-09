@@ -56,3 +56,4 @@ psycopg2-binary==2.9.9
 DBUtils==3.1.0
 alembic==1.13.1
 SQLAlchemy==2.0.29
+redis==5.0.3

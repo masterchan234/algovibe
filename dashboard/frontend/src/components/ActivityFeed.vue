@@ -21,26 +21,31 @@
         </button>
         <button 
           :class="{ active: filterMode === 'history' }" 
-          @click="filterMode = 'history'"
+          @click="filterMode = 'history'; historyPage = 1"
         >
           History
           <span v-if="store.stats.history_count > 0" class="tab-count history">{{ store.stats.history_count }}</span>
         </button>
+        <button
+          :class="{ active: filterMode === 'analysis' }"
+          @click="filterMode = 'analysis'"
+        >
+          <span class="tab-icon">🧠</span> Analysis
+        </button>
       </div>
     </nav>
 
-    <!-- Contextual Panel (Positions / History) -->
-    <div class="context-panel" :class="{ 'collapsed': filterMode !== 'history' && filterMode !== 'overview' }">
+    <!-- Contextual Panel (Positions / History / Analysis) -->
+    <div class="context-panel expanded">
 
       <!-- Active Positions Mode (Overview) -->
       <div class="positions-section" v-if="filterMode === 'overview' || (filterMode === 'all' && store.positions.length > 0)">
         <div class="section-header">
           <div class="col-pair">PAIR</div>
           <div class="col-size">SIZE</div>
-          <div class="col-price">ENTRY/MARK</div>
-          <div class="col-target">TARGETS</div>
-          <div class="col-pnl">PnL (NET EXIT)</div>
-          <div class="col-exit">ACTION</div>
+          <div class="col-price-progress text-center">PRICE & TARGETS</div>
+          <div class="col-pnl">PnL (NET)</div>
+          <div class="col-exit">ACT</div>
         </div>
         <div class="positions-list">
           <div
@@ -49,7 +54,13 @@
             class="position-item"
             :class="[isDustPosition(pos) ? 'dust' : (pos.pnl_net_idr >= 0 ? 'green' : 'red'), { 'exit-pending': isExitRequested(pos.pair) }]"
           >
-            <div class="col-pair">
+            <!-- Order Book Depth Background -->
+            <div class="depth-bg" v-if="getCoinDepth(pos.pair)">
+              <div class="depth-bg-bid" :style="{ width: getCoinDepth(pos.pair).bidPct + '%' }"></div>
+              <div class="depth-bg-ask" :style="{ width: getCoinDepth(pos.pair).askPct + '%' }"></div>
+            </div>
+
+            <div class="col-pair" style="position: relative; z-index: 1;">
               <div class="pair-name">{{ formatPair(pos.pair) }}</div>
               <div style="display: flex; gap: 6px; margin-top: 4px;">
                 <div class="status-pill" :class="pos.status.toLowerCase()">{{ displayStatus(pos) }}</div>
@@ -57,15 +68,15 @@
               </div>
             </div>
             
-            <div class="col-size">
-              <div class="val-idr">{{ formatIdr(pos.amount_idr) }}</div>
+            <div class="col-size" style="position: relative; z-index: 1;">
+              <div class="val-idr">{{ formatIdr(pos.amount_quote, false) }}</div>
               <div class="val-coin">{{ formatCoin(pos.amount_crypto ?? pos.amount_coin) }} units</div>
             </div>
 
-            <div class="col-price-progress">
+            <div class="col-price-progress" style="position: relative; z-index: 1;">
               <div class="price-labels">
                 <span class="entry-label">ENT: {{ formatNumber(pos.entry_price) }}</span>
-                <span class="current-label">MARK: {{ formatNumber(pos.exit_price) }}</span>
+                <span class="current-label">MARK: {{ formatNumber(pos.last_price || 0) }}</span>
               </div>
               <div v-if="!isDustPosition(pos)" class="progress-container">
                 <div class="progress-bg"></div>
@@ -80,7 +91,7 @@
                 <div class="target-marker tp" title="Take Profit"></div>
               </div>
               <div v-else class="dust-note">
-                DUST tracked - menunggu BUY signal untuk top-up dan promosi kembali ke OPEN.
+                DUST tracked - waiting for BUY signal to top-up and promote back to OPEN.
               </div>
               <div v-if="!isDustPosition(pos)" class="target-labels">
                 <span class="sl-val">SL -{{ Math.abs(pos.target_sl || 0).toFixed(1) }}%</span>
@@ -88,7 +99,7 @@
               </div>
             </div>
 
-            <div class="col-pnl">
+            <div class="col-pnl" style="position: relative; z-index: 1;">
               <div class="pnl-val">{{ formatIdr(pos.pnl_net_idr) }}</div>
               <div class="pnl-pct">{{ (pos.pnl_net_pct ?? pos.pnl_pct) > 0 ? '+' : '' }}{{ Number((pos.pnl_net_pct ?? pos.pnl_pct) || 0).toFixed(2) }}%</div>
               <div class="pnl-kind" :title="isDustPosition(pos) ? 'Tracked dust estimate only' : 'Execution-aware net estimate from orderbook depth and fees'">
@@ -96,9 +107,9 @@
               </div>
             </div>
 
-            <div class="col-exit">
+            <div class="col-exit" style="position: relative; z-index: 1;">
               <button
-                v-if="(pos.status || '').toUpperCase() === 'OPEN' && (pos.pnl_net_idr / (pos.amount_idr || 1)) < manualExitMaxNetPct"
+                v-if="(pos.status || '').toUpperCase() === 'OPEN' && (pos.pnl_net_idr / (pos.amount_quote || 1)) < manualExitMaxNetPct"
                 class="btn-manual-exit"
                 :disabled="exitingPairs.has(pos.pair)"
                 @click.stop="handleManualExit(pos.pair)"
@@ -120,84 +131,75 @@
         <div class="section-header">
           <div class="col-pair">PAIR</div>
           <div class="col-size">SIZE</div>
-          <div class="col-price">ENTRY/EXIT</div>
+          <div class="col-price" style="display: flex; justify-content: space-between; padding: 0 10px;">
+            <span>ENTRY</span>
+            <span>EXIT</span>
+          </div>
           <div class="col-pnl">RESULT</div>
         </div>
-        <div class="history-list">
+        <div class="history-list custom-scroll">
           <div
-            v-for="trade in sortedRecentTrades"
+            v-for="trade in paginatedHistory"
             :key="trade.created_at"
             class="history-item"
-            :class="trade.pnl_idr >= 0 ? 'green' : 'red'"
+            :class="trade.pnl_quote >= 0 ? 'green' : 'red'"
           >
             <div class="history-row">
               <div class="col-pair">
                 <div class="pair-name">{{ formatPair(trade.pair) }}</div>
                 <div class="time">{{ formatTimeShort(trade.created_at) }}</div>
-                <div class="exit-reason" v-if="trade.reason">{{ trade.reason }}</div>
               </div>
               <div class="col-size">
-                <div class="val-idr">{{ formatIdr(trade.amount_idr || 0) }}</div>
+                <div class="val-idr">{{ formatIdr(trade.amount_quote || 0) }}</div>
               </div>
-              <div class="col-price">
-                <div class="entry">{{ formatNumber(trade.entry_price) }}</div>
-                <div class="exit">{{ formatNumber(trade.exit_price) }}</div>
+              <div class="col-price" style="display: flex; justify-content: space-between; padding: 0 10px;">
+                <div class="entry mono">{{ formatNumber(trade.entry_price) }}</div>
+                <div class="exit mono" style="font-weight: 700;">{{ formatNumber(trade.exit_price) }}</div>
               </div>
               <div class="col-pnl">
-                <div class="pnl-val">{{ formatIdr(trade.pnl_idr) }}</div>
+                <div class="pnl-val">{{ formatIdr(trade.pnl_quote) }}</div>
                 <div class="pnl-pct">{{ trade.pnl_pct > 0 ? '+' : '' }}{{ (trade.pnl_pct || 0).toFixed(2) }}%</div>
+                <div class="exit-reason" :class="exitReasonClass(trade)" v-if="trade.reason" style="margin-top: 4px;">{{ displayTradeReason(trade) }}</div>
               </div>
             </div>
           </div>
-          <div v-if="store.stats.recent_trades.length === 0" class="empty-state">
+          <div v-if="sortedRecentTrades.length === 0" class="empty-state">
             No historical trades found.
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Live Intelligence Stream (Market / Analisa / Open Coin Analysis Logs) -->
-    <div class="stream-container">
-      <div class="stream-tabs">
-        <button 
-          :class="{ active: activeStreamTab === 'market' }" 
-          @click="activeStreamTab = 'market'"
-        >
-          <span class="tab-icon">📊</span> Market Data
-        </button>
-        <button 
-          :class="{ active: activeStreamTab === 'analisa' }" 
-          @click="activeStreamTab = 'analisa'"
-        >
-          <span class="tab-icon">🧠</span> Analisa AI
-        </button>
-        <button
-          :class="{ active: activeStreamTab === 'llm' }"
-          @click="activeStreamTab = 'llm'"
-        >
-          <span class="tab-icon">🧾</span> Open Coin Logs
-          <span v-if="llmExitCount > 0" class="tab-count llm">{{ llmExitCount }}</span>
-        </button>
-        <div class="tab-indicator" :class="activeStreamTab"></div>
+        <div v-if="sortedRecentTrades.length > historyPageSize" class="pagination">
+          <button class="page-btn" :disabled="historyPage === 1" @click="historyPage--">&lt;</button>
+          <span class="page-info">{{ historyPage }} / {{ totalHistoryPages }}</span>
+          <button class="page-btn" :disabled="historyPage === totalHistoryPages" @click="historyPage++">&gt;</button>
+        </div>
       </div>
 
-      <div class="events-list" ref="eventsList">
-        <transition-group name="feed-slide" tag="div">
-          <div
-            v-for="item in filteredStream"
-            :key="item.id"
-            class="feed-item"
-            :class="[itemClass(item), activeStreamTab === 'market' ? 'dense-item' : '']"
-          >
-            <div class="feed-top">
-              <span class="feed-time">{{ formatTime(item.created_at) }}</span>
-              <span class="feed-tag" :class="tagClass(item)">{{ item.side }}</span>
-              <span class="feed-pair">{{ formatPair(item.pair) }}</span>
+      <!-- Live Intelligence Stream (AI Analysis Only) -->
+      <div class="analysis-section" v-if="filterMode === 'analysis'" style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+        <div class="events-list custom-scroll" ref="eventsList">
+          <transition-group name="feed-slide" tag="div">
+            <div
+              v-for="item in paginatedStream"
+              :key="item.id"
+              class="feed-item"
+              :class="[itemClass(item)]"
+            >
+              <div class="feed-top">
+                <span class="feed-time">{{ formatTime(item.created_at) }}</span>
+                <span class="feed-tag" :class="tagClass(item)">{{ item.side }}</span>
+                <span class="feed-pair">{{ formatPair(item.pair) }}</span>
+              </div>
+              <div class="feed-msg">{{ item.message }}</div>
             </div>
-            <div class="feed-msg" :class="{ 'mono-text': activeStreamTab === 'market' }">{{ item.message }}</div>
-          </div>
-        </transition-group>
+          </transition-group>
+        </div>
+        <div v-if="filteredStream.length > streamPageSize" class="pagination stream-pagination">
+          <button class="page-btn" :disabled="streamPage === 1" @click="streamPage--">&lt;</button>
+          <span class="page-info">{{ streamPage }} / {{ totalStreamPages }}</span>
+          <button class="page-btn" :disabled="streamPage === totalStreamPages" @click="streamPage++">&gt;</button>
+        </div>
       </div>
+
     </div>
   </div>
 </template>
@@ -211,7 +213,11 @@ const { getAuthHeaders } = useAuth()
 
 const store = useTradeStore()
 const filterMode = ref('overview')
-const activeStreamTab = ref('analisa') 
+
+const historyPage = ref(1)
+const historyPageSize = 10
+const streamPage = ref(1)
+const streamPageSize = 15
 
 // Threshold from server config — EXIT allowed only when Net PnL < this value
 const manualExitMaxNetPct = computed(() => store.stats.manual_exit_max_net_pct ?? 0.001)
@@ -232,6 +238,12 @@ const sortedRecentTrades = computed(() => {
     const timeB = b.created_at ? new Date(b.created_at).getTime() : 0
     return timeB - timeA
   })
+})
+
+const totalHistoryPages = computed(() => Math.ceil(sortedRecentTrades.value.length / historyPageSize) || 1)
+const paginatedHistory = computed(() => {
+  const start = (historyPage.value - 1) * historyPageSize
+  return sortedRecentTrades.value.slice(start, start + historyPageSize)
 })
 
 const activeVisibleCount = computed(() =>
@@ -258,6 +270,30 @@ function displayStatus(pos) {
     return 'DUST'
   }
   return pos.status
+}
+
+function displayTradeReason(trade) {
+  const reason = trade.reason || ''
+  const pnl = Number(trade.pnl_quote || 0)
+  if (reason === 'TAKE_PROFIT') return pnl < 0 ? 'TP · NET LOSS' : 'TAKE PROFIT'
+  if (reason === 'STOP_LOSS') return pnl >= 0 ? 'TRAIL STOP' : 'STOP LOSS'
+  if (reason === 'HARD_STOP_LOSS') return 'HARD STOP'
+  if (reason === 'EXIT_TIMEOUT') return 'TIMEOUT'
+  if (reason === 'BASKET_EXIT') return 'BASKET EXIT'
+  if (reason === 'MANUAL_DASHBOARD_EXIT') return 'MANUAL EXIT'
+  if (reason === 'FORCE_PROFIT_HIGH_TIER') return 'FORCE PROFIT'
+  if (reason === 'RAPID_TP_GOOD_PROFIT') return 'RAPID TP'
+  return reason.replace(/_/g, ' ')
+}
+
+function exitReasonClass(trade) {
+  const reason = trade.reason || ''
+  const pnl = Number(trade.pnl_quote || 0)
+  if (reason === 'TAKE_PROFIT' && pnl < 0) return 'reason-tp-loss'
+  if (reason === 'TAKE_PROFIT') return 'reason-tp'
+  if ((reason === 'STOP_LOSS' || reason === 'HARD_STOP_LOSS') && pnl >= 0) return 'reason-trail'
+  if (reason === 'STOP_LOSS' || reason === 'HARD_STOP_LOSS') return 'reason-sl'
+  return 'reason-other'
 }
 
 function markExitRequestedUx(pair) {
@@ -305,7 +341,7 @@ async function handleManualExit(pair) {
         window.dispatchEvent(new CustomEvent('algovibe:require-login', {
           detail: { source: 'manual-exit', pair }
         }))
-        alert('Sesi login diperlukan untuk manual EXIT. Silakan login terlebih dahulu.')
+        alert('Login session required for manual EXIT. Please login first.')
       } else {
         alert(`Exit failed: ${err.error || res.statusText}`)
       }
@@ -350,71 +386,31 @@ watch(openPairSet, (pairs) => {
 
 const filteredStream = computed(() => {
   const items = store.activityFeed
-  const activePairs = new Set(activeCoinPositions.value.map((p) => String(p?.pair || '').toLowerCase()))
-  const activePairList = Array.from(activePairs)
-  const activeSymbols = activePairList.map((p) => p.replace(/idr$/i, '').toUpperCase())
-
-  const marketItems = items.filter((item) => {
-    const src = String(item?.source || '').toUpperCase()
-    const side = String(item?.side || '').toUpperCase()
-    return src === 'MARKET_WS' && (side === 'BUY' || side === 'SELL' || side === 'MARKET')
-  })
-  const openCoinLogCandidates = items
-    .map((item) => {
-      const src = String(item?.source || '').toUpperCase()
-      if (src === 'MARKET_WS') return null
-
-      const rawPair = String(item?.pair || '').toLowerCase()
-      const msg = String(item?.message || '').toUpperCase()
-
-      if (activePairs.has(rawPair)) {
-        return { ...item, pair: rawPair }
-      }
-
-      const matchedSymbol = activeSymbols.find((sym) => sym && msg.includes(sym))
-      if (!matchedSymbol) return null
-
-      const matchedPair = activePairList.find((pair) => pair === `${matchedSymbol.toLowerCase()}idr`)
-      if (!matchedPair) return null
-
-      return { ...item, pair: matchedPair }
-    })
-    .filter(Boolean)
-
-  const openCoinLogItems = activeCoinPositions.value.map((pos) => {
-    const pair = String(pos?.pair || '').toLowerCase()
-    const latest = openCoinLogCandidates.find((item) => String(item?.pair || '').toLowerCase() === pair)
-    if (latest) return latest
-
-    const status = String(pos?.status || 'OPEN').toUpperCase()
-    return {
-      id: `synthetic-monitor-${pair}`,
-      created_at: String(pos?.created_at || pos?.timestamp || new Date().toISOString()),
-      pair,
-      side: 'MONITOR',
-      message: `Monitoring aktif ${formatPair(pair)} (${status}) — menunggu sinyal analisa/log terbaru.`,
-      source: 'SYNTHETIC',
-    }
+  const _sortDesc = (arr) => [...arr].sort((a, b) => {
+    const tA = a.created_at ? new Date(a.created_at).getTime() : 0
+    const tB = b.created_at ? new Date(b.created_at).getTime() : 0
+    return tB - tA
   })
 
-  if (activeStreamTab.value === 'market') return marketItems
-  if (activeStreamTab.value === 'llm') return openCoinLogItems
-  
-  // Overview: show everything except dense market data
-  return items.filter((item) => {
+  // Overview: show everything except dense market data, newest first
+  return _sortDesc(items.filter((item) => {
     const src = String(item?.source || '').toUpperCase()
     return src !== 'MARKET_WS'
-  })
+  }))
 })
 
-const llmExitCount = computed(() => activeCoinPositions.value.length)
+const totalStreamPages = computed(() => Math.ceil(filteredStream.value.length / streamPageSize) || 1)
+const paginatedStream = computed(() => {
+  const start = (streamPage.value - 1) * streamPageSize
+  return filteredStream.value.slice(start, start + streamPageSize)
+})
 
 function itemClass(item) {
   const side = (item.side || '').toUpperCase()
   if (side === 'LLM_EXIT_SIGNAL') return 'type-llm'
   if (side === 'BUY' || side === 'LONG') return 'type-buy'
   if (side === 'SELL' || side === 'SHORT') return 'type-sell'
-  if (side.includes('AI') || side.includes('ORACLE')) return 'type-ai'
+  if (side.includes('AI') || side.includes('SYSTEM')) return 'type-ai'
   if (side === 'ERROR' || side === 'WARN') return 'type-warn'
   return 'type-info'
 }
@@ -424,7 +420,8 @@ function tagClass(item) {
   if (side === 'LLM_EXIT_SIGNAL') return 'tag-llm'
   if (side === 'BUY' || side === 'LONG') return 'tag-buy'
   if (side === 'SELL' || side === 'SHORT') return 'tag-sell'
-  if (side.includes('AI') || side.includes('ORACLE')) return 'tag-ai'
+  if (side.includes('AI') || side.includes('SYSTEM')) return 'tag-ai'
+  if (side === 'ERROR' || side === 'WARN') return 'tag-warn'
   return 'tag-info'
 }
 
@@ -439,7 +436,7 @@ function formatTime(ts) {
 function formatPair(pair) {
   if (!pair) return ''
   if (pair.toLowerCase() === 'system' || pair.toLowerCase() === 'global') return pair.toUpperCase()
-  return pair.replace(/idr$/i, '').toUpperCase()
+  return pair.replace(/(idr|usdt)$/i, '').toUpperCase()
 }
 
 function formatTimeShort(ts) {
@@ -466,25 +463,55 @@ function calculatePosition(pos) {
 }
 
 function formatNumber(val) {
-  return Number(val || 0).toLocaleString('id-ID')
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  if (isUsdt) {
+    return Number(val || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  } else {
+    return Number(val || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 })
+  }
 }
 
 function formatCoin(val) {
   const n = Number(val) || 0
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
   if (n === 0) return '0'
   if (n < 0.001) return n.toFixed(8)
   if (n < 0.1) return n.toFixed(6)
   if (n < 1) return n.toFixed(4)
   if (n < 1000) return n.toFixed(2)
-  return n.toLocaleString('id-ID', { maximumFractionDigits: 2 })
+  return n.toLocaleString(isUsdt ? 'en-US' : 'id-ID', { maximumFractionDigits: 2 })
 }
 
-function formatIdr(val) {
-  const n = Math.round(Number(val) || 0)
+function formatIdr(val, signed = true) {
+  const n = Number(val) || 0
+  const isUsdt = store.stats.exchange === 'binance' || (store.stats.btc_price && store.stats.btc_price < 500000)
+  const prefix = signed ? (n >= 0 ? '+' : '-') : ''
   const abs = Math.abs(n)
-  const prefix = n >= 0 ? '+' : '-'
-  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}jt`
+  if (isUsdt) {
+    if (abs >= 1_000) return `${prefix}$${(abs / 1_000).toFixed(1)}k`
+    return `${prefix}$${abs.toFixed(2)}`
+  }
+  if (abs >= 1_000_000) return `${prefix}Rp ${(abs / 1_000_000).toFixed(2)}M`
   return `${prefix}Rp ${abs.toLocaleString('id-ID')}`
+}
+
+function getCoinDepth(pair) {
+  if (!pair) return null
+  const pName = pair.toLowerCase()
+  const depth = store.marketDepths[pName]
+  if (!depth) return null
+  
+  const bidDepth = depth[0] || 0
+  const askDepth = depth[1] || 0
+  const total = bidDepth + askDepth
+  if (total === 0) return null
+
+  return {
+    bidPct: ((bidDepth / total) * 100).toFixed(1),
+    askPct: ((askDepth / total) * 100).toFixed(1),
+    bidVol: bidDepth,
+    askVol: askDepth
+  }
 }
 </script>
 
@@ -493,76 +520,99 @@ function formatIdr(val) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #161b22;
+  background: var(--bg-surface);
   border-radius: 12px;
   overflow: hidden;
-  border: 1px solid #30363d;
+  border: 1px solid var(--border-trader);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
 .feed-main-header {
   padding: 16px 20px;
-  background: #0d1117;
-  border-bottom: 1px solid #30363d;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border-trader);
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
-.title { font-weight: 900; font-size: 14px; color: #e6edf3; text-transform: uppercase; letter-spacing: 1px; }
+.title { font-weight: 900; font-size: 14px; color: var(--text-primary); text-transform: uppercase; letter-spacing: 1px; }
 
-.feed-nav { padding: 12px 20px; background: #161b22; border-bottom: 1px solid rgba(48, 54, 61, 0.5); }
+.feed-nav { padding: 12px 20px; background: var(--bg-surface); border-bottom: 1px solid rgba(48, 54, 61, 0.5); }
 
 .segmented-control {
   display: flex;
-  background: #0d1117;
+  background: var(--bg-deep);
   padding: 4px;
   border-radius: 8px;
-  border: 1px solid #30363d;
+  border: 1px solid var(--border-trader);
 }
 
 .segmented-control button {
-  flex: 1; background: transparent; border: none; color: #8b949e; font-size: 11px;
+  flex: 1; background: transparent; border: none; color: var(--text-secondary); font-size: 11px;
   font-weight: 700; padding: 8px 0; border-radius: 6px; cursor: pointer; transition: all 0.2s;
 }
 
-.segmented-control button.active { background: #21262d; color: #58a6ff; }
+.segmented-control button.active { background: var(--border-light); color: #58a6ff; }
 
 .tab-count { background: #f85149; color: white; font-size: 9px; padding: 1px 5px; border-radius: 10px; margin-left: 5px; }
-.tab-count.history { background: #30363d; color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.2); }
+.tab-count.history { background: var(--border-trader); color: var(--text-secondary); border: 1px solid rgba(139, 148, 158, 0.2); }
 .tab-count.llm { background: rgba(255, 51, 102, 0.15); color: #ff3366; border: 1px solid rgba(255, 51, 102, 0.25); }
 
-.context-panel { background: #0d1117; max-height: 60%; overflow-y: auto; border-bottom: 1px solid #30363d; transition: all 0.3s; }
-.context-panel.collapsed { max-height: 0; border-bottom: none; }
+.context-panel { background: var(--bg-deep); max-height: 60%; overflow-y: auto; border-bottom: 1px solid var(--border-trader); transition: all 0.3s; }
+.context-panel.expanded { flex: 1; max-height: 100%; border-bottom: none; display: flex; flex-direction: column; }
 
 .section-header {
   display: flex;
   padding: 10px 20px;
   background: rgba(13, 17, 23, 0.8);
-  border-bottom: 1px solid #30363d;
+  border-bottom: 1px solid var(--border-trader);
   font-size: 10px;
   font-weight: 800;
   color: #484f58;
   letter-spacing: 0.5px;
 }
 
-.col-pair { flex: 1.2; }
-.col-size { flex: 1; text-align: right; padding-right: 15px; }
-.col-price-progress { flex: 3; padding: 0 10px; }
-.col-pnl { flex: 1.2; text-align: right; }
-.col-exit { flex: 0 0 56px; text-align: center; }
+.col-pair { flex: 1.2; min-width: 70px; }
+.col-size { flex: 1; text-align: right; padding-right: 10px; min-width: 60px; }
+.col-price-progress { flex: 2; padding: 0 5px; min-width: 110px; }
+.col-price { flex: 2.5; padding: 0 10px; min-width: 160px; }
+.col-pnl { flex: 1.2; text-align: right; min-width: 70px; }
+.col-exit { flex: 0 0 75px; text-align: center; display: flex; justify-content: flex-end; align-items: center; margin-left: auto; padding-right: 5px; }
+.text-center { text-align: center; }
+.mono { font-family: monospace; }
 
 .position-item, .history-item {
   display: flex;
   align-items: center;
-  gap: 15px;
-  padding: 12px 20px;
-  border-bottom: 1px solid rgba(48, 54, 61, 0.4);
-  transition: background 0.2s;
+  gap: 8px;
+  padding: 12px 14px;
+  margin: 6px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
 }
 
+.position-item::before, .history-item::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 4px;
+  background: transparent;
+  transition: all 0.3s ease;
+}
+
+.position-item.green::before, .history-item.green::before { background: #39d353; box-shadow: 0 0 12px #39d353; }
+.position-item.red::before, .history-item.red::before { background: #ff4d4d; box-shadow: 0 0 12px #ff4d4d; }
+
 .position-item:hover, .history-item:hover {
-  background: rgba(88, 166, 255, 0.03);
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .position-item.exit-pending {
@@ -575,24 +625,42 @@ function formatIdr(val) {
   background: rgba(139, 148, 158, 0.05);
 }
 
-.pair-name { font-weight: 900; color: #e6edf3; font-size: 13px; margin-bottom: 2px; }
+.depth-bg {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  z-index: 0;
+  opacity: 0.15;
+  pointer-events: none;
+}
+.depth-bg-bid { height: 100%; background: #3fb950; transition: width 0.5s ease; }
+.depth-bg-ask { height: 100%; background: #f85149; transition: width 0.5s ease; }
+
+.pair-name { font-weight: 900; color: var(--text-primary); font-size: 13px; margin-bottom: 2px; }
 .exit-reason {
   font-size: 8px; font-weight: 700; text-transform: uppercase;
-  color: #8b949e; letter-spacing: 0.4px; margin-top: 2px; opacity: 0.75;
+  color: var(--text-secondary); letter-spacing: 0.4px; margin-top: 2px; opacity: 0.75;
 }
+.exit-reason.reason-tp { color: #3fb950; opacity: 0.9; }
+.exit-reason.reason-tp-loss { color: #f0883e; opacity: 1; font-weight: 900; letter-spacing: 0.6px; }
+.exit-reason.reason-trail { color: #58a6ff; opacity: 0.9; }
+.exit-reason.reason-sl { color: #f85149; opacity: 0.85; }
+.exit-reason.reason-other { color: var(--text-secondary); opacity: 0.75; }
 .status-pill {
   display: inline-block;
   font-size: 8px;
   font-weight: 900;
-  padding: 1px 5px;
-  border-radius: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
   text-transform: uppercase;
-  background: #21262d;
-  color: #8b949e;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.05);
 }
-.status-pill.exiting { color: #f85149; border: 1px solid rgba(248, 81, 73, 0.2); }
-.status-pill.pending_buy { color: #d29922; border: 1px solid rgba(210, 153, 34, 0.2); }
-.status-pill.open { color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.2); }
+.status-pill.exiting { color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); background: rgba(248, 81, 73, 0.1); box-shadow: 0 0 8px rgba(248, 81, 73, 0.2); }
+.status-pill.pending_buy { color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); background: rgba(210, 153, 34, 0.1); box-shadow: 0 0 8px rgba(210, 153, 34, 0.2); }
+.status-pill.open { color: #39d353; border: 1px solid rgba(57, 211, 83, 0.3); background: rgba(57, 211, 83, 0.1); box-shadow: 0 0 8px rgba(57, 211, 83, 0.2); }
 .status-pill.fast-opportunity { 
   color: #fbbf24;
   background: rgba(251, 191, 36, 0.08);
@@ -615,8 +683,8 @@ function formatIdr(val) {
   font-weight: 700;
   font-family: monospace;
 }
-.entry-label { color: #8b949e; }
-.current-label { color: #e6edf3; font-weight: 900; }
+.entry-label { color: var(--text-secondary); }
+.current-label { color: var(--text-primary); font-weight: 900; }
 .sl-val { color: rgba(248, 81, 73, 0.7); }
 .tp-val { color: rgba(63, 185, 80, 0.7); }
 
@@ -628,7 +696,7 @@ function formatIdr(val) {
 .progress-bg {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: #21262d;
+  background: var(--border-light);
   border-radius: 3px;
 }
 .progress-fill {
@@ -655,29 +723,19 @@ function formatIdr(val) {
 .dust-note {
   font-size: 9px;
   font-weight: 700;
-  color: #8b949e;
+  color: var(--text-secondary);
   margin-top: 4px;
   letter-spacing: 0.2px;
 }
 
-.green .pnl-val { color: #3fb950; }
-.green .pnl-pct { background: rgba(63, 185, 80, 0.1); color: #3fb950; }
-.red .pnl-val { color: #f85149; }
-.red .pnl-pct { background: rgba(248, 81, 73, 0.1); color: #f85149; }
+.green .pnl-val { color: #39d353; text-shadow: 0 0 12px rgba(57, 211, 83, 0.4); }
+.green .pnl-pct { background: rgba(57, 211, 83, 0.15); color: #39d353; border: 1px solid rgba(57, 211, 83, 0.3); box-shadow: 0 0 10px rgba(57, 211, 83, 0.2); }
+.red .pnl-val { color: #ff4d4d; text-shadow: 0 0 12px rgba(255, 77, 77, 0.4); }
+.red .pnl-pct { background: rgba(255, 77, 77, 0.15); color: #ff4d4d; border: 1px solid rgba(255, 77, 77, 0.3); box-shadow: 0 0 10px rgba(255, 77, 77, 0.2); }
 
 .empty-state { padding: 20px; text-align: center; color: #484f58; font-size: 12px; font-style: italic; }
 
-.stream-container { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.stream-tabs { display: flex; position: relative; background: #161b22; border-bottom: 1px solid #30363d; }
-.stream-tabs button { flex: 1; background: transparent; border: none; padding: 14px 0; color: #8b949e; font-size: 11px; font-weight: 800; cursor: pointer; }
-.stream-tabs button.active { color: #e6edf3; }
-
-.tab-indicator { position: absolute; bottom: 0; height: 2px; width: calc(100% / 3); transition: all 0.3s; }
-.tab-indicator.market  { transform: translateX(0);   background: #58a6ff; }
-.tab-indicator.analisa { transform: translateX(100%); background: #a371f7; }
-.tab-indicator.llm     { transform: translateX(200%); background: #ff3366; }
-
-.events-list { flex: 1; overflow-y: auto; background: #0d1117; }
+.events-list { flex: 1; overflow-y: auto; background: var(--bg-deep); }
 .feed-item { padding: 10px 20px; border-bottom: 1px solid rgba(48, 54, 61, 0.1); border-left: 3px solid transparent; }
 .feed-item.type-buy  { border-left-color: #3fb950; }
 .feed-item.type-sell { border-left-color: #f85149; }
@@ -685,7 +743,7 @@ function formatIdr(val) {
 .feed-item.type-llm  { border-left-color: #ff3366; background: rgba(255, 51, 102, 0.03); }
 
 .feed-top { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
-.feed-time { color: #8b949e; font-size: 10px; }
+.feed-time { color: var(--text-secondary); font-size: 10px; }
 .feed-tag { font-size: 9px; font-weight: 900; padding: 1px 4px; border-radius: 3px; }
 .tag-buy  { background: rgba(63, 185, 80, 0.1);   color: #3fb950; }
 .tag-sell { background: rgba(248, 81, 73, 0.1);  color: #f85149; }
@@ -697,7 +755,7 @@ function formatIdr(val) {
 
 .badge { font-size: 9px; font-weight: 900; padding: 2px 8px; border-radius: 12px; }
 .badge.live { color: #3fb950; background: rgba(63, 185, 80, 0.1); border: 1px solid rgba(63, 185, 80, 0.2); }
-.badge.offline { color: #8b949e; background: rgba(139, 148, 158, 0.1); border: 1px solid rgba(139, 148, 158, 0.2); }
+.badge.offline { color: var(--text-secondary); background: rgba(139, 148, 158, 0.1); border: 1px solid rgba(139, 148, 158, 0.2); }
 
 .history-item { flex-direction: column; align-items: stretch; gap: 8px; }
 .history-row { display: flex; align-items: center; gap: 15px; width: 100%; }
@@ -719,7 +777,7 @@ function formatIdr(val) {
 
 .audit-icon { font-size: 12px; }
 .audit-title { font-size: 9px; font-weight: 900; color: #a371f7; letter-spacing: 1px; }
-.audit-confidence { margin-left: auto; font-size: 9px; color: #8b949e; font-weight: 700; }
+.audit-confidence { margin-left: auto; font-size: 9px; color: var(--text-secondary); font-weight: 700; }
 
 .audit-body { display: flex; align-items: flex-start; gap: 8px; }
 .audit-verdict {
@@ -727,7 +785,7 @@ function formatIdr(val) {
   font-weight: 900;
   padding: 1px 5px;
   border-radius: 4px;
-  background: #21262d;
+  background: var(--border-light);
   color: #c9d1d9;
 }
 .audit-verdict.buy { color: #3fb950; }
@@ -737,24 +795,29 @@ function formatIdr(val) {
   margin: 0;
   font-size: 11px;
   line-height: 1.4;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-style: italic;
 }
 
 .btn-manual-exit {
-  background: #da3633;
+  background: linear-gradient(135deg, #f85149 0%, #da3633 100%);
   color: #fff;
-  border: none;
-  border-radius: 5px;
-  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 6px 10px;
   font-size: 10px;
   font-weight: 900;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
   cursor: pointer;
-  transition: background 0.15s, opacity 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 12px rgba(248, 81, 73, 0.4);
   white-space: nowrap;
 }
-.btn-manual-exit:hover:not(:disabled) { background: #f85149; }
+.btn-manual-exit:hover:not(:disabled) { 
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(248, 81, 73, 0.6);
+  background: linear-gradient(135deg, #ff6b63 0%, #ed4845 100%);
+}
 .btn-manual-exit:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .exit-queued {
@@ -767,4 +830,43 @@ function formatIdr(val) {
   border-radius: 4px;
   padding: 2px 6px;
 }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-trader);
+  background: var(--bg-surface);
+}
+
+.stream-pagination {
+  border-top: 1px solid rgba(48, 54, 61, 0.5);
+  background: var(--bg-deep);
+}
+
+.page-btn {
+  background: rgba(255,255,255,0.05);
+  color: var(--text-primary);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-weight: 800;
+}
+.page-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.page-info {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.custom-scroll::-webkit-scrollbar { width: 6px; }
+.custom-scroll::-webkit-scrollbar-track { background: var(--bg-deep); }
+.custom-scroll::-webkit-scrollbar-thumb { background: rgba(139, 148, 158, 0.3); border-radius: 3px; }
+.custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(139, 148, 158, 0.5); }
 </style>

@@ -1,298 +1,249 @@
 """
 services/market_pipe/providers/binance.py — Binance Market Provider
-==================================================================
-Connects to the public Binance WebSocket using a combined stream of bookTicker
-updates, normalises updates into Tick Protobuf messages, and emits them via
-the configured callback.
+====================================================================
+Subclass IndodaxProvider dan override seluruh perilaku yang spesifik untuk
+Binance: initial subscriptions via live top movers, dan mover refresh loop
+setiap 5 menit.
 
-Stream list is built DYNAMICALLY at startup by:
-  1. Fetching all active USDT trading pairs from Binance REST exchangeInfo.
-  2. Fetching all IDR trading pairs from Indodax REST summaries.
-  3. Mapping Indodax pairs (baseIDR → baseUSDT) and intersecting with Binance.
-  4. Subscribing only to the intersection — covers all cross-listed coins
-     automatically, skipping purely local / domestic-only tokens.
-
-Binance combined stream limit: 1024 streams max per connection.
-Includes automatic reconnection, ping/pong keepalive, and thread safety.
+Hanya dipakai saat env var EXCHANGE=binance.
 """
 
-import json
 import logging
-import os
-import sys
-import threading
 import time
-from typing import Optional, Set
+import threading
 
-import requests
-import websocket
+import requests as _req
 
-# Allow importing from the repo root when running as standalone service
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
-from services.market_pipe.providers.base import MarketProvider, TickCallback, TradeCallback
-from shared.algovibe_pb2 import Tick, ExchangeId  # type: ignore[attr-defined]
+from services.market_pipe.providers.indodax import IndodaxProvider
 
 logger = logging.getLogger(__name__)
 
-# Binance REST endpoints (public, no auth required)
-_BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-_INDODAX_SUMMARIES_URL = "https://indodax.com/api/summaries"
-
-# Nama base yang berbeda antara Indodax dan Binance (indodax_base → binance_base).
-# Tambahkan mapping di sini jika ada koin baru yang namanya tidak konsisten.
-_BASE_OVERRIDE: dict = {
-    "rndr": "render",   # Render Network: Indodax=RNDR, Binance=RENDER
-}
-
-# Pairs yang hanya ada di Indodax (tidak ada pasangan USDT di Binance) dan harus di-skip.
-# Ini adalah safety-net; discovery otomatis akan melewatkan koin ini secara alami.
-_LOCAL_ONLY_BASES: Set[str] = {
-    "idr",    # USDT/IDR pair itu sendiri
-}
+# Pair stablecoin yang tidak perlu di-trade
+_STABLECOIN_BASES = frozenset({
+    'USDC', 'FDUSD', 'TUSD', 'USDP', 'BUSD', 'DAI', 'USDB', 'USD1',
+    'XUSD', 'U', 'RLUSD', 'XAUT', 'PAXG', 'EUR', 'GBP', 'TRY',
+})
 
 
-def _fetch_binance_usdt_pairs(timeout: float = 10.0) -> Set[str]:
+class BinanceProvider(IndodaxProvider):
+    """Market provider untuk Binance Spot exchange.
+
+    Menggunakan live Binance public API untuk menentukan pair yang perlu
+    di-watch: top gainers + losers + high-volume, di-refresh setiap 5 menit.
     """
-    Fetch semua simbol USDT yang aktif diperdagangkan di Binance spot.
-    Returns set of lowercase base symbols (e.g. {'btc', 'eth', 'sol', ...}).
-    """
-    try:
-        resp = requests.get(_BINANCE_EXCHANGE_INFO_URL, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        bases = set()
-        for sym in data.get("symbols", []):
-            if (
-                sym.get("quoteAsset") == "USDT"
-                and sym.get("status") == "TRADING"
-                and sym.get("isSpotTradingAllowed", False)
-            ):
-                bases.add(sym["baseAsset"].lower())
-        logger.info("[BinanceProvider] Fetched %d active USDT base assets from Binance.", len(bases))
-        return bases
-    except Exception as e:
-        logger.warning("[BinanceProvider] Failed to fetch Binance exchange info: %s. Using empty set.", e)
-        return set()
-
-
-def _fetch_indodax_bases(timeout: float = 10.0) -> Set[str]:
-    """
-    Fetch semua pair IDR dari Indodax summaries API.
-    Returns set of lowercase base symbols (e.g. {'btc', 'eth', 'sol', ...}).
-    """
-    try:
-        resp = requests.get(_INDODAX_SUMMARIES_URL, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        tickers = data.get("tickers", {})
-        bases = set()
-        for pair_key in tickers:
-            # pair_key format: "btc_idr", "eth_idr", ...
-            if pair_key.endswith("_idr"):
-                base = pair_key[:-4]  # strip '_idr'
-                if base not in _LOCAL_ONLY_BASES:
-                    bases.add(base.lower())
-        logger.info("[BinanceProvider] Fetched %d IDR base assets from Indodax.", len(bases))
-        return bases
-    except Exception as e:
-        logger.warning("[BinanceProvider] Failed to fetch Indodax summaries: %s. Using empty set.", e)
-        return set()
-
-
-def _build_stream_list() -> list:
-    """
-    Build the full WebSocket stream subscription list by intersecting
-    Binance active USDT pairs with Indodax IDR pair list.
-
-    Returns list of bookTicker stream names (e.g. ['btcusdt@bookTicker', ...]).
-    """
-    binance_bases = _fetch_binance_usdt_pairs()
-    indodax_bases = _fetch_indodax_bases()
-
-    streams = []
-    skipped_local = []
-
-    for indodax_base in sorted(indodax_bases):
-        # Apply override mapping (e.g. rndr → render)
-        binance_base = _BASE_OVERRIDE.get(indodax_base, indodax_base)
-        
-        if binance_base in binance_bases:
-            streams.append(f"{binance_base}usdt@bookTicker")
-        else:
-            skipped_local.append(indodax_base)
-
-    logger.info(
-        "[BinanceProvider] Dynamic discovery: %d streams to subscribe | "
-        "%d local-only (no Binance listing): %s",
-        len(streams), len(skipped_local),
-        skipped_local[:20],  # log maks 20 agar tidak spam
-    )
-    return streams
-
-
-class BinanceProvider(MarketProvider):
-    """
-    Binance market-data provider using a public combined bookTicker stream.
-    No API keys are required.
-
-    Stream list is built dynamically at startup by intersecting Indodax IDR
-    pairs with Binance active USDT pairs, so all cross-listed coins are always
-    covered without any manual configuration.
-    """
-
-    # Binance combined stream limit
-    _MAX_STREAMS_PER_CONNECTION = 1024
-
-    def __init__(
-        self,
-        on_tick: Optional[TickCallback] = None,
-        on_trade: Optional[TradeCallback] = None,
-    ):
-        super().__init__(on_tick=on_tick, on_trade=on_trade)
-
-        self._ws: Optional[websocket.WebSocketApp] = None
-        self._running = False
-        self._ready_event = threading.Event()
-        self._ws_thread: Optional[threading.Thread] = None
-
-        # streams akan di-build saat start() untuk memastikan discovery
-        # berjalan fresh setiap kali service di-restart
-        self.streams: list = []
-        self.url: str = ""
-
-    #  Identity 
 
     @property
     def exchange_id(self) -> str:
         return "binance"
 
-    #  Lifecycle 
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
         self._start_time = time.monotonic()
         self._running = True
-        self._ready_event.clear()
+        self._mws.start()
+        threading.Thread(target=self._initial_subscriptions, daemon=True).start()
+        threading.Thread(target=self._mover_refresh_loop, daemon=True).start()
+        threading.Thread(target=self._depth_broadcast_loop, daemon=True).start()
+        logger.info("[BINANCE Provider] Started.")
 
-        self._ws_thread = threading.Thread(target=self._run_loop, daemon=True, name="BinanceWS-Thread")
-        self._ws_thread.start()
-        logger.info("[BinanceProvider] Background WS thread started.")
+    # ── Depth Broadcasting ────────────────────────────────────────────────────
 
-    def stop(self) -> None:
-        self._running = False
-        if self._ws:
-            try:
-                self._ws.close()
-            except Exception as e:
-                logger.warning(f"[BinanceProvider] Error closing WS: {e}")
-        logger.info("[BinanceProvider] Stopped.")
-
-    def wait_ready(self, timeout: float = 30.0) -> bool:
-        return self._ready_event.wait(timeout=timeout)
-
-    def is_connected(self) -> bool:
-        if self._ws and self._ws.sock and self._ws.sock.connected:
-            return True
-        return False
-
-    #  Connection Loop 
-
-    def _run_loop(self) -> None:
-        # Dynamic discovery — dilakukan sekali saat pertama terhubung
-        logger.info("[BinanceProvider] Running dynamic pair discovery...")
-        self.streams = _build_stream_list()
-
-        if not self.streams:
-            logger.error("[BinanceProvider] No streams discovered. Binance feed disabled.")
-            return
-
-        # Batasi ke maksimum per koneksi Binance
-        if len(self.streams) > self._MAX_STREAMS_PER_CONNECTION:
-            logger.warning(
-                "[BinanceProvider] Discovered %d streams exceeds limit %d. Truncating.",
-                len(self.streams), self._MAX_STREAMS_PER_CONNECTION
-            )
-            self.streams = self.streams[:self._MAX_STREAMS_PER_CONNECTION]
-
-        streams_query = "/".join(self.streams)
-        self.url = f"wss://stream.binance.com:9443/stream?streams={streams_query}"
-
+    def _depth_broadcast_loop(self) -> None:
+        """Broadcast bid/ask depth for all tickers every 1s via ZMQ as JSON."""
+        import json as _json
+        # Wait for WS to be ready
+        time.sleep(5)
         while self._running:
-            logger.info(
-                "[BinanceProvider] Connecting to Binance combined stream (%d pairs)...",
-                len(self.streams)
-            )
+            try:
+                tickers = self._mws.get_tickers() or {}
+                depth_payload = {}
+                for pair, t in tickers.items():
+                    bd = float(t.get('bid_depth', 0))
+                    ad = float(t.get('ask_depth', 0))
+                    if bd > 0 or ad > 0:
+                        depth_payload[pair] = [bd, ad]
+                if depth_payload and self._on_tick is not None:
+                    raw = _json.dumps(depth_payload).encode()
+                    try:
+                        self._on_tick(raw, topic="depth")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("[BINANCE Provider] Depth broadcast error: %s", e)
+            time.sleep(1)
 
-            self._ws = websocket.WebSocketApp(
-                self.url,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close,
-                on_open=self._on_open
-            )
+    # ── Initial Subscriptions ─────────────────────────────────────────────────
 
-            # Run the client loop with automatic ping keepalive
-            self._ws.run_forever(
-                ping_interval=15,
-                ping_timeout=10
-            )
+    def _initial_subscriptions(self) -> None:
+        """Subscribe pair-pair dari live Binance movers + open positions."""
+        # Tunggu sampai WS connected sebelum mulai bulk subscribe
+        for _ in range(30):
+            if self._mws.is_connected():
+                break
+            time.sleep(1)
+        else:
+            logger.warning("[BINANCE Provider] WS not connected after 30s, proceeding anyway.")
+        time.sleep(0.5)  # sedikit buffer biar koneksi stabil
 
-            if self._running:
-                logger.warning("[BinanceProvider] WS disconnected. Reconnecting in 3 seconds...")
-                time.sleep(3)
+        from app.infrastructure.database import db
 
-    #  WS Callbacks 
+        watch_pair = 'btcusdt'
+        db_ready = False
+        for i in range(30):
+            try:
+                watch_pair = db.get_state('current_watch_pair') or 'btcusdt'
+                with db.get_connection() as conn:
+                    conn.execute("SELECT 1 FROM positions LIMIT 1")
+                db_ready = True
+                break
+            except Exception as e:
+                logger.warning("[BINANCE Provider] DB not ready (attempt %d/30): %s", i + 1, e)
+                time.sleep(2)
 
-    def _on_open(self, ws) -> None:
-        logger.info(
-            "[BinanceProvider] [OK] Connected to Binance stream. Subscribed to %d pairs.",
-            len(self.streams)
-        )
-        # Signal readiness immediately on connection open
-        if not self._ready_event.is_set():
-            self._ready_event.set()
+        if not db_ready:
+            logger.error("[BINANCE Provider] DB tables never became ready. Falling back.")
 
-    def _on_message(self, ws, raw_msg: str) -> None:
+        pairs = {'btcusdt', str(watch_pair).lower()}
         try:
-            payload = json.loads(raw_msg)
-            data = payload.get("data", {})
-            if not data:
+            with db.get_connection() as conn:
+                rows = conn.execute("SELECT pair FROM positions").fetchall()
+                for r in rows:
+                    p = str(r['pair'] or '').lower().strip()
+                    if p:
+                        pairs.add(p)
+        except Exception as e:
+            logger.warning("[BINANCE Provider] Could not load open positions: %s", e)
+
+        # Tambahkan live top movers dari Binance API
+        pairs.update(self._fetch_live_mover_pairs())
+
+        try:
+            self._mws.bulk_subscribe_market_trades(set(pairs))
+            subscribed = len(pairs)
+        except Exception as e:
+            logger.warning("[BINANCE Provider] Trade subscriptions failed: %s", e)
+
+        logger.info("[BINANCE Provider] Initial subscriptions: %d pairs", subscribed)
+
+    # ── Tick/Trade Handlers ───────────────────────────────────────────────────
+
+    def _handle_tick_update(self, pair: str, data: dict) -> None:
+        import time as _time
+        from shared.algovibe_pb2 import Tick, ExchangeId  # type: ignore[attr-defined]
+        try:
+            ts_ms = int(_time.time() * 1000)
+            price = float(data.get("last") or 0)
+            if price <= 0:
                 return
-
-            symbol = str(data.get("s", "")).lower()  # e.g., "btcusdt"
-            bid = float(data.get("b", 0.0))
-            ask = float(data.get("a", 0.0))
-
-            if bid <= 0 or ask <= 0:
-                return
-
-            price = (bid + ask) / 2.0
-            ts_ms = int(time.time() * 1000)
-
-            # Create Tick protobuf
             tick = Tick()
-            tick.symbol      = symbol
+            tick.symbol      = pair
             tick.price       = price
-            tick.volume      = 0.0  # bookTicker doesn't carry 24h volume
+            tick.volume      = float(data.get("vol_coin") or 0)
             tick.timestamp   = ts_ms
             tick.exchange_id = ExchangeId.Value("EXCHANGE_BINANCE")
-            tick.bid         = bid
-            tick.ask         = ask
-            tick.high_24h    = price
-            tick.low_24h     = price
-            tick.vol_idr     = 0.0
-
-            self._emit(tick.SerializeToString(), topic="tick")
-
+            tick.bid         = float(data.get("buy") or 0)
+            tick.ask         = float(data.get("sell") or 0)
+            tick.high_24h    = float(data.get("high") or 0)
+            tick.low_24h     = float(data.get("low") or 0)
+            tick.vol_idr     = float(data.get("vol_idr") or 0)
+            latency_ms = 0.0
+            try:
+                epoch = data.get("epoch")
+                if epoch:
+                    latency_ms = (_time.time() - float(epoch)) * 1000.0
+            except Exception:
+                pass
+            self._emit(tick.SerializeToString(), latency_ms=latency_ms)
+            if not self._ready_event.is_set():
+                self._ready_event.set()
         except Exception as e:
-            logger.error(f"[BinanceProvider] Error processing message: {e}")
+            logger.error("[BINANCE Provider] Tick error for %s: %s", pair, e)
 
-    def _on_error(self, ws, err) -> None:
-        logger.error(f"[BinanceProvider] WebSocket Error: {err}")
+    def _handle_trade_update(self, pair: str, trade_data: list) -> None:
+        from shared.algovibe_pb2 import Trade, ExchangeId  # type: ignore[attr-defined]
+        try:
+            t = Trade()
+            t.symbol      = pair
+            t.timestamp   = int(trade_data[1] * 1000)
+            t.tid         = str(trade_data[2])
+            t.side        = str(trade_data[3])
+            t.price       = float(trade_data[4])
+            t.amount      = float(trade_data[6])
+            t.exchange_id = ExchangeId.Value("EXCHANGE_BINANCE")
+            logger.info("[BINANCE Provider] Emitting trade: %s", pair)
+            self._emit_trade(t.SerializeToString())
+        except Exception as e:
+            logger.error("[BINANCE Provider] Trade error for %s: %s", pair, e)
 
-    def _on_close(self, ws, close_status_code, close_msg) -> None:
-        logger.warning(f"[BinanceProvider] WebSocket Closed: {close_status_code} - {close_msg}")
+    # ── Mover Logic ───────────────────────────────────────────────────────────
+
+    def _fetch_live_mover_pairs(self, top_n_change: int = 30, top_n_vol: int = 20) -> set:
+        """Fetch top gainers + losers + high-volume dari Binance public API.
+
+        Returns set of normalised lowercase pair strings (e.g. 'xlmusdt').
+        """
+        try:
+            resp = _req.get("https://api.binance.com/api/v3/ticker/24hr", timeout=8)
+            if resp.status_code != 200:
+                logger.warning("[BINANCE Provider] fetch_live_mover_pairs HTTP %d", resp.status_code)
+                return set()
+            raw = resp.json()
+            candidates = []
+            for t in raw:
+                sym = str(t.get('symbol', ''))
+                if not sym.endswith('USDT'):
+                    continue
+                if sym[:-4] in _STABLECOIN_BASES:
+                    continue
+                vol = float(t.get('quoteVolume', 0) or 0)
+                if vol < 5_000_000:
+                    continue
+                change = float(t.get('priceChangePercent', 0) or 0)
+                candidates.append((sym.lower(), change, vol))
+
+            by_gain = sorted(candidates, key=lambda x: x[1], reverse=True)[:top_n_change]
+            by_loss = sorted(candidates, key=lambda x: x[1])[:top_n_change]
+            by_vol  = sorted(candidates, key=lambda x: x[2], reverse=True)[:top_n_vol]
+            result  = {x[0] for x in by_gain + by_loss + by_vol}
+
+            gainers_brief = " ".join(
+                f"{x[0].replace('usdt', '')}({x[1]:+.1f}%)" for x in by_gain[:6]
+            )
+            losers_brief = " ".join(
+                f"{x[0].replace('usdt', '')}({x[1]:+.1f}%)" for x in by_loss[:6]
+            )
+            logger.info(
+                "[BINANCE Provider] Live movers: %d pairs | G: %s | L: %s",
+                len(result), gainers_brief, losers_brief,
+            )
+            return result
+        except Exception as e:
+            logger.warning("[BINANCE Provider] _fetch_live_mover_pairs failed: %s", e)
+            return set()
+
+    def _mover_refresh_loop(self) -> None:
+        """Subscribe ke top gainer/loser WS streams, di-refresh setiap 5 menit.
+
+        Memastikan brain_inference mendapat data live untuk semua pair yang
+        sedang trending di market.
+        """
+        # Tunggu initial subscriptions selesai dulu
+        time.sleep(35)
+        while self._running:
+            target_pairs = self._fetch_live_mover_pairs()
+            seeded = 0
+            if self._running and target_pairs:
+                try:
+                    self._mws.bulk_subscribe_market_trades(set(target_pairs))
+                    seeded = len(target_pairs)
+                except Exception:
+                    pass
+            if seeded:
+                logger.info("[BINANCE Provider] Mover refresh: %d pairs re-subscribed.", seeded)
+
+            # Tunggu 5 menit sebelum refresh berikutnya
+            for _ in range(60):
+                if not self._running:
+                    break
+                time.sleep(5)

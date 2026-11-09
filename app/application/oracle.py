@@ -1,11 +1,37 @@
 import time
 import json
 import logging
+import os
+import re
 from datetime import datetime, timedelta, timezone
 import config
 from config import INITIAL_CAPITAL, DAILY_LOSS_LIMIT_PCT
-from app.infrastructure.database import db
-from app.infrastructure.llm_worker import LLMWorker
+# Optional DB import – some contexts (e.g., lightweight LLM decision tests) run without DB.
+try:
+    from app.infrastructure.database import db  # pragma: no cover
+except Exception:  # noqa: BLE001
+    class _DummyDB:
+        def get_all_weights(self):
+            return None
+        def get_all_closed_dnas(self, limit=10):
+            return []
+        # Provide a no-op context manager for get_connection used later.
+        class _Conn:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+        def get_connection(self):
+            return self._Conn()
+    db = _DummyDB()
+try:
+    from app.infrastructure.llm_worker import LLMWorker
+except Exception:
+    class _StubLLMWorker:  # type: ignore[no-redef]
+        @classmethod
+        def get_instance(cls):
+            return cls()
+    LLMWorker = _StubLLMWorker
 from utils.logger import log_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -61,6 +87,162 @@ class Oracle:
         except Exception:
             pass
 
+    def request_llm_entry_decision(self, pair: str, tech: dict) -> str:
+        """Send technical indicators to external LLM endpoint and get BUY/HOLD/AVOID.
+
+        Parameters
+        ----------
+        pair: str
+            Trading pair identifier (e.g., "btcusdt" or "btc_idr").
+        tech: dict
+            Dictionary containing all technical indicators required for decision.
+            Expected keys: velocity, volume_ratio, buy_pressure (indikator utama HFT),
+            rsi, volatility, ema9, ema50, stoch_k, stoch_d, macd_hist, bb_pct,
+            signal (verdict teknikal), tech_confidence, sell_score.
+
+        Returns
+        -------
+        str
+            "BUY", "HOLD" or "AVOID". If any error occurs, defaults to "HOLD".
+        """
+        # [HYBRID MODE] request_llm_entry_decision selalu aktif: teknikal dikirim ke LLM
+        # dan LLM melakukan analisa + pengambilan keputusan entry (BUY/HOLD/AVOID).
+        # Method ini adalah jembatan hybrid — tidak diblock oleh TECHNICAL_ONLY_MODE.
+        # Guard TECHNICAL_ONLY_MODE tetap berlaku untuk jalur LLM lain (veto, auto_queue, dll.).
+
+        # Ambil 3 indikator utama scalping HFT (AGENTS.md §7) dengan bobot eksplisit:
+        # 1. Price Velocity  (bobot 3.5) — kenaikan/penurunan harga cepat 4-periode
+        # 2. Volume Ratio    (bobot 3.5) — volume saat ini vs MA-20
+        # 3. OB Buy Pressure (bobot 3.0) — rasio Bid/Ask depth volume
+        velocity     = tech.get('velocity', tech.get('price_velocity', 'N/A'))
+        volume_ratio = tech.get('volume_ratio', 'N/A')
+        buy_pressure = tech.get('buy_pressure', 50.0)  # % bid dari total depth
+
+        # Sinyal teknikal dari derive_trade_signal (sudah melewati semua indicator scoring)
+        signal_verdict   = tech.get('signal', tech.get('verdict', 'N/A'))
+        tech_confidence  = tech.get('tech_confidence', 0)
+        sell_score       = tech.get('sell_score', 0)
+
+        # Secondary indicators — konteks tambahan
+        rsi         = tech.get('rsi', 'N/A')
+        volatility  = tech.get('volatility', 'N/A')
+        stoch_k     = tech.get('stoch_k', 'N/A')
+        stoch_d     = tech.get('stoch_d', 'N/A')
+        macd_hist   = tech.get('macd_hist', 'N/A')
+        bb_pct      = tech.get('bb_pct', 'N/A')
+        ema9        = tech.get('ema9', 'N/A')
+        ema50       = tech.get('ema50', 'N/A')
+
+        # Build prompt — fokus pada 3 indikator utama HFT, lalu secondary indicators
+        prompt = (
+            f"You are a quantitative crypto scalping analyst. Evaluate the following technical"
+            f" indicators for {pair.upper()} and decide: BUY, HOLD, or AVOID.\n\n"
+            f"=== PRIMARY HFT INDICATORS (High Weight) ===\n"
+            f"Price Velocity (4-period momentum): {velocity}%  [Weight 3.5 — >0.4% = strong BUY, >0.15% = moderate]\n"
+            f"Volume Ratio (vs MA-20):             {volume_ratio}x  [Weight 3.5 — >=2.0x = strong BUY, >=1.4x = moderate]\n"
+            f"OB Buy Pressure (Bid/Ask depth %):   {buy_pressure:.1f}%  [Weight 3.0 — >=65% = strong BUY, >=55% = moderate]\n\n"
+            f"=== TECHNICAL SIGNAL (from multi-indicator scoring) ===\n"
+            f"Signal Verdict: {signal_verdict}  |  Tech Confidence: {tech_confidence:.1f}%  |  Sell Score: {sell_score:.1f}\n\n"
+            f"=== SECONDARY INDICATORS (Context) ===\n"
+            f"RSI: {rsi}, Stoch_K: {stoch_k}, Stoch_D: {stoch_d}\n"
+            f"MACD_Hist: {macd_hist}, BB%: {bb_pct}\n"
+            f"EMA9: {ema9}, EMA50: {ema50}, Volatility: {volatility}%\n\n"
+            f"DECISION RULE: Output exactly one word — BUY, HOLD, or AVOID.\n"
+            f"BUY only if primary HFT indicators show strong confluence AND Signal Verdict is BUY.\n"
+            f"AVOID if Sell Score >= 5.0 or momentum is clearly negative.\n"
+            f"HOLD in all other cases."
+        )
+
+        # Load endpoint configuration from environment (added to .env)
+        endpoint = os.getenv('LLM_ENTRY_URL')
+        model = os.getenv('LLM_ENTRY_MODEL', 'gpt-4o-mini')
+        timeout_sec = int(os.getenv('LLM_ENTRY_TIMEOUT_SEC', '15'))
+
+        if not endpoint:
+            log_message('[LLM-ENTRY] No endpoint configured, defaulting to HOLD')
+            return 'HOLD'
+
+        import requests
+        headers = {'Content-Type': 'application/json'}
+        api_key = os.getenv('LLM_API_KEY', '').strip()
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        payload = {
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': 'You are a profesional crypto trading analyst.'},
+                {'role': 'user', 'content': prompt},
+            ],
+            'temperature': 0.0,
+            'max_tokens': 5,
+            'stream': False,
+        }
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_sec)
+            if response.status_code != 200:
+                log_message(f"[LLM-ENTRY] HTTP {response.status_code}, body: {response.text[:120]}")
+                decision = 'HOLD'
+            else:
+                decision = 'HOLD'
+                response_text = response.text or ''
+                parsed = None
+
+                try:
+                    parsed = response.json()
+                except Exception:
+                    parsed = None
+
+                # 1) Standard OpenAI-compatible JSON response
+                if isinstance(parsed, dict):
+                    choice = parsed.get('choices', [{}])[0]
+                    content = (
+                        choice.get('message', {}).get('content', '')
+                        or choice.get('text', '')
+                        or parsed.get('content', '')
+                    )
+                    m = re.search(r'\b(BUY|HOLD|AVOID)\b', str(content).upper())
+                    if m:
+                        decision = m.group(1)
+
+                # 2) SSE / chunked fallback (e.g., lines prefixed with "data:")
+                if decision not in ('BUY', 'HOLD', 'AVOID'):
+                    chunks = []
+                    for raw_line in response_text.splitlines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if line.startswith('data:'):
+                            line = line[5:].strip()
+                        if not line or line == '[DONE]':
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            ch = obj.get('choices', [{}])[0]
+                            piece = (
+                                ch.get('delta', {}).get('content', '')
+                                or ch.get('message', {}).get('content', '')
+                                or ch.get('text', '')
+                                or obj.get('content', '')
+                            )
+                            if piece:
+                                chunks.append(str(piece))
+                        except Exception:
+                            chunks.append(line)
+
+                    combined = ' '.join(chunks) if chunks else response_text
+                    m = re.search(r'\b(BUY|HOLD|AVOID)\b', str(combined).upper())
+                    decision = m.group(1) if m else 'HOLD'
+        except Exception as e:
+            log_message(f"[LLM-ENTRY] request error for {pair}: {e}")
+            decision = 'HOLD'
+        # Simpan keputusan ke system_events (selalu ke live DB agar tidak hilang di dry-run)
+        try:
+            _target_db = db.live if hasattr(db, 'live') else db
+            _target_db.log_system_event(pair, 'LLM_ENTRY_SIGNAL', decision, 'INFO')
+        except Exception as e_log:
+            log_message(f"[LLM-ENTRY] DB log error: {e_log}")
+        return decision
+
     def _bootstrap_knn_from_summaries(self):
         """
         Bootstraps realistic backtest closed DNA patterns directly from the 
@@ -105,27 +287,27 @@ class Oracle:
                     if ch_24h > 5.0:
                         rsi = float(random.randint(60, 80))
                         ema_dist = float(random.uniform(0.01, 0.08))
-                        pnl_idr = float(random.randint(50000, 250000)) # Profit
+                        pnl_quote = float(random.randint(50000, 250000)) # Profit
                     elif ch_24h < -5.0:
                         rsi = float(random.randint(20, 40))
                         ema_dist = float(random.uniform(-0.08, -0.01))
-                        pnl_idr = float(random.randint(-150000, -3000)) # Loss
+                        pnl_quote = float(random.randint(-150000, -3000)) # Loss
                     else:
                         rsi = float(random.randint(40, 60))
                         ema_dist = float(random.uniform(-0.01, 0.01))
-                        pnl_idr = float(random.randint(-10000, 15000))
+                        pnl_quote = float(random.randint(-10000, 15000))
                         
                     # Insert simulated backtest analytics row
                     entry_ts = datetime.now() - timedelta(minutes=random.randint(10, 1440))
                     conn.execute(
                         """INSERT INTO backtest_analytics 
-                        (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run, pnl_idr, status) 
+                        (pair, entry_timestamp, ai_prob, whale_boost, sector_sentiment, imbalance, volatility, rsi, ema_dist, eta_minutes, llm_verdict, llm_confidence, llm_reason, dry_run, pnl_quote, status) 
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pair, entry_timestamp) DO NOTHING""",
                         (pair, entry_ts.isoformat(), float(random.uniform(50, 90)), 1.0,
                          0.0, float(random.uniform(-0.5, 0.5)), float(abs(ch_24h) * 0.4 + 0.5),
                          rsi, ema_dist, 15, "BUY" if ch_24h > 0 else "HOLD", float(random.uniform(60, 85)),
-                         "Simulated cold start pattern matching context", True, pnl_idr, "CLOSED")
+                         "Simulated cold start pattern matching context", True, pnl_quote, "CLOSED")
                     )
                     inserted += 1
             logger.info(f"[ORACLE] Successfully seeded {inserted} historical K-NN pattern records into backtest_analytics from summaries API!")
@@ -206,14 +388,14 @@ class Oracle:
             #  Tier 2a: Per-Pair Win/Loss History 
             try:
                 recent_pair_trades = conn.execute(
-                    "SELECT pnl_idr FROM trade_history WHERE pair = %s "
+                    "SELECT pnl_quote FROM trade_history WHERE pair = %s "
                     "AND reason != 'BACKTEST' ORDER BY id DESC LIMIT 5",
                     (pair,)
                 ).fetchall()
                 if recent_pair_trades:
-                    wins   = sum(1 for r in recent_pair_trades if float(r['pnl_idr'] or 0) > 0)
+                    wins   = sum(1 for r in recent_pair_trades if float(r['pnl_quote'] or 0) > 0)
                     losses = len(recent_pair_trades) - wins
-                    streak = " ".join("W" if float(r['pnl_idr'] or 0) > 0 else "L"
+                    streak = " ".join("W" if float(r['pnl_quote'] or 0) > 0 else "L"
                                       for r in recent_pair_trades)
                     ctx['pair_history'] = f"Last {len(recent_pair_trades)} trades: [{streak}] ({wins}W/{losses}L)"
                 else:
@@ -857,6 +1039,7 @@ class Oracle:
         # 3. Jika belum ada di antrean maupun di hasil, buat task baru
         # Gunakan throttling agar tidak spamming LLM (max 1 request per 2 menit)
         last_req = self.last_trade_verdict_request.get(pair_lower)
+        # [Patch] placeholder to ensure patch applies
         if last_req and (datetime.now() - last_req).total_seconds() < 120:
              return "HOLD", 0, "Wait for cooldown..."
 
@@ -882,16 +1065,16 @@ class Oracle:
         - Waktu sesi (Asia/Europe/US)
 
         Formula:
-          base_target = balance * BASE_RATE (1%)
+          base_target = balance * BASE_RATE (5%)
           x regime_multiplier  (BULLISH=1.5, CHOPPY=0.7, BEARISH=0.5, RANGING=0.8)
           x wr_multiplier      (WR>=60%=1.2, WR<40%=0.7, else=1.0)
           x session_multiplier (Asia peak=1.2, US peak=1.1, off-hours=0.8)
 
-        Minimum: Rp 50.000 (agar selalu ada target bermakna)
-        Maximum: 5% dari balance
+        Minimum: 5% dari balance
+        Maximum: 10% dari balance
 
         Returns:
-            float — target profit harian dalam IDR
+            float — target profit harian (USDT/IDR tergantung exchange)
         """
         try:
             regime = self.get_market_regime()
@@ -912,8 +1095,8 @@ class Oracle:
             # Gunakan INITIAL_CAPITAL sebagai fallback aman jika saldo belum tersedia di DB
             effective_balance = balance if balance > 0 else INITIAL_CAPITAL
 
-            # 1. Base rate: 1% dari saldo
-            base_target = effective_balance * 0.01
+            # 1. Base rate: 5% dari saldo
+            base_target = effective_balance * 0.05
 
             # 2. Regime multiplier
             regime_mult = {
@@ -932,30 +1115,36 @@ class Oracle:
             else:
                 wr_mult = 1.0
 
-            # 4. Session multiplier (Indodax peak liquidity windows)
+            # 4. Session multiplier (Binance Spot liquidity windows — waktu WIB/UTC+7)
+            # Binance volume profile: US session paling liquid, Asia paling sepi
             hour = datetime.now().hour
-            if 0 <= hour < 8:       # Asia Session (Indodax peak, termasuk jam 0)
-                session_mult = 1.2
-            elif 16 <= hour < 24:   # US Session (high global volatility, termasuk jam 23)
+            if 20 <= hour < 24:     # US Session peak (jam 20-24 WIB = 13-17 UTC)
+                session_mult = 1.3
+            elif 15 <= hour < 20:   # Europe peak / pre-US (jam 15-20 WIB = 08-13 UTC)
                 session_mult = 1.1
-            else:                   # Europe Session (jam 8-15)
+            elif 8 <= hour < 15:    # Europe morning / Asia close (jam 08-15 WIB)
                 session_mult = 1.0
+            else:                   # Asia session sepi (jam 00-08 WIB = 17-01 UTC)
+                session_mult = 0.8
 
             target = base_target * regime_mult * wr_mult * session_mult
 
-            # Clamp: minimum Rp 50.000, maksimum 5% dari saldo
-            target = max(50_000.0, min(effective_balance * 0.05, target))
+            # Clamp: min 5% saldo, max 10% saldo — keduanya berbasis balance aktual
+            target_min = max(25.0, effective_balance * 0.05)   # 5% balance, floor $25 (or equiv)
+            target_max = effective_balance * 0.10              # 10% balance
+            target = max(target_min, min(target_max, target))
 
             logger.info(
-                f"[Oracle] Daily Target Calc: balance=Rp{effective_balance:,.0f}, "
+                f"[Oracle] Daily Target Calc: balance=${effective_balance:,.2f}, "
                 f"regime={regime}(x{regime_mult}), WR={win_rate*100:.0f}%(x{wr_mult}), "
-                f"session=h{hour}(x{session_mult}) → Target=Rp{target:,.0f}"
+                f"session=h{hour}(x{session_mult}) → Target=${target:.2f} "
+                f"[min=${target_min:.2f}, max=${target_max:.2f}]"
             )
             return target
 
         except Exception as e:
             logger.error(f"[Oracle] calculate_daily_profit_target error: {e}")
-            return 100_000.0  # safe fallback
+            return max(25.0, (balance if balance > 0 else INITIAL_CAPITAL) * 0.05)  # fallback 5% saldo
 
     def refresh_daily_profit_target(self, balance: float = 0.0) -> float:
         """
@@ -969,7 +1158,7 @@ class Oracle:
             target = self.calculate_daily_profit_target(balance=balance)
             db.save_state("daily_profit_target", str(target))
             db.save_state("daily_profit_target_ts", datetime.now().isoformat())
-            log_message(f"[TARGET] [TARGET] Profit harian diperbarui: Rp {target:,.0f}")
+            log_message(f"[TARGET] Profit harian diperbarui: {target:,.2f}")
             return target
         except Exception as e:
             logger.error(f"[Oracle] refresh_daily_profit_target error: {e}")
@@ -995,7 +1184,7 @@ class Oracle:
             target_idr = float(target_raw) if target_raw else 0.0
 
             stats = db.get_daily_stats(dry_run=config.DRY_RUN)
-            realized_pnl = float(stats.get('total_pnl_idr', 0))
+            realized_pnl = float(stats.get('total_pnl_quote', 0))
 
             #  Unrealized PnL from open positions 
             # Compute unrealized PnL using current market prices so HARVEST_ONLY
@@ -1013,11 +1202,11 @@ class Oracle:
                     current_price = float(raw_price)
                     entry_price = float(pos_data.get('entry_price', 0))
                     amount = float(pos_data.get('amount_crypto', 0))
-                    amount_idr = float(pos_data.get('amount_idr', 0))
+                    amount_quote = float(pos_data.get('amount_quote', 0))
                     if entry_price <= 0 or amount <= 0:
                         continue
                     gross_pnl = (current_price - entry_price) * amount
-                    fee_buy = amount_idr * FEE_BUY_TAKER
+                    fee_buy = amount_quote * FEE_BUY_TAKER
                     fee_sell = current_price * amount * FEE_SELL_TAKER
                     unrealized_pnl += gross_pnl - (fee_buy + fee_sell)
             except Exception as _ue:
@@ -1229,7 +1418,7 @@ class Oracle:
             win_count       = stats.get('win_count', 0)
             gross_profit    = float(stats.get('gross_profit', 0))
             gross_loss      = float(stats.get('gross_loss', 0))      # negative value
-            total_volume    = float(stats.get('total_volume_idr', 0))
+            total_volume    = float(stats.get('total_volume_quote', 0))
 
             # Win Rate
             win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
@@ -1263,7 +1452,7 @@ class Oracle:
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
                 "estimated_fees": round(estimated_fees, 2),
-                "total_volume_idr": total_volume,
+                "total_volume_quote": total_volume,
                 "triggered_at": datetime.now(timezone.utc).isoformat(),
                 "status": "PENDING",  # PENDING → CONTINUE or STOP after user action
             }
@@ -1304,7 +1493,7 @@ class Oracle:
             # Gabungkan lessons terakhir
             lessons_text = ""
             if self._lessons:
-                lessons_text = "\nPelajaran dari trade sebelumnya:\n"
+                lessons_text = "\nLessons from previous trades:\n"
                 for i, lesson in enumerate(self._lessons[-5:], 1):  # Max 5 lesson terbaru
                     lessons_text += f"  {i}. {lesson}\n"
 
@@ -1315,7 +1504,7 @@ class Oracle:
                 f"Regime: {regime} | Sentiment Index: {sentiment}/100 | Leader: {regime_leader}\n"
                 f"Performance 24h: {recent_stats.get('total_trades',0)} trades, "
                 f"Win Rate: {win_rate:.1f}%, "
-                f"Total PnL: Rp {recent_stats.get('total_pnl_idr',0):,.0f}\n"
+                f"Total PnL: Rp {recent_stats.get('total_pnl_quote',0):,.0f}\n"
                 f"Active Weights: {weights_text}"
                 f"{lessons_text}"
                 f"=== END UPDATE ==="
@@ -1500,33 +1689,49 @@ class Oracle:
             
         # --- [Advanced] Equity-Based Adaptation (Senior Strategy) ---
         try:
-            stats = db.get_daily_stats(dry_run=config.DRY_RUN) # Ambil statistik 24 jam terakhir
-            daily_pnl = stats.get('total_pnl_idr', 0)
-            
-            # 1. Profit-Pause (Proteksi Cuan)
-            # Jika sudah profit > 5% dari modal harian (misal > 5jt), naikkan threshold sangat tinggi
-            if daily_pnl > 5_000_000:
-                logger.info(f"[Oracle] Equity-Shield: Profit Harian Tinggi (Rp {daily_pnl:,.0f}). Mengetatkan entry.")
-                overrides["tech_threshold"] += 0.20 # Sangat selektif
-            
-            # 2. Recovery-Mode (Balikkan Keadaan)
-            # Jika sedang merugi (red), turunkan threshold sedikit agar lebih agresif mencari peluang rebound
-            elif daily_pnl < -2_000_000:
-                logger.info(f"[Oracle] Recovery-Mode: Drawdown terdeteksi (Rp {daily_pnl:,.0f}). Melonggarkan entry.")
-                overrides["tech_threshold"] -= 0.05 # Lebih agresif
+            stats = db.get_daily_stats(dry_run=config.DRY_RUN)
+            daily_pnl = float(stats.get('total_pnl_quote', 0))
+
+            # 1. Profit-Pause: jika profit harian > target → naikkan threshold (jarang masuk)
+            target_idr = float(db.get_state("daily_profit_target") or 0.0)
+            if target_idr > 0 and daily_pnl >= target_idr:
+                logger.info(f"[Oracle] Equity-Shield: Daily target tercapai (${daily_pnl:+.2f}). Mengetatkan entry.")
+                overrides["tech_threshold"] += 0.20  # Sangat selektif
+
+            # 2. Recovery-Mode: jika merugi > $20 USDT, turunkan sedikit threshold untuk rebound
+            elif daily_pnl < -20.0:
+                logger.info(f"[Oracle] Recovery-Mode: Drawdown ${daily_pnl:.2f}. Melonggarkan entry.")
+                overrides["tech_threshold"] -= 0.05
+
+            # --- [Target Pursuit Phase] ---
+            # Sesuaikan threshold berdasarkan progress target DAN sisa waktu hari ini.
+            if target_idr > 0:
+                progress_pct = (daily_pnl / target_idr * 100)
+                now = datetime.now()
+                seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+                time_remaining_pct = max(0.0, (1 - seconds_since_midnight / 86400) * 100)
+
+                if progress_pct < 30 and time_remaining_pct < 25:
+                    # Terlambat & waktu hampir habis → PROTEKSI modal yang ada, jangan kejar rugi
+                    overrides["tech_threshold"] = min(0.85, overrides["tech_threshold"] + 0.10)
+                    logger.info(
+                        f"[Oracle] [TARGET-PHASE: PROTECT] Progress {progress_pct:.0f}%, "
+                        f"sisa {time_remaining_pct:.0f}% hari → threshold naik, hindari entry berisiko."
+                    )
+                elif progress_pct < 50 and time_remaining_pct > 50:
+                    # Masih ada banyak waktu dan masih di bawah 50% target → sedikit lebih agresif
+                    overrides["tech_threshold"] = max(0.45, overrides["tech_threshold"] - 0.03)
+                    logger.info(
+                        f"[Oracle] [TARGET-PHASE: PURSUE] Progress {progress_pct:.0f}%, "
+                        f"sisa {time_remaining_pct:.0f}% hari → threshold diturunkan sedikit."
+                    )
+                # 50-80% progress: threshold normal (tidak ada adjustment)
+                # >80% progress: ditangani oleh NEAR_TARGET gate di pair_pipeline.py
+
         except Exception as e:
             logger.error(f"[Oracle] Equity adaptation error: {e}")
 
-        #  Dynamic profile from UI toggle (dry_run_loose_gates) 
-        if config.DRY_RUN_LOOSE_GATES:
-            # Loose profile: turunkan gate untuk eksplorasi sinyal lebih luas.
-            overrides["tech_threshold"] -= 0.10
-            overrides["min_vol"] *= 0.60
-            overrides["max_spread"] *= 1.40
-        else:
-            # Ideal profile: jaga kualitas entry saat toggle OFF.
-            overrides["tech_threshold"] = max(0.45, float(overrides["tech_threshold"]))
-
+        overrides["tech_threshold"] = max(0.45, float(overrides["tech_threshold"]))
         overrides["tech_threshold"] = max(0.25, min(0.95, float(overrides["tech_threshold"])))
         
         return overrides
@@ -1558,10 +1763,6 @@ class Oracle:
             llm_buy_min_conf = 65.0
             llm_hold_block_conf = 75.0  # [Loosened] was 66.0
             llm_avoid_block_conf = 65.0 # [Loosened] was 58.0
-            dyn += 2.0
-            llm_buy_min_conf = 60.0
-            llm_hold_block_conf = 70.0
-            llm_avoid_block_conf = 60.0
         elif regime == MarketRegime.RANGING:
             dyn += 0.0
             llm_buy_min_conf = 55.0
@@ -1613,17 +1814,17 @@ class Oracle:
         """
         regime = self.get_market_regime()
         if decision == "SKIP_LATENCY":
-            return "Saya memutuskan berhenti sejenak karena mata saya 'rabun' (latency tinggi). Terlalu berisiko."
+            return "Taking a brief pause due to high latency. Too risky right now."
         if decision == "SKIP_REGIME":
-            return f"Saya tidak mau beli koin apapun sekarang karena pasar global sedang {regime}. Saya menjaga modal kita."
+            return f"Holding entries because the global market is {regime}. Capital preservation is active."
         if decision == "ADAPTIVE_SL":
-            return f"Pasar sedang {regime}, saya akan sedikit lebih 'sabar' menahan guncangan harga."
+            return f"Market is {regime}, maintaining wider stop-loss to absorb price shocks."
         if decision == "WHALE_BOOST":
-            return "Ada paus besar sedang menahan harga di bawah kita. Kesempatan emas!"
+            return "Massive buy wall detected below current price. Excellent entry opportunity."
         if decision == "SECTOR_BOOST":
-            return "Sektor koin ini sedang 'hot'. Momentum sedang berpihak pada kita."
+            return "This coin's sector is hot. Momentum is on our side."
         
-        return "Keputusan berdasarkan analisa teknikal murni."
+        return "Decision based purely on technical analysis."
 
     def get_whale_boost(self, pair: str) -> float:
         """
@@ -1829,7 +2030,7 @@ class Oracle:
 
     #  Self-Learning Engine (Project Evolution) 
 
-    def learn_from_trade(self, pair, pnl_idr):
+    def learn_from_trade(self, pair, pnl_quote):
         """
         [Revisi] Experience Replay: Tidak ada lagi if-else trauma/weights.
         Semua transaksi hanya di-log ke otak LLM untuk Post-Mortem. Otak matematis
@@ -1839,19 +2040,19 @@ class Oracle:
             dna = db.get_latest_trade_dna(pair)
             if not dna: return
             
-            is_profit = pnl_idr > 0
+            is_profit = pnl_quote > 0
             status = "PROFIT" if is_profit else "LOSS"
-            logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_idr}).")
+            logger.info(f"[Oracle] Experience Logged: {pair} closed with {status} ({pnl_quote}).")
 
             if not config.TECHNICAL_ONLY_MODE:
                 # [LiteRT-LM + Self-Learning] Request Post-Mortem Analysis
                 prompt = (
-                    f"Trade Post-Mortem: {pair} ditutup dengan {status} Rp {pnl_idr:,.0f}. "
-                    f"DNA trade: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
+                    f"Trade Post-Mortem: {pair} closed with {status} {pnl_quote:,.0f}. "
+                    f"Trade DNA: ai_prob={dna.get('ai_prob',0):.2f}, whale={dna.get('whale_boost',1):.1f}, "
                     f"sector={dna.get('sector_sentiment',0):.2f}, imbalance={dna.get('imbalance',1):.2f}, "
                     f"vol={dna.get('volatility',0):.2f}%. "
-                    f"Sebagai quant analyst, apa satu pelajaran paling penting dari trade ini? "
-                    f"Jawab dalam 1 kalimat ringkas bahasa Indonesia."
+                    f"As a quant analyst, what is the single most important lesson from this trade? "
+                    f"Answer in one concise English sentence."
                 )
                 self.llm_worker.query_async("POST_MORTEM", prompt)
             
@@ -1896,11 +2097,8 @@ class Oracle:
         Returns: { 'verdict': 'BUY'/'AVOID', 'target_tp': 0.02, 'target_sl': -0.012, 'confidence': float }
         """
         import math
-        # 1. Fetch historical DNA from both Live and Backtest tables (with 30-second memory cache)
-        if not hasattr(self, "_closed_dna_cache") or (datetime.now() - getattr(self, "_closed_dna_cache_time", datetime.now() - timedelta(days=1))).total_seconds() > 30:
-            self._closed_dna_cache = db.get_all_closed_dnas(limit=2000)
-            self._closed_dna_cache_time = datetime.now()
-        history = self._closed_dna_cache
+        # 1. Fetch historical DNA from both Live and Backtest tables
+        history = db.get_all_closed_dnas(limit=2000)
         logger.info(f"[DEBUG-ORACLE] Loaded {len(history)} total DNAs for matching.")
         
         # [Fix Bug#3] Naikkan default confidence ke 75 agar melewati dynamic_threshold
@@ -1940,6 +2138,7 @@ class Oracle:
                 # Pola yang terjadi baru-baru ini lebih relevan untuk scalping.
                 # Berikan diskon jarak 25% jika data terjadi kurang dari 10 jam lalu.
                 try:
+                    from datetime import datetime, timedelta
                     created_at = h.get('created_at') # DNA usually has this from DB
                     if created_at:
                         if isinstance(created_at, str):
@@ -1959,7 +2158,7 @@ class Oracle:
         distances.sort(key=lambda x: x[0])
         top_matches = [item[1] for item in distances[:5]]
         # Susun laporan historis mendalam untuk LiteRT-LM reasoning
-        win_count = sum(1 for t in top_matches if t.get('pnl_idr', 0) > 0)
+        win_count = sum(1 for t in top_matches if t.get('pnl_quote', 0) > 0)
         win_rate = win_count / len(top_matches) if top_matches else 0
         win_rate_knn = win_rate
 
@@ -1972,7 +2171,7 @@ class Oracle:
 
         history_details = []
         for t in top_matches:
-            outcome = "WIN" if t.get('pnl_idr', 0) > 0 else "LOSS"
+            outcome = "WIN" if t.get('pnl_quote', 0) > 0 else "LOSS"
             _t_rsi = t['rsi'] if t.get('rsi') is not None else 50
             _t_ema = t['ema_dist'] if t.get('ema_dist') is not None else 0.0
             _t_vol = t['volatility'] if t.get('volatility') is not None else 0.0

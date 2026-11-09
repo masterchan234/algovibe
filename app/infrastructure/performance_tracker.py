@@ -37,7 +37,7 @@ def calculate_24h_performance(reference_ts: float | None = None) -> dict:
     total_trades    = stats['total_trades']
     winning_trades  = stats['win_count']
     losing_trades   = stats['loss_count']
-    total_net_pnl   = stats['total_pnl_idr']
+    total_net_pnl   = stats['total_pnl_quote']
     avg_net_pnl     = total_net_pnl / total_trades if total_trades else 0.0
     win_rate        = (winning_trades / total_trades * 100) if total_trades else 0.0
 

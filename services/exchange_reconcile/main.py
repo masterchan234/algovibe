@@ -26,7 +26,6 @@ _REPO_ROOT = os.path.dirname(
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import config as cfg
 from app.application.exit_manager import ExitManager
 from app.infrastructure.database import db
 from app.infrastructure.exchange_factory import create_indodax_exchange
@@ -54,9 +53,6 @@ class ExchangeReconcileService:
         db.save_state("trigger_wallet_reconcile", "0")
 
     def _run_once(self) -> None:
-        if cfg.DRY_RUN:
-            logger.info("[exchange-reconcile] DRY_RUN mode — skip reconcile.")
-            return
         # ExitManager already handles mode awareness (dry/live) internally.
         self._exit_manager.reconcile_with_exchange()
         db.save_state("wallet_reconcile_last_ok_ts", str(int(time.time())))

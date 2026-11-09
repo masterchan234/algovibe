@@ -7,7 +7,7 @@ Always completes (never skips) — gate filtering is done downstream.
 """
 
 from app.infrastructure.database import db
-from app.domain.predictor import get_prediction
+from app.domain.predictor import get_prediction, get_raw_ml_prob
 from app.domain.technicals import get_technical_summary, derive_trade_signal
 from utils.logger import log_message
 
@@ -29,7 +29,12 @@ def enrich_pair(bot, p, tickers):
     imbalance_ratio = p.get('imbalance', 1.0)
 
     # Pure technical probability — no AI sentiment multiplier applied.
-    tq_prob = get_prediction(history, tickers.get(pair))
+    # Pass pair agar predictor memakai per-pair model jika tersedia.
+    tq_prob = get_prediction(history, tickers.get(pair), pair=pair)
+
+    # Raw ML probability — dipakai untuk ML fast-track gate di entry_gates.
+    # Terpisah dari tq_prob agar tidak terblend dengan technical probability.
+    ml_prob = get_raw_ml_prob(pair.lower(), history)
 
     ch_5m = ch_15m = ch_1h = 0.0
     if len(history) >= 2:
@@ -73,6 +78,7 @@ def enrich_pair(bot, p, tickers):
         "ch_1h": ch_1h,
         "imbalance_ratio": imbalance_ratio,
         "tq_prob": tq_prob,
+        "ml_prob": ml_prob,          # raw ML prob — untuk fast-track gate
         "whale_boost": whale_boost,       # display only
         "sector_boost": sector_boost,     # display only
         "final_prob": tq_prob,            # no AI adjustment

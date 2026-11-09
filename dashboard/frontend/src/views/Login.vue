@@ -1,20 +1,10 @@
 <template>
-  <div class="blog-portal">
-    <header class="portal-header">
-      <div class="header-container">
-        <div class="portal-branding">
-          <p class="brand-kicker">ALGORITHMIC JOURNAL</p>
-          <h1>ALGOVIBE <span class="sub">INTELLIGENCE</span></h1>
-        </div>
-        <nav class="portal-nav" aria-label="Primary Navigation">
-          <a href="/about-us">About Us</a>
-          <a href="#hero-2">Featured Story</a>
-          <a href="#articles">Articles</a>
-          <a href="#signals">Live Signals</a>
-          <button @click="activeTab = 'auth'" class="login-trigger">login</button>
-        </nav>
-      </div>
-    </header>
+  <div class="login-page">
+    <div class="stars-bg"></div>
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+
+    <PortalHeader @open-login="openAuthModal" />
 
     <div v-if="selectedArticle" class="article-overlay" @click.self="closeArticle()">
       <div class="article-modal">
@@ -29,7 +19,7 @@
           </nav>
           <div class="art-cat">{{ selectedArticle.category }}</div>
           <h2 class="reader-title">{{ selectedArticle.title }}</h2>
-          <div class="art-meta">{{ formatDate(selectedArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+          <div class="art-meta">{{ formatDate(selectedArticle.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
         </div>
         <div ref="articleBodyRef" class="reader-body">
           <div class="reader-content">
@@ -61,15 +51,15 @@
             <article :key="currentInsightIdx" class="hero-copy">
               <h2 id="hero-title">{{ currentInsightText }}</h2>
               <p>
-                Editorial desk Algovibe memantau dinamika pasar kripto IDR secara real-time,
-                menggabungkan konteks teknikal, arus orderbook, dan perubahan sentimen untuk keputusan trading yang lebih terukur.
+                The Algovibe editorial desk monitors {{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }} crypto market dynamics in real-time,
+                synthesizing technical analysis, order book flows, and sentiment shifts for more calculated trading decisions.
               </p>
             </article>
           </Transition>
           <div class="hero-meta">
             <span>Regime: {{ landingData.market.regime }}</span>
             <span>Sentiment: {{ landingData.market.sentiment }}%</span>
-            <span>BTC/IDR: {{ formatPrice(landingData.market.btc_price) }}</span>
+            <span>BTC/{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}: {{ formatPrice(landingData.market.btc_price) }}</span>
             <span>Updated: {{ currentTime }}</span>
           </div>
         </section>
@@ -82,25 +72,25 @@
               class="read-btn"
               @click="openArticle(heroArticle)"
             >
-              READ_FULL_REPORT
+              READ FULL REPORT
             </button>
           </div>
           <article v-if="heroArticle" class="featured-story">
             <p class="art-cat">{{ heroArticle.category }}</p>
             <h2 id="featured-story-title">{{ heroArticle.title }}</h2>
             <p class="feature-excerpt">{{ stripMarkdown(heroArticle.excerpt) }}</p>
-            <div class="art-meta">{{ formatDate(heroArticle.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+            <div class="art-meta">{{ formatDate(heroArticle.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
           </article>
           <article v-else class="featured-story empty-story">
             <h2 id="featured-story-title">Featured article is being prepared</h2>
-            <p>Mesin editorial sedang menyusun analisis terbaru berbasis data market dan indikator teknis.</p>
+            <p>The editorial engine is compiling the latest analysis based on market data and technical metrics.</p>
           </article>
         </section>
 
         <section id="articles" class="section-block" aria-labelledby="latest-articles-title">
           <div class="section-headline">
             <h2 id="latest-articles-title">Latest Intelligence Articles</h2>
-            <p>Analisis mendalam tentang coin yang hype, coin yang melemah, dan struktur risiko intraday.</p>
+            <p>In-depth analysis of trending coins, decaying assets, and intraday risk structures.</p>
           </div>
           <div class="articles-list">
             <article
@@ -112,22 +102,82 @@
               <div class="art-cat">{{ art.category }}</div>
               <h3 class="art-title">{{ art.title }}</h3>
               <p class="art-excerpt">{{ stripMarkdown(art.excerpt) }}</p>
-              <div class="art-meta">{{ formatDate(art.created_at) }} | BY_ALGOVIBE_ORACLE</div>
+              <div class="art-meta">{{ formatDate(art.created_at) }} | BY_ALGOVIBE_SYSTEM</div>
             </article>
+          </div>
+        </section>
+
+        <section id="performance" class="section-block" aria-labelledby="performance-title">
+          <div class="section-headline">
+            <h2 id="performance-title">Bot Performance</h2>
+            <p>Aggregated trading statistics from live autonomous execution, updated every refresh.</p>
+          </div>
+
+          <div class="perf-bar">
+            <div class="perf-bar-header">
+              <span class="perf-label">{{ landingData.performance.window_days }}-DAY PERFORMANCE</span>
+              <span class="perf-window">rolling {{ landingData.performance.window_days }} days</span>
+            </div>
+            <div class="perf-stats">
+              <div class="perf-stat perf-stat--main">
+                <span class="perf-val" :class="landingData.performance.win_rate >= 60 ? 'green' : landingData.performance.win_rate >= 45 ? 'amber' : 'red'">
+                  {{ landingData.performance.win_rate.toFixed(1) }}%
+                </span>
+                <span class="perf-key">WIN RATE</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat">
+                <span class="perf-val green">{{ landingData.performance.wins }}</span>
+                <span class="perf-key">WINS</span>
+              </div>
+              <div class="perf-stat">
+                <span class="perf-val red">{{ landingData.performance.losses }}</span>
+                <span class="perf-key">LOSSES</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat">
+                <span class="perf-val green">+{{ landingData.performance.avg_win_pct.toFixed(2) }}%</span>
+                <span class="perf-key">AVG WIN</span>
+              </div>
+              <div class="perf-stat">
+                <span class="perf-val red">{{ landingData.performance.avg_loss_pct.toFixed(2) }}%</span>
+                <span class="perf-key">AVG LOSS</span>
+              </div>
+              <div class="perf-divider"></div>
+              <div class="perf-stat perf-stat--main">
+                <span class="perf-val" :class="landingData.performance.net_avg_pct >= 0 ? 'green' : 'red'">
+                  {{ landingData.performance.net_avg_pct >= 0 ? '+' : '' }}{{ landingData.performance.net_avg_pct.toFixed(2) }}%
+                </span>
+                <span class="perf-key">NET AVG / TRADE</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Coin Attribution -->
+          <div v-if="landingData.performance.coin_attribution.length" class="coin-attr">
+            <span class="coin-attr-label">COIN ATTRIBUTION</span>
+            <div class="coin-attr-list">
+              <div v-for="c in landingData.performance.coin_attribution" :key="c.coin" class="coin-pill">
+                <span class="coin-pill-name">{{ c.coin }}</span>
+                <span class="coin-pill-trades">{{ c.trades }}x</span>
+                <span class="coin-pill-wr" :class="c.attr_pct > 0 ? 'green' : c.attr_pct < 0 ? 'red' : 'amber'">{{ c.attr_pct > 0 ? '+' : '' }}{{ c.attr_pct }}%</span>
+              </div>
+            </div>
           </div>
         </section>
 
         <section id="signals" class="section-block" aria-labelledby="live-signals-title">
           <div class="section-headline">
             <h2 id="live-signals-title">Live Market Signals</h2>
-            <p>Snapshot kekuatan trend dan skor momentum berbasis stream data pasar.</p>
+            <p>Real-time trend strength snapshots and momentum scoring based on active market streams.</p>
           </div>
+
           <div class="signals-grid">
             <div v-for="sig in landingData.signals" :key="sig.pair" class="sig-brief">
               <!-- Header: pair + verdict badge -->
               <div class="sig-header">
                 <div class="sig-pair-wrap">
-                  <span class="pair">{{ sig.pair }}<span class="pair-base">/IDR</span></span>
+                  <span class="pair">{{ sig.pair }}<span class="pair-base">/{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}</span></span>
                   <span class="sig-verdict" :class="sig.verdict?.toLowerCase()">{{ sig.verdict || 'HOLD' }}</span>
                 </div>
                 <div class="sig-scores">
@@ -236,7 +286,7 @@
     <footer class="portal-footer">
       <div class="footer-container">
         <div class="market-strip">
-          <span class="market-item">BTC_IDR: {{ formatPrice(landingData.market.btc_price) }}</span>
+          <span class="market-item">BTC_{{ landingData.market.btc_price < 500000 ? 'USDT' : 'IDR' }}: {{ formatPrice(landingData.market.btc_price) }}</span>
           <span class="market-item">DB_STATE: <span :class="getDbStateClass(dbState)">{{ dbState }}</span></span>
           <span class="market-item">LATENCY: {{ latency }}ms</span>
         </div>
@@ -252,6 +302,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useMode } from '../composables/useMode'
 import MarkdownIt from 'markdown-it'
+import PortalHeader from '../components/PortalHeader.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -270,6 +321,10 @@ const password = ref('')
 const error = ref('')
 const loading = ref(false)
 const activeTab = ref(null)
+
+function openAuthModal() {
+  activeTab.value = 'auth'
+}
 const latency = ref(0)
 const dbState = ref('SYNCING')
 const currentTime = ref('')
@@ -281,7 +336,8 @@ const landingData = reactive({
   insights: [],
   signals: [],
   articles: [],
-  market: { sentiment: 50, btc_price: 0, regime: 'SCANNING' }
+  market: { sentiment: 50, btc_price: 0, regime: 'SCANNING' },
+  performance: { wins: 0, losses: 0, win_rate: 0, avg_win_pct: 0, avg_loss_pct: 0, net_avg_pct: 0, window_days: 7, coin_attribution: [] }
 })
 
 const currentInsightIdx = ref(0)
@@ -322,7 +378,7 @@ const backendUrl = import.meta.env.DEV
 
 const DEFAULT_SEO = {
   title: 'Algovibe Intelligence | Crypto Market Blog & Live Signals',
-  description: 'Analisis pasar kripto berbasis data, artikel trading insight, dan live market signals untuk ekosistem IDR.',
+  description: 'Data-driven crypto market analysis, quantitative insights, and real-time live trading signals.',
 }
 
 let insightInterval = null
@@ -332,6 +388,19 @@ let landingPollInterval = null
 onMounted(() => {
   fetchLandingData()
   startTime()
+
+  if (route.query.showAuth === 'true') {
+    activeTab.value = 'auth'
+  }
+
+  const hash = route.hash || window.location.hash
+  if (hash) {
+    const cleanHash = hash.replace('#', '')
+    requestAnimationFrame(() => {
+      const el = document.getElementById(cleanHash)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
 
   insightInterval = setInterval(() => {
     if (landingData.insights.length > 1) {
@@ -364,6 +433,30 @@ watch(() => landingData.articles, () => {
   renderStructuredData()
 })
 
+watch(() => route.query.showAuth, (val) => {
+  if (val === 'true') {
+    activeTab.value = 'auth'
+  }
+})
+
+watch(activeTab, (val) => {
+  if (val === null && route.query.showAuth === 'true') {
+    const query = { ...route.query }
+    delete query.showAuth
+    router.replace({ query }).catch(() => {})
+  }
+})
+
+watch(() => route.hash, (val) => {
+  if (val) {
+    const cleanHash = val.replace('#', '')
+    requestAnimationFrame(() => {
+      const el = document.getElementById(cleanHash)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+})
+
 function startTime() {
   timeInterval = setInterval(() => {
     const now = new Date()
@@ -391,7 +484,7 @@ async function fetchLandingData() {
       dbState.value = latency.value <= 1200 ? 'OPTIMAL' : 'DEGRADED'
       landingData.insights = data.insights
       landingData.signals = (data.signals || []).map((s) => ({
-        pair: String(s.pair || '').replace(/idr$/i, '').toUpperCase(),
+        pair: String(s.pair || '').replace(/idr$/i, '').replace(/usdt$/i, '').toUpperCase(),
         score: Number(s.score ?? 0),
         sell_score: Number(s.sell_score ?? 0),
         confidence: Number(s.confidence ?? 50),
@@ -415,6 +508,9 @@ async function fetchLandingData() {
         signal: s.signal || 'NEUTRAL',
       }))
       landingData.market = data.market
+      if (data.performance) {
+        landingData.performance = data.performance
+      }
       publicLogs.value = (data.public_logs || []).map((log) => ({
         time: formatLogTime(log.time),
         message: String(log.message || '')
@@ -606,7 +702,7 @@ function renderStructuredData() {
         url: `${baseUrl}/articles/${article.slug}`,
         author: {
           '@type': 'Organization',
-          name: 'Algovibe Oracle',
+          name: 'Algovibe Analytics',
         },
       })),
     },
@@ -655,7 +751,7 @@ async function handleLogin() {
     const success = await login(username.value, password.value)
     if (success) {
       await syncModeFromBackend()
-      router.push('/mode-select')
+      router.push('/dashboard')
     } else {
       error.value = 'ACCESS_DENIED'
     }
@@ -775,12 +871,20 @@ function formatIndFloat(v) {
 
 function formatPrice(p) {
   if (!p) return '0'
+  const isUsdt = p < 500000
+  if (isUsdt) {
+    return `$${p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
   return Math.round(p).toLocaleString('id-ID')
 }
 
 function formatSignalPrice(price) {
   if (!price || price <= 0) return '-'
   const p = Number(price)
+  const isUsdt = p < 500000
+  if (isUsdt) {
+    return `$${p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+  }
   let formatted = ''
   if (p >= 1000) {
     formatted = Math.round(p).toLocaleString('id-ID')
@@ -879,7 +983,45 @@ function stripMarkdown(text) {
 }
 </script>
 
+
 <style scoped>
+.login-page {
+  min-height: 100vh;
+  background: var(--bg-main, #0b0e14);
+  color: var(--text-primary, #ffffff);
+  position: relative;
+  overflow-x: hidden;
+}
+.stars-bg {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: 
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.05) 100%, transparent),
+    radial-gradient(1px 1px at 40% 60%, rgba(255,255,255,0.05) 100%, transparent),
+    radial-gradient(2px 2px at 80% 30%, rgba(255,255,255,0.02) 100%, transparent);
+  background-size: 200px 200px;
+  z-index: 0;
+  pointer-events: none;
+}
+.glow-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  z-index: 0;
+  opacity: 0.15;
+  pointer-events: none;
+}
+.orb-1 {
+  top: -10%; left: -10%;
+  width: 500px; height: 500px;
+  background: rgba(139, 92, 246, 0.4);
+}
+.orb-2 {
+  bottom: -20%; right: -10%;
+  width: 600px; height: 600px;
+  background: rgba(76, 175, 80, 0.2);
+}
+
 .blog-portal {
   width: 100vw;
   height: 100vh;
@@ -895,81 +1037,11 @@ function stripMarkdown(text) {
   flex-direction: column;
 }
 
-.header-container, .content-container, .footer-container {
+.content-container, .footer-container {
   max-width: 1160px;
   margin: 0 auto;
   width: 100%;
   padding: 0 28px;
-}
-
-.portal-header {
-  border-bottom: 1px solid rgba(133, 168, 192, 0.2);
-  background: rgba(8, 15, 24, 0.9);
-  backdrop-filter: blur(8px);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header-container {
-  min-height: 84px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.brand-kicker {
-  margin: 0 0 4px;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: #7ea3c1;
-  font-weight: 700;
-}
-
-.portal-branding h1 {
-  font-size: 20px;
-  font-weight: 900;
-  letter-spacing: 3px;
-  color: #f4f8fb;
-  margin: 0;
-}
-
-.portal-branding h1 .sub {
-  color: #5dc6e7;
-  font-weight: 500;
-  font-size: 13px;
-}
-
-.portal-nav {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-}
-
-.portal-nav a {
-  color: #b6c8d7;
-  font-size: 11px;
-  text-decoration: none;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-}
-
-.login-trigger {
-  background: linear-gradient(120deg, #79d1ee, #5fc4a4);
-  color: #051018;
-  border: 1px solid rgba(178, 236, 255, 0.35);
-  padding: 8px 18px;
-  font-size: 11px;
-  font-weight: 800;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
-}
-
-.login-trigger:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 18px rgba(80, 177, 214, 0.35);
 }
 
 .portal-main {
@@ -1140,6 +1212,141 @@ function stripMarkdown(text) {
   font-weight: 700;
   color: #7391a4;
 }
+
+.perf-bar {
+  background: rgba(0, 216, 122, 0.05);
+  border: 1px solid rgba(0, 216, 122, 0.18);
+  border-radius: 14px;
+  padding: 16px 24px;
+  margin-bottom: 16px;
+}
+
+.perf-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.perf-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #00d87a;
+  text-transform: uppercase;
+}
+
+.perf-window {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  color: #4a6272;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.perf-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  width: 100%;
+}
+
+.perf-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+
+.perf-stat--main .perf-val {
+  font-size: 20px;
+}
+
+.perf-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.perf-val.green { color: #00d87a; }
+.perf-val.red   { color: #ff4466; }
+.perf-val.amber { color: #f0b429; }
+
+.perf-key {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.10em;
+  color: #7391a4;
+  text-transform: uppercase;
+}
+
+.perf-divider {
+  width: 1px;
+  height: 36px;
+  background: rgba(125, 173, 198, 0.20);
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+.coin-attr {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.coin-attr-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #4a6272;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.coin-attr-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.coin-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(8, 23, 33, 0.70);
+  border: 1px solid rgba(125, 173, 198, 0.18);
+  border-radius: 20px;
+  padding: 4px 12px;
+}
+
+.coin-pill-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #c8dde8;
+  letter-spacing: 0.05em;
+}
+
+.coin-pill-trades {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: #4a6272;
+}
+
+.coin-pill-wr {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.coin-pill-wr.green { color: #00d87a; }
+.coin-pill-wr.amber { color: #f0b429; }
+.coin-pill-wr.red   { color: #ff4466; }
 
 .signals-grid {
   display: grid;

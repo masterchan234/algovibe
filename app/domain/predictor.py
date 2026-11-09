@@ -7,14 +7,11 @@ Model ML (RandomForest) tetap dipakai sebagai refinement, bukan decision-maker u
 """
 
 import os
-import time
 import joblib
 import numpy as np
-import pandas as pd
-from datetime import datetime
 from app.domain.technicals import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
-    calculate_stochastic_rsi, calculate_ema, calculate_volatility,
+    calculate_stochastic_rsi, calculate_ema,
     calculate_ema_slope, calculate_williams_r, calculate_roc,
     _MACD_NORM_FACTOR,
 )
@@ -34,243 +31,160 @@ _RSI_SIGMOID_SCALE  = 12.0
 _ROC_CAP_PCT   = 5.0
 _ROC_COEFF     = 0.08
 
-#  Global model cache 
-MODEL_PATH   = "models/scalper_v2.joblib"
-_model       = None
-_model_mtime: float = 0.0
+#  Per-pair model cache: {pair: (model, mtime)} 
+_PAIR_MODEL_DIR  = "scalp_models"
+_pair_models: dict = {}
 
-#  Coin-specific model cache 
-if os.path.exists("/app/models_coin"):
-    COIN_MODELS_DIR = "/app/models_coin"
-else:
-    COIN_MODELS_DIR = "models"
-
-_COIN_MODELS_CACHE = {}  # {pair: (model, P_train_mean, mtime)}
-
-#  Per-coin indicator weight cache (derived from feature_importances_) 
-_COIN_WEIGHTS_CACHE: dict = {}  # {pair: (weights_dict, mtime)}
-
-# Flexible feature name → signal component mapping (case-insensitive).
-# Covers common naming conventions from various Colab training scripts.
-_FEATURE_SIGNAL_MAP = {
-    # RSI family
-    'rsi': 'rsi', 'rsi_change': 'rsi', 'rsi_slope': 'rsi',
-    # MACD family
-    'macd_hist': 'macd', 'macd': 'macd', 'macd_histogram': 'macd', 'macd_signal': 'macd',
-    'macd_signal_cross': 'macd',
-    # Bollinger family
-    'bb_pct': 'bb', 'bb': 'bb', 'bb_position': 'bb', 'bollinger_pct': 'bb',
-    'bb_pos': 'bb', 'bb_width': 'bb', 'bollinger_b': 'bb', 'pct_b': 'bb',
-    # Stochastic family
-    'stoch_k': 'stoch', 'stoch_d': 'stoch', 'stoch_cross': 'stoch',
-    'stochastic': 'stoch', 'stoch': 'stoch', 'stochrsi': 'stoch',
-    'stoch_rsi': 'stoch', 'stoch_rsi_k': 'stoch',
-    # Volume family
-    'volume': 'volume', 'vol': 'volume', 'volume_ratio': 'volume',
-    'vol_change': 'volume', 'volume_change': 'volume', 'vol_ratio': 'volume',
-    'obv_slope': 'volume',
-    # EMA / trend — mapped ke macd (trend component)
-    'ema_9_21_diff': 'macd', 'ema_above_50': 'macd',
-    'williams_r': 'rsi',       # oscillator, karakter mirip RSI
-    'atr_pct': 'bb',           # volatility, karakter mirip BB width
-    # Price momentum — mapped ke macd (momentum component)
-    'price_change_1m': 'macd', 'price_change_3m': 'macd', 'price_change_5m': 'macd',
-}
-
-_WEIGHTS_DEFAULT = {'rsi': 1.0, 'macd': 1.0, 'bb': 1.0, 'stoch': 1.0, 'volume': 1.0}
+_PAIR_FEATURE_NAMES = [
+    "RSI", "RSI_Change", "RSI_Slope", "MACD_Hist", "MACD_Signal_Cross",
+    "BB_Pos", "BB_Width", "Stoch_K", "Stoch_D", "Stoch_Cross",
+    "Williams_R", "EMA_9_21_Diff", "EMA_Above_50", "Vol_Ratio", "Vol_Change",
+    "Price_Change_1m", "Price_Change_3m", "Price_Change_5m", "ATR_Pct", "OBV_Slope",
+]
 
 
-def get_coin_indicator_weights(pair: str) -> dict:
+def _load_pair_model(pair: str):
+    """Load per-pair scalp classifier dari models/{pair}_1m_90d_1m_scalp_classifier.pkl.
+    Hot-reload otomatis jika file diperbarui. Returns model atau None.
     """
-    Derive per-coin indicator weight multipliers from model feature_importances_.
-
-    Returns dict dengan multiplier [0.5, 2.0] untuk setiap komponen signal:
-      {'rsi': float, 'macd': float, 'bb': float, 'stoch': float, 'volume': float}
-
-    Multiplier > 1.0 = indikator ini lebih penting untuk koin ini dari rata-rata.
-    Multiplier < 1.0 = indikator ini kurang relevan untuk koin ini.
-
-    Fallback ke semua 1.0 jika:
-    - Model tidak ditemukan
-    - Model tidak memiliki feature_names_in_
-    - Total importance indikator < 5% (model masih price-dominated)
-    """
-    global _COIN_WEIGHTS_CACHE
-
-    if not pair:
-        return dict(_WEIGHTS_DEFAULT)
-
-    pair_key = pair.replace("/", "").replace("_", "").lower()
-
-    # Check cache: valid selama mtime model tidak berubah.
-    # Prioritas: _classifier.pkl (model baru, indicator-based) > _model.pkl (lama)
-    current_mtime = 0.0
-    model_path = None
-    for suffix in (f"{pair_key}_1m_90d_1m_scalp_classifier.pkl", f"{pair_key}_1m_90d_classifier.pkl", f"{pair_key}_1m_90d_model.pkl"):
-        candidate = os.path.join(COIN_MODELS_DIR, suffix)
-        if os.path.exists(candidate):
-            try:
-                current_mtime = os.path.getmtime(candidate)
-                model_path = candidate
-            except OSError:
-                pass
-            break
-
-    cached = _COIN_WEIGHTS_CACHE.get(pair_key)
-    if cached and cached[1] == current_mtime and current_mtime > 0:
-        return cached[0]
-
-    if not model_path or current_mtime == 0:
-        return dict(_WEIGHTS_DEFAULT)
-
-    try:
-        import joblib as _jl
-        model = _jl.load(model_path)
-
-        if not hasattr(model, 'feature_importances_') or not hasattr(model, 'feature_names_in_'):
-            _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
-            return dict(_WEIGHTS_DEFAULT)
-
-        names = [n.lower() for n in model.feature_names_in_]
-        importances = model.feature_importances_
-
-        # Aggregate importances per signal component
-        component_imp: dict = {}
-        for name, imp in zip(names, importances):
-            component = _FEATURE_SIGNAL_MAP.get(name)
-            if component:
-                component_imp[component] = component_imp.get(component, 0.0) + float(imp)
-
-        # Guard: jika total importance indikator < 5%, model masih dominated by price
-        total_ind_imp = sum(component_imp.values())
-        if total_ind_imp < 0.05:
-            _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
-            return dict(_WEIGHTS_DEFAULT)
-
-        # Normalize: weight = component_importance / mean_importance, clamped [0.5, 2.0]
-        n_comp = len(component_imp)
-        mean_imp = total_ind_imp / n_comp if n_comp > 0 else 1.0
-        weights = dict(_WEIGHTS_DEFAULT)
-        for comp, imp in component_imp.items():
-            multiplier = imp / mean_imp if mean_imp > 0 else 1.0
-            weights[comp] = max(0.5, min(2.0, round(multiplier, 3)))
-
-        log_message(
-            f"[Predictor] [OK] Coin weights {pair.upper()}: "
-            f"RSI={weights['rsi']:.2f} MACD={weights['macd']:.2f} "
-            f"BB={weights['bb']:.2f} Stoch={weights['stoch']:.2f} Vol={weights['volume']:.2f}"
-        )
-        _COIN_WEIGHTS_CACHE[pair_key] = (weights, current_mtime)
-        return weights
-
-    except Exception as e:
-        log_message(f"[WARN] [Predictor] get_coin_indicator_weights({pair}) failed: {e}")
-        _COIN_WEIGHTS_CACHE[pair_key] = (dict(_WEIGHTS_DEFAULT), current_mtime)
-        return dict(_WEIGHTS_DEFAULT)
-
-
-def _load_coin_model(pair: str):
-    global _COIN_MODELS_CACHE
-    if not pair:
-        return None, 0.0
-    
-    pair = pair.replace("/", "").replace("_", "").lower()
-    model_file = f"{pair}_1m_90d_model.pkl"
-    path = os.path.join(COIN_MODELS_DIR, model_file)
-    
+    global _pair_models
+    path = os.path.join(_PAIR_MODEL_DIR, f"{pair}_1m_90d_1m_scalp_classifier.pkl")
     if not os.path.exists(path):
-        # C1: log warning agar operator tahu model hilang (bukan silent fallback)
-        log_message(f"[WARN] [Predictor] Coin model tidak ditemukan untuk {pair.upper()} ({path}) — fallback ke global model")
-        return None, 0.0
-        
-    try:
-        current_mtime = os.path.getmtime(path)
-        cached = _COIN_MODELS_CACHE.get(pair)
-        
-        if cached is None or current_mtime > cached[2]:
-            model = joblib.load(path)
-
-            # H2: validasi tipe model setelah load untuk deteksi korupsi file
-            from sklearn.ensemble import RandomForestRegressor as _RFR
-            if not isinstance(model, _RFR):
-                log_message(f"[WARN] [Predictor] Coin model {pair.upper()} tipe tidak valid ({type(model).__name__}) — fallback ke global model")
-                return None, 0.0
-            
-            # C2 + H1: Tentukan index SMA_20 secara dinamis dari feature_names_in_ jika tersedia
-            # Hindari asumsi hardcoded bahwa SMA_20 selalu di index 6.
-            sma_index = 6  # default fallback
-            if hasattr(model, 'feature_names_in_'):
-                feat_list = list(model.feature_names_in_)
-                if 'SMA_20' in feat_list:
-                    sma_index = feat_list.index('SMA_20')
-                else:
-                    log_message(f"[WARN] [Predictor] Coin model {pair.upper()} tidak memiliki fitur SMA_20 — P_train_mean tidak dapat diekstrak")
-                    return None, 0.0
-            
-            # Ekstrak split thresholds SMA_20 dari semua tree sebagai estimasi P_train_mean
-            sma_thresholds = []
-            for estimator in model.estimators_:
-                tree = estimator.tree_
-                for node_idx in range(tree.node_count):
-                    if tree.feature[node_idx] == sma_index:
-                        sma_thresholds.append(tree.threshold[node_idx])
-            
-            P_train_mean = np.mean(sma_thresholds) if sma_thresholds else 0.0
-
-            # H1: sanity check — jika P_train_mean jauh dari harga wajar, model mungkin stale
-            if P_train_mean <= 0:
-                log_message(f"[WARN] [Predictor] Coin model {pair.upper()} P_train_mean={P_train_mean} tidak valid — fallback ke global model")
-                return None, 0.0
-            
-            _COIN_MODELS_CACHE[pair] = (model, P_train_mean, current_mtime)
-            log_message(
-                f"[Predictor] [OK] Loaded coin model for {pair.upper()} "
-                f"(P_train_mean={P_train_mean:.8f}, SMA_idx={sma_index}, mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})"
-            )
-            
-        return _COIN_MODELS_CACHE[pair][0], _COIN_MODELS_CACHE[pair][1]
-        
-    except Exception as e:
-        log_message(f"[WARN] [Predictor] Failed to load coin model for {pair}: {e}")
-        return None, 0.0
-
-
-def _load_model():
-    global _model, _model_mtime
-    if not os.path.exists(MODEL_PATH):
         return None
     try:
-        current_mtime = os.path.getmtime(MODEL_PATH)
-        if _model is None or current_mtime > _model_mtime:
-            loaded = joblib.load(MODEL_PATH)
-            # H2: validasi tipe global model
-            from sklearn.ensemble import HistGradientBoostingClassifier as _HGBC
-            from sklearn.ensemble import RandomForestClassifier as _RFC
-            if not isinstance(loaded, (_HGBC, _RFC)):
-                log_message(f"[WARN] [Predictor] Global model tipe tidak valid ({type(loaded).__name__}) — model tidak diganti")
-            else:
-                _model = loaded
-                _model_mtime = current_mtime
-                log_message(
-                    f"[Predictor] Scalper V2 Model loaded "
-                    f"(mtime={datetime.fromtimestamp(current_mtime).strftime('%H:%M:%S')})."
-                )
+        mtime = os.path.getmtime(path)
+        cached = _pair_models.get(pair)
+        if cached is None or mtime > cached[1]:
+            model = joblib.load(path)
+            _pair_models[pair] = (model, mtime)
+            log_message(f"[OK] [Predictor] Per-pair model loaded: {pair}")
+        return _pair_models[pair][0]
     except Exception as e:
-        log_message(f"[WARN] [Predictor] Failed to load model: {e}")
-    return _model
+        log_message(f"[WARN] [Predictor] Failed to load pair model {pair}: {e}")
+        return None
+
+
+def _build_pair_features(prices: list) -> "np.ndarray | None":
+    """Bangun 20-feature vector yang kompatibel dengan train_scalp_classifiers.py.
+
+    Fitur berbasis OHLCV yang tidak tersedia (volume, high, low) di-approximate
+    dari data close saja — Williams %R via close min/max, ATR via selisih close,
+    volume features (Vol_Ratio, Vol_Change, OBV_Slope) fallback ke nilai netral.
+    """
+    n = len(prices)
+    if n < 30:
+        return None
+
+    closes = np.array(prices, dtype=float)
+
+    # 1-3. RSI, RSI_Change, RSI_Slope
+    rsi_now   = calculate_rsi(prices)
+    rsi_prev3 = calculate_rsi(list(closes[:-3])) if n > 16 else rsi_now
+    rsi_change = rsi_now - rsi_prev3
+    rsi_slope  = rsi_change / 3.0
+
+    # 4-5. MACD_Hist, MACD_Signal_Cross
+    macd_hist, prev_hist = 0.0, 0.0
+    if n >= 35:
+        _, _, macd_hist = calculate_macd(prices)
+    if n >= 36:
+        _, _, prev_hist = calculate_macd(list(closes[:-1]))
+    macd_cross = (1.0 if (macd_hist > 0 and prev_hist <= 0) else
+                  -1.0 if (macd_hist < 0 and prev_hist >= 0) else 0.0)
+
+    # 6-7. BB_Pos (= bb_pct), BB_Width
+    if n >= 20:
+        _, _, _, bb_pct = calculate_bollinger_bands(prices)
+        bb_arr  = closes[-20:]
+        bb_mid  = float(np.mean(bb_arr))
+        bb_std  = float(np.std(bb_arr, ddof=0))
+        bb_width = (4.0 * bb_std / bb_mid) if bb_mid > 0 else 0.0
+    else:
+        bb_pct   = 0.5
+        bb_width = 0.0
+
+    # 8-10. Stoch_K, Stoch_D, Stoch_Cross (RSI-based)
+    stoch_k, stoch_d = calculate_stochastic_rsi(prices)
+    stoch_cross = 1.0 if stoch_k > stoch_d else 0.0
+
+    # 11. Williams %R — approximate menggunakan min/max close-14 sebagai proxy H/L
+    if n >= 14:
+        wnd = closes[-14:]
+        hh  = float(np.max(wnd))
+        ll  = float(np.min(wnd))
+        wr  = ((hh - closes[-1]) / (hh - ll) * -100.0) if (hh - ll) > 0 else -50.0
+    else:
+        wr = -50.0
+
+    # 12-13. EMA_9_21_Diff, EMA_Above_50
+    ema9  = calculate_ema(prices, 9)  if n >= 9  else float(closes[-1])
+    ema21 = calculate_ema(prices, 21) if n >= 21 else float(closes[-1])
+    ema50 = calculate_ema(prices, 50) if n >= 50 else float(closes[-1])
+    ema_9_21_diff = ((ema9 - ema21) / ema21 * 100.0) if ema21 > 0 else 0.0
+    ema_above_50  = 1.0 if closes[-1] > ema50 else 0.0
+
+    # 14-15. Vol_Ratio, Vol_Change — tidak ada data volume, gunakan nilai netral
+    vol_ratio  = 1.0
+    vol_change = 0.0
+
+    # 16-18. Price_Change_1m/3m/5m
+    def _pct(a, b): return ((a - b) / b * 100.0) if b > 0 else 0.0
+    pc1 = _pct(closes[-1], closes[-2]) if n >= 2  else 0.0
+    pc3 = _pct(closes[-1], closes[-4]) if n >= 4  else 0.0
+    pc5 = _pct(closes[-1], closes[-6]) if n >= 6  else 0.0
+
+    # 19. ATR_Pct — approximate via abs selisih close (tanpa high/low)
+    if n >= 15:
+        diffs   = np.abs(np.diff(closes[-15:]))
+        atr_pct = (float(np.mean(diffs)) / closes[-1] * 100.0) if closes[-1] > 0 else 0.0
+    else:
+        atr_pct = 0.0
+
+    # 20. OBV_Slope — tidak ada volume, nilai netral
+    obv_slope = 0.0
+
+    return np.array([[
+        rsi_now, rsi_change, rsi_slope,
+        macd_hist, macd_cross,
+        bb_pct, bb_width,
+        stoch_k, stoch_d, stoch_cross,
+        wr, ema_9_21_diff, ema_above_50,
+        vol_ratio, vol_change,
+        pc1, pc3, pc5,
+        atr_pct, obv_slope,
+    ]], dtype=float)
 
 
 def preload_model() -> None:
-    """Pre-load the ML model into the global cache at startup.
+    """No-op — per-pair models di-load on-demand saat pertama kali pair diprediksi.
 
-    Calling this once at bot startup ensures subsequent calls to get_prediction()
-    return immediately without paying the joblib load cost on the first trade.
+    Dipanggil dari bootstrap.py; dipertahankan agar signature tidak berubah.
     """
-    model = _load_model()
-    if model is not None:
-        log_message("[OK] [Predictor] ML model pre-loaded into memory at startup.")
-    else:
-        log_message("[WARN] [Predictor] ML model not found at startup (will load on demand when available).")
+    pass
+
+
+def get_raw_ml_prob(pair: str, price_history: list) -> "float | None":
+    """Probabilitas ML murni untuk pair — tanpa blending dengan tech_prob.
+
+    Berguna untuk ML fast-track gate: jika model sangat yakin (>= 0.68),
+    bot bisa bypass beberapa gate teknikal yang terlalu konservatif.
+
+    Returns:
+        float (0.0-1.0)  — probabilitas class 1 (upward move) dari model
+        None             — model tidak tersedia atau fitur kurang
+    """
+    if not pair or not price_history:
+        return None
+    model = _load_pair_model(pair.lower())
+    if model is None:
+        return None
+    feat = _build_pair_features(price_history)
+    if feat is None:
+        return None
+    try:
+        return float(model.predict_proba(feat)[0][1])
+    except Exception:
+        return None
 
 
 def _compute_technical_probability(price_history: list, ticker_data: dict = None) -> float:
@@ -426,13 +340,16 @@ def _compute_technical_probability(price_history: list, ticker_data: dict = None
 
 def get_prediction(price_history: list, ticker_data: dict = None, pair: str = None) -> float:
     """
-    Probabilitas eksekusi trade — PURE TECHNICAL (v2.0) + Coin-Specific ML Refinement.
+    Probabilitas eksekusi trade — PURE TECHNICAL (v2.0).
 
     Perubahan dari v1:
     - Semua pengaruh LLM/AI dihapus sepenuhnya.
     - Base score 100% dari indikator teknikal (RSI, MACD, BB, StochRSI, EMA, WilliamsR, ROC, OB).
-    - Model ML koin khusus (RandomForestRegressor) dimuat dinamis dengan penskalaan harga otomatis.
+    - Model ML (per-pair RandomForest) sebagai refinement jika model tersedia.
     - Bobot blend dinamis berdasarkan tingkat kecocokan tech vs ML.
+
+    Args:
+        pair: Jika diberikan, muat per-pair model dari models/{pair}_1m_90d_1m_scalp_classifier.pkl.
 
     Returns:
         -1.0  → Warming Up (data kurang dari minimum)
@@ -448,129 +365,29 @@ def get_prediction(price_history: list, ticker_data: dict = None, pair: str = No
         #  1. Pure Technical Base Score 
         tech_prob = _compute_technical_probability(price_history, ticker_data)
 
-        #  2. Machine Learning Refinement (Coin-Specific RandomForestRegressor)
-        if not pair and ticker_data:
-            pair = ticker_data.get("pair")
-            
-        model_coin, P_train_mean = _load_coin_model(pair) if pair else (None, 0.0)
-        
-        if model_coin and P_train_mean > 0:
-            prices = list(price_history)
-            
-            # Compute input features: ['open', 'high', 'low', 'close', 'volume', 'RSI', 'SMA_20']
-            close_val = float(prices[-1])
-            open_val = float(prices[-2]) if len(prices) >= 2 else close_val
-            high_val = max(open_val, close_val)
-            low_val = min(open_val, close_val)
-            
-            rsi_val = calculate_rsi(prices)
-            sma_val = sum(prices[-20:]) / 20.0
-            
-            # Dummy volume (since importance is 0.0)
-            vol_val = 10000.0
-            
-            # Apply Dynamic Price Scaling
-            P_current = sma_val if sma_val > 0 else close_val
-            S = P_train_mean / P_current if P_current > 0 else 1.0
-            
-            open_scaled = open_val * S
-            high_scaled = high_val * S
-            low_scaled = low_val * S
-            close_scaled = close_val * S
-            sma_scaled = sma_val * S
-            
-            # Feature DataFrame
-            features_df = pd.DataFrame([{
-                "open": open_scaled,
-                "high": high_scaled,
-                "low": low_scaled,
-                "close": close_scaled,
-                "volume": vol_val,
-                "RSI": rsi_val,
-                "SMA_20": sma_scaled
-            }])
-            
-            # Predict
-            pred_scaled = model_coin.predict(features_df)[0]
-            
-            # Rescale prediction back up
-            pred_final = pred_scaled / S
-            
-            # Projected expected return
-            expected_return = (pred_final - close_val) / close_val if close_val > 0 else 0.0
-            
-            # Map return to probability using sigmoid: 0% -> 50%, +1% -> 82%, -1% -> 18%
-            ml_prob = float(1.0 / (1.0 + np.exp(-expected_return * 150.0)))
-            
-            # Blend dynamically
-            divergence = abs(tech_prob - ml_prob)
-            if divergence < 0.10:
-                final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
-            elif divergence < 0.25:
-                final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
-            else:
-                final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
-                
-            return float(round(max(0.0, min(final_prob, 0.99)), 4))
+        #  2. Machine Learning Refinement (per-pair RandomForest) 
+        pair_model = _load_pair_model(pair) if pair else None
 
-        # Fallback to original global model (scalper_v2.joblib) if available
-        model = _load_model()
-        if model:
-            rsi = calculate_rsi(price_history)
-            _, _, macd_hist = calculate_macd(price_history) if n >= 35 else (0, 0, 0)
-            _, _, _, bb_pct = calculate_bollinger_bands(price_history) if n >= 20 else (0, 0, 0, 0.5)
-            stoch_k, stoch_d = calculate_stochastic_rsi(price_history)
-            vol = calculate_volatility(price_history)
-
-            ema9  = calculate_ema(price_history, 9) if n >= 9 else price_history[-1]
-            ema21 = calculate_ema(price_history, 21) if n >= 21 else price_history[-1]
-            ema_dist = (price_history[-1] - ema21) / ema21 if ema21 > 0 else 0.0
-
-            imbalance_val = 0.5
-            if ticker_data:
-                bd = float(ticker_data.get("bid_depth", 0))
-                ad = float(ticker_data.get("ask_depth", 0))
-                if (bd + ad) > 0:
-                    imbalance_val = bd / (bd + ad)
-
-            hour = datetime.now().hour
-
-            features_df = pd.DataFrame([{
-                "ai_prob":          tech_prob,
-                "imbalance":        imbalance_val,
-                "volatility":       vol,
-                "rsi":              rsi,
-                "ema_dist":         ema_dist,
-                "ema_dist_abs":     abs(ema_dist),
-                "rsi_oversold":     max(0.0, (30.0 - rsi) / 30.0),
-                "rsi_overbought":   max(0.0, (rsi - 70.0) / 30.0),
-                "hour_sin":         np.sin(2 * np.pi * hour / 24.0),
-                "hour_cos":         np.cos(2 * np.pi * hour / 24.0),
-            }])
-
-            # Validasi feature compatibility — model lama mungkin expect feature set berbeda
-            if hasattr(model, 'feature_names_in_'):
-                expected = set(model.feature_names_in_)
-                provided = set(features_df.columns)
-                if not expected.issubset(provided):
-                    model = None
-            if model is None:
-                final_prob = tech_prob
-            else:
-                ml_prob = model.predict_proba(features_df)[0][1]
-
+        if pair_model:
+            # Per-pair model: 20 OHLCV-derived features
+            feat = _build_pair_features(price_history)
+            if feat is not None:
+                ml_prob    = float(pair_model.predict_proba(feat)[0][1])
                 divergence = abs(tech_prob - ml_prob)
                 if divergence < 0.10:
-                    final_prob = (tech_prob * 0.55) + (ml_prob * 0.45)
+                    final_prob = tech_prob * 0.55 + ml_prob * 0.45
                 elif divergence < 0.25:
-                    final_prob = (tech_prob * 0.65) + (ml_prob * 0.35)
+                    final_prob = tech_prob * 0.65 + ml_prob * 0.35
                 else:
-                    final_prob = (tech_prob * 0.75) + (ml_prob * 0.25)
+                    final_prob = tech_prob * 0.75 + ml_prob * 0.25
+            else:
+                final_prob = tech_prob
         else:
+            # Tidak ada per-pair model — murni teknikal
             final_prob = tech_prob
 
         return float(round(max(0.0, min(final_prob, 0.99)), 4))
 
     except Exception as e:
-        log_message(f"[WARN] [Predictor] Prediction Error: {e}")
+        log_message(f"Prediction Error: {e}")
         return 0.45  # Default netral, bukan 0 (agar tidak memblokir semua sinyal)

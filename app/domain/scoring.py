@@ -1,8 +1,11 @@
 import math
+import logging
 
-import config
 from config import SECTOR_MAP
 from app.domain.technicals import calculate_rsi, calculate_macd
+from utils.logger import log_message
+
+logger = logging.getLogger(__name__)
 
 # Sektor yang mendapat sector-momentum boost saat pumping
 _BOOSTED_SECTORS = {"AI", "MEME", "L1"}
@@ -48,38 +51,16 @@ def calculate_score(args):
         ask_depth = float(d.get('ask_depth', 0))
         imbalance = (bid_depth / ask_depth) if ask_depth > 0 else 1.0
 
+        max_spread = config_override['max_spread'] * 100
+        min_vol = config_override['min_vol']
         min_price = config_override.get('min_price', 0)
 
         # [Anti-Shitcoin] Filter koin harga receh (1-10 perak)
         if last < min_price:
             return None
 
-        # --- Dynamic Tiered Arbitrage Universe Classification ---
-        pair_lower = pair.lower()
-        
-        tier = 3
-        tier_min_vol = getattr(config, 'TIER_3_MIN_VOLUME', 200000000)
-        tier_max_spread = getattr(config, 'TIER_3_MAX_SPREAD', 1.50)
-        
-        if pair_lower in getattr(config, 'TIER_1_PAIRS', set()):
-            tier = 1
-            tier_min_vol = getattr(config, 'TIER_1_MIN_VOLUME', 1000000000)
-            tier_max_spread = getattr(config, 'TIER_1_MAX_SPREAD', 0.35)
-        elif pair_lower in getattr(config, 'TIER_2_PAIRS', set()):
-            tier = 2
-            tier_min_vol = getattr(config, 'TIER_2_MIN_VOLUME', 500000000)
-            tier_max_spread = getattr(config, 'TIER_2_MAX_SPREAD', 0.75)
-            
-        # Adapt overrides dynamically based on market regime (BEARISH/CRASH)
-        if market_regime == "BEARISH":
-            tier_min_vol *= 1.5
-            tier_max_spread *= 0.8
-        elif market_regime == "CRASH":
-            tier_min_vol *= 2.0
-            tier_max_spread *= 0.5
-
-        # Apply Tier-specific Volume and Spread bounds!
-        if spread < tier_max_spread and volatility >= 0.1 and vol > tier_min_vol:
+        # [Senior Engineer Fix] Lepaskan batas atas volatilitas untuk Dashboard Ranking.
+        if spread < max_spread and volatility >= 0.1 and vol > min_vol:
             # [Smart Thinking] Gunakan Volatility-Adjusted Change.
             change_24h = d.get('change_24h', 0)
             rel_momentum = (abs(change_24h) * 5) / max(0.5, volatility)

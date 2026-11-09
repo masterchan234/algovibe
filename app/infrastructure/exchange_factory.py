@@ -21,15 +21,35 @@ import os
 import ccxt
 
 
-def create_indodax_exchange():
-    """Create configured ccxt Indodax client (legacy, direct ccxt usage)."""
-    return ccxt.indodax(
-        {
-            'apiKey': os.getenv('INDODAX_API_KEY'),
-            'secret': os.getenv('INDODAX_API_SECRET'),
-            'enableRateLimit': True,
-        }
-    )
+def create_exchange_client():
+    """Create configured ccxt client (returns ccxt.binance or ccxt.indodax depending on EXCHANGE env var)."""
+    eid = os.getenv("EXCHANGE", "binance").lower()
+    if eid == "binance":
+        return ccxt.binance(
+            {
+                'apiKey': os.getenv('BINANCE_API_KEY') or os.getenv('INDODAX_API_KEY'),
+                'secret': os.getenv('BINANCE_API_SECRET') or os.getenv('INDODAX_API_SECRET'),
+                'enableRateLimit': True,
+                'options': {
+                    'adjustForTimeDifference': True,
+                    'defaultType': 'spot',
+                    'fetchCurrencies': False,
+                }
+            }
+        )
+    else:
+        return ccxt.indodax(
+            {
+                'apiKey': os.getenv('INDODAX_API_KEY'),
+                'secret': os.getenv('INDODAX_API_SECRET'),
+                'enableRateLimit': True,
+            }
+        )
+
+
+# Backward compatibility alias
+create_indodax_exchange = create_exchange_client
+
 
 
 def create_trading_bridge(
@@ -69,7 +89,7 @@ def create_exchange_provider(
     Parameters
     ----------
     exchange_id : str | None
-        Exchange identifier.  Defaults to ``'indodax'``.
+        Exchange identifier.  Defaults to ``'binance'``.
     api_key, api_secret : str | None
         Credentials; fall back to environment variables when not provided.
 
@@ -77,12 +97,17 @@ def create_exchange_provider(
     -------
     BaseExchangeAdapter
     """
-    eid = (exchange_id or os.getenv("EXCHANGE", "indodax")).lower()
-    key    = api_key    or os.getenv("INDODAX_API_KEY", "")
-    secret = api_secret or os.getenv("INDODAX_API_SECRET", "")
+    eid = (exchange_id or os.getenv("EXCHANGE", "binance")).lower()
 
-    if eid == "indodax":
+    if eid == "binance":
+        key = api_key or os.getenv("BINANCE_API_KEY", "") or os.getenv("INDODAX_API_KEY", "")
+        secret = api_secret or os.getenv("BINANCE_API_SECRET", "") or os.getenv("INDODAX_API_SECRET", "")
+        from app.infrastructure.providers.binance_adapter import BinanceAdapter
+        return BinanceAdapter(key, secret)
+    elif eid == "indodax":
+        key = api_key or os.getenv("INDODAX_API_KEY", "")
+        secret = api_secret or os.getenv("INDODAX_API_SECRET", "")
         from app.infrastructure.providers.indodax_adapter import IndodaxAdapter
         return IndodaxAdapter(key, secret)
 
-    raise ValueError(f"Unsupported exchange_id: '{eid}'. Registered: ['indodax']")
+    raise ValueError(f"Unsupported exchange_id: '{eid}'. Registered: ['binance', 'indodax']")

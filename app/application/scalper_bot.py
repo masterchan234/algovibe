@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from app.application.use_cases.market_cycle import run_market_cycle
 from app.application.use_cases.trade_execution import execute_trade as execute_trade_use_case
-from app.infrastructure.exchange_factory import create_indodax_exchange
+from app.infrastructure.exchange_factory import create_exchange_client
 import config
 from app.infrastructure.database import db
 from app.application.exit_manager import ExitManager
@@ -29,7 +29,7 @@ class ScalperBot:
     def __init__(self):
         load_dotenv()
 
-        self.exchange = create_indodax_exchange()
+        self.exchange = create_exchange_client()
 
         self.market_ws = MarketDataWS()
         self.oracle = Oracle(self.market_ws)
@@ -70,7 +70,7 @@ class ScalperBot:
 
         import threading
 
-        self.insight_thread = threading.Thread(target=self._insight_loop, daemon=True)
+
         self.exit_monitor_thread = threading.Thread(target=self._exit_monitor_loop, daemon=True)
         self.utc_reset_thread = threading.Thread(target=self._utc_reset_monitor_loop, daemon=True)
         self.daily_report_thread = threading.Thread(target=self._daily_report_loop, daemon=True)
@@ -95,17 +95,20 @@ class ScalperBot:
             log_message(f" [STARTUP] New UTC day detected ({last_reset} → {today_utc}). Triggering session reset...")
             self._perform_utc_day_reset()
 
+        api_key = os.getenv('BINANCE_API_KEY') or os.getenv('INDODAX_API_KEY', '')
+        api_secret = os.getenv('BINANCE_API_SECRET') or os.getenv('INDODAX_API_SECRET', '')
+
         self.private_ws = PrivateWS(
-            api_key=os.getenv('INDODAX_API_KEY', ''),
-            api_secret=os.getenv('INDODAX_API_SECRET', ''),
+            api_key=api_key,
+            api_secret=api_secret,
             on_order_update=self.exit_manager.handle_order_update,
         )
 
         from app.infrastructure.deadman import DeadmanSwitch
 
         self.deadman = DeadmanSwitch(
-            api_key=os.getenv('INDODAX_API_KEY', ''),
-            api_secret=os.getenv('INDODAX_API_SECRET', ''),
+            api_key=api_key,
+            api_secret=api_secret,
         )
         self.deadman.start()
 
@@ -114,30 +117,17 @@ class ScalperBot:
         self.oracle._load_lessons_from_db()
         self.exit_manager.reconcile_with_exchange()
 
-        # Initial balance fetch (mode-aware)
+        # Initial balance fetch for LIVE mode
         self.cached_balance = 0
         if not config.DRY_RUN:
             try:
                 bal = self.exchange.fetch_balance()
-                self.cached_balance = float(bal.get('free', {}).get('IDR', 0))
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                self.cached_balance = float(bal.get('free', {}).get(quote_currency, 0))
                 db.save_state("cached_idr_balance", str(self.cached_balance))
             except Exception as e:
                 log_message(f"[WARN] Initial Balance Fetch Failed: {e}")
-        else:
-            try:
-                dry_stats = db.get_daily_stats()
-                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
-                open_pos = db.get_open_positions()
-                pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
-                used_idr = sum(
-                    float(p.get("amount_idr", 0))
-                    for p in pos_iter
-                    if int(p.get("dry_run", 0)) == 1
-                )
-                self.cached_balance = config.INITIAL_CAPITAL + realized_pnl_dry - used_idr
-                db.save_state("cached_idr_balance", str(self.cached_balance))
-            except Exception as e:
-                log_message(f"[WARN] Initial Dry Balance Setup Failed: {e}")
 
             # Crash Recovery: resume management of any existing live positions
             self._resume_live_positions()
@@ -230,7 +220,9 @@ class ScalperBot:
             return
 
         try:
-            full_idr_list = [m['symbol'] for m in markets if m['quote'] == 'IDR' and m['active']]
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            full_idr_list = [m['symbol'] for m in markets if m['quote'] == quote_currency and m['active']]
 
             idr_pairs = []
             skipped = 0
@@ -241,12 +233,13 @@ class ScalperBot:
                 else:
                     skipped += 1
 
-            # [BTC Fix] Selalu sertakan BTC/IDR dalam backfill agar Oracle regime filter
+            # [BTC Fix] Selalu sertakan BTC/IDR (atau BTC/USDT) dalam backfill agar Oracle regime filter
             # tidak mengalami error "Data BTC tidak tersedia di WS/DB".
-            btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == 'btcidr'), None)
+            btc_target = "btc" + quote_currency.lower()
+            btc_symbol = next((s for s in full_idr_list if s.replace('/', '').lower() == btc_target), None)
             if btc_symbol and btc_symbol not in idr_pairs:
                 idr_pairs.insert(0, btc_symbol)
-                log_message(" [BTC Fix] Forcing BTC/IDR into backfill for Oracle regime filter.")
+                log_message(f" [BTC Fix] Forcing {btc_symbol} into backfill for Oracle regime filter.")
 
             total_pairs = len(idr_pairs)
             log_message(f" Smart Backfill: {total_pairs} pairs to sync | {skipped} pairs skipped (data warm in DB)")
@@ -313,29 +306,17 @@ class ScalperBot:
     def _sync_balances_to_db(self):
         """[Senior Logic] Sync real exchange balances to DB for Dashboard visibility."""
         if config.DRY_RUN:
-            try:
-                dry_stats = db.get_daily_stats()
-                realized_pnl_dry = float(dry_stats.get("total_pnl_idr") or 0.0)
-                open_pos = db.get_open_positions()
-                pos_iter = open_pos.values() if isinstance(open_pos, dict) else open_pos
-                used_idr = sum(
-                    float(p.get("amount_idr", 0))
-                    for p in pos_iter
-                    if int(p.get("dry_run", 0)) == 1
-                )
-                self.cached_balance = config.INITIAL_CAPITAL + realized_pnl_dry - used_idr
-                db.save_state("cached_idr_balance", str(self.cached_balance))
-            except Exception as e:
-                log_message(f"[WARN] Dry Balance Sync Failed: {e}")
             return
         try:
             bal = self.exchange.fetch_balance()
             db.save_balances(bal)
-            if 'IDR' in bal:
-                self.cached_balance = float(bal['IDR'].get('free', 0))
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            if quote_currency in bal:
+                self.cached_balance = float(bal[quote_currency].get('free', 0))
                 # Cache saldo IDR ke bot_state agar Oracle bisa membacanya untuk target harian
                 db.save_state("cached_idr_balance", str(self.cached_balance))
-                log_message(f" [BALANCE SYNC] IDR Free: {self.cached_balance:,.0f} → DB Updated")
+                log_message(f" [BALANCE SYNC] {quote_currency} Free: {self.cached_balance:,.0f} → DB Updated")
         except Exception as e:
             log_message(f"[WARN] Balance Sync Failed: {e}")
 
@@ -368,6 +349,7 @@ class ScalperBot:
         volatility=0.0,
         dynamic_tp=None,
         dynamic_sl=None,
+        entry_size_factor=1.0,
         taker=False,
     ):
         return execute_trade_use_case(
@@ -382,6 +364,7 @@ class ScalperBot:
             volatility=volatility,
             dynamic_tp=dynamic_tp,
             dynamic_sl=dynamic_sl,
+            entry_size_factor=entry_size_factor,
             taker=taker,
         )
 
@@ -445,19 +428,6 @@ class ScalperBot:
                 log_message(f"Error in _exit_monitor_loop: {e}")
             time.sleep(2)
 
-    def _insight_loop(self):
-        while True:
-            try:
-                if config.TECHNICAL_ONLY_MODE:
-                    if not getattr(self, "_technical_only_logged", False):
-                        log_message(" [TECHNICAL_ONLY_MODE] LLM insight loop disabled.")
-                        self._technical_only_logged = True
-                    time.sleep(5)
-                    continue
-                self.oracle.process_llm_insights()
-            except Exception as e:
-                log_message(f"Error in _insight_loop: {e}")
-            time.sleep(2)
 
     def _perform_utc_day_reset(self):
         """
@@ -536,13 +506,16 @@ class ScalperBot:
             wins  = stats.get('win_count', 0)
             losses = stats.get('loss_count', 0)
             win_rate = (wins / total * 100) if total > 0 else 0.0
-            net_pnl  = stats.get('total_pnl_idr', 0.0)
+            net_pnl  = stats.get('total_pnl_quote', 0.0)
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            currency_prefix = "$" if eid == "binance" else "Rp "
+            net_profit_str = f"{currency_prefix}{net_pnl:,.2f}" if eid == "binance" else f"Rp {net_pnl:,.0f}"
             msg = (
                 f"DAILY PERFORMANCE SUMMARY\n"
                 f"Tanggal: {now_wib.strftime('%d %b %Y')} WIB\n"
                 f"Total Trades: {total} | Win: {wins} | Loss: {losses}\n"
                 f"Win Rate: {win_rate:.1f}%\n"
-                f"Net Profit: Rp {net_pnl:,.0f}"
+                f"Net Profit: {net_profit_str}"
             )
             log_message(msg.replace('*', '').replace('\n', ' | '))
             send_telegram_message(msg)
@@ -615,7 +588,6 @@ class ScalperBot:
         self.private_ws.start()
 
         log_message("WebSocket clients running. Starting background threads…")
-        self.insight_thread.start()
         self.exit_monitor_thread.start()
         self.utc_reset_thread.start()
         self.daily_report_thread.start()

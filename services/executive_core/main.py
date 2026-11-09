@@ -46,7 +46,7 @@ from shared.pid_lock import PidLock
 from services.executive_core.net_zero import NetZeroGuard
 from services.executive_core.profit_lock import ProfitLock
 from app.infrastructure.database import db
-from app.infrastructure.exchange_factory import create_indodax_exchange
+from app.infrastructure.exchange_factory import create_exchange_client
 from app.infrastructure.ws_private import PrivateWS
 from utils.logger import log_message, send_telegram_message
 from config import FEE_BUY_TAKER, FEE_SELL_TAKER
@@ -72,7 +72,7 @@ class ExecutiveCoreService:
     """
 
     def __init__(self):
-        self._exchange = create_indodax_exchange()
+        self._exchange = create_exchange_client()
         self._tick_sub = ZMQSubscriber(IPC_MARKET)
         self._equity_sub = ZMQSubscriber(IPC_EQUITY)
         self._signal_sub = ZMQSubscriber(IPC_SIGNAL)
@@ -86,12 +86,18 @@ class ExecutiveCoreService:
         # Equity tracking
         self._realized_pnl: float = 0.0
         self._unrealized_pnl: float = 0.0
+        self._position_value: float = 0.0   # market value of open positions in quote
+        self._open_positions_count: int = 0
         self._pnl_samples: list = []   # [(ts, net_pnl), ...]
         self._peak_equity: float = 0.0
         try:
             self._peak_equity = float(db.get_state("peak_net_pnl_session", 0.0) or 0.0)
         except Exception:
             self._peak_equity = 0.0
+
+        # Daily stats cache (refreshed every 30s — changes infrequently)
+        self._daily_stats_cache: dict = {}
+        self._daily_stats_last_fetch: float = 0.0
 
         # Velocity (IDR/s)
         self._velocity: float = 0.0
@@ -172,8 +178,14 @@ class ExecutiveCoreService:
         self._legacy_exit_enabled = True
 
         # Private WS order updates are required so pending BUY/SELL can be reconciled.
-        api_key = os.getenv("INDODAX_API_KEY", "")
-        api_secret = os.getenv("INDODAX_API_SECRET", "")
+        eid = os.getenv("EXCHANGE", "binance").lower()
+        if eid == "binance":
+            api_key = os.getenv("BINANCE_API_KEY", "")
+            api_secret = os.getenv("BINANCE_API_SECRET", "")
+        else:
+            api_key = os.getenv("INDODAX_API_KEY", "")
+            api_secret = os.getenv("INDODAX_API_SECRET", "")
+            
         self._private_ws = None
         if api_key and api_secret:
             self._private_ws = PrivateWS(
@@ -182,7 +194,7 @@ class ExecutiveCoreService:
                 on_order_update=self.exit_manager.handle_order_update,
             )
         else:
-            logger.warning("[executive-core] PrivateWS disabled: missing API credentials")
+            logger.warning(f"[executive-core] PrivateWS disabled: missing {eid.upper()} API credentials")
 
     #  Lifecycle 
 
@@ -300,7 +312,9 @@ class ExecutiveCoreService:
         try:
             bal = self._exchange.fetch_balance()
             db.save_balances(bal)
-            self.cached_balance = float(bal.get("free", {}).get("IDR", self.cached_balance))
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_currency = "USDT" if eid == "binance" else "IDR"
+            self.cached_balance = float(bal.get("free", {}).get(quote_currency, self.cached_balance))
         except Exception as exc:
             logger.debug(f"[executive-core] _sync_balances_to_db skip: {exc}")
 
@@ -327,7 +341,9 @@ class ExecutiveCoreService:
                 pair = sym.replace("/", "").lower()
             else:
                 pair = sym.lower()
-            if not pair.endswith("idr"):
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_suffix = "usdt" if eid == "binance" else "idr"
+            if not pair.endswith(quote_suffix):
                 continue
 
             info = payload.get("info") if isinstance(payload, dict) else {}
@@ -363,7 +379,7 @@ class ExecutiveCoreService:
             self._ticks[pair] = tick
             seeded += 1
 
-        logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} IDR pairs")
+        logger.info(f"[executive-core] Warmup snapshot seeded: {seeded} pairs")
 
     #  Signal consumer 
 
@@ -372,22 +388,11 @@ class ExecutiveCoreService:
         async for raw in self._signal_sub.aiter_messages():
             if not self._running:
                 break
-            # Skip non-Signal frames (e.g. topic="tau" JSON dari lead-lag)
-            # Brain-inference publish beberapa jenis message ke socket yang sama.
-            if not raw or raw[:1] == b"{":
-                continue
             try:
                 sig = Signal()
                 sig.ParseFromString(raw)
                 
                 if sig.action == 1: # BUY
-                    # --- [SESSION BUY GATE] ---
-                    _buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
-                    _sess_mode   = db.get_state("session_mode") or "NORMAL"
-                    if not _buy_enabled or _sess_mode == "HARVEST_ONLY":
-                        logger.info(f"[EXECUTIVE] BUY blocked — session_buy_enabled={_buy_enabled} mode={_sess_mode}")
-                        continue
-
                     # --- [DYNAMIC TARGETING UNPACK] ---
                     raw_symbol = sig.symbol
                     pair = raw_symbol
@@ -436,7 +441,8 @@ class ExecutiveCoreService:
                 elif sig.action == 2:  # SELL
                     pair = str(sig.symbol or "").lower()
                     logger.info(f"[EXECUTIVE] Received SELL signal for {pair} (conf: {sig.confidence:.1f}%)")
-                    pos = db.get_position(pair)
+                    loop = asyncio.get_event_loop()
+                    pos = await loop.run_in_executor(None, db.get_position, pair)
                     if pos and pos.get("status") == "OPEN":
                         tick = self._ticks.get(pair)
                         px = float(tick.price) if tick and tick.price > 0 else float(pos.get("entry_price") or 0)
@@ -449,7 +455,7 @@ class ExecutiveCoreService:
                                     price=px,
                                     reason="SIGNAL_SELL",
                                     entry_price=float(pos.get("entry_price") or 0),
-                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    amount_quote=float(pos.get("amount_quote") or 0),
                                     position_data=pos,
                                 ),
                             )
@@ -478,13 +484,6 @@ class ExecutiveCoreService:
                     continue
 
                 if sig.action == 1:  # BUY
-                    # --- [SESSION BUY GATE] ---
-                    _buy_enabled = (db.get_state("session_buy_enabled") or "true") == "true"
-                    _sess_mode   = db.get_state("session_mode") or "NORMAL"
-                    if not _buy_enabled or _sess_mode == "HARVEST_ONLY":
-                        logger.info(f"[EXECUTIVE] LLM BUY blocked — session_buy_enabled={_buy_enabled} mode={_sess_mode}")
-                        continue
-
                     # --- [DYNAMIC TARGETING UNPACK] ---
                     raw_symbol = sig.symbol
                     pair = raw_symbol
@@ -543,7 +542,7 @@ class ExecutiveCoreService:
                                     price=px,
                                     reason="LLM_SIGNAL_SELL",
                                     entry_price=float(pos.get("entry_price") or 0),
-                                    amount_idr=float(pos.get("amount_idr") or 0),
+                                    amount_quote=float(pos.get("amount_quote") or 0),
                                     position_data=pos,
                                 ),
                             )
@@ -609,13 +608,16 @@ class ExecutiveCoreService:
 
                 self._ticks[tick.symbol] = tick
                 # History buffering for radar/dashboard
-                if tick.symbol not in self._price_history:
-                    self._price_history[tick.symbol] = []
-                # Only append if price changed or it's empty to save space
-                if not self._price_history[tick.symbol] or self._price_history[tick.symbol][-1] != tick.price:
-                    self._price_history[tick.symbol].append(tick.price)
-                    if len(self._price_history[tick.symbol]) > 60:
-                        self._price_history[tick.symbol].pop(0)
+                # Only append if price changed or it's empty to save space.
+                # Use immutable updates (copy on write) to avoid dictionary mutation exceptions
+                # when read concurrently by the legacy exit monitor thread.
+                hist = self._price_history.get(tick.symbol, [])
+                if not hist or hist[-1] != tick.price:
+                    new_hist = list(hist)
+                    new_hist.append(tick.price)
+                    if len(new_hist) > 60:
+                        new_hist.pop(0)
+                    self._price_history[tick.symbol] = new_hist
 
             except Exception as exc:
                 logger.error(f"[EXECUTIVE] Tick processing error: {exc}")
@@ -626,7 +628,11 @@ class ExecutiveCoreService:
             updates = []
             for symbol, hist in self._price_history.items():
                 if len(hist) > 0:
-                    updates.append((symbol, list(hist), 0.0, 0.0, 0.0))
+                    last = hist[-1]
+                    ch_5m  = ((last - hist[-5])  / hist[-5]  * 100) if len(hist) >= 5  else 0.0
+                    ch_15m = ((last - hist[-15]) / hist[-15] * 100) if len(hist) >= 15 else 0.0
+                    ch_1h  = ((last - hist[0])   / hist[0]   * 100) if len(hist) >= 60 else 0.0
+                    updates.append((symbol, list(hist), ch_5m, ch_15m, ch_1h))
             if updates:
                 db.save_ticker_history_batch(updates)
         except Exception as e:
@@ -640,7 +646,8 @@ class ExecutiveCoreService:
         and run risk guards.
         """
         try:
-            open_positions = db.get_open_positions()
+            loop = asyncio.get_running_loop()
+            open_positions = await loop.run_in_executor(None, db.get_open_positions)
         except Exception as exc:
             logger.error(f"[EXECUTIVE] DB error fetching positions: {exc}")
             return
@@ -652,6 +659,8 @@ class ExecutiveCoreService:
 
         current_dr_val = 1 if db.is_dry_run() else 0
         total_unrealized = 0.0
+        total_position_value = 0.0
+        open_count = 0
         for pos in positions_iter:
             if int(pos.get("dry_run", 0)) != current_dr_val:
                 continue
@@ -661,16 +670,20 @@ class ExecutiveCoreService:
                 continue
             entry = float(pos.get("entry_price") or 0)
             amount = float(pos.get("amount_crypto") or 0)
-            amount_idr = float(pos.get("amount_idr") or 0)
+            amount_quote = float(pos.get("amount_quote") or 0)
             if entry <= 0 or amount <= 0:
                 continue
 
-            fee_buy = amount_idr * FEE_BUY_TAKER
+            fee_buy = amount_quote * FEE_BUY_TAKER
             fee_sell = amount * tick.price * FEE_SELL_TAKER
             gross = (tick.price - entry) * amount
             total_unrealized += gross - fee_buy - fee_sell
+            total_position_value += tick.price * amount
+            open_count += 1
 
         self._unrealized_pnl = total_unrealized
+        self._position_value = total_position_value
+        self._open_positions_count = open_count
 
         #  Update Balance & Stats 
         try:
@@ -678,12 +691,14 @@ class ExecutiveCoreService:
             if int(time.time()) % 10 == 0:
                 loop = asyncio.get_event_loop()
                 bal_data = await loop.run_in_executor(None, self._exchange.fetch_balance)
-                self.cached_balance = float(bal_data.get('free', {}).get('IDR', 0))
+                eid = os.getenv("EXCHANGE", "binance").lower()
+                quote_currency = "USDT" if eid == "binance" else "IDR"
+                self.cached_balance = float(bal_data.get('free', {}).get(quote_currency, 0))
             
             stats = db.get_all_time_stats()
-            self._realized_pnl = float(stats.get("total_pnl_idr") or 0.0)
+            self._realized_pnl = float(stats.get("total_pnl_quote") or 0.0)
         except Exception as e:
-            logger.debug(f"[EXECUTIVE] Balance/Stats fetch skip: {e}")
+            logger.debug(f"[executive-core] Balance/Stats fetch skip: {e}")
             pass
 
         net_pnl = self._realized_pnl + self._unrealized_pnl
@@ -739,9 +754,47 @@ class ExecutiveCoreService:
                 self._equity_pub.send(equity.SerializeToString())
 
                 # Persist snapshot to DB for dashboard
-                db.save_state("net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
-                db.save_state("net_pnl_realized",   str(round(self._realized_pnl, 2)))
-                db.save_state("peak_net_pnl_session", str(round(self._peak_equity, 2)))
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, db.save_state, "net_pnl_unrealized", str(round(self._unrealized_pnl, 2)))
+                await loop.run_in_executor(None, db.save_state, "net_pnl_realized",   str(round(self._realized_pnl, 2)))
+                await loop.run_in_executor(None, db.save_state, "peak_net_pnl_session", str(round(self._peak_equity, 2)))
+
+                # Refresh daily stats cache every 30s
+                _now = time.time()
+                if _now - self._daily_stats_last_fetch >= 30:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        _ds = await loop.run_in_executor(None, lambda: db.get_daily_stats(dry_run=1 if db.is_dry_run() else 0))
+                        self._daily_stats_cache = _ds
+                        self._daily_stats_last_fetch = _now
+                    except Exception:
+                        pass
+
+                # Realtime equity insert (every second)
+                _ds = self._daily_stats_cache
+                _net_pnl = self._realized_pnl + self._unrealized_pnl
+                _peak = self._peak_equity if self._peak_equity != 0 else _net_pnl
+                _drawdown = ((_peak - _net_pnl) / abs(_peak) * 100.0) if _peak != 0 else 0.0
+                _tc = int(_ds.get("total_trades") or 0)
+                _wc = int(_ds.get("win_count") or 0)
+                _lc = int(_ds.get("loss_count") or 0)
+                _wr = (_wc / _tc * 100.0) if _tc > 0 else 0.0
+                db.save_equity_snapshot(
+                    balance_quote=round(self.cached_balance, 6),
+                    position_value=round(self._position_value, 6),
+                    total_equity=round(self.cached_balance + self._position_value, 6),
+                    realized_pnl_day=round(float(_ds.get("total_pnl_quote") or 0.0), 6),
+                    realized_pnl_total=round(self._realized_pnl, 6),
+                    unrealized_pnl=round(self._unrealized_pnl, 6),
+                    peak_equity=round(_peak, 6),
+                    drawdown_pct=round(_drawdown, 4),
+                    open_positions=self._open_positions_count,
+                    trade_count_day=_tc,
+                    win_count_day=_wc,
+                    loss_count_day=_lc,
+                    win_rate_day=round(_wr, 2),
+                    dry_run=db.is_dry_run(),
+                )
 
                 # Heartbeat every 5 seconds
                 _heartbeat_counter += 1
@@ -790,7 +843,10 @@ class ExecutiveCoreService:
                 logger.warning(f"[executive-core] Invalid order payload skipped: {order}")
                 return
 
-            ccxt_symbol = pair.upper().replace("IDR", "/IDR")
+            eid = os.getenv("EXCHANGE", "binance").lower()
+            quote_suffix = "usdt" if eid == "binance" else "idr"
+            quote_upper = quote_suffix.upper()
+            ccxt_symbol = pair.upper().replace(quote_upper, f"/{quote_upper}")
 
             loop = asyncio.get_event_loop()
             if hasattr(self._exchange, "place_order"):
@@ -805,7 +861,11 @@ class ExecutiveCoreService:
                     ),
                 )
             else:
-                pair_param = pair[:-3] + "_idr" if pair.endswith("idr") else pair
+                if pair.endswith(quote_suffix):
+                    base = pair[:-len(quote_suffix)]
+                    pair_param = f"{base}_{quote_suffix}"
+                else:
+                    pair_param = pair
                 result = await loop.run_in_executor(
                     None,
                     lambda: self._exchange.create_order(

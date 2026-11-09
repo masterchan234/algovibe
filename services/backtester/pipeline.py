@@ -15,8 +15,8 @@ from services.backtester.core import (
 )
 from services.backtester.db_backtest import get_connection
 from services.backtester.runtime import (
-    DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    DEFAULT_MIN_PRICE_IDR,
+    DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    DEFAULT_MIN_PRICE_USDT,
     OHLCV_DAYS,
     _get_latest_ohlcv_ts,
     _load_active_profiles,
@@ -66,24 +66,23 @@ def _load_pairs_from_ohlcv_window(start: datetime, end: datetime, pairs_filter: 
     return pairs
 
 
-def _validate_pair_setup_coverage(pairs: list[str], pair_setup_map: dict[str, dict], strict_per_coin: bool) -> bool:
+def _filter_pairs_by_setup_coverage(pairs: list[str], pair_setup_map: dict[str, dict], strict_per_coin: bool) -> list[str]:
     missing_pairs = sorted([px for px in pairs if str(px).lower() not in pair_setup_map])
     if not missing_pairs:
-        return True
+        return pairs
 
     preview = ", ".join(missing_pairs[:10])
     if len(missing_pairs) > 10:
         preview += f", ... (+{len(missing_pairs)-10} lainnya)"
 
     if strict_per_coin:
-        print(" Strict per-coin aktif: setup teknikal per-koin belum lengkap.")
-        print(f"   Missing pair setup: {preview}")
-        print("   Jalankan `analyze` dulu agar backtest_coin_analysis terisi untuk semua pair tersebut.")
-        return False
+        print(f"[WARN] Strict per-coin: {len(missing_pairs)} pair tanpa setup analysis dilewati: {preview}")
+        print("   (Pair ini tidak memenuhi filter analyze — dilanjutkan tanpa pair tersebut.)")
+        return [px for px in pairs if str(px).lower() in pair_setup_map]
 
     print("[WARN] Per-coin setup belum lengkap, menjalankan fallback ke profile global untuk pair yang missing.")
     print(f"   Missing pair setup: {preview}")
-    return True
+    return pairs
 
 
 def _enrich_profiles_for_run(profiles: list[dict], pair_setup_map: dict[str, dict]) -> list[dict]:
@@ -131,9 +130,7 @@ def _cache_backtest_results(all_results: list[dict], days: int, start: datetime,
 
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, "wb") as f:
-            # Hanya menyimpan struktur sederhana — tidak ada objek kompleks
-            payload = {"results": all_results, "days": days, "start": start, "now": end}
-            pickle.dump(payload, f)
+            pickle.dump({"results": all_results, "days": days, "start": start, "now": end}, f)
         logger.info(f"[run]  Results cached to {cache_file}")
     except Exception as e:
         logger.warning(f"[run] [WARN]  Failed to cache results: {e}")
@@ -144,8 +141,8 @@ def run_backtest(
     pairs_filter=None,
     profiles_override: list[dict] | None = None,
     strict_per_coin: bool = True,
-    min_liquidity_24h_idr: float = DEFAULT_MIN_LIQUIDITY_24H_IDR,
-    min_price_idr: float = DEFAULT_MIN_PRICE_IDR,
+    min_liquidity_24h_usdt: float = DEFAULT_MIN_LIQUIDITY_24H_USDT,
+    min_price_usdt: float = DEFAULT_MIN_PRICE_USDT,
 ):
     profiles = profiles_override if profiles_override is not None else _load_active_profiles()
     if not profiles:
@@ -163,14 +160,16 @@ def run_backtest(
         logger.warning("[run] No pairs selected in requested time window.")
         return
 
-    if float(min_liquidity_24h_idr) > 0 or float(min_price_idr) > 0:
+    if float(min_liquidity_24h_usdt) > 0 or float(min_price_usdt) > 0:
         print("ℹ Catatan: filter likuiditas/harga diabaikan pada mode strict per-koin ini.")
 
     pair_setup_map = _load_latest_coin_setup(pairs)
     logger.info(f"[run] Loaded per-coin setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
     print(f"ℹ Loaded per-coin technical setup for {len(pair_setup_map)} pair(s) from backtest_coin_analysis.")
 
-    if not _validate_pair_setup_coverage(pairs, pair_setup_map, strict_per_coin):
+    pairs = _filter_pairs_by_setup_coverage(pairs, pair_setup_map, strict_per_coin)
+    if not pairs:
+        logger.warning("[run] No pairs remaining after setup coverage filter.")
         return
 
     context = BacktestRunContext(
@@ -190,7 +189,7 @@ def _persist_results(all_results, profiles, start, now):
         p_trades = [t for t in all_results if t["profile_id"] == p["id"]]
         if p_trades:
             portfolio = _simulate_portfolio(p_trades, p)
-            stats = _compute_stats(portfolio, p["initial_capital_idr"], start, now)
+            stats = _compute_stats(portfolio, p["initial_capital_quote"], start, now)
             if stats:
                 rid = _save_result(p["id"], None, stats, portfolio)
                 _save_result_pair_setups(
